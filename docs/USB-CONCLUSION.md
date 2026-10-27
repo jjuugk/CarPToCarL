@@ -56,7 +56,7 @@ Android 根本没给应用层留入口。
 | 方案 | 车机侧 | 手机 ↔ 板 | 问题 |
 |---|---|---|---|
 | **单口 Zero 2 W** | 有线 ✅（Apple VID + NCM） | **只能 Wi-Fi**（唯一 OTG 口给了车机） | 手机到板仍是射频，**现在的掉链/抖动一点不会消失**，只是多一跳 |
-| **双口板**（Pi 4/5 + 两路 gadget） | 有线 ✅ | 有线 ✅（手机作 host，板作 RNDIS 设备） | 才真正"全有线"，但成本、供电、体积都翻倍 |
+| **双口板**（Pi 4/5 + 两路 gadget） | 有线 ✅ | 有线 ✅（手机开「USB 共享网络」当 RNDIS 设备，**无需 root**） | 才真正"全有线"，但成本、供电、体积都翻倍 |
 
 再叠两条既有事实：
 
@@ -97,3 +97,41 @@ Android 根本没给应用层留入口。
 
 反过来做（协议先跑通再回头啃 USB）会在"描述符到底哪一位不对"上无限打转——
 USB 侧没有日志，只有"车机不理你"。
+
+---
+
+## 六、把「没办法」逐条证伪
+
+不想让结论停在"我觉得不行"，所以把所有可能让手机以 Apple 身份出现在 USB 上的机制列了一遍：
+
+| # | 机制 | 结论 | 原因 |
+|---|---|---|---|
+| 1 | configfs 手搓 gadget（`/config/usb_gadget`） | ✗ | 由 init 以 root 独占；`adb shell`（uid 2000）写入即被拒，而 Shizuku 给的正是这个身份 |
+| 2 | FunctionFS（`/dev/usb-ffs/*`） | ✗ | ffs 实例必须先由 configfs 建出来——绕回第 1 条；设备节点还有 SELinux 域限制 |
+| 3 | `UsbGadget` HAL / `svc usb setFunctions` | ✗ | 只能在**出厂预置**的 function 间切换（mtp/ptp/rndis/midi/audio_source），既无 NCM 也无 vendor-specific；VID/PID 更不由它决定 |
+| 4 | AOA 配件模式（`UsbAccessory`） | ✗ 对 CarPlay / ✓ 对 AA | 进入后 VID 固定是 Google 的 `0x18D1`，只有一类 vendor 接口 + 两对 bulk；但它正是 **Android Auto / CarLife 的 USB 通道**（见第 12 条） |
+| 5 | 改 `ro.*` prop / build.prop | ✗ | 与 USB 描述符无关——描述符由 gadget 驱动按 function 拼装 |
+| 6 | 加载自定义 gadget 内核模块 | ✗ | 需 root，且零售内核多开了模块签名校验 |
+| 7 | 中间串一个"改写描述符"的转接 | ✗ | USB 没这个机制：无源 Hub 只做电气转发；能改描述符的必须是一台**主动设备**（即第 9 条） |
+| 8 | 用提权漏洞拿 root | ✗ | 那就是 root，且不建议 |
+| 9 | 外接 Linux 板（带 HS OTG）伪装 Apple 设备 | ✓ | 唯一可行：板子侧 configfs 随便写，手机侧只需把 RFCOMM 换成 TCP |
+| 10 | 手机「USB 共享网络」给板 | ✓ **关键补丁** | **这一步无 root**：手机能当 RNDIS/CDC 网卡，不需要改任何描述符。于是"手机 ↔ 板"这段也能走线，整条链可做到全有线 |
+| 11 | ESP32-S3 之类 MCU 自己当 gadget | △ | 描述符确实能随便写，但只有 USB **全速 12Mbps**；1080p60 的 H.264（10~20Mbps）跑不动，要 HS 的板子（Zero 2 W / Pi 4） |
+| 12 | 干脆换协议：Android Auto / CarLife 有线 | ✓ 但非 CarPlay | 两者都基于 AOA，车机支持就零开发、插线即用；中国市场 GM 车机一般只有 CarLife，未必有 AA——得看车机菜单 |
+
+### 唯一还没量过的变量
+
+有一件事没在目标机上亲眼确认：`/config` 的权限位与 SELinux 域。理论上"万一它对 shell 组开放"还剩一条缝，
+插上手机 10 秒可判：
+
+```bash
+adb shell id
+adb shell ls -ld /config /config/usb_gadget 2>&1
+adb shell cat /proc/mounts | grep -i configfs
+```
+
+- `/config` 是 `root root 0500/0700`（AOSP 默认）→ 连列目录都不行，第 1 条彻底断；
+- 若 `usb_gadget` 对某个 shell 所属组可写 → 才有继续谈的必要（还要再过 SELinux）。
+
+**结论措辞修正**：手机本体仍然不行；但"带一块板"这条路比 §三 说的更宽——
+**可以做到全有线**（第 9 + 10 条），代价是一块双口板（Pi 4/5 级），而不是"手机侧只能 Wi-Fi"。
