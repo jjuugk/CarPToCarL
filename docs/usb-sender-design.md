@@ -3,7 +3,8 @@
 > **分支状态：已封存（2026-10-27）**。目标机 PTP-AN10 无 root、BL 不可解锁，
 > 手机侧 USB gadget 路径不存在入口，因此本分支**不做合并、不发版**。
 > 保留内容 = 可复用的协议契约（§2）+ 纯 JVM 的 `UsbMux`/`UsbMuxServer` + `UsbGadgetProbe` 自检。
-> **30 秒版结论见 §7**。
+> **完整解答（四道门 / 代码价值 / 板子方案对照 / 后续三条路）见 [`USB-CONCLUSION.md`](USB-CONCLUSION.md)；
+> 技术结论版见本文 §7**。
 
 > 日期：2026-10-27 · 分支 `usb` · 参考项目：[shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay)（GPL-3.0）
 >

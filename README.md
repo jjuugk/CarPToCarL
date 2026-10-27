@@ -9,8 +9,10 @@
 > 本分支保留**协议契约**（VID `0x05AC`、配置号 4、`0xC0/0x52`、首连 `62078`、USBMUX v2 帧格式、`NTB16`）
 > 与纯 JVM 的 mux 实现，供将来有可解锁设备或外接 gadget 板时复用。
 >
-> 完整推演与实测证据见 [`docs/usb-sender-design.md`](docs/usb-sender-design.md)（**§7 是结论**），
-> 历史可行性分析见 [`docs/WIRED-CARPLAY-FEASIBILITY.md`](docs/WIRED-CARPLAY-FEASIBILITY.md)。
+> **完整解答见 [`docs/USB-CONCLUSION.md`](docs/USB-CONCLUSION.md)**——四道门逐条实测、分支代码的保留价值、
+> 外接 gadget 板两种方案的成本对照、以及以后想继续时的三条路与验证顺序。
+> 协议细节见 [`docs/usb-sender-design.md`](docs/usb-sender-design.md)，历史可行性分析见
+> [`docs/WIRED-CARPLAY-FEASIBILITY.md`](docs/WIRED-CARPLAY-FEASIBILITY.md)。
 > **本分支不合并进 `main`**；`main` 与正式版仍只走无线。
 
 一台普通 Android 手机（未 root）扮演 **CarPlay 发送端（iPhone 角色）**，  
