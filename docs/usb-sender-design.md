@@ -139,3 +139,44 @@ adb shell ls /sys/module | grep -E 'usb_f_|libcomposite'
 #   UsbGadgetPlan.toShell(UsbGadgetPlan.build())  →  su -c sh -s
 #   再启动 FFS 守护进程，最后 UsbGadgetPlan.bindCommand("<udc>")
 ```
+
+---
+
+## 7. 无 root 的最终结论（2026-10-27 实测确认）
+
+目标机 **PTP-AN10（荣耀）没有 root，BL 也不可解锁**。这一条把本分支在**手机侧**的执行路径
+彻底关闭，不是"难"，是**没有入口**：
+
+| 门 | 事实 |
+|---|---|
+| 描述符归内核 | `/config/usb_gadget` 仅 uid 0 可写；Shizuku 拿到的是 shell(2000)，照样 `Permission denied` |
+| HAL 无自定义能力 | `android.hardware.usb.gadget` 只有 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**；且调用需 `MANAGE_USB`（signature\|privileged） |
+| FunctionFS 不对 App 开放 | `/dev/usb-ffs/*` 受 SELinux 保护，何况 ffs 实例本身要先由 configfs（=root）创建 |
+| AOA 是反方向 | accessory 模式下 VID 是 Google 的 `0x18D1`，换不来「Apple vendor 接口 + NCM」的复合描述符，车机仍不认 iPhone |
+
+### 本分支代码的保留价值（不是白写）
+
+1. **L1~L4 契约**（VID `0x05AC`、配置号必须 4、`0xC0/0x52 wIndex=4`、`0xC0/0x45`、首连 `62078`、
+   mux 帧头布局、`NTB16`）是从 DiPlay 逆向出的硬事实，**换任何硬件平台都直接复用**。
+2. `UsbMux` / `UsbMuxServer` 是**纯 JVM**（不依赖 Android API），可原样跑在 Linux + JVM 上——
+   如果将来板子方案选「Pi 上跑 JVM」，这两块直接搬。
+3. `UsbGadgetProbe` 适合留在 App 里当**一键自检**：无 root 时如实输出"本机不可用"，
+   避免以后再有人（包括我们自己）在 USB 上白转一圈。
+
+### 无 root 剩下的唯一有线路径，以及它到底值不值
+
+只有一条：**手机外接一块 USB gadget 板当"iPhone 替身"**（`WIRED-CARPLAY-FEASIBILITY.md` 路线 B）。
+诚实记账：
+
+| 方案 | 车机侧 | 手机↔板 | 问题 |
+|---|---|---|---|
+| 单口 Zero 2 W | 有线（Apple VID + NCM） | **只能 Wi-Fi**（唯一 OTG 口给了车机） | 手机到板仍是射频，**现在的掉链/抖动不会消失**，只是中间多一跳 |
+| 双口板（Pi 4/5 + 两路 gadget） | 有线 | 有线（手机作 host，板作 RNDIS 设备） | 成本、供电、体积、两套 gadget 并存；才真正"全有线" |
+
+再叠加两条既有事实：车机侧 NCM 上限 ~100M，而无线按设置已经能到 60fps——
+**有线换不来画质与延迟的数量级收益**，收益只在"车机 Wi-Fi 热点本身不稳"这一种情况下成立。
+
+### 结论
+
+**为本机不做有线。** 精力放回无线链路的稳定性（拆链循环、重连时序、帧率上限、音频通路），
+那才是当前真正影响体验的地方。将来若有可解锁设备，按 §5 的顺序验证，第一步先跑 `UsbGadgetProbe`。
