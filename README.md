@@ -1,5 +1,18 @@
 # CarPToCarL — 让 Android 手机充当 CarPlay 发送端，把原生 CarLife 投到车机
 
+> ### 本分支（`usb`）说明：一次被硬件门槛挡住的尝试，结论已定
+>
+> 目标：让手机以**有线 USB**（而非无线 iAP2）出现在车机上，即 CarPlay 有线发送端。
+>
+> **结论：目标机（PTP-AN10，无 root、BL 不可解锁）上不可行**——USB 描述符由内核 gadget 发出，
+> 应用层没有入口，`AOA` 也换不来「Apple vendor 接口 + NCM」的复合描述符。
+> 本分支保留**协议契约**（VID `0x05AC`、配置号 4、`0xC0/0x52`、首连 `62078`、USBMUX v2 帧格式、`NTB16`）
+> 与纯 JVM 的 mux 实现，供将来有可解锁设备或外接 gadget 板时复用。
+>
+> 完整推演与实测证据见 [`docs/usb-sender-design.md`](docs/usb-sender-design.md)（**§7 是结论**），
+> 历史可行性分析见 [`docs/WIRED-CARPLAY-FEASIBILITY.md`](docs/WIRED-CARPLAY-FEASIBILITY.md)。
+> **本分支不合并进 `main`**；`main` 与正式版仍只走无线。
+
 一台普通 Android 手机（未 root）扮演 **CarPlay 发送端（iPhone 角色）**，  
 连到支持 CarPlay 的车机；画面内容取自**手机原生 CarLife+ 引擎的 H.264 码流**，  
 经本 App 劫持后**直通转发**给车机（不重编码）。
