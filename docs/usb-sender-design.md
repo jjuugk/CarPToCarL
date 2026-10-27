@@ -110,17 +110,24 @@ proto=6  TCP ：头 + 20B TCP 头 + payload
 ```bash
 adb shell id -u                       # 0 = 有 root；2000 = 只有 shell
 adb shell ls /sys/class/udc           # 空 = 这台机没有设备侧控制器
-adb shell ls -d /config/usb_gadget    # 不存在 = 内核没开 configfs
+adb shell stat -c '%A' /config        # 能拿到权限位 = 内核开了 configfs（见下方注意）
 adb shell ls /dev/usb-ffs             # 不存在 = 没有 FunctionFS 目录
 adb shell ls /sys/module | grep -E 'usb_f_|libcomposite'
 ```
 
+> **注意（2026-10-27 实测）**：不要用 `ls -d /config/usb_gadget` 判断内核有没有开 configfs。
+> 非 root 下它返回的是 `Permission denied`，与"不存在"无法区分。要看的是
+> `stat -c '%A' /config` 能否拿到 `drwxr-xr-x`，以及 `/proc/mounts` 里有没有 `type configfs`。
+
 满足条件才是"USB 可尝试"：
 
-1. **root**：`/config/usb_gadget` 只有 uid0 可写，Shizuku 的 shell(2000) 不行；
+1. **root**：`/config` 的 DAC 在 PTP-AN10 上是 0755，但 SELinux 对 shell 域**连 `search` 都没 allow**
+   （`avc: denied { search } ... tcontext=u:object_r:configfs:s0`），且 shell 的 `CapEff=0`、
+   bounded set 里没有 `CAP_SYS_ADMIN`。Shizuku 的 shell(2000) 因此不是"权限不够"，是"根本进不去"；
 2. **`usb_f_fs`（FunctionFS）+ `libcomposite`**：自定义描述符只能走 FFS；
 3. **`usb_f_ncm`**：没有它 mux 也许能通，但 AirPlay 的 IP 承载起不来；
-4. **能抢 UDC**：同一 UDC 只能绑一个 gadget，必须先解绑 Android 自带 `g1`（**会断 adb / U 盘 / USB 共享**）。
+4. **能抢 UDC**：同一 UDC 只能绑一个 gadget，必须先解绑 Android 自带 gadget
+   （**会断 adb / U 盘 / USB 共享**）。注意厂商不一定叫 `g1`——PTP-AN10 上是 `gadget.0`。
 
 > 荣耀 PTP-AN10 大概率锁 BL、拿不到 root。真要走这条线，建议一台可 root 的测试机
 > （一加/小米旧款/ Pixel）。
@@ -158,9 +165,9 @@ adb shell ls /sys/module | grep -E 'usb_f_|libcomposite'
 
 | 门 | 事实 |
 |---|---|
-| 描述符归内核 | `/config/usb_gadget` 仅 uid 0 可写；Shizuku 拿到的是 shell(2000)，照样 `Permission denied` |
-| HAL 无自定义能力 | `android.hardware.usb.gadget` 只有 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**；且调用需 `MANAGE_USB`（signature\|privileged） |
-| FunctionFS 不对 App 开放 | `/dev/usb-ffs/*` 受 SELinux 保护，何况 ffs 实例本身要先由 configfs（=root）创建 |
+| 描述符归内核 | `/config` 的 DAC 是 0755（比 AOSP 松），但 SELinux 对 shell 域连 `search` 都没 allow；Shizuku 拿的正是 shell(2000)，`cd /config` 直接 `EACCES` |
+| HAL 无自定义能力 | 可选 function 只有 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**。`MANAGE_USB` 不是障碍（`com.android.shell` 已被预授），缺的是那个 function |
+| FunctionFS 不对 App 开放 | `/dev/usb-ffs` 属主就是 `shell`（DAC 有 `w`），SELinux 仍判 `{ write }` 拒绝；何况 ffs 实例本身要先由 configfs（=root）创建 |
 | AOA 是反方向 | accessory 模式下 VID 是 Google 的 `0x18D1`，换不来「Apple vendor 接口 + NCM」的复合描述符，车机仍不认 iPhone |
 
 ### 本分支代码的保留价值（不是白写）

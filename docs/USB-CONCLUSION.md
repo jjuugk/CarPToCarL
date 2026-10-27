@@ -19,9 +19,9 @@ Android 根本没给应用层留入口。
 
 | 门 | 实测事实 |
 |---|---|
-| **描述符归内核** | `/config/usb_gadget` 只有 uid 0 能写；Shizuku 拿到的是 shell（2000），照样 `Permission denied` |
-| **HAL 只有固定 function** | `android.hardware.usb.gadget` 只认 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**；调用还要 `MANAGE_USB`（`signature\|privileged`） |
-| **FunctionFS 不对 App 开放** | `/dev/usb-ffs/*` 受 SELinux 保护，而且 ffs 实例本身要先由 configfs 建出来——又回到 root |
+| **描述符归内核** | `/config` 的 DAC 是 **0755**（比 AOSP 松），但 SELinux 对 shell 域**连 `search` 都没有**，`cd /config` 直接 `EACCES`；Shizuku 拿的正是 shell（2000） |
+| **HAL 只有固定 function** | 可选 function 只有 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**。`MANAGE_USB` 不是障碍——`com.android.shell` 已被预授（详见 §六 末尾实测） |
+| **FunctionFS 不对 App 开放** | `/dev/usb-ffs` 属主就是 `shell`（DAC 有 `w`），SELinux 仍判 `{ write }` 拒绝；而且 ffs 实例本身要先由 configfs 建出来——又回到 root |
 | **AOA 是反方向** | accessory 模式下 VID 是 Google 的 `0x18D1`，换不来「Apple vendor 接口 + NCM」的复合描述符，车机照样不认 iPhone |
 
 也就是说：**手机要让车机在 USB 上认成一台 iPhone，就得改内核发出的描述符。
@@ -119,19 +119,143 @@ USB 侧没有日志，只有"车机不理你"。
 | 11 | ESP32-S3 之类 MCU 自己当 gadget | △ | 描述符确实能随便写，但只有 USB **全速 12Mbps**；1080p60 的 H.264（10~20Mbps）跑不动，要 HS 的板子（Zero 2 W / Pi 4） |
 | 12 | 干脆换协议：Android Auto / CarLife 有线 | ✓ 但非 CarPlay | 两者都基于 AOA，车机支持就零开发、插线即用；中国市场 GM 车机一般只有 CarLife，未必有 AA——得看车机菜单 |
 
-### 唯一还没量过的变量
+### 实测结果：`/config` 权限位与 SELinux 域（2026-10-27）
 
-有一件事没在目标机上亲眼确认：`/config` 的权限位与 SELinux 域。理论上"万一它对 shell 组开放"还剩一条缝，
-插上手机 10 秒可判：
+上一版这一节写的是"还没在目标机上亲眼确认，插上手机 10 秒可判"，并给了三条命令和一段理论推断。
+2026-10-27 手机接上后量完了。**结果比推演更彻底，同时推翻了原文两处措辞。**
+
+**目标机**：荣耀 `PTP-AN10`，Android 17（SDK 37），`ro.build.type=user`、`ro.debuggable=0`、`ro.secure=1`；
+无 `su`；`adb root` 返回 `adbd cannot run as root in production builds`。
+
+#### 复现命令
 
 ```bash
-adb shell id
-adb shell ls -ld /config /config/usb_gadget 2>&1
-adb shell cat /proc/mounts | grep -i configfs
+export MSYS_NO_PATHCONV=1            # Git Bash 下 /config 会被当 Windows 路径转换
+ADB=.tools/android-sdk/platform-tools/adb.exe
+
+$ADB shell id                              # uid=2000(shell) ... context=u:r:shell:s0
+$ADB shell getenforce                      # Enforcing
+$ADB shell stat -c '%A' /config            # drwxr-xr-x
+$ADB shell ls -ldZ /config                 # 带 SELinux 标签
+$ADB shell 'cd /config && echo OK'         # Permission denied → 触发 AVC
+$ADB shell ls -ldZ /dev/usb-ffs            # 属主是 shell，DAC 有 w
+$ADB shell mkdir /dev/usb-ffs/probe        # Permission denied → 触发 AVC
+$ADB shell 'logcat -c -b all; <触发操作>; sleep 1; \
+           logcat -d -b all | grep "avc:"' # 关键：此机 AVC 会进 logcat
+$ADB shell grep -E '^Cap(Eff|Bnd)' /proc/self/status
+$ADB shell 'ls /sys/module | grep -E "libcomposite|configfs|cdc_ncm"'
+$ADB shell 'zcat /proc/config.gz | grep -E "USB_CONFIGFS|USB_F_NCM|USB_GADGET"'
+$ADB shell 'readlink /sys/class/udc/*/gadget'
+$ADB shell 'dumpsys package com.android.shell | grep -i MANAGE_USB'
 ```
 
-- `/config` 是 `root root 0500/0700`（AOSP 默认）→ 连列目录都不行，第 1 条彻底断；
-- 若 `usb_gadget` 对某个 shell 所属组可写 → 才有继续谈的必要（还要再过 SELinux）。
+> 这台机器的 AVC 拒绝**不进 `dmesg`（被拒读）但进 `logcat -b all`**，所以拒绝判词可以自己触发、自己抓回来。
+> 这是本次取证能拿到精确 `perm/tclass/tcontext` 的原因。
+
+#### 发现 1：`/config` 的权限位是松的，SELinux 才是墙
+
+| 项 | 实测值 |
+|---|---|
+| `stat /config` | `drwxr-xr-x root root` = **0755**（**不是** AOSP 默认的 0500/0700） |
+| 挂载 | `none on /config type configfs (rw,nosuid,nodev,noexec,relatime)` |
+| SELinux 标签 | `u:object_r:configfs:s0` |
+| link count | 7（约 5 个子项，gadget 全在里面） |
+| `stat /config/usb_gadget` | `Permission denied`（连 stat 都不行） |
+| `cd /config` | `Permission denied` |
+
+0755 意味着 shell 作为 other 本有 `r-x`、能列目录。进不去是 SELinux 判的：
+
+```text
+avc: denied { search } for name="/" dev="configfs" ino=4006 \
+  scontext=u:r:shell:s0 tcontext=u:object_r:configfs:s0 tclass=dir permissive=0
+```
+
+只拒了一个 `search` —— **策略里没有 shell → configfs 的任何 allow 规则**，不是"某一位权限没给"。
+原文担心"万一它对 shell 组开放还剩一条缝"：**缝不存在**，但原因不是权限位紧，而是规则压根没写。
+
+#### 发现 2：`/dev/usb-ffs` 更反直觉——属主就是 shell，照样写不进去
+
+| 项 | 实测值 |
+|---|---|
+| `/dev/usb-ffs` | `drwxrwxr-x shell system u:object_r:device:s0` ← **属主 shell，DAC 上 `w` 齐全** |
+| 已存在实例 | `adb` / `hdb` / `mtp` / `ptp`，均 `dr-xr-x---`、标签 `u:object_r:functionfs:s0` |
+| `ls /dev/usb-ffs/adb` | `Permission denied`（`adb` 实例属主写着 `shell:system`，DAC 给 `r-x`） |
+| `mkdir /dev/usb-ffs/probe` | `Permission denied` |
+
+```text
+avc: denied { write } for name="usb-ffs" dev="tmpfs" ino=2059 \
+  scontext=u:r:shell:s0 tcontext=u:object_r:device:s0 tclass=dir permissive=0
+```
+
+这条把结论 2 从"受 SELinux 保护"精确成：**DAC 已经把目录交给 shell 了，SELinux 又把它拿回去。**
+而且就算 mkdir 成功也没用——ffs 实例要靠 `mount -t functionfs` 挂上去，那是 `CAP_SYS_ADMIN`。
+
+#### 发现 3：capability 也不够，放开 SELinux 也白搭
+
+```text
+CapInh: 0000000000000000
+CapPrm: 0000000000000000
+CapEff: 0000000000000000   ← effective 一个都没有
+CapBnd: 00000000008000c0   ← bounded 只有 SETUID / SETGID / SYS_NICE
+```
+
+bounded set 里没有 `CAP_SYS_ADMIN`（mount）、`CAP_DAC_OVERRIDE`、`CAP_SYS_MODULE`（insmod）、`CAP_NET_ADMIN`。
+**所以"给 shell 域加条 allow"这种假设性绕过也是死路**：即使策略放开，`mount -t configfs` 仍会 `EPERM`。
+
+#### 发现 4：内核侧全是齐的——缺的不是驱动
+
+| 项 | 实测 |
+|---|---|
+| `CONFIG_USB_GADGET` | `=y` |
+| `CONFIG_USB_CONFIGFS` | `=y` |
+| `CONFIG_USB_F_NCM` | `=y` |
+| `CONFIG_ANDROID_USB_CONFIGFS_UEVENT` | `=y` |
+| 已加载模块 | `libcomposite` / `configfs` / `cdc_ncm` |
+| UDC | `a600000.dwc3`（高通 DWC3，`a600000.ssusb`） |
+| UDC 的 gadget 链接 | `../../gadget.0` ← **不是 AOSP 的 `g1`** |
+| 厂商 gadget 状态 | `sys.usb.config = hisuite,mtp,mass_storage,adb,hdb`，`sys.usb.configfs=9`，`sys.usb.controller=a600000.dwc3` |
+| `ls /sys/class/net` | 没有 `usb0`/`ncm0`（NCM 未启用） |
+
+**内核什么都有，缺的只是"谁有资格写 configfs"。**
+给后来人的坑：这台机器 gadget 目录叫 **`gadget.0`**，任何写死 `usb_gadget/g1` 的脚本第一步就踩空。
+
+#### 发现 5（措辞纠正）`MANAGE_USB` 其实不是门
+
+原文结论 3 写"调用还要 `MANAGE_USB`（`signature|privileged`）"。实测：
+
+```text
+android.permission.MANAGE_USB: granted=true      # com.android.shell
+usb_hal_version=20
+port_manager: can_change_mode=true, current_mode=ufp, data_role=device
+```
+
+**shell 已被预授 `MANAGE_USB`**，HAL 是 2.0，端口支持改 mode。也就是说权限层是通的，卡的是**没有你要的那个 function**：
+
+```bash
+adb shell svc usb getFunctions     # 返回空 —— Honor 的 UsbService 不走 AOSP 的 functions 列表
+```
+
+结论 3 的正确表述因此改为：**`svc usb` 能调，但能选的 function 里没有 NCM / vendor-specific。**
+
+> **这一步没跑**：`svc usb setFunctions ncm` 没有真正执行。它会重建 gadget、很可能踢掉 adb，
+> 需要一台随时能重插的机器再做；且即便成功也只到 NCM，仍拿不到 Apple vendor 接口，对 CarPlay 无益。
+
+#### 发现 6：App 侧（`untrusted_app`）只会更窄
+
+App 进程域实测为 `u:r:untrusted_app_34:s0`（带 MLS category `c24,c257,c512,c768`，从本机 AVC 日志可见）。
+`untrusted_app` 不持有 `MANAGE_USB`（`signature|privileged`，只有 shell 被预授），也没有任何 configfs 允许规则；
+而 shell 是所有应用域里权限最宽的一个，它对 configfs 连 `search` 都没有。
+**App 直接 `open("/config/usb_gadget/...")` 必然 `EACCES`**——不需要再单独验证。
+
+#### 实测后的净结论
+
+| 门 | 推演版 | 实测版 |
+|---|---|---|
+| 1 描述符归内核 | "只有 uid 0 能写" | **权限位 0755 是松的，但策略里没有 allow，连 `search` 都拒** |
+| 2 FunctionFS | "受 SELinux 保护" | **DAC 主动把 `/dev/usb-ffs` 交给 shell，SELinux 又拒 `{ write }`** |
+| 3 HAL / `svc usb` | "还要 `MANAGE_USB`" | **`MANAGE_USB` 有、HAL 2.0 有，缺的是 NCM/vendor function** |
+
+三条都从"我认为"变成"实机判词"，且都更硬。**结论不变：手机本体不行。**
 
 **结论措辞修正**：手机本体仍然不行；但"带一块板"这条路比 §三 说的更宽——
 **可以做到全有线**（第 9 + 10 条），代价是一块双口板（Pi 4/5 级），而不是"手机侧只能 Wi-Fi"。

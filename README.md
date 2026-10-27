@@ -16,9 +16,9 @@ Android 根本没给应用层留入口。
 
 | 门 | 实测事实 |
 |---|---|
-| **描述符归内核** | `/config/usb_gadget` 只有 uid 0 能写；Shizuku 拿到的是 shell（2000），照样 `Permission denied` |
-| **HAL 只有固定 function** | `android.hardware.usb.gadget` 只认 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**；调用还要 `MANAGE_USB`（`signature\|privileged`） |
-| **FunctionFS 不对 App 开放** | `/dev/usb-ffs/*` 受 SELinux 保护，而且 ffs 实例本身要先由 configfs 建出来——又回到 root |
+| **描述符归内核** | `/config` 的 DAC 是 **0755**（比 AOSP 松），但 SELinux 对 shell 域**连 `search` 都没有**，`cd /config` 直接 `EACCES`；Shizuku 拿的正是 shell（2000） |
+| **HAL 只有固定 function** | 可选 function 只有 `mtp/ptp/rndis/midi/audio_source`，**没有 NCM，更没有 vendor-specific**。`MANAGE_USB` 其实不是障碍——`com.android.shell` 已被预授（见文末实测补记） |
+| **FunctionFS 不对 App 开放** | `/dev/usb-ffs` 属主就是 `shell`（DAC 有 `w`），SELinux 仍判 `{ write }` 拒绝；而且 ffs 实例本身要先由 configfs 建出来——又回到 root |
 | **AOA 是反方向** | accessory 模式下 VID 是 Google 的 `0x18D1`，换不来「Apple vendor 接口 + NCM」的复合描述符，车机照样不认 iPhone |
 
 也就是说：**手机要让车机在 USB 上认成一台 iPhone，就得改内核发出的描述符。
@@ -107,22 +107,76 @@ USB 侧没有日志，只有"车机不理你"。
 | 11 | ESP32-S3 之类 MCU 自己当 gadget | △ | 描述符确实能随便写，但只有 USB **全速 12Mbps**；1080p60 的 H.264（10~20Mbps）跑不动，要 HS 的板子（Zero 2 W / Pi 4） |
 | 12 | 干脆换协议：Android Auto / CarLife 有线 | ✓ 但非 CarPlay | 两者都基于 AOA，车机支持就零开发、插线即用；中国市场 GM 车机一般只有 CarLife，未必有 AA——得看车机菜单 |
 
-#### 唯一还没量过的变量
+#### 实测补记：`/config` 权限位与 SELinux 域（2026-10-27）
 
-有一件事没在目标机上亲眼确认：`/config` 的权限位与 SELinux 域。理论上"万一它对 shell 组开放"还剩一条缝，
-插上手机 10 秒可判：
+上一版这里写的是"还没量过，插上手机 10 秒可判"。手机接上了，量完了——**比推演更彻底，同时纠正了两处说法**。
 
-```bash
-adb shell id
-adb shell ls -ld /config /config/usb_gadget 2>&1
-adb shell cat /proc/mounts | grep -i configfs
+目标机：荣耀 `PTP-AN10`，Android 17（SDK 37），`ro.build.type=user`、`ro.debuggable=0`、`ro.secure=1`，
+无 `su`，`adb root` 被拒（`adbd cannot run as root in production builds`）。
+
+| 项 | 实测值 |
+|---|---|
+| `stat /config` | `drwxr-xr-x root root` = **0755**（不是 AOSP 的 0500/0700） |
+| 挂载 | `none on /config type configfs (rw,nosuid,nodev,noexec,relatime)` |
+| SELinux 标签 | `u:object_r:configfs:s0`（link count 7，约 5 个子项） |
+| `cd /config` / `ls /config` | `Permission denied` |
+
+DAC 给 shell（other）留了 `r-x`，本该能列目录；进不去是 SELinux 判的：
+
+```text
+avc: denied { search } for name="/" dev="configfs" ino=4006 \
+  scontext=u:r:shell:s0 tcontext=u:object_r:configfs:s0 tclass=dir permissive=0
 ```
 
-- `/config` 是 `root root 0500/0700`（AOSP 默认）→ 连列目录都不行，第 1 条彻底断；
-- 若 `usb_gadget` 对某个 shell 所属组可写 → 才有继续谈的必要（还要再过 SELinux）。
+只拒了一个 `search`——**策略里根本没有 shell → configfs 的 allow**。所以"万一对 shell 组开放还剩一条缝"这个担心不成立：
+不是权限位紧，是规则压根不存在。
+
+`/dev/usb-ffs` 更反直觉：目录是 `drwxrwxr-x shell system`，**属主就是 shell**，DAC 上 `mkdir` 完全合法，仍然失败：
+
+```text
+avc: denied { write } for name="usb-ffs" dev="tmpfs" ino=2059 \
+  scontext=u:r:shell:s0 tcontext=u:object_r:device:s0 tclass=dir permissive=0
+```
+
+里面 `adb` / `hdb` / `mtp` / `ptp` 四个实例标签是 `u:object_r:functionfs:s0`、模式 `dr-xr-x---`，
+shell 连 `ls` 都不行（`adb` 实例属主明明写的是 `shell:system`）。
+**DAC 已经替你想好了，SELinux 又补一刀。**
+
+就算放开 SELinux 也没用——capability 不够：
+
+```text
+CapEff: 0000000000000000   ← 一个都没有
+CapBnd: 00000000008000c0   ← 只有 SETUID / SETGID / SYS_NICE
+```
+
+bounded set 里没有 `CAP_SYS_ADMIN`（mount）、`CAP_DAC_OVERRIDE`、`CAP_SYS_MODULE`（insmod）、`CAP_NET_ADMIN`，
+所以"给 shell 域加条 allow"也白搭，`mount -t configfs` 照样 `EPERM`。
+
+内核侧反而全齐：`CONFIG_USB_GADGET=y`、`CONFIG_USB_CONFIGFS=y`、`CONFIG_USB_F_NCM=y`，
+`libcomposite` / `configfs` / `cdc_ncm` 均已加载，UDC `a600000.dwc3`。
+**缺的不是驱动，是"谁有资格写 configfs"。**
+
+两处措辞纠正（都在这份实测里被推翻）：
+
+1. **`MANAGE_USB` 不是门**。`com.android.shell` 的 `android.permission.MANAGE_USB` 是 `granted=true`，
+   `dumpsys usb` 里 `usb_hal_version=20`、`can_change_mode=true`。真正的墙是"没有 NCM / vendor-specific 这个
+   function 可选"，不是"没资格调用"。`svc usb getFunctions` 返回空（Honor 的 UsbService 不走 AOSP 的列表）。
+2. **gadget 目录不叫 `g1`**。UDC 的 `gadget` 链接指向 `../../gadget.0`——厂商命名。
+   任何写死 `usb_gadget/g1` 的脚本，在这台机器上第一步就踩空。
+
+App 侧只会更窄：进程域 `u:r:untrusted_app_34:s0`（带 MLS `c24,c257,c512,c768`），
+不持有 `MANAGE_USB`，也没有任何 configfs 允许规则 → 直接 `open()` 必然 `EACCES`。
+
+> **没有真跑的一步**：`svc usb setFunctions ncm` 没执行。它会重建 gadget、很可能踢掉 adb，
+> 需要一台随时能重插的机器再做；而且即便成功也只到 NCM，仍拿不到 Apple vendor 接口，对 CarPlay 无益。
 
 **结论措辞修正**：手机本体仍然不行；但"带一块板"这条路比「结论 3」说的更宽——
 **可以做到全有线**（第 9 + 10 条），代价是一块双口板（Pi 4/5 级），而不是"手机侧只能 Wi-Fi"。
+
+**实测后的净结论**：四道门的前三条从"推演"升级为"实机判词"，而且都比原来更硬——
+第 1 条从"权限位可能不严"变成"**权限位不严，但策略里没有这条 allow**"；
+第 2 条从"受 SELinux 保护"变成"**DAC 主动给了写权限，SELinux 又拒了**"；
+第 3 条从"还要 `MANAGE_USB`"变成"**`MANAGE_USB` 有，但没有那个 function**"。结论不变。
 
 ---
 
