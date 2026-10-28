@@ -32,6 +32,8 @@ import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
+import io.github.shaonialife.carptocar.net.WifiP2pCarPlayConnector
+import io.github.shaonialife.carptocar.net.WifiP2pGroupNames
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.util.SysShell
@@ -346,6 +348,12 @@ object SessionController {
     private var wifiConnector: WifiCarPlayConnector? = null
 
     /**
+     * Wi-Fi Direct 加入通道。只有车机用 P2P GO（组名 `DIRECT-` 前缀）时才会用到；
+     * 自带热点的车走 [wifiConnector]，这条保持空闲。
+     */
+    private var p2pConnector: WifiP2pCarPlayConnector? = null
+
+    /**
      * 当前已绑定到哪个车机热点（bindCarWifiAndRegister 成功后写入）。
      * 端点交接时若已绑定到同一 SSID，跳过二次 bindCurrentWifi——它内部先
      * release() 解绑，会打断刚注册好的 ctrl mDNS 广播并白等系统重连。
@@ -564,6 +572,7 @@ object SessionController {
                         appendLog(">>> 车机热点 \"$ssid\" 已断开——本次会话需重新连接")
                     }
                 }
+            p2pConnector = WifiP2pCarPlayConnector(context) { line -> appendLog(line) }
             val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
             // 目标车机动态读取：选择后下一轮连接尝试/下一次连入即生效，无需重启链路
@@ -689,6 +698,7 @@ object SessionController {
         ctrlAdvertiser?.stop()
         endpointBrowser?.stop()
         wifiConnector?.release()
+        p2pConnector?.release()
         boundCarSsid = null
         if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
@@ -800,6 +810,15 @@ object SessionController {
             if (shellReady && shellWifiDisabled() && !waitForWifiEnabled()) return@run
             if (connectCancelled) return@run
             // 2) 首选应用专属网络（不影响 4G/5G、不会被系统切回、不需要任何特权）
+            //    例外：P2P GO 的组名（DIRECT-*）站模式关联不进去，必须先走 Wi-Fi Direct。
+            if (WifiP2pGroupNames.isP2pGroupName(wifi.ssid)) {
+                when (val p2p = joinCarWifiViaP2p(wifi)) {
+                    is WifiP2pCarPlayConnector.Result.Joined -> return@run
+                    else -> appendLog(
+                        "WIFI: Wi-Fi Direct 加入未成功（$p2p）——继续尝试应用专属网络",
+                    )
+                }
+            }
             when (val result = joinCarWifiSpecifier(wifi, shellReady)) {
                 is WifiCarPlayConnector.JoinResult.Joined -> Unit
 
@@ -811,6 +830,40 @@ object SessionController {
                 WifiCarPlayConnector.JoinResult.Unavailable -> promptSpecifierFailed(wifi, shellReady)
             }
         }
+    }
+
+    /**
+     * 以 Wi-Fi Direct 加入车机自建的 P2P 组（组名 `DIRECT-*`）。
+     *
+     * 与站模式（[joinCarWifiSpecifier]）的关键差别在「谁管加密」：P2P 组由
+     * `WifiP2pManager` 协商密钥并拉 p2p 接口，站模式连不进去。所以这里不走
+     * `WifiNetworkSpecifier`，改由 [WifiP2pCarPlayConnector] 完成扫描/连接/绑定。
+     *
+     * 成功后与站模式一样要重注册 ctrl 广播——车机靠 `_carplay-ctrl` 找到手机，
+     * 绑定完再注册才不会丢第一轮邀请。
+     */
+    private fun joinCarWifiViaP2p(wifi: Iap2SenderSession.WifiConfiguration): WifiP2pCarPlayConnector.Result {
+        val connector = p2pConnector ?: return WifiP2pCarPlayConnector.Result.NotApplicable
+        phaseHint = "正在以 Wi-Fi Direct 加入 ${wifi.ssid}…"
+        appendLog(
+            ">>> \"${wifi.ssid}\" 是 Wi-Fi Direct 组（DIRECT- 前缀）——改用 P2P 加入，" +
+                "BSSID=${wifi.bssid ?: "(车机未给)"} channel=${wifi.channel}",
+        )
+        val result =
+            connector.joinGroup(
+                ssid = wifi.ssid,
+                passphrase = wifi.passphrase,
+                bssidHint = wifi.bssid,
+                channelHint = wifi.channel,
+                isCancelled = { connectCancelled },
+            )
+        if (result is WifiP2pCarPlayConnector.Result.Joined) {
+            boundCarSsid = wifi.ssid
+            phaseHint = "已加入车机热点（Wi-Fi Direct）"
+            ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = result.network)
+            appendLog(">>> 已通过 Wi-Fi Direct 加入 \"${wifi.ssid}\"，ctrl 广播已重新注册，等待车机 ctrl 邀请")
+        }
+        return result
     }
 
     /**

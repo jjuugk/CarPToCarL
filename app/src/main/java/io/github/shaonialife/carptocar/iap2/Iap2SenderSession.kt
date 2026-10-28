@@ -73,6 +73,10 @@ class Iap2SenderSession(
          * 强制配对（现代）。2026-10-19 奥迪 4xxx（4851）连不上与这条分类直接相关。
          */
         val advertisedFeatures: Long? = null,
+        /** `0x4301` param 8：车机要求双向认证。见 [CarPlayStartSessionParams.mutualAuth]。 */
+        val mutualAuthRequired: Boolean = false,
+        /** `0x4301` param 6：车机的 CarPlay SDK 版本串。仅用于日志定位，不参与决策。 */
+        val sdkVersion: String? = null,
     )
 
     private val parser = Iap2Csm.Parser()
@@ -492,7 +496,8 @@ class Iap2SenderSession(
             log(
                 "iap2 rx=0x4301 airPlayPort=${endpoint.airPlayPort} " +
                     "device=${endpoint.deviceIdentifier} publicKey=${endpoint.publicKey?.take(16)}… " +
-                    "srcvers=${endpoint.sourceVersion} ips=${endpoint.ipAddresses}",
+                    "srcvers=${endpoint.sourceVersion} sdk=${endpoint.sdkVersion ?: "(未给)"} " +
+                    "mutualAuth=${endpoint.mutualAuthRequired} ips=${endpoint.ipAddresses}",
             )
         }
 
@@ -1167,6 +1172,13 @@ class Iap2SenderSession(
         val passphrase: String,
         val channel: Int,
         val securityType: Int,
+        /**
+         * `0x5703` param 0 的 BSSID（`aa:bb:cc:dd:ee:ff`）。null = 车机没给。
+         *
+         * 用途只有一处：Wi-Fi Direct 组加入时把它当 GO 的 deviceAddress 首选候选。
+         * P2P GO 的 BSSID 通常就是它的 p2p 设备地址，比「扫描后按名字猜」可靠得多。
+         */
+        val bssid: String? = null,
     )
 
     private fun parseWifiConfiguration(frame: Iap2Csm.Frame): WifiConfiguration {
@@ -1186,6 +1198,8 @@ class Iap2SenderSession(
                     ?.firstOrNull()
                     ?.toInt()
                     ?.and(0xFF) ?: 0,
+            // 0x5703 param 0 = BSSID。此前整条丢弃：P2P 组加入要靠它定位 GO。
+            bssid = CarPlayStartSessionParams.bssid(params[0]?.value),
         )
     }
 
@@ -1231,6 +1245,21 @@ class Iap2SenderSession(
                     "security=${fromSession.securityType} psk=${if (fromSession.passphrase.isEmpty()) "(空)" else "***"}",
             )
         }
+        // param 6 / 8：连接相关但此前整体未读。
+        // SDKVersion 只为把「对方是哪一代实现」写进日志；
+        // mutualAuth 必须单独一行：它=1 时失败点会落在 AirPlay 认证段，
+        // 而表面症状是「端点全对、就是连不上」，不点名会查很久。
+        val sdkVersion = CarPlayStartSessionParams.sdkVersion(params[6]?.value)
+        val mutualAuth = CarPlayStartSessionParams.mutualAuth(params[8]?.value)
+        if (mutualAuth) {
+            log(
+                "iap2 0x4301 ★ param8 mutualAuth=1——车机要求双向认证。" +
+                    "本实现只做单向（0xAA00~0xAA03 由配件证明自己），" +
+                    "若随后卡在 AirPlay 认证段，先怀疑这一条而不是报文格式",
+            )
+        } else if (params[8] != null) {
+            log("iap2 0x4301 param8 mutualAuth=0——单向认证即可")
+        }
         return CarPlayEndpoint(
             ssid = ap?.ssid ?: "",
             passphrase = ap?.passphrase ?: "",
@@ -1241,6 +1270,8 @@ class Iap2SenderSession(
             publicKey = params[4]?.value?.asStringOrEmpty(),
             sourceVersion = params[5]?.value?.asStringOrEmpty(),
             ipAddresses = addresses,
+            mutualAuthRequired = mutualAuth,
+            sdkVersion = sdkVersion,
         )
     }
 
