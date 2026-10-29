@@ -356,6 +356,10 @@ class Iap2SenderSession(
                 "iap2 识别为别克 B233（${if (forceBuickE5) "下拉框指定别克档" else identityText}）——" +
                     "走专用建链：MFi 严格 32B、不发 0x5702、0x4300 用 75B 双 group、0x4301 750ms 轮询",
             )
+            // B233 的车机链路层重启后会退回探测态：发 DETECT（marker）→ 等回显 → 再发 SYN。
+            // 默认实现里 NORMAL 态的 SYN 被当噪声丢掉，车机就永远停在探测态；这里只为
+            // B233 打开「NORMAL 也应答 SYN」。其它车机保持默认（见 Iap2LinkEngine 注释）。
+            channel.acceptPeerResyncInNormal = true
         }
         // 0x4300 报文体形态的按车机试错记忆（见 AvailabilityBodyMemory 文档：
         // 别克 E2LB 收到新版嵌套体后控制会话直接停摆）。无 Context（单测）时固定新版。
@@ -511,6 +515,9 @@ class Iap2SenderSession(
             // 别克不看「有没有声明会发 0x4301」（E2LB 日志里它压根不声明），
             // 一律按 750ms 轮询重发 0x4300 催到窗口结束。
             var pollCount = 0
+            // DETECT 心跳基线：车机在探测态时**只发 marker**、不处理 0x4300，
+            // 这两种沉默的处置完全不同（前者回 DETECT、后者重发可用性帧）。
+            var markersAtLastPoll = channel.peerMarkerCount
             startSession =
                 expectOrNull(
                     Iap2MessageIds.CARPLAY_START_SESSION,
@@ -518,12 +525,25 @@ class Iap2SenderSession(
                     pollIntervalMillis = BUICK_AVAILABILITY_POLL_MILLIS,
                     onPoll = {
                         if (channel.isAlive) {
-                            pollCount++
-                            log(
-                                "iap2 别克 B233：0x4301 未到，第 $pollCount 次重发 0x4300" +
-                                    "（${BUICK_AVAILABILITY_POLL_MILLIS}ms 轮询）",
-                            )
-                            runCatching { sendBuickAvailability() }
+                            val markers = channel.peerMarkerCount
+                            if (markers > markersAtLastPoll) {
+                                // 车机回到链路层探测态：按 iAP2 语义回一个 DETECT（不附会话表），
+                                // 把它推回协商；此时再灌 0x4300 只会让它继续沉默。
+                                log(
+                                    "iap2 别克 B233：车机只发链路 DETECT 心跳" +
+                                        "（本轮 +${markers - markersAtLastPoll}，累计 $markers 个）" +
+                                        "——回显 DETECT 催它回到协商，暂不重发 0x4300",
+                                )
+                                markersAtLastPoll = markers
+                                runCatching { channel.echoMarker() }
+                            } else {
+                                pollCount++
+                                log(
+                                    "iap2 别克 B233：0x4301 未到，第 $pollCount 次重发 0x4300" +
+                                        "（${BUICK_AVAILABILITY_POLL_MILLIS}ms 轮询）",
+                                )
+                                runCatching { sendBuickAvailability() }
+                            }
                         }
                     },
                 )
@@ -542,9 +562,14 @@ class Iap2SenderSession(
         // 这与只走 mDNS 的奥迪不同——E5 的端点和热点都只在这条报文里，
         // 猜一个 SSID 出去只会让车主看到「连上了但一直黑屏」。
         if (buickB233 && startSession == null) {
+            // 把「两种沉默」写进异常：marker 有增 = 链路活着但车机不认 0x4300；
+            // marker 为零 = 车机连探测心跳都停了（链路/配对层问题）。
+            val markers = channel.peerMarkerCount
             throw IOException(
                 "别克 B233：0x4301 在 ${startSessionWindow / 1_000_000_000}s 内未到，" +
-                    "拿不到车机热点与 AirPlay 端口——本轮断开重连（请确认车机上已选择本机）",
+                    "拿不到车机热点与 AirPlay 端口——本轮断开重连（请确认车机上已选择本机）；" +
+                    "期间链路 DETECT 心跳 $markers 个、" +
+                    "对端控制帧 ${channel.peerFrameCount - framesBeforeAvailability} 个",
             )
         }
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。

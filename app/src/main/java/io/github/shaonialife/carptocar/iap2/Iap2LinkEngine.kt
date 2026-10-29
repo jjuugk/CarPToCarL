@@ -16,7 +16,8 @@ private const val PHONE_DECLARED_MAX_OUTGOING = 0x7F
  *  3. 协商状态下收到 ACK 即进入 NORMAL（控制会话 10 可用）
  *
  * 数据帧：control=0x40（捎带 ACK），seq=发送序号（u8 回绕，初始 99），
- * ack=已按序收到的最新序号，sessionId=10。对端 marker 会被帧头扫描自然丢弃。
+ * ack=已按序收到的最新序号，sessionId=10。对端 marker 整块识别、计数并经
+ * [onMarkerReceived] 上报（见 [receivedMarkerCount]）。
  *
  * 协议语义参照 reference/xcertplay transport/Iap2LinkEngine.kt（独立重写）。
  * 简化项（RFCOMM 为可靠有序流）：不做乱序缓冲与主动 EAK，保留重复帧检测、
@@ -110,6 +111,30 @@ class Iap2LinkEngine(
         private set
     var peerSynchronization: SynchronizationPayload? = null
         private set
+
+    /**
+     * 收到的对端 marker（链路层 DETECT `FF 55 02 00 EE 10`）个数。
+     *
+     * 为什么单独计数：marker 是**唯一**能在「对端控制会话停摆」时证明链路还活着的心跳。
+     * 别克 B233 实测（2026-10-26/29）：车机收下 0x4300 后不再回任何控制帧，但 marker 照发
+     * ——此时「车机在探测态等 DETECT 回显」和「车机彻底不认这条路」是两种完全不同的处置，
+     * 只有这个计数能区分。
+     */
+    var receivedMarkerCount: Int = 0
+        private set
+
+    /** 收到一个完整对端 marker 时回调（[receivedMarkerCount] 已计入）。 */
+    var onMarkerReceived: (() -> Unit)? = null
+
+    /**
+     * 是否允许在 [State.NORMAL] 下响应对端**重新发起**的纯 SYN。
+     *
+     * 默认关：其它车机进入 NORMAL 后的 SYN 一律按噪声处理，与改动前逐字节一致。
+     * 只有别克 B233 打开它——车机链路层重启后会退回探测态（发 DETECT，收到回显再发
+     * SYN），此时若我们仍按「NORMAL 不理 SYN」处置，车机会永远停在探测态。
+     */
+    @Volatile
+    var acceptPeerResyncInNormal: Boolean = false
 
     private var sentSequence = INITIAL_SEQUENCE
     private var lastSentAcknowledged: Int? = null
@@ -252,6 +277,17 @@ class Iap2LinkEngine(
         state = State.NEGOTIATING
     }
 
+    /**
+     * 单发一个 marker（链路层 DETECT 回显），不碰协商状态、不改重发计时。
+     *
+     * 用途：对端回到探测态时（只发 DETECT、不发任何控制帧），按 iAP2 链路层语义回一个
+     * DETECT 把它推回协商。与 [start]/[initiate] 的区别是**不附带 FF5A 同步包**——
+     * 对探测态的对端灌会话表反而会让它继续沉默（2026-10-11 事件通道踩过同一坑）。
+     *
+     * 返回 false 仅代表链路已死。
+     */
+    fun sendMarker(): Boolean = appendOutput(MARKER)
+
     fun feed(
         bytes: ByteArray,
         nowMillis: Long,
@@ -339,6 +375,24 @@ class Iap2LinkEngine(
     // ---- 接收解析 ----
 
     private fun parseAvailable(nowMillis: Long): Boolean {
+        // 对端 marker 整块吞掉并上报，而不是丢进下面的逐字节丢弃循环：
+        // 逐字节丢弃无法区分「收到一个 DETECT」和「收到 6 个杂字节」，B233 的
+        // 「车机在探测态等回显」判定就无从谈起。RFCOMM 会把 6 字节 marker 分段读入，
+        // 所以只匹配上前缀时返回 false 等更多字节（此时也凑不出一条 9 字节帧头，
+        // 不改变原有解析行为）。
+        if (receive.size >= 2 &&
+            receive[0] == 0xFF.toByte() && receive[1] == 0x55.toByte()
+        ) {
+            val probeSize = minOf(receive.size, MARKER.size)
+            val probe = receive.peek(probeSize)
+            if (MARKER.indices.take(probeSize).all { probe[it] == MARKER[it] }) {
+                if (probeSize < MARKER.size) return false
+                receive.discard(MARKER.size)
+                receivedMarkerCount++
+                onMarkerReceived?.invoke()
+                return true
+            }
+        }
         // 丢弃帧头前的杂字节（含对端 marker FF55…）
         while (receive.size >= 2 &&
             !(receive[0] == 0xFF.toByte() && receive[1] == 0x5A.toByte())
@@ -404,7 +458,9 @@ class Iap2LinkEngine(
             // 发起方 SYN，属于「它已应答」的信号（见下方 ACK 分支），再回一条就会形成
             // 双方互回 SYN|ACK 的无限乒乓（单测暴露：两个引擎互相喂帧时协商永不收敛）。
             val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
-            if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst)) {
+            val acceptsResync =
+                state == State.NEGOTIATING || (acceptPeerResyncInNormal && state == State.NORMAL)
+            if (sync != null && isPureSyn && (acceptsResync || echoFirst)) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 if (firstAdoption) adoptedSynchronization = sync

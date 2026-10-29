@@ -46,6 +46,29 @@ class Iap2LinkChannel(
     var peerFrameCount: Int = 0
         private set
 
+    /**
+     * 对端 marker（链路层 DETECT `FF 55 02 00 EE 10`）个数。
+     *
+     * 与 [peerFrameCount] 的区别：控制帧计数**不含**心跳，所以车机停摆但链路还活着时
+     * 它纹丝不动；这个计数恰好相反——只看心跳。别克 B233 用它区分「车机在探测态等
+     * DETECT 回显」与「车机彻底不认这条路」（见 [Iap2LinkEngine.receivedMarkerCount]）。
+     */
+    @Volatile
+    var peerMarkerCount: Int = 0
+        private set
+
+    /**
+     * 是否允许在 NORMAL 下响应对端重新发起的 SYN（别克 B233 专用，默认关）。
+     *
+     * 别的车机保持默认：进入 NORMAL 后收到的 SYN 继续按噪声处理，行为与改动前一致。
+     * 见 [Iap2LinkEngine.acceptPeerResyncInNormal]。
+     */
+    var acceptPeerResyncInNormal: Boolean
+        get() = engine.acceptPeerResyncInNormal
+        set(value) {
+            engine.acceptPeerResyncInNormal = value
+        }
+
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
@@ -55,6 +78,12 @@ class Iap2LinkChannel(
         }
         engine.onUnknownSessionData = { sessionId, size ->
             log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
+        }
+        engine.onMarkerReceived = {
+            peerMarkerCount++
+            if (peerMarkerCount <= MARKER_LOG_LIMIT) {
+                log("LINK rx: 对端 marker（DETECT 心跳，累计 $peerMarkerCount 个）")
+            }
         }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             peerFrameCount++
@@ -105,6 +134,21 @@ class Iap2LinkChannel(
             val accepted = engine.sendControl(bytes, nowMillis(), awaitAck)
             drainOutputLocked()
             return accepted
+        }
+    }
+
+    /**
+     * 回一个链路层 DETECT（marker），**不附带会话表**。
+     *
+     * 只在「对端只发心跳、不发控制帧」时用（别克 B233 的探测态）。其它车机不要调——
+     * 多发的 marker 会让它们的链路状态机多走一轮探测。
+     */
+    fun echoMarker(): Boolean {
+        synchronized(lock) {
+            if (terminated) return false
+            if (!engine.sendMarker()) return false
+            drainOutputLocked()
+            return true
         }
     }
 
@@ -273,6 +317,9 @@ class Iap2LinkChannel(
 
         /** 逐帧摘要日志上限（每方向每连接）。 */
         const val FRAME_LOG_LIMIT = 40
+
+        /** marker 日志预算：心跳每秒一个，全打印会把链路帧日志淹没。 */
+        const val MARKER_LOG_LIMIT = 5
 
         /** 链路终结哨兵；真实控制载荷至少包含一段 CSM 帧，不会为空。 */
         val POISON = ByteArray(0)

@@ -223,6 +223,106 @@ class Iap2LinkEngineTest {
         assertEquals(emitted.sorted(), emitted)
     }
 
+    // ---- 对端 marker（链路层 DETECT 心跳）----
+
+    /**
+     * 对端 marker 必须被**整块**识别并计数，而不是当杂字节丢掉。
+     *
+     * 别克 B233 的两种沉默靠这个计数区分：车机在探测态（只发 DETECT）时链路还活着，
+     * 但不会再处理 0x4300；彻底不认这条路时连 DETECT 都没有。丢掉计数就无从判断。
+     */
+    @Test
+    fun inboundMarkerIsCountedAndReported() {
+        val phone = Iap2LinkEngine()
+        var callbacks = 0
+        phone.onMarkerReceived = { callbacks++ }
+
+        phone.feed(Iap2LinkEngine.MARKER, 1)
+
+        assertEquals(1, phone.receivedMarkerCount)
+        assertEquals(1, callbacks)
+        assertTrue("收 marker 本身不产出任何回帧（是否回显由上层决定）", phone.takeOutput().isEmpty())
+        assertEquals("marker 不改变链路状态", Iap2LinkEngine.State.IDLE, phone.state)
+    }
+
+    /** RFCOMM 会把 6 字节 marker 分段读入：碎片必须等齐后按一个 marker 计。 */
+    @Test
+    fun markerSplitAcrossReadsIsCountedOnce() {
+        val phone = Iap2LinkEngine()
+
+        phone.feed(Iap2LinkEngine.MARKER.copyOfRange(0, 2), 1)
+        assertEquals("碎片不能提前计数", 0, phone.receivedMarkerCount)
+        phone.feed(Iap2LinkEngine.MARKER.copyOfRange(2, 6), 2)
+
+        assertEquals(1, phone.receivedMarkerCount)
+    }
+
+    /** marker 紧跟帧时必须只吞 marker，不得把后面的帧一起吃掉。 */
+    @Test
+    fun markerDoesNotSwallowFollowingFrame() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        phone.feed(synFrame(peerSequence = 161), 1)
+
+        assertEquals("synFrame 自带前置 marker", 1, phone.receivedMarkerCount)
+        assertTrue(
+            "marker 之后的 SYN 必须照常回 SYN|ACK",
+            parseFrames(phone.takeOutput()).any { it.control == 0xC0 },
+        )
+    }
+
+    /** `FF 55` 打头但不是 marker 的杂字节仍按老路子丢弃，不能把解析卡死。 */
+    @Test
+    fun nonMarkerFf55PrefixIsStillTreatedAsJunk() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        val junk = byteArrayOf(0xFF.toByte(), 0x55, 0x11, 0x22)
+        phone.feed(junk + synFrame(peerSequence = 161), 1)
+
+        assertEquals("不是 marker 就不能计数", 0, phone.receivedMarkerCount)
+        assertTrue(parseFrames(phone.takeOutput()).any { it.control == 0xC0 })
+    }
+
+    /** 回显 DETECT 只发 marker 本身，不附带会话表（附了会把探测态的对端按回去）。 */
+    @Test
+    fun echoMarkerEmitsMarkerOnly() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        assertTrue(phone.sendMarker())
+        assertArrayEquals(Iap2LinkEngine.MARKER, phone.takeOutput())
+    }
+
+    /**
+     * NORMAL 下收到的对端 SYN：**默认不理**（其它车机行为零变化），
+     * 只有显式打开 [Iap2LinkEngine.acceptPeerResyncInNormal]（别克 B233）才回 SYN|ACK。
+     */
+    @Test
+    fun peerSynInNormalIsIgnoredUnlessOptedIn() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+        phone.takeOutput()
+
+        phone.feed(synFrame(peerSequence = 11), tick())
+        assertTrue("默认档：NORMAL 态的对端 SYN 不回任何字节", phone.takeOutput().isEmpty())
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+
+        phone.acceptPeerResyncInNormal = true
+        phone.feed(synFrame(peerSequence = 12), tick())
+        val frames = parseFrames(phone.takeOutput())
+        assertEquals("打开后必须回一帧 SYN|ACK", 1, frames.count { it.control == 0xC0 })
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+    }
+
     // ---- 工具 ----
 
     private class ParsedFrame(
