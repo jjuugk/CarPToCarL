@@ -658,12 +658,27 @@ class Iap2BluetoothClient(
             }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
         activeChannel = channel
+        val peerAddress =
+            try {
+                socket.remoteDevice.address
+            } catch (_: SecurityException) {
+                null
+            }
         try {
             channel.runSenderSession(
                 context,
                 SESSION_TIMEOUT_MILLIS,
                 log,
-                onEndpoint,
+                { endpoint ->
+                    // 真正走通 0x4301 且判定为 B233，才把该地址记下来：
+                    // 下一次这台车连入/被拨号就直接走专用流程，不必再靠蓝牙名猜。
+                    if (endpoint.isBuickB233 &&
+                        ReceiverCompatibilityMemory.rememberB233(context, peerAddress)
+                    ) {
+                        log("BT-C: 已记录 $peerAddress 为别克 B233——以后该地址直接走专用建链")
+                    }
+                    onEndpoint(endpoint)
+                },
                 onWifiCredentials,
                 onEndpointUpdate,
                 nowPlayingProvider,
