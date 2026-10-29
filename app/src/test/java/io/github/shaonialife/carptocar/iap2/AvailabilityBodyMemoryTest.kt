@@ -68,4 +68,29 @@ class AvailabilityBodyMemoryTest {
             AvailabilityBodyMemory.silentDescription(null, key),
         )
     }
+
+    /**
+     * 曾经成功定档的形态**又**静默时，定档必须作废、阶梯继续往前走。
+     *
+     * 2026-10-29 别克 E2LB 真机日志：`0x4300 报文体形态：新版嵌套体` 与
+     * `（该车机历史静默档=新版嵌套体）` 同时出现——本轮选的正是已被判静默的那一档。
+     * 修前 `recordSilent` 保留旧定档，`nextVariant` 优先返回它，于是每轮都在重复
+     * 最坏的那一档，「老版平铺体」永远轮不到。
+     */
+    @Test
+    fun silentAgainOnPinnedVariantClearsThePin() {
+        val key = "$buick repin_${System.nanoTime()}"
+        // 历史：新版嵌套体成功过一次 → 定档
+        AvailabilityBodyMemory.recordSuccess(null, key, AvailabilityBodyMemory.Variant.MODERN_NESTED)
+        assertEquals(AvailabilityBodyMemory.Variant.MODERN_NESTED, AvailabilityBodyMemory.nextVariant(null, key))
+
+        // 现在它又静默了：定档作废，必须换到老版平铺体
+        val next = AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.MODERN_NESTED)
+        assertEquals(
+            "定档形态再次静默时必须往下换档，不能原地打转",
+            AvailabilityBodyMemory.Variant.LEGACY_FLAT,
+            next,
+        )
+        assertEquals(AvailabilityBodyMemory.Variant.LEGACY_FLAT, AvailabilityBodyMemory.nextVariant(null, key))
+    }
 }

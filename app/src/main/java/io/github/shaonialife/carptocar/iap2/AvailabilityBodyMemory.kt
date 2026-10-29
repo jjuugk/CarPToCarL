@@ -86,7 +86,12 @@ object AvailabilityBodyMemory {
         if (variant == Variant.NONE) return Variant.NONE
         val key = receiverKey(identityText)
         val silent = readSilent(context, identityText) + variant.name
-        store(context, key, readOk(context, identityText), silent)
+        // 定过档的形态**又**静默了：旧定档必须作废。
+        // 否则 nextVariant 优先返回成功档，阶梯永远停在第一档（2026-10-29 别克 E2LB 实测：
+        // 日志同时打印「形态=新版嵌套体」与「历史静默档=新版嵌套体」——该车早前成功过一次被
+        // recordSuccess 定档，此后每轮静默都换不动档，「老版平铺体」一次都没被试过）。
+        val ok = readOk(context, identityText)?.takeIf { it != variant }
+        store(context, key, ok, silent)
         return nextVariant(context, identityText)
     }
 
