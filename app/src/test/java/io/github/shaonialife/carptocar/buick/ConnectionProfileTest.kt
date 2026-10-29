@@ -40,6 +40,25 @@ class ConnectionProfileTest {
         assertFalse(B233Identity.confirmsB233(null))
     }
 
+    /**
+     * 车型代号两种写法都认：模块型号 B233、平台代号 E2LB。
+     *
+     * 2026-10-29 BUICK_2874 真机日志：0x1D01 回的是 `name=BUICK_2874 model=E2LB
+     * manufacturer=Saic General Motors`。只认 b233 时这台车判不进专用分支，
+     * 于是发出通用单 group 的 0x4300 被车机静默（连链路层 ACK 都不回），
+     * 0x4301 永远等不到——日志里的死循环就是这么来的。
+     */
+    @Test
+    fun `E2LB 平台代号与 B233 同等识别`() {
+        assertTrue(
+            B233Identity.confirmsB233("buick_2874 buick e2lb saic general motors"),
+        )
+        // 车型代号缺失时仍不算（避免把「只要是台别克」都塞进专用分支）
+        assertFalse(B233Identity.confirmsB233("buick_2874 buick saic general motors"))
+        // 别的品牌带 e2lb 也不算
+        assertFalse(B233Identity.confirmsB233("audi e2lb b233"))
+    }
+
     @Test
     fun `通用档永不判定为别克`() {
         val hits =

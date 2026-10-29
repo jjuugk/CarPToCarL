@@ -94,17 +94,27 @@ object B233Identity {
     /** 别克车机的出厂蓝牙名形态：`BUICK_1234`。 */
     private val RECEIVER_NAME = Regex("^BUICK_[0-9]{4}$", RegexOption.IGNORE_CASE)
 
-    /** 0x1D01 身份文本必须同时出现的三个标记（小写比对）。 */
-    private val IDENTITY_MARKERS = listOf("buick", "b233", "saic general motors")
+    /** 0x1D01 身份文本必须同时出现的两个标记（小写比对）。 */
+    private val IDENTITY_MARKERS = listOf("buick", "saic general motors")
+
+    /**
+     * 车型代号的两种写法：模块型号 **B233**、平台代号 **E2LB**。
+     *
+     * 同一台 SAIC-GM 8155 车机（Cinemo 栈）在 0x1D01 里回的是 `model=E2LB`
+     * （2026-10-29 BUICK_2874 真机日志），"B233" 只是我们给这条分支的命名。
+     * 只认 b233 会让整条专用分支永远不命中——那台车于是走通用单 group 的 0x4300，
+     * 被车机静默丢弃（日志里「发出后 8s 内车机零反馈」），而它要的正是 75B 双 group。
+     */
+    private val MODEL_MARKERS = listOf("b233", "e2lb")
 
     /** 蓝牙名是否像别克车机（仅用于发现阶段的优先尝试，不构成身份认证）。 */
     fun looksLikeBuick(name: String?): Boolean = name != null && RECEIVER_NAME.matches(name.trim())
 
-    /** 0x1D01 身份文本是否确认为别克 B233（三个标记全含）。 */
+    /** 0x1D01 身份文本是否确认为别克 B233 / E2LB（两个身份标记 + 一个车型代号）。 */
     fun confirmsB233(identityText: String?): Boolean {
         if (identityText.isNullOrBlank()) return false
         val text = identityText.lowercase()
-        return IDENTITY_MARKERS.all { text.contains(it) }
+        return IDENTITY_MARKERS.all { text.contains(it) } && MODEL_MARKERS.any { text.contains(it) }
     }
 }
 
