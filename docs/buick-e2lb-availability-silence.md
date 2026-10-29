@@ -198,3 +198,20 @@ WiFi 应该是 `3`——现在按参考实现发 `1`，可作为下一轮实验�
 - `iap2 未收到 0x6800（该接收端不发 StartHID，继续）` 与上一行
   `可选消息声明：StartHID(0x6800)=会发` 自相矛盾——原文案写死了「不发」。
   已改成按声明区分：声明会发 → 「可能等 0x4300 之后才开 HID」；无清单 → 「按不发处理」。
+
+## 9. 参考来源
+
+本分支（`bieke`）的别克建链参考了开源项目
+**[chengshl/cardeck](https://github.com/chengshl/cardeck) 的别克（Buick）CarPlay 连接池**：
+
+- 它是 [CarDeck](https://github.com/shaonialife/cardeck) 的别克适配 fork，长期维护
+  `Buick` / `Buick-E5` / `Buick-Test` 三条分支，专门做别克 E5 实车适配，MIT 许可。
+- 与我们相关、且被本文引用到的部分：`iap2/BuickB233VirtualPostAuth.kt`（认证后虚拟链路的
+  post-auth 消息集——只发 `0x1D01` param 7 可收清单里的 ID）、`buick/` 下的车型适配层，
+  以及 `docs/milestones/Buick-E5-T*` 里的实车里程碑记录。
+- 参考方式是**方案与真车结论**级别的对照，不是代码移植：本仓库的 `buick/`、`iap2/`、
+  `airplay/` 实现均为独立编写，报文与阈值以本文引用的 E2LB 真机日志为准。
+  双方同为 MIT，若有需要后续直接引用其源码也不存在许可障碍。
+
+参考链接：<https://github.com/chengshl/cardeck>
+

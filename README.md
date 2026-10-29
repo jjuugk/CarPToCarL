@@ -69,6 +69,27 @@
 两个仓库都未声明或使用任何第三方的 MFi 授权，法律边界见
 [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)。
 
+### 别克（`bieke`）分支的参考来源
+
+`bieke` 分支上这套别克 E5 建链，参考了 **[chengshl/cardeck](https://github.com/chengshl/cardeck)
+的别克（Buick）CarPlay 连接池**——该仓库是 CarDeck 的别克适配 fork，`Buick` / `Buick-E5` /
+`Buick-Test` 三条长期分支专门做别克 E5（B233 / E2LB）实车适配，同样以 MIT 发布。
+
+参考的是「车机侧到底要什么才肯把无线 CarPlay 建起来」这一层的方案与实测结论：
+
+| 参考点 | 本项目对应实现 |
+|---|---|
+| B233 身份判定 + 被动建链优先（车机发起，手机不主动拨号） | `buick/ConnectionProfile.kt`、`bt/Iap2BluetoothClient.kt` |
+| `0x4300` 报文体形态分档（新版嵌套 / 老版平铺 / 不发） | `iap2/AvailabilityBodyMemory.kt` |
+| `0x4301` 轮询节奏、车机零回帧时不催问 | `iap2/Iap2SenderSession.kt` |
+| MFi 挑战长度按车型收紧（B233 只认 32B） | `iap2/Iap2SenderSession.kt` |
+| 认证后虚拟链路的 post-auth 消息集（只发 `0x1D01` 可收清单里的 ID） | `airplay/VirtualIap2Link.kt` |
+| 蓝牙侧不拆 HFP/A2DP，保留车机音频链路 | `bt/Iap2BluetoothClient.kt` |
+
+需要说明的是：以上是**方案与真车结论**的参考，本仓库代码为独立实现，未复制其源码
+（该 fork 与本仓库同为 MIT，即便引用也无许可障碍）；具体报文与判定阈值来自别克 E2LB 真机日志的
+实测，差异与依据见 [docs/buick-e2lb-availability-silence.md](docs/buick-e2lb-availability-silence.md)。
+
 ### 方向说明
 
 - 本项目是**发送端**（手机扮演 iPhone），与 DiPlay / xcertplay 这类**接收端**（扮演车机）方向相反。  
