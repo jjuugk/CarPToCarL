@@ -8,6 +8,11 @@ import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import io.github.shaonialife.carptocar.buick.B233DialPolicy
+import io.github.shaonialife.carptocar.buick.B233Identity
+import io.github.shaonialife.carptocar.buick.B233Selection
+import io.github.shaonialife.carptocar.buick.ConnectionProfile
+import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
@@ -100,6 +105,19 @@ class Iap2BluetoothClient(
 
     @Volatile
     private var running = false
+
+    /**
+     * 本次启动读到的「连接配置」档位。
+     *
+     * 只在 [start] 时读一次：建链方向与拆链策略在整轮服务生命周期里保持一致，
+     * 中途改档位不会把正在进行的会话从被动切成主动（那会让车机看到两路争抢）。
+     */
+    @Volatile
+    private var connectionProfile: ConnectionProfile = ConnectionProfile.AUTO
+
+    /** 别克档是否由手机主动拨号；false = 等车机接入（E5 实测默认方向）。 */
+    @Volatile
+    private var b233PhoneDialEnabled = false
 
     /** 歌名变化时主动补推 0x5001（转发给当前保活会话）。 */
     fun pushNowPlaying() {
@@ -259,9 +277,13 @@ class Iap2BluetoothClient(
         iap2ServiceCache.clear()
         skippedNoService.clear()
         BtSessionGate.targetSoftFallback = false
+        // 连接配置档位在这里定型：改动在下次 start() 生效（界面里也这么写）
+        connectionProfile = ConnectionProfilePrefs.get(context)
+        b233PhoneDialEnabled = connectionProfile.b233PhoneInitiates
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
+        log("BT-C: 连接配置=${connectionProfile.label}——${connectionProfile.summary}")
         log(
             "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
                 if (target != null) {
@@ -290,6 +312,9 @@ class Iap2BluetoothClient(
         var targetFailRounds = 0
         /** 连续「SDP 层失败」的轮数（见 [PASSIVE_FALLBACK_ROUNDS]）。 */
         var passiveFailRounds = 0
+        /** 别克档「手机拨号」的节流基线（见 [B233DialPolicy]）。 */
+        var lastB233DialAt = 0L
+        val loopStartedAt = android.os.SystemClock.uptimeMillis()
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
@@ -307,6 +332,8 @@ class Iap2BluetoothClient(
                 continue
             }
             var connected: BluetoothSocket? = null
+            /** 连上的这台是否按别克 B233 处理（决定会话侧要不要强制 B233 建链）。 */
+            var connectedBuick = false
             // 本轮有几台设备是「SDP 层就没连上」（不是被拒、不是超时）。累计到
             // [PASSIVE_FALLBACK_ROUNDS] 轮就切被动方向（车机主动连入）。
             var sdpLookupFailures = 0
@@ -318,19 +345,66 @@ class Iap2BluetoothClient(
                     } catch (_: SecurityException) {
                         null
                     } ?: device.address
+                // 别克 B233 判定（档位 + 设备线索）：命中后建链方向、SDP 闸门、
+                // 音频配置文件策略都不同，必须在任何连接动作之前算出来。
+                val knownBuick =
+                    B233Selection.matches(
+                        connectionProfile,
+                        targetProvider()?.address,
+                        device.address,
+                        name,
+                        ReceiverCompatibilityMemory.wasB233Observed(context, device.address),
+                    )
                 runCatching { adapter.cancelDiscovery() }
+                if (knownBuick) {
+                    // ① 被动档（E5 实测默认）：车机自己会连本机的 …cafe。
+                    // 手机再主动拨一次只会让两边争抢同一段空口，把车机的建链窗口拖死。
+                    if (!b233PhoneDialEnabled) {
+                        if (skippedNoService.add("b233-passive:" + device.address)) {
+                            log(
+                                "BT-C: 「$name」按别克 B233 处理——被动等车机连入（不主动拨号）。" +
+                                    "若车机始终不连，可在「连接配置」里改选「别克 E5（手机拨号）」",
+                            )
+                        }
+                        continue
+                    }
+                    // ② 主动档：先给车机留反向接入的优先窗口，且两次拨号至少隔 15 秒
+                    // （E5 对密集重试很敏感，连拨会把它的 iAP2 窗口拖死）。
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val sinceLastAttempt = if (lastB233DialAt == 0L) Long.MAX_VALUE else now - lastB233DialAt
+                    if (!B233DialPolicy.mayDial(
+                            active = true,
+                            sessionBusy = BtSessionGate.sessionActive || BtSessionGate.inboundActive,
+                            runningForMs = now - loopStartedAt,
+                            sinceLastAttemptMs = sinceLastAttempt,
+                            cooldownRemainingMs = 0L,
+                        )
+                    ) {
+                        continue
+                    }
+                    lastB233DialAt = now
+                    log(
+                        "BT-C: 别克 B233 主动档——拨号「$name」" +
+                            "（已等过入站优先窗口 ${B233DialPolicy.INBOUND_PRIORITY_MS}ms）",
+                    )
+                }
                 // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
                 // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
                 // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
                 // 的设备不过闸（用户显式指定，保持原路径与时序）。
                 val gate =
-                    if (targetProvider() == null || BtSessionGate.targetSoftFallback) {
-                        // 软回退（目标连不上、放开限制）也过闸：否则会把已配对的耳机、
-                        // 蓝牙键盘（AB Shutter3）、音箱全试一遍，既断别人的音频又拖慢
-                        // 重试节奏（2026-10-26 雪铁龙日志实测）。
-                        awaitIap2Service(device)
-                    } else {
-                        Iap2Service.HAS
+                    when {
+                        // 别克 B233 不过 SDP 闸门：它的 …caff 服务窗口只在车机自己打开
+                        // CarPlay 时才出现，SDP 经常查不出结论；过闸等于把能连的车机挡在门外。
+                        knownBuick -> Iap2Service.HAS
+                        // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
+                        // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
+                        // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
+                        // 的设备不过闸（用户显式指定，保持原路径与时序）。软回退（目标连不上、
+                        // 放开限制）也过闸：否则会把已配对的耳机、蓝牙键盘（AB Shutter3）、
+                        // 音箱全试一遍，既断别人的音频又拖慢重试节奏（2026-10-26 雪铁龙日志实测）。
+                        targetProvider() == null || BtSessionGate.targetSoftFallback -> awaitIap2Service(device)
+                        else -> Iap2Service.HAS
                     }
                 if (gate == Iap2Service.MISSING) {
                     if (skippedNoService.add(device.address)) {
@@ -344,7 +418,7 @@ class Iap2BluetoothClient(
                     // 探不通再看是不是「蓝牙已连接时不开放服务窗口」的机型（奥迪实测），
                     // 此时才断开配置文件重试一次——耳机类设备永远不会被我们断掉音频。
                     var probe = tryConnect(device)
-                    if (probe == null && !looksLikePersonalAudio(device)) {
+                    if (probe == null && !looksLikePersonalAudio(device) && !knownBuick) {
                         val dropped = BtProfiles.disconnect(context, device)
                         if (dropped.isNotEmpty()) {
                             log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
@@ -363,6 +437,7 @@ class Iap2BluetoothClient(
                     }
                     log("BT-C: 「$name」SDP 未给出结论，但直连 …caff 成功——按车机处理")
                     connected = probe
+                    connectedBuick = knownBuick
                     break
                 }
                 // 先「保持现有配置文件」直连一次。
@@ -372,7 +447,12 @@ class Iap2BluetoothClient(
                 // 需要「保持连接」的车机第一次就能成，奥迪那类需要「仅配对」的车机
                 // 会在第一次失败后走到下面的断开重试。
                 var socket = tryConnect(device)
-                if (socket == null) {
+                if (socket != null && knownBuick) {
+                    // 别克 B233 的 iAP2 服务窗口与蓝牙音频**共存**，拆了 HFP/A2DP 反而
+                    // 会让车机关掉服务窗口——与奥迪「只配对不连接」正好相反，所以这里
+                    // 保留配置文件，失败就等下一轮（车机会在自己的窗口期连进来）。
+                    log("BT-C: 「$name」按别克 B233 处理——保留蓝牙免提/媒体连接，不拆配置文件")
+                } else if (socket == null) {
                     // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
                     // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
                     // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
@@ -394,6 +474,7 @@ class Iap2BluetoothClient(
                 if (socket != null) {
                     log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")
                     connected = socket
+                    connectedBuick = knownBuick
                     break
                 } else {
                     if (lastFailureWasSdpLookup) sdpLookupFailures++
@@ -448,7 +529,7 @@ class Iap2BluetoothClient(
                 currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
                 return
             }
-            runSession(connected)
+            runSession(connected, connectedBuick)
             sleepQuietly(RETRY_DELAY_MILLIS)
         }
         log("BT-C: 客户端已停止")
@@ -567,7 +648,10 @@ class Iap2BluetoothClient(
         }
     }
 
-    private fun runSession(socket: BluetoothSocket) {
+    private fun runSession(
+        socket: BluetoothSocket,
+        knownBuick: Boolean = false,
+    ) {
         val stream =
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
@@ -585,6 +669,9 @@ class Iap2BluetoothClient(
                 nowPlayingProvider,
                 onSessionReady = { session -> senderSession = session },
                 onLinkClosed = onLinkClosed,
+                // 只有用户**显式**选了别克档才强制 B233；自动档命中蓝牙名时仍交给
+                // 0x1D01 身份文本判定（万一不是 B233，别把别的别克车型带进死路径）。
+                forceBuickE5 = connectionProfile.forcesB233 && knownBuick,
             )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")

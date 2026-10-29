@@ -1377,6 +1377,9 @@ class AirPlayClient(
                     tunnelWriter = { iapTunnel },
                     alive = { socket?.isClosed == false },
                     nowPlayingProvider = { nowPlayingSource?.invoke() },
+                    // 别克 B233：0x5001/0x4171 这类「车机可能根本不 ACK」的推送不做致命重传，
+                    // 否则链路看门狗约 20 秒后把整条会话杀掉（E2LB 日志里的典型死法）。
+                    isBuickB233 = endpoint.isBuickB233,
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.begin()

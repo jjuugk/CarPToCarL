@@ -22,6 +22,11 @@ internal fun Iap2LinkChannel.runSenderSession(
     onSessionReady: (Iap2SenderSession) -> Unit = {},
     /** 保活泵退出（链路断开）回调——用于释放主控的「会话处理中」互斥，见调用处注释。 */
     onLinkClosed: () -> Unit = {},
+    /**
+     * 强制按别克 E5（B233）建链（用户在下拉框里指定了别克档）。
+     * 默认 false：其它车机仍按 0x1D01 身份文本自动判定，流程不变。
+     */
+    forceBuickE5: Boolean = false,
 ) {
     val session =
         Iap2SenderSession(
@@ -34,6 +39,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
             context.applicationContext,
             nowPlayingProvider,
+            forceBuickE5,
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

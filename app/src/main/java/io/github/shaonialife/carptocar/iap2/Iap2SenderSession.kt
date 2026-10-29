@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.iap2
 
+import io.github.shaonialife.carptocar.buick.B233Identity
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.io.IOException
@@ -51,6 +52,14 @@ class Iap2SenderSession(
      * 在蓝牙 bring-up 后即发 0x5000，歌名需在**这条蓝牙链路**上应答。
      */
     private val nowPlayingProvider: (() -> CarPlayNowPlaying?)? = null,
+    /**
+     * 强制按别克 E5（B233）建链，不看 0x1D01 文本。
+     *
+     * 由「连接配置」下拉框的别克档位传入：车主已明确指定这台是别克，就不必再等
+     * 身份文本才能切分支（某些固件在识别阶段就可能因通用流程抢先发 0x5702 而掉线）。
+     * 默认 false —— 奥迪/宝马/凯迪拉克等既有车机的流程完全不变。
+     */
+    private val forceBuickE5: Boolean = false,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -77,6 +86,13 @@ class Iap2SenderSession(
         val mutualAuthRequired: Boolean = false,
         /** `0x4301` param 6：车机的 CarPlay SDK 版本串。仅用于日志定位，不参与决策。 */
         val sdkVersion: String? = null,
+        /**
+         * 本轮是否按别克 E5（B233）建链。
+         *
+         * 下游要用它的地方：虚拟 iAP2 链路要切 B233 骨架（等车机 DETECT 再 echo SYN、
+         * 0x5001/0x4171 不做致命重传）、蓝牙层成功后要把该地址记为 B233。
+         */
+        val isBuickB233: Boolean = false,
     )
 
     private val parser = Iap2Csm.Parser()
@@ -117,6 +133,15 @@ class Iap2SenderSession(
      * 改动前一致。真机有 Context 时由 [AvailabilityBodyMemory.nextVariant] 决定。
      */
     private var availabilityVariant: AvailabilityBodyMemory.Variant? = null
+
+    /**
+     * 本轮是否走别克 E5（B233）专用分支。
+     *
+     * 判定来源有两个：构造参数 [forceBuickE5]（用户在下拉框里指定了别克档），
+     * 或 0x1D01 身份文本同时含 buick / b233 / saic general motors。两者都不成立时
+     * 保持 false，所有既有车机的行为与改动前逐字节一致。
+     */
+    private var buickB233: Boolean = false
 
     /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
     private var lastLateStartSessionSignature: Int? = null
@@ -233,6 +258,43 @@ class Iap2SenderSession(
         /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
         const val START_SESSION_RAW_LOG_BYTES = 1_024
 
+        // ---- 别克 E5（B233）专用 ----
+
+        /** B233 的 MFi 挑战长度：**精确 32 字节**，长度不符车机直接断链。 */
+        const val BUICK_MFI_CHALLENGE_BYTES = 32
+
+        /** B233 的 MFi 应答窗口（实测应答在亚秒级，给 5 秒容错）。 */
+        const val BUICK_MFI_WINDOW_MS = 5_000L
+
+        /** 合法蓝牙 MAC 形态（B233 会用 group1 里的 MAC 与 RFCOMM 对端比对）。 */
+        val LOCAL_MAC_PATTERN = Regex("(?i)^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+        /** 占位 MAC：构造出来必然是假标识，宁可报错也不发。 */
+        val PLACEHOLDER_MACS = listOf("02:00:00:00:00:00", "00:00:00:00:00:00")
+
+        /**
+         * B233 等 0x4301 的窗口。
+         *
+         * 比其他新协议车机的 8 秒长：E5 要先吃完 0x4E0A/0x4E09/0x4E0B/0x4E0C 这组问候、
+         * 再收下 75 字节 0x4300 才会回 0x4301，实测整段在 10~20 秒量级。
+         */
+        const val BUICK_START_SESSION_WAIT_NANOS = 30_000_000_000L
+
+        /** B233 等 0x4301 时的重发间隔。 */
+        const val BUICK_AVAILABILITY_POLL_MILLIS = 750L
+
+        /**
+         * 发 0x4300 **之前**的静默期：问候组（含 0x4E0C）要用自己的 ACK 走完一轮，
+         * 抢在 ACK 之前灌 0x4300 会被车机当成乱序，之后整段不再回帧。
+         */
+        const val BUICK_PRE_AVAILABILITY_SETTLE_MS = 300L
+
+        /**
+         * 发 0x4300 **之后**的硬等：E5 实测在这段里专心处理可用性帧，
+         * 期间再发任何控制帧都会让它放弃本轮握手。
+         */
+        const val BUICK_POST_AVAILABILITY_SETTLE_MS = 1_500L
+
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
 
@@ -285,12 +347,28 @@ class Iap2SenderSession(
 
         // ---- MFi（跳过校验：0xAA05 自报成功）----
         val identityText = identityText(identification)
+        // 别克 B233 判定：用户在「连接配置」里指定别克档，或身份文本三个标记齐全。
+        // 判定必须发生在 MFi 之前——B233 对挑战长度是硬要求（只认 32B，不符立即断链），
+        // 一旦先按通用 20B 试过，车机侧就可能已经把会话掐了。
+        buickB233 = forceBuickE5 || B233Identity.confirmsB233(identityText)
+        if (buickB233) {
+            log(
+                "iap2 识别为别克 B233（${if (forceBuickE5) "下拉框指定别克档" else identityText}）——" +
+                    "走专用建链：MFi 严格 32B、不发 0x5702、0x4300 用 75B 双 group、0x4301 750ms 轮询",
+            )
+        }
         // 0x4300 报文体形态的按车机试错记忆（见 AvailabilityBodyMemory 文档：
         // 别克 E2LB 收到新版嵌套体后控制会话直接停摆）。无 Context（单测）时固定新版。
         receiverIdentity = identityText
         // 只有真机（有 Context，可持久化）才启用阶梯；单测/纯 JVM 固定新版嵌套体，
         // 协议时序与改动前完全一致（也让用例之间不会通过进程内记忆互相污染）。
-        availabilityVariant = if (context == null) null else AvailabilityBodyMemory.nextVariant(context, identityText)
+        // B233 不走阶梯：它的形态是确定的（双 group），不需要猜。
+        availabilityVariant =
+            if (buickB233) {
+                null
+            } else {
+                if (context == null) null else AvailabilityBodyMemory.nextVariant(context, identityText)
+            }
         availabilityVariant?.let {
             log(
                 "iap2 0x4300 报文体形态：${it.label}" +
@@ -311,7 +389,7 @@ class Iap2SenderSession(
         //    32B→20B 的会话全部卡死，20B→（记忆命中）的会话全部秒通。
         //  - 测试台 DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，长度不符直接断链。
         // 全部无应答也不中止——我们不校验签名（0xAA05 自报），由 0x5702 是否应答判定放行。
-        runMfiChallenge(deadline, prefer20First = legacyCar, receiverKey = identityText)
+        runMfiChallenge(deadline, prefer20First = legacyCar, receiverKey = identityText, buickStrict = buickB233)
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
@@ -351,9 +429,14 @@ class Iap2SenderSession(
         val declaresReceiveWifi =
             accessoryDeclaresReceive(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
         val declaresSendWifi = accessoryDeclaresSend(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION)
-        val legacyWifiExchange = wifiGen != ReceiverProfile.WifiGen.NEW
+        // 别克 B233 无论画像怎么判都不发 0x5702：它的能力清单没声明可收，E5 实测
+        // 每轮都在这里沉默、把整个握手拖死。AP 信息只从 0x4301 取。
+        val legacyWifiExchange = !buickB233 && wifiGen != ReceiverProfile.WifiGen.NEW
         val wifiFromExchange: WifiConfiguration? =
-            if (!legacyWifiExchange) {
+            if (buickB233) {
+                log("iap2 别克 B233 跳过 0x5702（车机未声明可收）——AP 信息只从 0x4301 取")
+                null
+            } else if (!legacyWifiExchange) {
                 log(
                     "iap2 画像判 wifiGen=NEW（两清单完整仍无 0x57xx，收=${declaresReceiveWifi ?: "未知"} " +
                         "发=${declaresSendWifi ?: "未知"}）——跳过旧协议，AP 信息由 0x4301 提供",
@@ -396,16 +479,55 @@ class Iap2SenderSession(
         val framesBeforeAvailability = channel.peerFrameCount
         // 催问的静默基线也钉在这一刻：第一次催问（+15s）就能判断车机是否还在回帧。
         lastNudgePeerFrames = framesBeforeAvailability
+        // 别克 B233：问候组（含 0x4E0C）要先用自己的 ACK 走完一轮，抢在 ACK 之前
+        // 灌 0x4300 会被车机当成乱序，之后整段不再回帧。
+        if (buickB233) {
+            sleepQuietly(BUICK_PRE_AVAILABILITY_SETTLE_MS)
+            if (!channel.isAlive) throw IOException("别克 B233：发 0x4300 之前链路已断开")
+        }
         sendAvailability()
+        // 别克 B233：0x4300 之后车机专心处理可用性帧，这段窗口里再发任何控制帧
+        // 都会让它放弃本轮握手——硬等一段再开始轮询。
+        if (buickB233) {
+            sleepQuietly(BUICK_POST_AVAILABILITY_SETTLE_MS)
+            if (!channel.isAlive) {
+                throw IOException("别克 B233：0x4300 之后链路被车机断开（不接受该报文形态）")
+            }
+        }
         // 车机声明里没有 0x4301 就直接跳过等待（Audi 实测每轮白等 10s）：
         // 真 iPhone 对这类车机也不等——AirPlay 端点经 mDNS/网关合成。
         val declaresStartSession = accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)
         // 没拿到 0x5703（新协议车机）时，0x4301 是**唯一**的 AP 信息来源——窗口给足；
         // 真有 0x5703 的旧协议车机保持 3 秒短窗口（应答都在毫秒级）。
+        // 别克 B233 用最长窗口：它要吃完问候组再处理 75/69 字节的双 group 报文。
         val startSessionWindow =
-            if (wifiFromExchange == null) START_SESSION_WAIT_NEW_PROTOCOL_NANOS else START_SESSION_WAIT_NANOS
+            when {
+                buickB233 -> BUICK_START_SESSION_WAIT_NANOS
+                wifiFromExchange == null -> START_SESSION_WAIT_NEW_PROTOCOL_NANOS
+                else -> START_SESSION_WAIT_NANOS
+            }
         var startSession: Iap2Csm.Frame? = null
-        if (declaresStartSession == false) {
+        if (buickB233) {
+            // 别克不看「有没有声明会发 0x4301」（E2LB 日志里它压根不声明），
+            // 一律按 750ms 轮询重发 0x4300 催到窗口结束。
+            var pollCount = 0
+            startSession =
+                expectOrNull(
+                    Iap2MessageIds.CARPLAY_START_SESSION,
+                    minOf(deadline, System.nanoTime() + startSessionWindow),
+                    pollIntervalMillis = BUICK_AVAILABILITY_POLL_MILLIS,
+                    onPoll = {
+                        if (channel.isAlive) {
+                            pollCount++
+                            log(
+                                "iap2 别克 B233：0x4301 未到，第 $pollCount 次重发 0x4300" +
+                                    "（${BUICK_AVAILABILITY_POLL_MILLIS}ms 轮询）",
+                            )
+                            runCatching { sendBuickAvailability() }
+                        }
+                    },
+                )
+        } else if (declaresStartSession == false) {
             log("iap2 车机未声明会发 0x4301——跳过等待（AirPlay 端点走 mDNS/网关）")
         } else {
             // 车机可能只发 0x4301 而完全不回答 0x5702：发送后先等一轮，
@@ -416,6 +538,15 @@ class Iap2SenderSession(
                     minOf(deadline, System.nanoTime() + startSessionWindow),
                 )
         }
+        // 别克 B233 沉默时**绝不合成 Wi-Fi 凭据**：0x4301 缺失就是明确的建链失败。
+        // 这与只走 mDNS 的奥迪不同——E5 的端点和热点都只在这条报文里，
+        // 猜一个 SSID 出去只会让车主看到「连上了但一直黑屏」。
+        if (buickB233 && startSession == null) {
+            throw IOException(
+                "别克 B233：0x4301 在 ${startSessionWindow / 1_000_000_000}s 内未到，" +
+                    "拿不到车机热点与 AirPlay 端口——本轮断开重连（请确认车机上已选择本机）",
+            )
+        }
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。
         // 老协议车机（Audi 等）对 0x4300 的处置不影响后续流程，不做阶梯，避免回归。
         if (startSession == null && declaresStartSession == true && wifiFromExchange == null) {
@@ -425,7 +556,9 @@ class Iap2SenderSession(
         }
         val endpoint =
             if (startSession != null) {
-                parseStartSession(startSession, wifiFromExchange)
+                val parsed = parseStartSession(startSession, wifiFromExchange)
+                // 下游（虚拟 iAP2 链路切 B233 骨架、蓝牙层记下该地址是 B233）要这个标记
+                if (buickB233) parsed.copy(isBuickB233 = true) else parsed
             } else {
                 // 不能断言「该车机不发」：Audi MMI 0000 声明会发、也确实发，只是晚到
                 // 2 分 35 秒（2026-10-18 日志）。措辞必须保留「稍后可能补发」的预期，
@@ -705,6 +838,10 @@ class Iap2SenderSession(
      * 进重传队列只会让看门狗提前把链路杀掉。
      */
     private fun sendAvailability() {
+        if (buickB233) {
+            sendBuickAvailability()
+            return
+        }
         when (availabilityVariant ?: AvailabilityBodyMemory.Variant.MODERN_NESTED) {
             AvailabilityBodyMemory.Variant.MODERN_NESTED ->
                 sendFireAndForget(
@@ -722,6 +859,62 @@ class Iap2SenderSession(
             AvailabilityBodyMemory.Variant.NONE ->
                 log("iap2 0x4300 本轮不发（该车机对两种报文体都无反应——只等它自己发 0x4301）")
         }
+    }
+
+    /**
+     * 别克 B233 的 0x4300：**双 group**，与通用线的单 group 嵌套体不同。
+     *
+     * 形状对照 iPhone 抓包：group(0) 放设备标识，group(1) 放本机真实蓝牙 MAC。
+     * 车机会校验 group1 里的 MAC 是否等于 RFCOMM 链路对端，所以这里必须是
+     * [bluetoothMac] 的真值——占位 MAC（`02:00:00:00:00:00`）会直接导致车机沉默，
+     * 因此宁可抛错也别发一帧假的。
+     *
+     * 与通用线一样发后不管：B233 对未被 ACK 的帧会在约 20 秒后拆链，
+     * 进重传队列只会让看门狗提前自杀。
+     */
+    private fun sendBuickAvailability() {
+        val mac = bluetoothMac.trim()
+        if (!LOCAL_MAC_PATTERN.matches(mac) || PLACEHOLDER_MACS.any { it.equals(mac, ignoreCase = true) }) {
+            throw IOException("别克 B233：本机蓝牙 MAC 非法（$mac），拒绝构造 0x4300")
+        }
+        val body =
+            Iap2Csm.group(
+                0,
+                Iap2Csm.u8(0, 1),
+                Iap2Csm.string(1, carPlayDeviceIdentifier()),
+            ) +
+                Iap2Csm.group(
+                    1,
+                    Iap2Csm.u8(0, 1),
+                    Iap2Csm.string(1, mac),
+                )
+        val frame = Iap2Csm.encode(Iap2MessageIds.CARPLAY_AVAILABILITY, body)
+        // 只记 SHA-256 前 8 字节：成功/失败轮次可对比，又不泄露设备标识与蓝牙 MAC。
+        val digest =
+            java.security.MessageDigest
+                .getInstance("SHA-256")
+                .digest(frame)
+                .take(8)
+                .joinToString("") { "%02x".format(it) }
+        log(
+            "iap2 别克 B233 0x4300 双 group（group0 设备标识 / group1 真实 MAC）" +
+                "frameBytes=${frame.size} sha256=$digest",
+        )
+        sendFireAndForget(Iap2MessageIds.CARPLAY_AVAILABILITY, body)
+    }
+
+    /**
+     * 别克 B233 的 CarPlay 设备标识：由本机蓝牙 MAC 派生，**绝不复制真 iPhone 的私有 ID**。
+     *
+     * 与通用线的 DeviceIdentifier 同样只是「发送端身份」，车机不校验真伪，
+     * 但同一台车会按它去重旧会话，所以必须在同一台手机上保持稳定。
+     */
+    private fun carPlayDeviceIdentifier(): String {
+        val digest =
+            java.security.MessageDigest
+                .getInstance("SHA-256")
+                .digest(("CarPToCarL-CarPlay:" + bluetoothMac.uppercase()).toByteArray())
+        return digest.take(12).joinToString("") { "%02X".format(it.toInt() and 0xFF) }
     }
 
     /**
@@ -883,7 +1076,7 @@ class Iap2SenderSession(
                     "——交给主控热更新端点/重试配对",
             )
         }
-        onEndpointUpdate?.invoke(endpoint)
+        onEndpointUpdate?.invoke(if (buickB233) endpoint.copy(isBuickB233 = true) else endpoint)
     }
 
     /** 0x4301 原始体只记一次：车机间端点字段差异（有无 IPv4/端口/公钥）只能靠它定谳。 */
@@ -917,7 +1110,14 @@ class Iap2SenderSession(
         deadline: Long,
         prefer20First: Boolean = false,
         receiverKey: String,
+        buickStrict: Boolean = false,
     ) {
+        // 别克 B233 是硬要求档：只认精确 32 字节，不符立即断链，**绝不回落** 20B/16B。
+        // 也不能让按车机记忆把顺序改掉——旧记忆里若存着 20B 成功，回落一次车机就把会话掐了。
+        if (buickStrict) {
+            runBuickMfiChallenge(deadline)
+            return
+        }
         val baselineLengths =
             if (prefer20First) {
                 listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
@@ -998,6 +1198,51 @@ class Iap2SenderSession(
         }
     }
 
+    /**
+     * 别克 B233 的 MFi 挑战：**只发一次精确 32 字节**，不换档、不查记忆。
+     *
+     * 依据 E5 实测：20B/16B 会被车机直接断链（不是静默），而重试本身就是把会话
+     * 拖死的元凶。所以这里宁可让本轮失败重连，也不做长度试探——失败原因写清楚，
+     * 车主在日志里能直接看到「该车机要求精确 32 字节」。
+     */
+    private fun runBuickMfiChallenge(deadline: Long) {
+        val challenge = ByteArray(BUICK_MFI_CHALLENGE_BYTES).also(random::nextBytes)
+        send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
+        log(
+            "iap2 tx=0xaa02 challenge=${BUICK_MFI_CHALLENGE_BYTES}B" +
+                "（别克 B233 严格档：只认 32B，失败即断链，不回落 20B/16B）",
+        )
+        val window = minOf(System.nanoTime() + BUICK_MFI_WINDOW_MS * 1_000_000L, deadline)
+        while (true) {
+            val remaining = (window - System.nanoTime()) / 1_000_000L
+            if (remaining <= 0) break
+            val frame = recvFrame(remaining) ?: continue
+            when (frame.messageId) {
+                Iap2MessageIds.MFI_RESPONSE -> {
+                    log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）")
+                    return
+                }
+
+                Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> throw IOException(
+                    "别克 B233 拒绝了 ${BUICK_MFI_CHALLENGE_BYTES}B MFi 挑战（0xAA04）——" +
+                        "该车机要求精确 32 字节挑战，本轮按失败断开",
+                )
+
+                else ->
+                    log(
+                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)})",
+                    )
+            }
+        }
+        if (!channel.isAlive) {
+            throw IOException("别克 B233 在 MFi 32B 挑战期间断开了链路（长度不符即为断链信号）")
+        }
+        // 静默超时：与其他车机一致，不中止——我们不校验签名（0xAA05 自报），
+        // 后续由 0x4301 是否到达判定该车机是否放行。
+        log("iap2 MFi 32B 挑战在 ${BUICK_MFI_WINDOW_MS}ms 内无应答——继续发 0xaa05（由 0x4301 判定放行）")
+    }
+
     private fun send(
         messageId: Int,
         vararg body: ByteArray,
@@ -1055,20 +1300,43 @@ class Iap2SenderSession(
      * 队列，非预期帧被塞回后立刻又被本函数取出，形成活锁（见 pendingFrames 注释）。
      * 目标帧若已在暂存区（早到），先从这里取，保证不漏。
      */
+    /**
+     * 等一条指定消息；期间到达的其它帧暂存进 [pendingFrames]。
+     *
+     * [pollIntervalMillis] > 0 时把等待切成等长小片，每片到点调一次 [onPoll] ——
+     * 别克 B233 靠它做「750ms 没等到 0x4301 就再催一帧 0x4300」的轮询，
+     * 通用线传 0（不切片），时序与改动前完全一致。
+     */
     private fun expectOrNull(
         messageId: Int,
         deadlineNanos: Long,
+        pollIntervalMillis: Long = 0L,
+        onPoll: (() -> Unit)? = null,
     ): Iap2Csm.Frame? {
         pendingFrames.firstOrNull { it.messageId == messageId }?.let {
             pendingFrames.remove(it)
             return it
         }
         while (true) {
-            val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L
-            if (remaining <= 0) return null
+            val now = System.nanoTime()
+            if (now >= deadlineNanos) return null
+            // 切片：先等到「下一片到点」或「总超时」中更早的那个
+            val sliceEnd =
+                if (pollIntervalMillis > 0L) {
+                    minOf(deadlineNanos, now + pollIntervalMillis * 1_000_000L)
+                } else {
+                    deadlineNanos
+                }
+            val remaining = (sliceEnd - now) / 1_000_000L
+            if (remaining <= 0) {
+                onPoll?.invoke()
+                continue
+            }
             val frame = recvNewFrame(remaining)
             if (frame == null) {
                 if (!channel.isAlive) return null
+                // 本片读完仍没目标帧：先让调用方补一帧，再等下一片
+                if (pollIntervalMillis > 0L) onPoll?.invoke()
                 continue
             }
             if (frame.messageId == messageId) return frame
@@ -1435,6 +1703,20 @@ class Iap2SenderSession(
     private fun remainingMillis(deadlineNanos: Long): Long {
         val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L
         return remaining.coerceIn(0, 60_000L)
+    }
+
+    /**
+     * 定长停顿（别克 B233 的握手节奏用）。
+     *
+     * 中断时**不**抛出：这里的停顿只是节奏控制，不是协议要求；擅自把中断当异常抛出，
+     * 会让「用户取消连接」在日志里伪装成「车机不接受某帧」。
+     */
+    private fun sleepQuietly(millis: Long) {
+        try {
+            Thread.sleep(millis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun u64Bytes(value: Long): ByteArray =

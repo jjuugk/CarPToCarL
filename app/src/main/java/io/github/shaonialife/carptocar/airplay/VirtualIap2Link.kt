@@ -55,6 +55,13 @@ class VirtualIap2Link(
      * 注入（数据源 = CarLife 内置播放器经 0x10035 推来的歌名，见 CarLifeHijack）。
      */
     private val nowPlayingProvider: (() -> CarPlayNowPlaying?)? = null,
+    /**
+     * 本轮是否按别克 E5（B233）建链。
+     *
+     * 只影响「推送类消息要不要等 ACK」：B233 对 0x5001（歌名）/0x4171（列表）
+     * 常常只收不 ACK，走致命重传会让链路看门狗在约 20 秒后拆掉整条会话。
+     */
+    private val isBuickB233: Boolean = false,
 ) {
     private val lock = Any()
     private val engine = Iap2LinkEngine()
@@ -469,10 +476,16 @@ class VirtualIap2Link(
         body: ByteArray = ByteArray(0),
     ) {
         val frame = Iap2Csm.encode(messageId, body)
-        val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
+        // 别克 B233：推送类消息（0x5001 歌名、0x4171 列表）车机常常只收不 ACK。
+        // 让它们不占「必须 ACK」的名额，避免传输看门狗在约 20 秒后判定链路已死、
+        // 把整条控制通道拆掉（E2LB 日志里「ACK 停滞 → packet not acknowledged」的成因）。
+        val awaitAck =
+            !(isBuickB233 && (messageId == Iap2MessageIds.NOW_PLAYING_UPDATE || messageId == LIST_UPDATE))
+        val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L, awaitAck)
         log(
             "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
-                "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B ok=$ok",
+                "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B ok=$ok" +
+                if (awaitAck) "" else "（别克 B233：推送不占用 ACK 名额）",
         )
         SessionTrace.csm(SessionTrace.Dir.TX, "tunnel", messageId, body, if (ok) "" else "send-failed")
     }

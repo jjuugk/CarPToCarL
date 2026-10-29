@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
@@ -168,6 +169,9 @@ class Iap2BluetoothServer(
                 nowPlayingProvider,
                 onSessionReady = { session -> senderSession = session },
                 onLinkClosed = onLinkClosed,
+                // 入站会话不区分是哪台车连进来，所以只看档位：用户显式选了别克档才强制 B233，
+                // 其它档位仍由 0x1D01 身份文本自动判定（既有车机行为不变）。
+                forceBuickE5 = ConnectionProfilePrefs.get(context).forcesB233,
             )
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")

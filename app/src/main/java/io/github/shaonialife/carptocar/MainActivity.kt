@@ -32,6 +32,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
+import io.github.shaonialife.carptocar.buick.ConnectionProfile
+import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -744,6 +746,15 @@ class MainActivity : AppCompatActivity() {
         // 目标车机选择：配对了多台车机时指定唯一目标（只向它发请求/只接受它连入）
         btnPickTarget.setOnClickListener { showTargetPicker() }
 
+        // 连接配置（车机协议族下拉框）：别克 E5（B233）与通用线的建链规则相反，
+        // 必须做成显式档位，否则「为别克加的兼容」会把奥迪/宝马等既有车机连不上。
+        val btnPickConnection = findViewById<TextView>(R.id.btnPickConnection)
+        val connectionNote = findViewById<TextView>(R.id.connectionNote)
+        refreshConnectionRow(btnPickConnection, connectionNote)
+        btnPickConnection.setOnClickListener {
+            showConnectionPicker(btnPickConnection, connectionNote)
+        }
+
         // ---- 折叠卡：日志 ----
         bindExpandable(R.id.logHeader, logBody, logChevron)
 
@@ -1275,6 +1286,49 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+    /**
+     * 刷新「连接配置」行的当前档位与说明。
+     *
+     * 档位保存在 [ConnectionProfilePrefs]，由 `Iap2BluetoothClient.start()` /
+     * `Iap2BluetoothServer` 在每次建链时读取——所以这里只负责展示，
+     * 改动会在下一次点「启动连接」（或车机重新连入）时生效。
+     */
+    private fun refreshConnectionRow(
+        button: TextView,
+        note: TextView,
+    ) {
+        val profile = ConnectionProfilePrefs.get(this)
+        button.text = "${profile.label} ▾"
+        note.text = profile.summary
+    }
+
+    /** 连接配置下拉：展开全部档位，选中即保存（下次连接生效）。 */
+    private fun showConnectionPicker(
+        button: TextView,
+        note: TextView,
+    ) {
+        val profiles = ConnectionProfile.entries
+        val current = ConnectionProfilePrefs.get(this)
+        val checked = profiles.indexOf(current).coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog
+            .Builder(this)
+            .setTitle("连接配置")
+            .setSingleChoiceItems(
+                profiles.map { it.label }.toTypedArray(),
+                checked,
+            ) { dialog, which ->
+                dialog.dismiss()
+                val profile = profiles[which]
+                if (profile == current) return@setSingleChoiceItems
+                ConnectionProfilePrefs.set(this, profile)
+                refreshConnectionRow(button, note)
+                log("CONN: 连接配置改为「${profile.label}」——${profile.summary}")
+                snack("连接配置：${profile.label}（下次连接生效）")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
 
     /**
      * 目标车机选择弹窗（2026-10-18 改版）：
