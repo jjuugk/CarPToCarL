@@ -182,3 +182,62 @@ CarLife 有**两条音频流**：
 
 如果第 2 行有、车上仍没声，那问题就落到 AirPlay 侧（音频 SETUP/音量/车机排播），
 按前文「复测判读」的三行继续查。
+
+---
+
+# 通话音频通道适配（2026-10-29）
+
+前几节解的都是「通话**之后**媒体音频不回来」。这一节处理的是通话**期间**：
+把接收端的输出通路从媒体档切到 `audioType=telephony` 档。
+
+## 一、为什么必须换流，不能调参数
+
+`audioType` 只在 SETUP 里出现一次，一条流建成后无法中途改变语义。车机把
+`media` 与 `telephony` 当成**两台不同的输出设备**：只有收到 telephony 档的流，
+它才会打开通话增益与麦克风通路。这就是「通话在车机上永远没声音」的结构性原因——
+媒体流一直占着媒体通路，通话通路从来没被打开过。
+
+改动（`SessionController.switchAudioScene`）：
+
+```
+AudioManager.mode 进入 IN_CALL / IN_COMMUNICATION / RINGTONE
+  → 换流：媒体档 → telephony 档（先建新的、成功后停旧的、补 RECORD）
+  → 转发 0x4155 CallStateUpdate（此时通话流已经在线）
+退出通话 → 换回媒体档（等价于「新建一条流」，接收端会重新打开输出设备）
+```
+
+音源不变：还是 CarLife 引擎的 PCM（`CarLifeAudioSink` 取的是
+`SessionController.audioSender`，换字段即生效），只是接收端换了通路。
+
+## 二、Android 侧的硬限制（决定了能做到哪一步）
+
+普通 App **拿不到通话双方的音频**，这条没有绕法：
+
+| 手段 | 结论 |
+|---|---|
+| `AudioPlaybackCapture` | 只允许 `USAGE_MEDIA / USAGE_GAME / USAGE_UNKNOWN`；通话是 `USAGE_VOICE_COMMUNICATION`，抛异常 |
+| `AudioRecord` + `VOICE_CALL/VOICE_DOWNLINK` | 需要 `CAPTURE_AUDIO_OUTPUT`（系统签名权限） |
+| `setCommunicationDevice` | 只能在已有设备里选，不能造设备、更不能接管别人的通话 |
+
+所以本次做的是**协议与通路**：车机会认到通话场景、把音频路由让给 telephony 档；
+但「车机喇叭里出对方的声音」在没有 root 的前提下做不到（想做成必须
+`VOICE_CALL` 采集或 LSPosed hook 系统电话）。
+
+## 三、验证要看这几行
+
+1. `AIRPLAY: 通话类档 type=… audioType=telephony output=0x… input=0x…`
+   —— 车机到底有没有声明通话档。**没有声明就到此为止**，任何代码都补不出来。
+2. `AUDIO: 进入通话（IN_CALL）→ 换到通话音频档`
+3. `AUDIO: 音频流已切到 t100/telephony/0x…` —— 切上了；否则会跟一行
+   `车机未声明通话音频档（telephony），保持媒体流`
+4. `IAPLINK: 主动补推 0x4155（通话状态=3）`
+5. 挂断后 `AUDIO: 音频流已切到 … media …` —— 切回媒体档
+
+## 四、有意没做的两件事
+
+1. **麦克风上行流（`input=true`）没有真建**。`microphoneCandidates()` 只生成候选并
+   打进日志（`AUDIO: 麦克风上行能力=…`）：上行要用我们自己的 UDP 监听端口换车机推流，
+   端口与密钥派生方向都与下行不同，没有车机日志无法确认方向，硬写只会多占一次
+   接收端资源仲裁。等日志证明车机声明了 PCM 输入位再做。
+2. **通话档拆链不归因媒体档**：`attributeAudioTeardown` 在 `audioInCallMode` 时直接
+   跳过，否则一次通话档不兼容会把好好的媒体档记进「踩雷名单」。

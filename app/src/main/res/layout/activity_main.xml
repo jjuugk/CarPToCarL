@@ -876,6 +876,16 @@
                     android:textColor="@color/m3_on_var"
                     android:textSize="12sp" />
 
+                <!-- 车机分辨率（只读）：来自车机 AirPlay /info，没连接时显示上次会话的快照 -->
+                <TextView
+                    android:id="@+id/displayResolutionNote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="连接后自动读取车机分辨率"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="12.5sp" />
+
                 <!-- 触摸注入节流 -->
                 <TextView
                     android:layout_width="wrap_content"

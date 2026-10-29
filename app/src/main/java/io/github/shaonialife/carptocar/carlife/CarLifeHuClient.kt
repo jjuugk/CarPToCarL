@@ -35,6 +35,15 @@ class CarLifeHuClient(
     private val log: (String) -> Unit,
     private val onVideoFrame: (data: ByteArray, keyFrame: Boolean) -> Unit,
     private val onVideoParams: (width: Int, height: Int, fps: Int) -> Unit = { _, _, _ -> },
+    /**
+     * **码流真实分辨率**（SPS 解析值）确认/变更时回调。
+     *
+     * 与 [onVideoParams] 的区别是硬性的：那是「跟引擎谈定的档位」，这是「引擎真正编了
+     * 多大」。两者经常不等——申请 1412×654 时引擎按白名单降档实编 1280×720
+     * （2026-10-29 日志实证），界面若拿协商值当码流尺寸就会显示「码流同尺寸」，
+     * 与车机上看到的画面自相矛盾。这个回调只在 SPS 解析成功后才触发。
+     */
+    private val onStreamSize: (width: Int, height: Int) -> Unit = { _, _ -> },
     /** 手机宣告音频格式（采样率, 声道数）。 */
     private val onAudioFormat: (sampleRate: Int, channels: Int) -> Unit = { _, _ -> },
     /** 收到一包裸 PCM（16bit 交织，size 为有效字节数）。 */
@@ -211,6 +220,7 @@ class CarLifeHuClient(
         streamWidth = sps.first
         streamHeight = sps.second
         log("CARLIFE: 触摸基准取自缓存 SPS ${sps.first}x${sps.second}")
+        onStreamSize(sps.first, sps.second)
     }
 
     /** 已收到的音频包计数（诊断用）。 */
@@ -650,6 +660,7 @@ class CarLifeHuClient(
                             "CARLIFE: 码流真实分辨率 ${sps.first}x${sps.second}" +
                                 "（原 $previous，谈好档位 ${videoWidth}x$videoHeight）",
                         )
+                        onStreamSize(sps.first, sps.second)
                     }
                 }
                 val now = android.os.SystemClock.uptimeMillis()

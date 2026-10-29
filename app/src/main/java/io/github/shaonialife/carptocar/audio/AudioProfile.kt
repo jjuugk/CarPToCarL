@@ -38,11 +38,27 @@ data class AudioProfile(
     val streamType: Long = 100L,
     /** 负载编码方式。 */
     val codec: AudioCodec = AudioCodec.PCM,
+    /**
+     * true = **麦克风上行流**（车机 → 手机），SETUP 里 `input=true`。
+     *
+     * 通话要成对两条流：下行（对方声音 → 车机喇叭）与上行（车机麦克风 → 手机）。
+     * 上行流我们只**收**不推，所以 [codec]/[sampleRate] 描述的是接收格式。
+     * 媒体音频永远只有下行（isInput=false），这是它与通话档的结构性差异。
+     */
+    val isInput: Boolean = false,
 ) {
-    /** 持久化记忆的键（含流类型与编码：同一 audioType/格式 在不同通路上完全不同）。 */
-    val key: String get() = "$streamType|${audioType.lowercase()}|$formatBit|${codec.name}"
+    /**
+     * 持久化记忆的键（含流类型与编码：同一 audioType/格式 在不同通路上完全不同）。
+     *
+     * 下行档**不带后缀**：旧版本写下的媒体档记忆（`2026-10-19` 起的踩雷名单）必须继续有效，
+     * 加后缀等于把整份历史作废。上行档才追加 `|in` 区分。
+     */
+    val key: String
+        get() = "$streamType|${audioType.lowercase()}|$formatBit|${codec.name}" + if (isInput) "|in" else ""
 
-    /** 日志用短标签。 */
+    /** 日志用短标签（上行带 ↑ 前缀，一眼区分收发方向）。 */
     val label: String
-        get() = "t$streamType/$audioType/0x${formatBit.toString(16)}(${sampleRate}Hz,${codec.name},$latencyMs ms)"
+        get() =
+            "${if (isInput) "↑" else ""}t$streamType/$audioType/0x${formatBit.toString(16)}" +
+                "(${sampleRate}Hz,${codec.name},$latencyMs ms)"
 }

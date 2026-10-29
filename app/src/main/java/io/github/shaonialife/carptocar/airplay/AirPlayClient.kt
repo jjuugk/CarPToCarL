@@ -755,11 +755,19 @@ class AirPlayClient(
         val infoMap = loadInfoWithDiagnostics()
         infoRoot = infoMap
         val display = (infoMap?.get("displays") as? List<*>)?.firstOrNull() as? Map<*, *>
-        if (display == null) {
+        // 车机分辨率：`displays[0].widthPixels/heightPixels`。宽容解析见 CarDisplayGeometry——
+        // 这里一旦静默落空，整条链路（流画布 / 虚拟屏 / CarLife 98311 / 触摸映射）就全部
+        // 按手机分辨率跑，画面比例当场错，所以成功与失败都必须落一条日志。
+        val carDisplay = CarDisplayGeometry.fromInfo(infoMap)
+        val fallbackDisplay = phoneFallbackSize()
+        if (carDisplay == null) {
             log(
-                "AIRPLAY: 未取得 /info displays → 显示屏参数退回手机分辨率兜底" +
-                    "（车机侧可能是小画面/黑边）；HID 设备为空 → 车机不会发 hidSendReport（触摸不可用）",
+                "AIRPLAY: 车机未通告显示屏（/info displays 缺失或宽高非法）→ 兜底 " +
+                    "${fallbackDisplay.first}×${fallbackDisplay.second}（手机横屏尺寸；车机侧可能拉伸/黑边）；" +
+                    "HID 设备为空 → 车机不会发 hidSendReport（触摸不可用）",
             )
+        } else {
+            log("AIRPLAY: 车机显示屏 ${carDisplay.text}（${carDisplay.source}）")
         }
         // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
@@ -830,8 +838,11 @@ class AirPlayClient(
                 timingPort = portOf(root["timingPort"]),
                 keepAlivePort = root["keepAlivePort"]?.let(::portOf)?.takeIf { it != 0 },
                 enabledFeatures = (root["enabledFeatures"] as? List<*>)?.map { it.toString() }.orEmpty(),
-                displayWidth = ((display?.get("widthPixels") as? Long) ?: 1080L).toInt(),
-                displayHeight = ((display?.get("heightPixels") as? Long) ?: 2320L).toInt(),
+                displayWidth = carDisplay?.width ?: fallbackDisplay.first,
+                displayHeight = carDisplay?.height ?: fallbackDisplay.second,
+                // 来源标记：UI 要据此区分「车机通告的」与「手机兜底的」，
+                // 后者意味着车机没执行 /info，画面比例与触摸都可能不准。
+                displayFromCar = carDisplay != null,
                 // /info displays[0] 的显示屏 UUID（真实 iPhone 会把它回填进屏幕流 SETUP；
                 // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
                 displayUuid =
@@ -840,7 +851,7 @@ class AirPlayClient(
                             ?: display?.get("UUID")
                             ?: display?.get("displayUUID"),
                     ),
-                maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
+                maxFps = CarDisplayGeometry.positiveInt(display?.get("maxFPS")) ?: 30,
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
@@ -849,8 +860,9 @@ class AirPlayClient(
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
                 "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
-                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps} " +
-                "displayUuid=${info.displayUuid}",
+                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps}" +
+                (if (info.displayFromCar) "" else "（车机未通告·手机兜底）") +
+                " displayUuid=${info.displayUuid}",
         )
         return info
     }
@@ -1028,6 +1040,13 @@ class AirPlayClient(
         /** 主显示屏参数（/info displays[0]，跟随接收端当前屏幕方向）。 */
         val displayWidth: Int,
         val displayHeight: Int,
+        /**
+         * 宽高是否真的来自车机（/info displays[0]）。
+         *
+         * false = 车机没通告、按手机横屏兜底——此时「车机分辨率」无从谈起，
+         * UI 必须照实标注，不能把兜底值当成车机参数展示。
+         */
+        val displayFromCar: Boolean = false,
         val displayUuid: String?,
         val maxFps: Int,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
@@ -1366,6 +1385,15 @@ class AirPlayClient(
      */
     var nowPlayingSource: (() -> CarPlayNowPlaying?)? = null
 
+    /**
+     * 通话状态提供者（iAP2 `CallState`：0=无通话、1=来电、2=拨出、3=通话中），
+     * 供虚拟 iAP2 链路的 0x4155 CallStateUpdate 使用。
+     *
+     * 由 SessionController 在会话建立时注入，数据源是 `AudioManager.mode`
+     * （`IN_CALL`/`IN_COMMUNICATION` → 通话中，`RINGTONE` → 来电）。null = 恒报无通话。
+     */
+    var callStateSource: (() -> Int)? = null
+
     /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
     private fun obtainIapLink(): VirtualIap2Link =
         iapLink ?: synchronized(this) {
@@ -1380,6 +1408,7 @@ class AirPlayClient(
                     // 别克 B233：0x5001/0x4171 这类「车机可能根本不 ACK」的推送不做致命重传，
                     // 否则链路看门狗约 20 秒后把整条会话杀掉（E2LB 日志里的典型死法）。
                     isBuickB233 = endpoint.isBuickB233,
+                    callStateProvider = { callStateSource?.invoke() ?: 0 },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.begin()
@@ -1395,6 +1424,16 @@ class AirPlayClient(
     /** 歌名变化时主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。 */
     fun pushNowPlaying() {
         obtainIapLink().pushNowPlaying()
+    }
+
+    /**
+     * 通话状态变化时主动补推一次 0x4155（见 [VirtualIap2Link.pushCallState]）。
+     *
+     * **必须在通话音频档 SETUP 成功之后调用**：车机收到「通话中」立刻切音频路由，
+     * 那时通话流若还没建，它切过去只能拿到一条空流。
+     */
+    fun pushCallState() {
+        obtainIapLink().pushCallState()
     }
 
     /**
@@ -1504,8 +1543,40 @@ class AirPlayClient(
         val sampleRate: Int = 48_000,
     )
 
-    /** plist 端口是 u16 但以 2 字节有符号整数编码（>32767 读出为负），按位掩出真实值。 */
-    private fun portOf(value: Any?): Int = ((value as? Long) ?: 0L).toInt() and 0xFFFF
+    /**
+     * 端口解析：plist 端口是 u16，但部分固件按 2 字节有符号整数编码（>32767 读出为负），
+     * 所以先取低 16 位再返回。
+     *
+     * **不能**借 [CarDisplayGeometry.positiveInt]：那个函数带 8192 上限（防分辨率字段
+     * 解析错位），而 TCP 数据端口常态在 49152 以上，套上去会全变 0，视频口直接连不上。
+     */
+    private fun portOf(value: Any?): Int {
+        val raw =
+            when (value) {
+                is Number -> value.toInt()
+                is String -> value.trim().toIntOrNull() ?: 0
+                else -> 0
+            }
+        return raw and 0xFFFF
+    }
+
+    /**
+     * 车机没通告显示屏时的画布兜底：手机屏幕的**横屏**尺寸（长边为宽）。
+     *
+     * 旧代码写死 1080×2320——那是手机的**竖屏**分辨率，当成车机画布用必然比例全错
+     * （画面转 90° 或被车机拉伸）。车机屏幕绝大多数是横向，按手机长边当宽至少能给出
+     * 一个同数量级、同画幅比例的画布。注意这只是兜底，`displayFromCar=false` 时
+     * UI 会明确标注，不能当成车机真实分辨率。
+     */
+    private fun phoneFallbackSize(): Pair<Int, Int> {
+        val metrics = context?.resources?.displayMetrics
+        val a = metrics?.widthPixels ?: 0
+        val b = metrics?.heightPixels ?: 0
+        if (a <= 0 || b <= 0) return 1280 to 720
+        val wide = maxOf(a, b) / 2 * 2
+        val short = minOf(a, b) / 2 * 2
+        return wide to short
+    }
 
     private companion object {
         /** 主屏视频流类型（对照接收端 STREAM_TYPE_MAIN_SCREEN；100 是音频、130 是数据/iAP 隧道）。 */
@@ -1542,6 +1613,25 @@ class AirPlayClient(
          * 「有 media 档时优先」的判据与其在 /info 缺失时的协议基线值。
          */
         const val AUDIO_TYPE_MEDIA = "media"
+
+        /**
+         * **通话音频**档位的 audioType（真 iPhone 通话走这条，2026-10-29 适配）。
+         *
+         * 与 [AUDIO_TYPE_MEDIA] 是**两条不同的接收端设备**：车机收到 telephony 档的流会把
+         * 输出切到通话增益、并把麦克风纳入这条通路。媒体档与通话档不能互相顶替——
+         * 媒体流推进 telephony 档得到怪声（见 [audioCandidates] 注释），通话时继续用媒体档
+         * 则车机的通话通路永远不打开（挂断后还可能停在通话增益上）。
+         */
+        const val AUDIO_TYPE_TELEPHONY = "telephony"
+
+        /**
+         * 提示音/铃声档位的 audioType。目前**只用于诊断打印**：这一档是接收端自己播铃声用的，
+         * 发送端往里推媒体声音同样是怪声（车机位图里也有 PCM48k，容易被误当成可用通路）。
+         */
+        const val AUDIO_TYPE_ALERT = "alert"
+
+        /** 语音识别（Siri/语音助手）档位的 audioType，同样只用于诊断打印。 */
+        const val AUDIO_TYPE_SPEECH = "speechRecognition"
 
         /**
          * 音频延迟兜底值（ms）：车机 /info 的 audioLatencies 里没给 outputLatencyMicros 时用。
@@ -1700,11 +1790,12 @@ class AirPlayClient(
                                 put("audioType", negotiation.audioType)
                                 put("audioLatencyMs", negotiation.latencyMs)
                                 // 与 catplay 发送端（StreamDescriptionAudio::new）逐字段对齐：
-                                // input=false（只下行，无麦克风上行）、
+                                // input = 这条流是不是**麦克风上行**（车机 → 手机）：
+                                //   false（默认）只下行；true 用于通话上行流（见 microphoneCandidates）。
                                 // supportsRTPPacketRedundancy=false（我们不打包冗余帧）。
                                 // 缺这两个布尔时部分严格实现的接收端会按「未声明=不支持」处理，
                                 // 在音频通路初始化阶段就放弃该流。
-                                put("input", false)
+                                put("input", negotiation.isInput)
                                 put("supportsRTPPacketRedundancy", false)
                                 put("supportsHighAccuracyTimestamps", tuning.highAccuracyTimestamps)
                                 // spf = 每包样本帧数：AAC 一帧 1024，PCM 走 352。
@@ -1752,13 +1843,29 @@ class AirPlayClient(
                 log("AIRPLAY: 音频流协商应答缺少 streams")
                 return null
             }
-        val audio =
-            streams.firstOrNull { entry ->
-                ((entry as? Map<*, *>)?.get("type") as? Long) == profile.streamType
-            } as? Map<*, *> ?: run {
-                log("AIRPLAY: 音频流被拒绝（streams=$streams）")
-                return null
-            }
+        // 应答里认**自己那条流**：同时存在媒体流与通话流时（通话中媒体流还活着，
+        // 或切换瞬间两条并存），type 完全一样（都是 100/102），只按 type 取会拿到
+        // 上一条流的 dataPort —— 包发到别人的端口上，症状是「SETUP 成功、车机全静音」。
+        // 先按 streamConnectionID 精确匹配，回显缺失时才退回 type（旧固件行为）。
+        val byConnectionId =
+            streams
+                .firstOrNull { entry ->
+                    val map = entry as? Map<*, *> ?: return@firstOrNull false
+                    (map["streamConnectionID"] as? Number)?.toLong() == connectionId
+                } as? Map<*, *>
+        val audio: Map<*, *> =
+            byConnectionId
+                ?: streams
+                    .firstOrNull { entry ->
+                        ((entry as? Map<*, *>)?.get("type") as? Long) == profile.streamType
+                    } as? Map<*, *>
+                ?: run {
+                    log("AIRPLAY: 音频流被拒绝（streams=$streams）")
+                    return null
+                }
+        if (byConnectionId == null) {
+            log("AIRPLAY: 应答未回显 streamConnectionID，按 type=${profile.streamType} 取流（多流并存时可能取错）")
+        }
         val dataPort = portOf(audio["dataPort"])
         if (dataPort == 0) {
             log("AIRPLAY: 音频流未返回 dataPort（$audio）")
@@ -1981,19 +2088,144 @@ class AirPlayClient(
         return ordered.distinctBy { it.key }
     }
 
+    /**
+     * **通话音频**档位候选（`audioType=telephony`，2026-10-29 适配）。
+     *
+     * 为什么要单独一套候选：车机把 telephony 档当成**另一台输出设备**——切到它等于告诉
+     * 接收端「现在要打电话」，它会打开通话增益与麦克风通路。媒体档（[audioCandidates]）
+     * 无论怎么调都不会触发这件事，所以通话时必须换成这一档，挂断再换回去。
+     *
+     * 三条与媒体档不同的规则：
+     *  1. **只认 telephony**：车机没声明这一档就返回**空**，绝不退回 media 顶替
+     *     （退回 media 等于没适配，还会把「车机不支持」伪装成「已支持」）；
+     *  2. **AAC 优先于 PCM**：真 iPhone 的通话音频是 AAC-LC，低延迟档也多为 AAC；
+     *     PCM 只在 AAC 位缺失时兜底（通话对时序敏感，PCM 更容易被 WiFi 抖动打成欠载）；
+     *  3. 不参与 [AudioProfileMemory] 的媒体档记忆——通话档踩雷不该影响下次媒体选档。
+     *
+     * 102（MainHighAudio）排在 100 前面：与媒体侧同一条实证规律（102 才是高质量音频通路）。
+     */
+    fun callCandidates(): List<AudioProfile> {
+        val info = negotiatedInfo ?: return emptyList()
+        val declared =
+            (info["audioFormats"] as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                .orEmpty()
+        if (declared.isEmpty()) return emptyList()
+        val phone =
+            declared.filter {
+                (it["audioType"] as? String)?.lowercase() == AUDIO_TYPE_TELEPHONY
+            }
+        if (phone.isEmpty()) {
+            log("AIRPLAY: 车机 /info 未声明 audioType=telephony → 通话档不切换（保持媒体档）")
+            return emptyList()
+        }
+        // 候选顺序：AAC 48k → AAC 44.1k → PCM 48k → PCM 44.1k；每组内 102 先于 100
+        val wanted =
+            listOf(
+                AUDIO_FORMAT_AAC_48K_STEREO to AudioCodec.AAC_LC,
+                AUDIO_FORMAT_AAC_LC_44K_STEREO to AudioCodec.AAC_LC,
+                AUDIO_FORMAT_PCM_48K_STEREO to AudioCodec.PCM,
+                AUDIO_FORMAT_PCM_44K_STEREO to AudioCodec.PCM,
+            )
+        val result = mutableListOf<AudioProfile>()
+        for ((bit, codec) in wanted) {
+            for (streamType in listOf(AUDIO_STREAM_TYPE_MAIN_HIGH, AUDIO_STREAM_TYPE)) {
+                val channel =
+                    phone.firstOrNull { ((it["type"] as? Number)?.toLong()) == streamType } ?: continue
+                val output = (channel["audioOutputFormats"] as? Number)?.toLong() ?: 0L
+                if ((output and bit) == 0L) continue
+                if (result.any { it.streamType == streamType && it.formatBit == bit }) continue
+                result +=
+                    AudioProfile(
+                        audioType = AUDIO_TYPE_TELEPHONY,
+                        formatBit = bit,
+                        sampleRate = if (bit == AUDIO_FORMAT_PCM_44K_STEREO || bit == AUDIO_FORMAT_AAC_LC_44K_STEREO) {
+                            44_100
+                        } else {
+                            48_000
+                        },
+                        latencyMs = latencyFor(info, AUDIO_TYPE_TELEPHONY, streamType),
+                        streamType = streamType,
+                        codec = codec,
+                    )
+            }
+        }
+        if (result.isEmpty()) {
+            log(
+                "AIRPLAY: 车机声明了 telephony 档但格式位不含 AAC-LC/PCM 立体声" +
+                    "（$phone）→ 通话档不切换",
+            )
+            return emptyList()
+        }
+        log("AIRPLAY: 通话音频候选=${result.map { it.label }}")
+        return result
+    }
+
+    /**
+     * **麦克风上行**候选（`input=true`，车机麦克风 → 手机）。
+     *
+     * 只取 telephony 档且 `audioInputFormats` 声明了 PCM 立体声的那一条。上行不推流，
+     * 我们只是按这条 SETUP 拿到端口后收车机发来的包——所以采样率是**接收**格式，
+     * 与下行档无关（真 iPhone 通话上下行是两条独立的流）。
+     *
+     * 车机没声明输入位时返回空：此时连「车机有没有麦克风可给我们用」都无法确认，
+     * 硬建一条只会换来 SETUP 被拒 + 多占一次接收端资源仲裁。
+     */
+    fun microphoneCandidates(): List<AudioProfile> {
+        val info = negotiatedInfo ?: return emptyList()
+        val declared =
+            (info["audioFormats"] as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                .orEmpty()
+        val phone =
+            declared.filter {
+                (it["audioType"] as? String)?.lowercase() == AUDIO_TYPE_TELEPHONY
+            }
+        if (phone.isEmpty()) return emptyList()
+        val result = mutableListOf<AudioProfile>()
+        listOf(AUDIO_FORMAT_PCM_48K_STEREO to 48_000, AUDIO_FORMAT_PCM_44K_STEREO to 44_100)
+            .forEach { (bit, rate) ->
+                for (streamType in listOf(AUDIO_STREAM_TYPE, AUDIO_STREAM_TYPE_MAIN_HIGH)) {
+                    val channel =
+                        phone.firstOrNull { ((it["type"] as? Number)?.toLong()) == streamType } ?: continue
+                    val input = (channel["audioInputFormats"] as? Number)?.toLong() ?: 0L
+                    if ((input and bit) == 0L) continue
+                    if (result.any { it.streamType == streamType && it.formatBit == bit }) continue
+                    result +=
+                        AudioProfile(
+                            audioType = AUDIO_TYPE_TELEPHONY,
+                            formatBit = bit,
+                            sampleRate = rate,
+                            latencyMs = latencyFor(info, AUDIO_TYPE_TELEPHONY, streamType, input = true),
+                            streamType = streamType,
+                            codec = AudioCodec.PCM,
+                            isInput = true,
+                        )
+                }
+            }
+        if (result.isEmpty()) {
+            log("AIRPLAY: 车机 telephony 档未声明 PCM 输入位 → 无麦克风上行流")
+            return emptyList()
+        }
+        log("AIRPLAY: 麦克风上行候选=${result.map { it.label }}")
+        return result
+    }
+
     /** 该 (type, audioType) 档位声明的输出延迟（ms）；无有效值用兜底。 */
     private fun latencyFor(
         info: Map<*, *>,
         audioType: String,
         streamType: Long = AUDIO_STREAM_TYPE,
+        input: Boolean = false,
     ): Long {
+        val key = if (input) "inputLatencyMicros" else "outputLatencyMicros"
         val declaredMs =
             (info["audioLatencies"] as? List<*>)
                 ?.mapNotNull { it as? Map<*, *> }
                 ?.firstOrNull {
                     ((it["type"] as? Number)?.toLong()) == streamType &&
                         (it["audioType"] as? String)?.lowercase() == audioType
-                }?.let { (it["outputLatencyMicros"] as? Number)?.toLong() }
+                }?.let { (it[key] as? Number)?.toLong() }
                 ?.takeIf { it > 0 }
                 ?.let { it / 1000 }
         // 下限 250ms：车机声明的 outputLatencyMicros 只是它自己的输出延迟（实测 35ms），
@@ -2939,6 +3171,29 @@ class AirPlayClient(
                     "output=0x${output.toString(16)} input=0x${input.toString(16)}" +
                     "（PCM48k立体声 bit15=${if ((output and (1L shl 15)) != 0L) "✓" else "✗"}）",
             )
+        }
+        // 通话/提示音/语音识别档汇总成一行：媒体协商用不到它们，但「这台车能不能承载
+        // 通话音频」只看这一行——排查通话适配（2026-10-29）时第一眼要看的就是它。
+        // 车机常常根本不声明 telephony（那就没有通话通路可切，任何代码都补不出来）。
+        val callTypes = listOf(AUDIO_TYPE_TELEPHONY, AUDIO_TYPE_ALERT, AUDIO_TYPE_SPEECH)
+        val callChannels =
+            (root["audioFormats"] as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                ?.filter { ((it["audioType"] as? String)?.lowercase()) in callTypes }
+                .orEmpty()
+        if (callChannels.isEmpty()) {
+            log("AIRPLAY: 车机未声明任何通话/提示音/语音识别档（telephony/alert/speechRecognition）")
+        } else {
+            callChannels.forEach { entry ->
+                val output = (entry["audioOutputFormats"] as? Number)?.toLong() ?: 0L
+                val input = (entry["audioInputFormats"] as? Number)?.toLong() ?: 0L
+                log(
+                    "AIRPLAY: 通话类档 type=${entry["type"]} audioType=${entry["audioType"]} " +
+                        "output=0x${output.toString(16)} input=0x${input.toString(16)}" +
+                        "（PCM48k出=${if ((output and AUDIO_FORMAT_PCM_48K_STEREO) != 0L) "✓" else "✗"}" +
+                        " PCM48k入=${if ((input and AUDIO_FORMAT_PCM_48K_STEREO) != 0L) "✓" else "✗"}）",
+                )
+            }
         }
         (root["audioLatencies"] as? List<*>)?.forEachIndexed { index, entry ->
             val latency = entry as? Map<*, *> ?: return@forEachIndexed

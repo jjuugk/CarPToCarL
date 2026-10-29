@@ -11,12 +11,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.provider.Settings
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.method.ScrollingMovementMethod
 import android.view.View
 import android.widget.EditText
@@ -35,6 +35,7 @@ import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.buick.ConnectionProfile
 import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
@@ -43,17 +44,14 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
-import io.github.shaonialife.carptocar.media.NotificationAccess
-import io.github.shaonialife.carptocar.service.CarPlayService
-import io.github.shaonialife.carptocar.input.CarInputClient
-import io.github.shaonialife.carptocar.util.SysShell
-import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.Bg
+import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogExporter
+import io.github.shaonialife.carptocar.util.SysShell
 import java.util.Locale
 
 /**
@@ -92,6 +90,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnResidualCleanup: TextView
     private lateinit var heroSubline: TextView
     private lateinit var heroStats: TextView
+    /** 「显示」卡片里的分辨率行（车机通告值 + 本次码流尺寸）。 */
+    private lateinit var displayResolutionNote: TextView
     private lateinit var heroProgress: View
     private lateinit var ctaButton: LinearLayout
     private lateinit var ctaIcon: ImageView
@@ -280,6 +280,20 @@ class MainActivity : AppCompatActivity() {
      */
     private fun ensureWifiLocationReady(onReady: () -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+：应用专属网络（WifiNetworkSpecifier）与 WiFi 建议
+            // （WifiNetworkSuggestion）**都**要求 NEARBY_WIFI_DEVICES 运行时权限。
+            // 旧实现以为 13+ 不需要就原地放行——结果 requestNetwork 在无权限时
+            // 静默挂起：既不回调 onAvailable 也不回调 onUnavailable，也不抛异常。
+            // 2026-10-29 BMW iD9 日志里连续 8 轮「发起加入后一条日志都没有」
+            // 就是这个形态，必须在这里前置拦截。
+            val granted =
+                ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) ==
+                    PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                pendingStartAfterLocationPermission.set(true)
+                nearbyWifiPermissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+                return
+            }
             onReady()
             return
         }
@@ -332,6 +346,18 @@ class MainActivity : AppCompatActivity() {
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("ACCESS_FINE_LOCATION 授权: $granted")
+            if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
+                proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
+            }
+        }
+
+    /** Android 13+ 的 NEARBY_WIFI_DEVICES 授权后自动续跑（与位置权限共用同一 pending 标志）。 */
+    private val nearbyWifiPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            log(
+                "NEARBY_WIFI_DEVICES 授权: $granted" +
+                    if (granted) "" else "——无法加入车机热点，请到「设置 > 应用 > 权限 > 附近的设备」授予",
+            )
             if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
                 proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
             }
@@ -491,6 +517,7 @@ class MainActivity : AppCompatActivity() {
         }
         heroSubline = findViewById(R.id.heroSubline)
         heroStats = findViewById(R.id.heroStats)
+        displayResolutionNote = findViewById(R.id.displayResolutionNote)
         heroProgress = findViewById(R.id.heroProgress)
         ctaButton = findViewById(R.id.ctaButton)
         ctaIcon = findViewById(R.id.ctaIcon)
@@ -910,6 +937,7 @@ class MainActivity : AppCompatActivity() {
         }
         updateConnectedSubline()
         updateHeroStats()
+        updateDisplayResolutionNote()
         updateAudioTag()
         updateReadyRow()
         updateDeviceSubtitle()
@@ -920,9 +948,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * 当前真正在用的码流尺寸。
+     *
+     * 直通模式下由 CarLife 引擎决定，而且**会变**：会话建立时引擎往往还停在默认
+     * 1280×720，收到车机分辨率（98311）之后才重建编码器。所以这里每次现取，
+     * 不能只记建链那一刻的快照——否则界面会一直显示临时值。
+     *
+     * 取值顺序是硬性的：**先 SPS 真值**。98311 申请值与 65544 回包值都只是「谈定的
+     * 档位」，引擎会按白名单降档（申请 1412×654 实编 1280×720，2026-10-29 日志实证）。
+     * 拿协商值当码流尺寸，界面就会写着「码流同尺寸」而车机上根本不是那个尺寸。
+     */
+    private fun effectiveStreamSize(): Pair<Int, Int>? {
+        if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
+            CarLifeHijack.actualStreamSize?.let { return it }
+            val (w, h) = CarLifeHijack.videoSize
+            if (w > 0 && h > 0) return w to h
+        }
+        val w = SessionController.activeStreamWidth
+        val h = SessionController.activeStreamHeight
+        return if (w > 0 && h > 0) w to h else null
+    }
+
+    /**
+     * 码流尺寸是否已经由 SPS 确认（false = 手上只有协商档位，还在等第一帧关键帧）。
+     *
+     * 非直通模式（自己出画面）没有「协商 vs 实编」这回事，恒为 true。
+     */
+    private fun streamSizeConfirmed(): Boolean =
+        if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
+            CarLifeHijack.actualStreamSize != null
+        } else {
+            true
+        }
+
+    /**
      * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实测帧率。
      * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
      * 目标帧率不再展示（固定 60，见 [DisplayPrefs.FPS]），只报实测值。
+     *
+     * 分辨率报**像素**，不再是「100%」这种只有自己看得懂的比例：车机原值在前，
+     * 码流与它不一致时用 `→` 接实际值（直通模式由 CarLife 引擎定尺寸）。
      */
     private fun updateHeroStats() {
         if (heroState != HeroState.CONNECTED) return
@@ -930,9 +995,66 @@ class MainActivity : AppCompatActivity() {
         if (sent < lastSentFrames) lastSentFrames = sent
         val fps = sent - lastSentFrames
         lastSentFrames = sent
-        heroStats.text =
-            "分辨率 ${SessionController.activeScalePercent}% · " +
-            "$fps fps"
+        val carW = SessionController.activeCarWidth
+        val carH = SessionController.activeCarHeight
+        val stream = effectiveStreamSize()
+        val resolution =
+            when {
+                carW <= 0 -> "—"
+                !SessionController.activeCarResolutionFromCar -> {
+                    // 车机没回 /info：这个值其实是手机横屏兜底，必须标明
+                    "${carW}×$carH（手机兜底）"
+                }
+                stream == null || (stream.first == carW && stream.second == carH) -> "$carW×$carH"
+                else -> "$carW×$carH → ${stream.first}×${stream.second}"
+            }
+        heroStats.text = "分辨率 $resolution · $fps fps"
+    }
+
+    /**
+     * 「显示」卡片里的分辨率行。
+     *
+     * 连接中显示本会话快照（车机 AirPlay `/info` 通告的原值 + 实际码流尺寸）；
+     * 没连接时回落到上一次会话的落盘快照——车机分辨率只有 SETUP 之后才知道，
+     * 不落盘的话断连状态永远是一片空白，用户没法核对「到底按多大在推」。
+     */
+    private fun updateDisplayResolutionNote() {
+        val target = displayResolutionNote
+        val running = SessionController.videoSender?.isRunning == true
+        val text =
+            if (running && SessionController.activeCarWidth > 0) {
+                val carW = SessionController.activeCarWidth
+                val carH = SessionController.activeCarHeight
+                val stream = effectiveStreamSize()
+                val confirmed = streamSizeConfirmed()
+                when {
+                    !SessionController.activeCarResolutionFromCar ->
+                        "⚑ 车机未通告分辨率 · 按手机横屏 $carW×$carH 兜底"
+                    // 还没解析到 SPS：手上的 stream 只是协商档位，不能当成「同尺寸」
+                    !confirmed && (stream == null || (stream.first == carW && stream.second == carH)) ->
+                        "车机 $carW×$carH · 码流待确认（等首个关键帧）"
+                    stream != null && (stream.first != carW || stream.second != carH) ->
+                        "车机 $carW×$carH · 码流 ${stream.first}×${stream.second}" +
+                            "（引擎按档位编码，非车机画布）"
+                    else -> "车机 $carW×$carH · 码流同尺寸"
+                }
+            } else {
+                val last = DisplayPrefs.lastSession(this)
+                val streamDiffers =
+                    last != null &&
+                        last.streamWidth > 0 &&
+                        (last.streamWidth != last.carWidth || last.streamHeight != last.carHeight)
+                when {
+                    last == null -> "连接后自动读取车机分辨率"
+                    !last.carFromCar ->
+                        "上次：车机未通告 · 按手机横屏 ${last.carWidth}×${last.carHeight} 兜底"
+                    streamDiffers ->
+                        "上次：车机 ${last.carWidth}×${last.carHeight} · " +
+                            "码流 ${last.streamWidth}×${last.streamHeight}（引擎按档位编码）"
+                    else -> "上次：车机 ${last.carWidth}×${last.carHeight}"
+                }
+            }
+        if (target.text != text) target.text = text
     }
 
     private fun applyHeroState(s: HeroState) {
@@ -1056,6 +1178,7 @@ class MainActivity : AppCompatActivity() {
         val hijackSwitch = findViewById<SwitchCompat>(R.id.switchCarLifeHijack)
         val hijackNote = findViewById<TextView>(R.id.carLifeHijackNote)
         hijackSwitch.isChecked = CarLifeHijack.isEnabled(ctx)
+
         fun refreshHijackNote() {
             val running = CarLifeHijack.isActive
             hijackNote.text =
@@ -1091,11 +1214,35 @@ class MainActivity : AppCompatActivity() {
 
         fun refreshScaleNote() {
             val runningNow = SessionController.videoSender?.isRunning == true
-            scaleNote.text =
-                if (runningNow) {
-                    "保存后下次连接起效；当前连接按 ${SessionController.activeScalePercent}% 运行"
+            val percent = DisplayPrefs.scalePercent(ctx)
+            // 百分比单独摆着没有信息量：顺手换算成像素（与 SessionController 同一套
+            // 偶数对齐、最小边限制），用户一眼能看出「120% 到底是多少」。
+            val car =
+                if (runningNow && SessionController.activeCarWidth > 0) {
+                    SessionController.activeCarWidth to SessionController.activeCarHeight
                 } else {
-                    "保存后下次连接起效"
+                    DisplayPrefs.lastSession(ctx)?.let { it.carWidth to it.carHeight }
+                }
+            val mapped =
+                car?.let { (w, h) ->
+                    val sw = ((w * percent / 100f).toInt().coerceAtLeast(320) / 2) * 2
+                    val sh = ((h * percent / 100f).toInt().coerceAtLeast(180) / 2) * 2
+                    "$percent% ≈ ${sw}×$sh"
+                }
+            scaleNote.text =
+                when {
+                    runningNow ->
+                        "保存后下次连接起效；当前连接按 ${SessionController.activeScalePercent}% 运行" +
+                            (mapped?.let { "（$it）" } ?: "") +
+                            // 直通模式下码流尺寸是 CarLife 引擎说了算，缩放只影响本地虚拟屏：
+                            // 不点明的话，这行的像素换算会被当成「实际在推的分辨率」。
+                            if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
+                                " · 直通码流由引擎定"
+                            } else {
+                                ""
+                            }
+                    mapped != null -> "保存后下次连接起效 · $mapped"
+                    else -> "保存后下次连接起效"
                 }
         }
         refreshScaleNote()
@@ -1810,7 +1957,6 @@ class MainActivity : AppCompatActivity() {
         val text = deviceName()
         if (deviceSubtitle.text != text) deviceSubtitle.text = text
     }
-
 
     // ==================== 通用 UI 工具 ====================
 

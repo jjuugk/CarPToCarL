@@ -41,6 +41,17 @@ class ReceiverProfileTest {
         assertEquals(ReceiverProfile.Era.MODERN, p.era)
     }
 
+    /**
+     * **防回归的关键用例**：奥迪 3315 的清单同样声明「可收 0x4300 / 会发 0x4301」
+     * （发送 0x4301、0xea03；可收 0x4e0c/0x4e09/0x4300/0xea00），但它走的是旧协议
+     * 0x5702→0x5703。2026-10-28 大众车机的清单形态几乎一样（9 项、同样含 0x4300/0x4301），
+     * 却是新版协议。
+     *
+     * 两者**只能靠实车行为区分，清单分不开**——所以这里必须保持 UNKNOWN，
+     * 不允许「声明了 0x4300/0x4301 就判 NEW」（那会让奥迪跳过 0x5702，
+     * 而它对 0x4300 只回 ACK 不出 0x4301，整轮必挂）。代际不确定由发送端
+     * 「两条请求并行发、谁先回用谁」兜底。
+     */
     @Test
     fun wifiGenLegacyWhenListsDeclareOldProtocol() {
         // 奥迪形态：发送清单含 0x5703

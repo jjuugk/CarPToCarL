@@ -209,6 +209,20 @@ class Iap2LinkEngine(
      */
     private var declaredMaxOutgoing = maxOutgoing
 
+    /**
+     * 对端在 sync 里声明的 RTO（毫秒）。采纳后**用它当本地重传节拍**，不再用构造默认值。
+     *
+     * 2026-10-28 大众实测：车机声明 2000ms，我们按本地 4000ms 等——车机发 EAK
+     * （ctl=0x60）要求重传时，我们仍在等自己的 RTO，白丢 4 秒；而整轮 bring-up
+     * 只有十几秒预算，这 4 秒直接吃掉 1/4。
+     */
+    private var peerRetransmissionTimeoutMillis: Long? = null
+
+    /** 实际重传间隔：对端声明值优先，夹在 [MIN_RTO_MILLIS]..[MAX_RTO_MILLIS]（防声明值离谱）。 */
+    private fun retransmissionDelayMillis(): Long =
+        (peerRetransmissionTimeoutMillis ?: retransmissionTimeoutMillis)
+            .coerceIn(MIN_RTO_MILLIS, MAX_RTO_MILLIS)
+
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
     fun start(nowMillis: Long) {
         if (state != State.IDLE) return
@@ -463,6 +477,7 @@ class Iap2LinkEngine(
             if (sync != null && isPureSyn && (acceptsResync || echoFirst)) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
+                adoptPeerTimings(sync)
                 if (firstAdoption) adoptedSynchronization = sync
                 // Audi 真车实测（2026-10-09，字节级对照）：车机以发起方姿态发 SYN 声明其会话表
                 // {1:control,2:EA}，手机必须「ACK + 原样回显其表（SYN|ACK）」——车机见到回显才发
@@ -499,6 +514,7 @@ class Iap2LinkEngine(
                 // 这个形态：车机侧由本分支收敛，随后按超时机制补裸 ACK。
                 peerSynchronization = sync
                 adoptedSynchronization = sync
+                adoptPeerTimings(sync)
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
                     adoptedPeerControlSessionId = it.id
                 }
@@ -508,6 +524,9 @@ class Iap2LinkEngine(
                 lastReceivedInOrder = sequence
                 completeNegotiationIfPending(nowMillis)
             }
+        }
+        if (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT != 0) {
+            handleExtendedAcknowledgement(ack, nowMillis)
         }
         if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
             handleAcknowledgement(ack, nowMillis)
@@ -592,6 +611,47 @@ class Iap2LinkEngine(
         onSynchronizationEchoSent?.invoke()
     }
 
+    /** 采纳对端 sync 里的重传节拍（见 [peerRetransmissionTimeoutMillis]）。 */
+    private fun adoptPeerTimings(sync: SynchronizationPayload) {
+        peerRetransmissionTimeoutMillis = sync.retransmissionTimeoutMillis.toLong().takeIf { it > 0 }
+    }
+
+    /**
+     * 扩展确认（EAK，control 位 0x20）：对端用它说「我从 `ack` 这个序号开始没收到」。
+     *
+     * 与裸 ACK 的区别只在**时机**：裸 ACK 只做「清掉已确认的」，缺口等本地 RTO 到点再补；
+     * EAK 是对端**明确告诉你缺了**，没有理由再等一个 RTO。2026-10-28 大众实测
+     * （车机 ctl=0x60、ack=106）：EAK 在 12.595 到达，我们靠本地 4 秒 RTO 到 16.515 才补，
+     * 白丢 4 秒——而那轮 bring-up 总共只有 17 秒。
+     *
+     * 只立即重传 `ack` 之后**最靠前**的那一个未确认包：EAK 缺的是一段窗口，但 RFCOMM
+     * 是可靠有序流，补上第一个后对端若仍缺会再发 EAK。一次 EAK 触发整窗重传会把链路
+     * 打成洪水，也会把每个包的重传计数一次刷满（`maxRetransmissions` 到顶就拆链）。
+     */
+    private fun handleExtendedAcknowledgement(
+        acknowledgement: Int,
+        nowMillis: Long,
+    ) {
+        completeNegotiationIfPending(nowMillis)
+        drainSendWindow(nowMillis)
+        // `ack` 的语义各家不一：有的实现指「期望的下一个序号」，有的指「缺的第一个」。
+        // 两种都兼容——先找 seq 正好等于 ack 的未确认包，找不到再取 ack 之后最近的那个。
+        // （**不要**在这里按 ACK 语义清未确认清单：ack 若正指着缺口起点，一清就把要重传的
+        //  包删掉了，等于什么都没做。窗口推进交给同一帧里的 ACK 位走 handleAcknowledgement。）
+        val target =
+            unacknowledged.firstOrNull { it.sequence == acknowledgement }
+                ?: unacknowledged.minByOrNull { sequenceDistance(it.sequence, acknowledgement) }
+                ?: return
+        target.retransmissions += 1
+        if (target.retransmissions > maxRetransmissions) {
+            die("packet ${target.sequence} not acknowledged")
+            return
+        }
+        target.deadlineMillis = nowMillis + retransmissionDelayMillis()
+        writePacket(target.payload, target.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
+        retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
+    }
+
     private fun handleAcknowledgement(
         acknowledgement: Int,
         nowMillis: Long,
@@ -641,7 +701,7 @@ class Iap2LinkEngine(
             sendBacklog.removeFirst()
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
-            packet.deadlineMillis = nowMillis + retransmissionTimeoutMillis
+            packet.deadlineMillis = nowMillis + retransmissionDelayMillis()
             writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
             if (!packet.awaitAck) continue // 发后不管：不追踪、不重传（见 sendControl 注释）
             if (peer == null || peer.maxRetransmissions > 0) {
@@ -658,7 +718,7 @@ class Iap2LinkEngine(
 
     private fun retransmitDue(nowMillis: Long) {
         val next = unacknowledged.minByOrNull { it.deadlineMillis } ?: return
-        next.deadlineMillis = nowMillis + retransmissionTimeoutMillis
+        next.deadlineMillis = nowMillis + retransmissionDelayMillis()
         next.retransmissions += 1
         if (next.retransmissions > maxRetransmissions) {
             die("packet ${next.sequence} not acknowledged")
@@ -805,6 +865,10 @@ class Iap2LinkEngine(
         private const val MARKER_RESEND_MILLIS = 1_000L
         private const val SYNC_RESEND_MILLIS = 500L
         private const val ACK_SLACK = 10
+
+        /** 重传间隔的夹取区间：对端声明值离谱（0 或 60000）时仍要有可用节拍。 */
+        private const val MIN_RTO_MILLIS = 500L
+        private const val MAX_RTO_MILLIS = 8_000L
 
         private fun sequenceDistance(
             sequence: Int,

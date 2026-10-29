@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
+import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
@@ -36,11 +37,11 @@ import io.github.shaonialife.carptocar.net.WifiP2pCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiP2pGroupNames
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
 import io.github.shaonialife.carptocar.service.CarPlayService
-import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
+import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -131,10 +132,20 @@ object SessionController {
     private const val WIFI_BIND_WAIT_S = 15L
 
     /**
-     * 等用户确认「连接车机热点」系统弹窗的上限（应用专属网络）。
-     * 系统确认框可能停留很久；用户取消连接时 [connectCancelled] 会即时退出。
+     * 等应用专属网络（`WifiNetworkSpecifier`）确认框的上限。
+     *
+     * **必须与车机的等待窗口对齐**：BMW iD9（IDC23）实测在交出 0x4301 后约 27 秒
+     * 就拆蓝牙链（2026-10-29，连续 6 轮 25~28s）。旧值 120s 意味着每轮都要白等到
+     * 车机先放弃，期间还会叠上下一轮的新请求（旧线程仍在 latch 上转），表现成
+     * 「连上就闪退 + 后续越连越连不上」。15s 留出车机窗口内再试一次的余地。
      */
-    private const val SPECIFIER_JOIN_TIMEOUT_MS = 120_000L
+    private const val SPECIFIER_JOIN_TIMEOUT_MS = 15_000L
+
+    /**
+     * 建议网络（[registerSuggestion]）生效后，等系统自动关联车机热点的上限。
+     * 建议已被用户授权时系统通常 1~3 秒内就连上，比 specifier 快且无弹框。
+     */
+    private const val SUGGESTION_JOIN_WAIT_MS = 8_000L
 
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
@@ -268,10 +279,16 @@ object SessionController {
                 album = null, // MediaSession 未单独暴露专辑名，这里留空
                 durationMs = session.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                 status =
-                    if (session.playing) Iap2NowPlaying.STATUS_PLAYING
-                    else Iap2NowPlaying.STATUS_PAUSED,
-                elapsedMs = session.displayPositionAt(android.os.SystemClock.elapsedRealtime())
-                    .coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                    if (session.playing) {
+                        Iap2NowPlaying.STATUS_PLAYING
+                    } else {
+                        Iap2NowPlaying.STATUS_PAUSED
+                    },
+                elapsedMs =
+                    session
+                        .displayPositionAt(android.os.SystemClock.elapsedRealtime())
+                        .coerceAtMost(Int.MAX_VALUE.toLong())
+                        .toInt(),
                 appName = session.pkg,
             )
         }
@@ -394,8 +411,36 @@ object SessionController {
     @Volatile
     var activeTargetFps: Int = DisplayPrefs.FPS
 
+    // ---- 本会话分辨率（英雄卡 / 显示卡片展示，均为会话建立时的快照）----
+
+    /** 车机通告的屏幕宽（`/info displays[0].widthPixels`；0 = 还没连过）。 */
+    @Volatile
+    var activeCarWidth: Int = 0
+
+    /** 车机通告的屏幕高。 */
+    @Volatile
+    var activeCarHeight: Int = 0
+
+    /**
+     * 车机分辨率是否真的来自车机。
+     *
+     * false = 车机没回 `/info` displays，[activeCarWidth]/[activeCarHeight] 是手机横屏兜底值，
+     * UI 必须照实标注——把兜底值当车机参数展示，会让人误判「车机就是竖屏/小屏」。
+     */
+    @Volatile
+    var activeCarResolutionFromCar: Boolean = false
+
+    /** 本会话真正上线的码流宽（直通模式下取 CarLife 引擎实际编码尺寸）。 */
+    @Volatile
+    var activeStreamWidth: Int = 0
+
+    /** 本会话真正上线的码流高。 */
+    @Volatile
+    var activeStreamHeight: Int = 0
+
     @Volatile
     var audioSender: AudioSender? = null
+
     @Volatile
     var currentClient: AirPlayClient? = null
 
@@ -427,6 +472,26 @@ object SessionController {
     /** 本轮真正用上的音频档位（拆链归因与记忆回写用；null = 本次没有音频）。 */
     @Volatile
     private var activeAudioProfile: AudioProfile? = null
+
+    /**
+     * 当前音频流是否处在**通话场景**（`audioType=telephony` 档）。
+     *
+     * 通话与媒体在接收端是两条**不同的输出设备**：车机收到 telephony 档的流才会打开
+     * 通话增益与麦克风通路。所以进/出通话都要换一次流，只调音量是没用的。
+     */
+    @Volatile
+    private var audioInCallMode: Boolean = false
+
+    /** 本次通话真正切上的通话档（null = 没切过 / 车机未声明 telephony）。 */
+    @Volatile
+    private var activeCallProfile: AudioProfile? = null
+
+    /**
+     * 已被拒过的通话档键：同一次通话里不重复撞同一档。
+     * SETUP 往返最长 8 秒，撞两遍就白等 16 秒——而通话场景本来就只有几十秒。
+     */
+    @Volatile
+    private var rejectedCallProfileKey: String? = null
 
     /** 音频档位记忆的键（车机身份文本，见 [AirPlayClient.receiverIdentity]）。 */
     @Volatile
@@ -714,12 +779,19 @@ object SessionController {
         // 只断车机视频通道，不拆 CarLife 劫持本身：本方法在每轮配对起步也会执行，
         // 而 CarLife 连接与 GOP 缓存要跨会话保留（用户可以在会话中途才进「无线连接」）。
         CarLifeHijack.detach()
+        // 回调属于上一轮会话（捕获了旧的 appendLog 语境），退役时一并摘掉。
+        CarLifeHijack.onActualStreamSize = null
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
         ScreenDimmer.setSessionActive(false)
         audioSender?.stop()
         audioSender = null
+        // 通话场景标记必须随会话清掉：留着的话下一轮会被当成「已经在通话档」，
+        // 进入通话时 switchAudioScene 直接返回 true，一条通话流都不会建。
+        audioInCallMode = false
+        activeCallProfile = null
+        rejectedCallProfileKey = null
         currentSharedSecret = null
         currentAudioHost = null
         currentHiddenSource?.release()
@@ -809,6 +881,10 @@ object SessionController {
             // 1) WLAN 开关。shell 不可用时跳过检查——requestNetwork 会以 Unavailable 反馈。
             if (shellReady && shellWifiDisabled() && !waitForWifiEnabled()) return@run
             if (connectCancelled) return@run
+            // 1.5) 登记 WiFi 建议（幂等）：用户授权过一次后，系统会自己把手机连上
+            // 车机热点，后续不再出现「连接到此网络？」确认框——这是无人点屏场景的
+            // 唯一可行路径（BMW iD9 只给 27s，人来不及点就断链）。
+            wifiConnector?.registerSuggestion(wifi.ssid, wifi.passphrase, wifi.securityType)
             // 2) 首选应用专属网络（不影响 4G/5G、不会被系统切回、不需要任何特权）
             //    例外：P2P GO 的组名（DIRECT-*）站模式关联不进去，必须先走 Wi-Fi Direct。
             if (WifiP2pGroupNames.isP2pGroupName(wifi.ssid)) {
@@ -910,8 +986,14 @@ object SessionController {
             // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
             ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
             appendLog(">>> WiFi 已加入车机热点（应用专属网络），ctrl 广播已重新注册，等待车机 ctrl 邀请")
-        } else if (!connectCancelled) {
-            appendLog("WIFI: 应用专属网络加入未成功（${result.javaClass.simpleName}）")
+        } else {
+            // 取消态也必须留痕：旧实现用 `if (!connectCancelled)` 把失败日志挡掉，
+            // 于是「车机 27s 超时掐断 BT → 本轮加入被静默取消」在日志里完全消失，
+            // 现场只剩「发起加入」一行、后面什么都没有，根本无从判断卡在哪一步。
+            appendLog(
+                "WIFI: 应用专属网络加入未成功（${result.javaClass.simpleName}）" +
+                    if (connectCancelled) "——本轮已被取消（车机链路已断开），下一轮重来" else "",
+            )
         }
         return result
     }
@@ -1573,7 +1655,7 @@ object SessionController {
                 activeAudioStartedAt = 0L
                 false
             } else {
-                startCallWatcher(sender)
+                startCallWatcher()
                 true
             }
         } catch (error: Exception) {
@@ -1626,8 +1708,9 @@ object SessionController {
         // 新流已就绪：停旧发送端。旧流不再有包，接收端会在超时后自行回收。
         old.stop()
         audioSender = null
-        // 旧看门狗线程因 sender.isRunning=false 自行退出；置空后下一行才能重新挂载。
-        callWatcher = null
+        // 看门狗线程跟随 audioSender 字段：换流后自动续上，所以这里**不该**置
+        // callWatcher = null —— 那只丢引用、旧线程仍在跑，紧接着 startCallWatcher()
+        // 再起一个就成双线程（两边同时切音频流）。startCallWatcher 自己有 isAlive 检查。
         val sender =
             AudioSender(
                 host = host,
@@ -1649,7 +1732,7 @@ object SessionController {
             return false
         }
         activeAudioStartedAt = android.os.SystemClock.uptimeMillis()
-        startCallWatcher(sender)
+        startCallWatcher()
         // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
         // 否则车机对 SETUP 回 200、给端口，但不排播（见 startAudioChannel 同名注释）。
         client.record()
@@ -1659,6 +1742,136 @@ object SessionController {
         )
         return true
     }
+
+    /**
+     * 按场景**换一条音频流**（媒体档 ↔ 通话档），先建新的、成功了才停旧的。
+     *
+     * 为什么必须换流而不是改参数：`audioType` 只在 SETUP 里出现一次，一条流建成后
+     * 无法中途改变语义。车机把 media / telephony 当**两台不同的输出设备**——这也是
+     * 通话在车机上没声音的根本原因（媒体流一直占着媒体通路，通话通路从没被打开）。
+     *
+     * 顺序沿用 [rebuildAudioChannel] 的约定：新流 SETUP 成功后才停旧流，SETUP 被拒时
+     * 旧流仍在推，绝不把「本来有声音」搞成「彻底没声」。成功后补一次 RECORD，
+     * 否则车机对后加入的流只给端口不排播。
+     *
+     * 音源**不变**：CarLife 引擎的 PCM 还是喂给 [AudioSender]，只是接收端换了输出通路
+     * （[CarLifeAudioSink] 取的是 `SessionController.audioSender`，换字段即生效）。
+     *
+     * @return 是否真的切过去了（false = 保持原流，调用方据此决定兜底动作）
+     */
+    @Synchronized
+    private fun switchAudioScene(
+        inCall: Boolean,
+        reason: String,
+    ): Boolean {
+        if (audioInCallMode == inCall) return true
+        val client = currentClient ?: return false
+        val secret = currentSharedSecret ?: return false
+        val host = currentAudioHost ?: return false
+        val context = appContext?.applicationContext ?: return false
+        val old = audioSender ?: return false
+        if (!old.isRunning) return false
+        val target: AudioProfile? =
+            if (inCall) {
+                val candidates = client.callCandidates()
+                if (candidates.isEmpty()) {
+                    // 车机没声明 telephony：没有通话通路可切。这不是失败，是这台车就不支持
+                    // ——硬用媒体档顶替只会得到怪声（见 AudioProfile 注释）。
+                    appendLog("AUDIO: $reason → 车机未声明通话音频档（telephony），保持媒体流（通话声音仍在本机）")
+                    return false
+                }
+                val chosen = candidates.firstOrNull { it.key != rejectedCallProfileKey } ?: candidates.first()
+                // 上行能力只做**诊断**（2026-10-29）：真正的麦克风上行流要用我们自己的
+                // UDP 监听端口换车机推流，端口/密钥语义与下行不同，没有车机日志无法确认
+                // 方向。先把结论落到日志：有候选说明车机声明了 PCM 输入位，下一轮才有依据。
+                val mic = client.microphoneCandidates()
+                val micText =
+                    if (mic.isEmpty()) {
+                        "车机 telephony 档未声明 PCM 输入位（无上行流可建）"
+                    } else {
+                        mic.joinToString(" ") { it.label }
+                    }
+                appendLog("AUDIO: 麦克风上行能力=$micText；本次下行用 ${chosen.label}")
+                chosen
+            } else {
+                activeAudioProfile
+            }
+        if (target == null) {
+            appendLog("AUDIO: $reason → 没有可用的${if (inCall) "通话" else "媒体"}档，保持当前流")
+            return false
+        }
+        appendLog(
+            "AUDIO: $reason → 音频流切换 ${if (inCall) "媒体→通话" else "通话→媒体"}（${target.label}）",
+        )
+        val info =
+            try {
+                client.runAudioStream(secret, target, AudioTuning.RAW_SPF)
+            } catch (error: Exception) {
+                appendLog("AUDIO: 切换协商异常 - ${error.message}")
+                null
+            }
+        if (info == null) {
+            if (inCall) rejectedCallProfileKey = target.key
+            appendLog("AUDIO: 切到 ${target.label} 失败——保持原音频流继续推（不降级成无声）")
+            return false
+        }
+        // 新流已就绪：停旧流。旧流不再有包，接收端会在超时后自行回收。
+        old.stop()
+        audioSender = null
+        val sender =
+            AudioSender(
+                host = host,
+                dataPort = info.dataPort,
+                streamKey = info.streamKey,
+                log = { line -> appendLog(line) },
+                context = context,
+                sampleRate = info.sampleRate,
+                codec = target.codec,
+                streamType = target.streamType,
+                adtsFrames = AudioTuning.RAW_SPF.adts,
+                controlPort = info.controlPort,
+            )
+        audioSender = sender
+        if (!sender.startPassthrough()) {
+            audioSender = null
+            appendLog("AUDIO: 切换后音频流启动失败——本段仅推视频（重连可恢复）")
+            return false
+        }
+        audioInCallMode = inCall
+        activeCallProfile = if (inCall) target else null
+        if (!inCall) rejectedCallProfileKey = null
+        // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
+        // 否则车机对 SETUP 回 200、给端口，但不排播。
+        client.record()
+        appendLog(
+            "AUDIO: 音频流已切到 ${target.label}（dataPort=${info.dataPort} " +
+                "controlPort=${info.controlPort}）——音源不变，只换了接收端输出通路",
+        )
+        // 通话档建好**之后**才告诉车机「正在通话」：顺序反了它会切到一条还没建的流上。
+        if (inCall) runCatching { client.pushCallState() }
+        return true
+    }
+
+    /**
+     * 当前通话状态（iAP2 `CallState`），由 `AudioManager.mode` 反推。
+     *
+     * 只区分「正在通话」与「无通话」：这两种都不会误报。`RINGTONE` 与 `IN_CALL` 一起
+     * 归为通话通路被占用——车机据此把音频路由让给 telephony 档。
+     * 面板来电/去电的区分依赖 `READ_PHONE_STATE` + 通话 App，不在本层职责内。
+     */
+    private fun callStateOf(): Int {
+        val manager =
+            appContext?.applicationContext?.getSystemService(Context.AUDIO_SERVICE)
+                as? android.media.AudioManager ?: return VirtualIap2Link.IAP2_CALL_STATE_NONE
+        return when (manager.mode) {
+            android.media.AudioManager.MODE_RINGTONE -> VirtualIap2Link.IAP2_CALL_STATE_INCOMING
+            android.media.AudioManager.MODE_IN_CALL,
+            android.media.AudioManager.MODE_IN_COMMUNICATION,
+            -> VirtualIap2Link.IAP2_CALL_STATE_ACTIVE
+            else -> VirtualIap2Link.IAP2_CALL_STATE_NONE
+        }
+    }
+
 
     /** 延迟 2.5 秒再重建：让车机先把通话通路的资源收干净，避免两边抢音频设备。 */
     private fun scheduleAudioRebuild() {
@@ -1689,7 +1902,7 @@ object SessionController {
      * （IN_CALL / IN_COMMUNICATION / RINGTONE → NORMAL）时补两件事：
      * ① 重新核对并纠正车机音量；② 补一轮同步包重锚。两者都幂等，失败只记日志。
      */
-    private fun startCallWatcher(sender: AudioSender) {
+    private fun startCallWatcher() {
         if (callWatcher?.isAlive == true) return
         val manager =
             appContext?.applicationContext?.getSystemService(Context.AUDIO_SERVICE)
@@ -1697,24 +1910,76 @@ object SessionController {
         callWatcher =
             Thread {
                 var lastMode = manager.mode
-                while (sender.isRunning) {
+                // 目标状态与连续计数：mode 在通话建立/挂断的瞬间会抖几下（IN_CALL → NORMAL
+                // → IN_COMMUNICATION），只认「连续 2 秒同向」才动手，避免来回换流。
+                var pendingInCall = isCallMode(lastMode)
+                var pendingTicks = 0
+                var idleTicks = 0
+                while (true) {
                     try {
                         Thread.sleep(1_000)
                     } catch (_: InterruptedException) {
                         return@Thread
                     }
+                    // 跟随字段而不是构造参数：换场景时 sender 会被整个换掉，
+                    // 看门狗得继续盯新的那条流，否则切换后这个线程直接退出。
+                    val sender = audioSender
+                    if (sender == null) {
+                        // 切换间隙（停旧 → 起新）也会短暂为 null：连续 3 次才算会话结束。
+                        if (++idleTicks >= 3) return@Thread
+                        continue
+                    }
+                    idleTicks = 0
+                    if (!sender.isRunning) return@Thread
                     val mode = manager.mode
-                    if (mode == lastMode) continue
-                    appendLog("AUDIO: 音频模式 ${audioModeName(lastMode)} → ${audioModeName(mode)}")
-                    if (isCallMode(lastMode) && !isCallMode(mode)) {
+                    if (mode != lastMode) {
+                        appendLog("AUDIO: 音频模式 ${audioModeName(lastMode)} → ${audioModeName(mode)}")
+                        lastMode = mode
+                    }
+                    val inCall = isCallMode(mode)
+                    if (inCall == audioInCallMode) {
+                        pendingTicks = 0
+                        continue
+                    }
+                    if (inCall != pendingInCall) {
+                        pendingInCall = inCall
+                        pendingTicks = 0
+                        continue
+                    }
+                    if (++pendingTicks < 2) continue
+                    pendingTicks = 0
+                    if (inCall) {
+                        appendLog("AUDIO: 进入通话（${audioModeName(mode)}）→ 换到通话音频档")
+                        val switched =
+                            runCatching { switchAudioScene(true, "进入通话") }.getOrElse {
+                                appendLog("AUDIO: 切换通话档异常 - ${it.message}")
+                                false
+                            }
+                        if (!switched) {
+                            appendLog("AUDIO: 通话档未切上——车机侧通话通路不会打开，通话声音仍在本机")
+                        }
+                    } else {
                         appendLog("AUDIO: 通话结束——重新核对车机音量并补同步包（车机常停在静音位）")
                         currentClient?.refreshVolume("通话结束")
                         sender.resyncAnchor("通话结束")
-                        // 音量/同步包都救不了「接收端输出设备被释放」这一种：
-                        // 再补一次「新建音频流」，才是重连一次就能好的等价动作。
-                        scheduleAudioRebuild()
+                        if (audioInCallMode) {
+                            val switched =
+                                runCatching { switchAudioScene(false, "通话结束") }.getOrElse {
+                                    appendLog("AUDIO: 切回媒体档异常 - ${it.message}")
+                                    false
+                                }
+                            if (switched) {
+                                runCatching { currentClient?.pushCallState() }
+                            } else {
+                                // 切不回去就按老办法重建媒体流：接收端在为通话释放过
+                                // 音频输出设备后，只有新建流才会重新打开。
+                                scheduleAudioRebuild()
+                            }
+                        } else {
+                            // 没切过通话档（车机未声明 telephony / 切换失败）：仍按老办法重建。
+                            scheduleAudioRebuild()
+                        }
                     }
-                    lastMode = mode
                 }
             }.apply {
                 isDaemon = true
@@ -1753,6 +2018,17 @@ object SessionController {
         val profile = activeAudioProfile ?: return
         val startedAt = activeAudioStartedAt
         val identity = activeAudioReceiverKey
+        // 通话中拆链不能算到媒体档头上：这段时间上线的是通话档（audioType=telephony），
+        // 两条流在接收端是不同设备，把责任记到媒体档会让它下次被跳过。
+        if (audioInCallMode) {
+            appendLog(
+                "AUDIO: 通话档在线期间会话被拆——不归因到媒体档 ${profile.label}" +
+                    (activeCallProfile?.let { "（通话档 ${it.label}）" } ?: ""),
+            )
+            activeAudioProfile = null
+            activeAudioStartedAt = 0L
+            return
+        }
         val lived = if (startedAt > 0) android.os.SystemClock.uptimeMillis() - startedAt else -1L
         // 本轮记忆很快失效：下次连接重新按最新记忆选档
         activeAudioProfile = null
@@ -2096,6 +2372,10 @@ object SessionController {
         )
         phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
+        // 0x4301 同样带热点密码（BMW iD9 不发 0x5703，AP 信息只走这条路）。
+        // 不缓存的话首页「WiFi」按钮会判成「尚未拿到热点密码」，用户连手动加入
+        // 都做不了——2026-10-29 日志里连着出现三次这条误导性提示，根因就是这里。
+        if (endpoint.passphrase.isNotEmpty()) lastWifiPsk = endpoint.passphrase
         // 诊断（老车机排查必看）：地址是 IPv4 还是只有 IPv6、TXT features 是否声明配对能力。
         // 奥迪 4xxx 两种「连不上」都源于这里——旧版日志里完全没有这两项。
         val addresses = endpoint.ipAddresses
@@ -2218,6 +2498,9 @@ object SessionController {
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
+                            // 0x4155 CallStateUpdate 的数据源：车机订阅通话状态时按真实值应答，
+                            // 否则它认定这台手机永远不打电话，通话时不切音频通路。
+                            created.callStateSource = { callStateOf() }
                         }
                     retireSession()
                     // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
@@ -2571,6 +2854,11 @@ object SessionController {
                                         ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
                                     activeScalePercent = scalePct
                                     activeTargetFps = DisplayPrefs.FPS
+                                    // 记录「车机通告分辨率」原值：英雄卡与「显示」卡片要如实
+                                    // 展示它，而不是只显示缩放百分比（用户根本看不出画布多大）。
+                                    activeCarWidth = setup.displayWidth
+                                    activeCarHeight = setup.displayHeight
+                                    activeCarResolutionFromCar = setup.displayFromCar
                                     // 车机触摸在通告视图坐标系（如 1160×540），流已按比例
                                     // 缩放（如 1450×674）——注入前需映射，否则点击漂移
                                     TouchRouter
@@ -2588,10 +2876,6 @@ object SessionController {
                                     CarLifeHijack.setRequestedResolution(
                                         setup.displayWidth,
                                         setup.displayHeight,
-                                    )
-                                    appendLog(
-                                        "DISPLAY: 流 ${setup.displayWidth}x${setup.displayHeight} → " +
-                                            "${streamW}x$streamH（$scalePct%）@${DisplayPrefs.FPS}fps",
                                     )
                                     pendingVideoW = streamW
                                     pendingVideoH = streamH
@@ -2614,10 +2898,41 @@ object SessionController {
                                         val (carW, carH) = CarLifeHijack.videoSize
                                         streamOutW = ((carW.coerceAtLeast(320)) / 2) * 2
                                         streamOutH = ((carH.coerceAtLeast(180)) / 2) * 2
-                                        appendLog("DISPLAY: CarLife 直通流 ${streamOutW}x$streamOutH")
                                     } else {
                                         streamOutW = streamW
                                         streamOutH = streamH
+                                    }
+                                    // 真正上线的码流尺寸（直通模式下与申请值可能不同）：
+                                    // 英雄卡与「显示」卡片显示的就是它，不是申请值。
+                                    activeStreamWidth = streamOutW
+                                    activeStreamHeight = streamOutH
+                                    appendLog(
+                                        "DISPLAY: 车机 ${setup.displayWidth}×${setup.displayHeight}" +
+                                            (if (setup.displayFromCar) {
+                                                "（/info 通告）"
+                                            } else {
+                                                "（车机未通告·手机横屏兜底）"
+                                            }) +
+                                            " → 流 ${streamOutW}×${streamOutH}（$scalePct%）@${DisplayPrefs.FPS}fps",
+                                    )
+                                    if (streamOutW != streamW || streamOutH != streamH) {
+                                        appendLog(
+                                            "DISPLAY: 码流尺寸由 CarLife 引擎决定（申请 " +
+                                                "${streamW}×$streamH，建链时刻 ${streamOutW}×$streamOutH）" +
+                                                "——引擎收到车机分辨率后会重建编码器，实际尺寸以界面显示为准",
+                                        )
+                                    }
+                                    // 落盘：下次还没连上时，界面也能显示「上次车机分辨率」，
+                                    // 而不是一片空白（用户问的就是「分辨率能不能从车机端看到」）。
+                                    appContext?.let { ctx ->
+                                        DisplayPrefs.recordSession(
+                                            ctx,
+                                            setup.displayWidth,
+                                            setup.displayHeight,
+                                            setup.displayFromCar,
+                                            streamOutW,
+                                            streamOutH,
+                                        )
                                     }
                                     videoSender =
                                         VideoSender(
@@ -2633,11 +2948,12 @@ object SessionController {
                                             // 此刻 CarLife 客户端可能还没握手完成（构造值只是
                                             // 默认 1280×720），等引擎按车机真实分辨率重建编码器后，
                                             // 这里每次发 config 都会取到最新值，声明永远与码流一致。
-                                            liveSize = if (hijackMode) {
-                                                { CarLifeHijack.videoSize }
-                                            } else {
-                                                null
-                                            },
+                                            liveSize =
+                                                if (hijackMode) {
+                                                    { CarLifeHijack.videoSize }
+                                                } else {
+                                                    null
+                                                },
                                             onEnded = {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
@@ -2682,6 +2998,28 @@ object SessionController {
                                         appendLog("MODE: 视频通道未创建，本轮无画面")
                                     } else if (target.startPassthrough()) {
                                         appendLog("MODE: CarLife 直通（车机画面 = 本机 CarLife+）")
+                                        // 引擎**实编**尺寸只有 SPS 说得准：98311 申请值/65544
+                                        // 回包值都只是「谈定的档位」，引擎会按白名单降档
+                                        // （申请 1412×654 实编 1280×720，2026-10-29 实测）。
+                                        // 界面与落盘一律跟真值走，否则「码流同尺寸」是假的。
+                                        CarLifeHijack.onActualStreamSize = { w, h ->
+                                            activeStreamWidth = w
+                                            activeStreamHeight = h
+                                            appContext?.let { ctx ->
+                                                DisplayPrefs.updateLastStream(ctx, w, h)
+                                            }
+                                            val negotiated = activeCarWidth > 0 &&
+                                                (w != activeCarWidth || h != activeCarHeight)
+                                            appendLog(
+                                                "DISPLAY: 实际码流 ${w}×$h" +
+                                                    if (negotiated) {
+                                                        "（引擎降档，车机画布 " +
+                                                            "${activeCarWidth}×${activeCarHeight}）"
+                                                    } else {
+                                                        ""
+                                                    },
+                                            )
+                                        }
                                         CarLifeHijack.attach(target) { line -> appendLog(line) }
                                         ScreenDimmer.setSessionActive(true)
                                     } else {
@@ -2760,6 +3098,12 @@ object SessionController {
             // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
             // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
             Bg.run("wifi-join-on-endpoint") {
+                // 第一步永远是登记「WiFi 建议」——幂等、不等结果、不弹框。
+                // 用户授权过一次之后，系统会在进入范围时自动关联车机热点，
+                // 届时下面那条 specifier 请求会立刻拿到 onAvailable（网络已存在，
+                // 系统不再要求确认），整条链路才能真正做到「上车即连」。
+                val connector = wifiConnector
+                connector?.registerSuggestion(wifiConfig.ssid, wifiConfig.passphrase, wifiConfig.securityType)
                 while (!connectCancelled) {
                     // Shizuku 已移除：没有 shell 特权。
                     val shellReady = false
@@ -2778,6 +3122,27 @@ object SessionController {
                         }
 
                         WifiCarPlayConnector.JoinResult.Unavailable -> {
+                            // specifier 没进来时，建议网络可能已经在后台把手机连上了
+                            // （用户授权过 suggestion，但系统关联比我们的 15s 窗口慢）。
+                            // 这里再给建议通道一个短窗口：真连上了就直接绑，省掉弹窗。
+                            val bySuggestion =
+                                if (connector != null && !connectCancelled) {
+                                    connector.bindCurrentWifiBlocking(SUGGESTION_JOIN_WAIT_MS) { connectCancelled }
+                                } else {
+                                    null
+                                }
+                            if (bySuggestion != null) {
+                                boundCarSsid = wifiConfig.ssid
+                                phaseHint = "已加入车机热点"
+                                ctrlAdvertiser?.ensureForNetwork(
+                                    wifiConfig.ssid,
+                                    force = true,
+                                    network = connector?.currentNetwork,
+                                )
+                                appendLog(">>> WiFi 由系统自动连上（热点建议生效，无需确认框），ctrl 广播已重新注册")
+                                continueWithNetwork(true)
+                                return@run
+                            }
                             promptSpecifierFailed(wifiConfig, shellReady)
                             // promptSpecifierFailed 内部可能已重试/转手动；两者都会
                             // 通过 joinCarWifiSpecifier → continueWithNetwork 续上流程，

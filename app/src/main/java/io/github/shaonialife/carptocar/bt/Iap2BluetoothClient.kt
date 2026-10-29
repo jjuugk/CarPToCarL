@@ -55,7 +55,26 @@ class Iap2BluetoothClient(
         val ACCESSORY_IAP2_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacaff")
 
         private const val SESSION_TIMEOUT_MILLIS = 90_000L
+
+        /** 主动连 …caff 的基础间隔（退避的第 0 档）。 */
         private const val RETRY_DELAY_MILLIS = 3_000L
+
+        /**
+         * 连续失败（含「连上即被关」）时的退避阶梯：3s → 10s → 20s，之后固定 20s。
+         *
+         * 为什么不再固定 3 秒：2026-10-28 大众日志里 52 轮、约 300 次连接尝试，全部
+         * 「连入 0.5 秒后车机 socket 关闭」——这台车机只在自己愿意时发起（日志 B 段就是
+         * 它主动连进来的）。密集探测既无用、又不断打断车机侧的节奏；本机的 …cafe 监听
+         * 一直在跑，车机想连随时能连，所以放长间隔不会错过什么。
+         */
+        private val RETRY_BACKOFF_MILLIS = longArrayOf(3_000L, 10_000L, 20_000L)
+
+        /** 会话存活不足这个时长就当作「无效轮」（车机连上就关），计入退避。 */
+        private const val SESSION_USEFUL_MILLIS = 3_000L
+
+        /** 退避睡眠的分片粒度：20 秒的退避也要能在 stop() 后立刻醒来。 */
+        private const val BACKOFF_POLL_MILLIS = 250L
+
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
 
         /** 目标连不上多少轮后放开限制（3s/轮 → 约 6s 后回退，旧行为要等 40s+）。 */
@@ -315,6 +334,8 @@ class Iap2BluetoothClient(
         /** 别克档「手机拨号」的节流基线（见 [B233DialPolicy]）。 */
         var lastB233DialAt = 0L
         val loopStartedAt = android.os.SystemClock.uptimeMillis()
+        /** 连续「没有有效会话」的轮数，用于 [RETRY_BACKOFF_MILLIS] 退避（连上即断也算）。 */
+        var failStreak = 0
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
@@ -521,7 +542,15 @@ class Iap2BluetoothClient(
                 } else {
                     passiveFailRounds = 0
                 }
-                sleepQuietly(RETRY_DELAY_MILLIS)
+                failStreak++
+                val backoff = backoffMillis(failStreak)
+                if (failStreak >= 3) {
+                    log(
+                        "BT-C: 已连续 $failStreak 轮没建起有效会话——下一轮间隔放长到 ${backoff / 1000}s" +
+                            "（这台车机可能只在自己愿意时发起：被动监听一直在，不必密集探测）",
+                    )
+                }
+                sleepBackoff(backoff)
                 continue
             }
             if (generation.get() != myGeneration) {
@@ -529,8 +558,19 @@ class Iap2BluetoothClient(
                 currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
                 return
             }
+            val sessionStartedAt = android.os.SystemClock.uptimeMillis()
             runSession(connected, connectedBuick)
-            sleepQuietly(RETRY_DELAY_MILLIS)
+            // 「连上就被关」不算成功：2026-10-28 大众实测 52 轮全是「连入 → 0.5 秒被车机
+            // 关闭」（车机不在无线窗口/要自己发起）。这类轮次按失败计，否则退避永远回到 3 秒，
+            // 每轮白断一次车机、还可能抢掉它主动连入的时机。
+            val aliveMillis = android.os.SystemClock.uptimeMillis() - sessionStartedAt
+            if (aliveMillis < SESSION_USEFUL_MILLIS) {
+                failStreak++
+                sleepBackoff(backoffMillis(failStreak))
+            } else {
+                failStreak = 0
+                sleepBackoff(RETRY_DELAY_MILLIS)
+            }
         }
         log("BT-C: 客户端已停止")
     }
@@ -725,6 +765,21 @@ class Iap2BluetoothClient(
         try {
             Thread.sleep(millis)
         } catch (_: InterruptedException) {
+        }
+    }
+
+    /** 第 [streak] 次连续失败的退避间隔（0 次 = 基础间隔）。 */
+    private fun backoffMillis(streak: Int): Long =
+        RETRY_BACKOFF_MILLIS[(streak - 1).coerceIn(0, RETRY_BACKOFF_MILLIS.size - 1)]
+
+    /**
+     * 退避睡眠：分片检查 [running]，让 stop() 能立刻打断 20 秒的长退避
+     * （整段 `Thread.sleep` 会让关闭会话时线程还挂着睡满一轮）。
+     */
+    private fun sleepBackoff(millis: Long) {
+        val deadline = android.os.SystemClock.uptimeMillis() + millis
+        while (running && android.os.SystemClock.uptimeMillis() < deadline) {
+            sleepQuietly(BACKOFF_POLL_MILLIS)
         }
     }
 }

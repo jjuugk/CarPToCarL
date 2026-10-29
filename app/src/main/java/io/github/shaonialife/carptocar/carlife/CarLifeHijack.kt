@@ -306,6 +306,20 @@ object CarLifeHijack {
     val touchVideoSize: Pair<Int, Int>
         get() = client?.videoSize ?: (1280 to 720)
 
+    /**
+     * 码流**实际**分辨率（SPS 解析值）；还没解析到 SPS 时返回 null。
+     *
+     * 与 [videoSize] 的区别：那是「跟引擎谈定的档位」，引擎可能按白名单降档编码
+     * （申请 1412×654 实编 1280×720，2026-10-29 日志实证）。界面要显示「真实在推
+     * 多少」，必须用这个；没确认就返回 null，绝不能拿协商值冒充实际值。
+     */
+    val actualStreamSize: Pair<Int, Int>?
+        get() = client?.let { if (it.videoSizeConfirmed) it.videoSize else null }
+
+    /** SPS 确认/变更时回调（上层刷界面、更新落盘快照）。 */
+    @Volatile
+    var onActualStreamSize: ((Int, Int) -> Unit)? = null
+
     fun isEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // v3 迁移：画面唯一来源就是 CarLife 劫持，默认改回开启。老安装若被 v2 关掉过，
@@ -506,6 +520,8 @@ object CarLifeHijack {
                 log = { line -> logSink?.invoke(line) },
                 onVideoFrame = { data, key -> onFrame(data, key) },
                 onVideoParams = { w, h, f -> logSink?.invoke("CARLIFE: 手机编码参数 ${w}x$h@$f") },
+                // SPS 是码流的真相：确认后立刻告诉上层（界面显示、落盘快照都跟着它）。
+                onStreamSize = { w, h -> onActualStreamSize?.invoke(w, h) },
                 onAudioFormat = { rate, channels -> sink.configure(rate, channels) },
                 onAudioPcm = { pcm, size -> routeAudio(sink, pcm, size) },
                 // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端

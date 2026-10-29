@@ -255,6 +255,15 @@ class Iap2SenderSession(
          */
         const val START_SESSION_WAIT_NEW_PROTOCOL_NANOS = 8_000_000_000L
 
+        /**
+         * 旧协议分支里「先单独等 0x5703」的短窗口：窗口内没回就**并行**把 0x4300 发出去。
+         *
+         * 真车对 0x5702 的应答都在毫秒级（奥迪/别克实测），1 秒没回基本就是「这台车机
+         * 不认 0x5702」或「它在等别的」。继续死等只会把车机的启动预算耗光——
+         * 2026-10-28 大众实测：0x5702 后 13 秒静默、17 秒时车机拆链，整轮 100% 失败。
+         */
+        const val LEGACY_WIFI_FIRST_WAIT_NANOS = 1_000_000_000L
+
         /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
         const val START_SESSION_RAW_LOG_BYTES = 1_024
 
@@ -436,19 +445,52 @@ class Iap2SenderSession(
         // 别克 B233 无论画像怎么判都不发 0x5702：它的能力清单没声明可收，E5 实测
         // 每轮都在这里沉默、把整个握手拖死。AP 信息只从 0x4301 取。
         val legacyWifiExchange = !buickB233 && wifiGen != ReceiverProfile.WifiGen.NEW
+        // 提前算：旧协议分支要用它决定「要不要并行发 0x4300」，后面等 0x4301 也要用。
+        val declaresStartSession = accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)
+        // 0x4300 的发送记账：可能在本段提前并行发出（旧协议兜底），也可能在后面正常发出。
+        // 静默判定要的「发出前对端帧计数」就在**真正发的那一刻**取，别提前取——
+        // 0x5702 的 ACK 会让计数上涨，早取等于把判据稀释掉。
+        var framesBeforeAvailability = 0
+        var availabilitySent = false
         val wifiFromExchange: WifiConfiguration? =
             if (buickB233) {
                 log("iap2 别克 B233 跳过 0x5702（车机未声明可收）——AP 信息只从 0x4301 取")
                 null
             } else if (!legacyWifiExchange) {
                 log(
-                    "iap2 画像判 wifiGen=NEW（两清单完整仍无 0x57xx，收=${declaresReceiveWifi ?: "未知"} " +
-                        "发=${declaresSendWifi ?: "未知"}）——跳过旧协议，AP 信息由 0x4301 提供",
+                    "iap2 画像判 wifiGen=NEW（未声明 0x57xx、AP 信息由 0x4301 自带；收 0x5702=" +
+                        "${declaresReceiveWifi ?: "未知"} 发 0x5703=${declaresSendWifi ?: "未知"}）" +
+                        "——跳过旧协议",
                 )
                 null
             } else {
                 send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
-                val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                // **并行兜底**：先给 0x5702 一个短窗口（真车应答都在毫秒级），窗口内没回
+                // 就立刻把 0x4300 也发出去，两条请求并行等，谁先回用谁。
+                // 不再把车机十几秒的启动预算全耗在「死等 0x5703」上——代际判错时
+                // （画像 UNKNOWN/LEGACY，车机其实是新版协议）这一条就是唯一的救命绳：
+                // 2026-10-28 大众实测 0x5702 后 13 秒静默、17 秒拆链，整轮 100% 失败。
+                var wifiConfiguration =
+                    expectOrNull(
+                        Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                        minOf(deadline, System.nanoTime() + LEGACY_WIFI_FIRST_WAIT_NANOS),
+                    )
+                if (wifiConfiguration == null) {
+                    // 走到这里说明车机对 0x5702 一声不吭——不管画像是怎么判的，它都不走旧协议。
+                    // 立刻把 0x4300 发出去，两条请求并行等（0x4301 若早到会在暂存区里被后续消费）。
+                    // 对奥迪这类「1 秒内就回 0x5703」的车机，本分支永不会进；对收 0x4300 无反应
+                    // 的车机，多发这一帧也只换来一条链路 ACK（原流程后面本来也要发它）。
+                    log(
+                        "iap2 并行兜底：0x5702 在 ${LEGACY_WIFI_FIRST_WAIT_NANOS / 1_000_000}ms 内无应答" +
+                            "（车机不走旧协议）——不再死等 0x5703，同时发出 0x4300",
+                    )
+                    framesBeforeAvailability = channel.peerFrameCount
+                    lastNudgePeerFrames = framesBeforeAvailability
+                    sendAvailability()
+                    availabilitySent = true
+                    wifiConfiguration =
+                        expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                }
                 if (wifiConfiguration == null) {
                     log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
                     null
@@ -480,27 +522,30 @@ class Iap2SenderSession(
         // （事件通道 SYN 洪水把它打懵的时段），链路看门狗险些再次自杀。
         // 发之前记一次对端控制帧计数：别克 E2LB 实测它收到这一帧后就**彻底不再 ACK**，
         // 用这个计数把「对端还在不在处理我们的帧」量出来（见下方 noteAvailabilitySilence）。
-        val framesBeforeAvailability = channel.peerFrameCount
-        // 催问的静默基线也钉在这一刻：第一次催问（+15s）就能判断车机是否还在回帧。
-        lastNudgePeerFrames = framesBeforeAvailability
-        // 别克 B233：问候组（含 0x4E0C）要先用自己的 ACK 走完一轮，抢在 ACK 之前
-        // 灌 0x4300 会被车机当成乱序，之后整段不再回帧。
-        if (buickB233) {
-            sleepQuietly(BUICK_PRE_AVAILABILITY_SETTLE_MS)
-            if (!channel.isAlive) throw IOException("别克 B233：发 0x4300 之前链路已断开")
-        }
-        sendAvailability()
-        // 别克 B233：0x4300 之后车机专心处理可用性帧，这段窗口里再发任何控制帧
-        // 都会让它放弃本轮握手——硬等一段再开始轮询。
-        if (buickB233) {
-            sleepQuietly(BUICK_POST_AVAILABILITY_SETTLE_MS)
-            if (!channel.isAlive) {
-                throw IOException("别克 B233：0x4300 之后链路被车机断开（不接受该报文形态）")
+        if (!availabilitySent) {
+            framesBeforeAvailability = channel.peerFrameCount
+            // 催问的静默基线也钉在这一刻：第一次催问（+15s）就能判断车机是否还在回帧。
+            lastNudgePeerFrames = framesBeforeAvailability
+            // 别克 B233：问候组（含 0x4E0C）要先用自己的 ACK 走完一轮，抢在 ACK 之前
+            // 灌 0x4300 会被车机当成乱序，之后整段不再回帧。
+            if (buickB233) {
+                sleepQuietly(BUICK_PRE_AVAILABILITY_SETTLE_MS)
+                if (!channel.isAlive) throw IOException("别克 B233：发 0x4300 之前链路已断开")
             }
+            sendAvailability()
+            // 别克 B233：0x4300 之后车机专心处理可用性帧，这段窗口里再发任何控制帧
+            // 都会让它放弃本轮握手——硬等一段再开始轮询。
+            if (buickB233) {
+                sleepQuietly(BUICK_POST_AVAILABILITY_SETTLE_MS)
+                if (!channel.isAlive) {
+                    throw IOException("别克 B233：0x4300 之后链路被车机断开（不接受该报文形态）")
+                }
+            }
+        } else {
+            log("iap2 0x4300 已在 0x5702 之后提前发出——此处不重发（0x4301 若早到已在暂存区）")
         }
         // 车机声明里没有 0x4301 就直接跳过等待（Audi 实测每轮白等 10s）：
         // 真 iPhone 对这类车机也不等——AirPlay 端点经 mDNS/网关合成。
-        val declaresStartSession = accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)
         // 没拿到 0x5703（新协议车机）时，0x4301 是**唯一**的 AP 信息来源——窗口给足；
         // 真有 0x5703 的旧协议车机保持 3 秒短窗口（应答都在毫秒级）。
         // 别克 B233 用最长窗口：它要吃完问候组再处理 75/69 字节的双 group 报文。

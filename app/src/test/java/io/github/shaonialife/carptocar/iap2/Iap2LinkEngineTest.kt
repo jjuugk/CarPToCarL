@@ -384,6 +384,75 @@ class Iap2LinkEngineTest {
         return raw
     }
 
+    // ---- EAK / RTO 回归 ----
+
+    /**
+     * 收到 EAK 必须**立刻**重传，不等本地 RTO。
+     *
+     * 2026-10-28 大众实测：车机在 12.595 发 EAK（ctl=0x60，要求从 106 重传），
+     * 我们靠本地 4 秒 RTO 到 16.515 才补——那一轮 bring-up 总共只有 17 秒。
+     */
+    @Test
+    fun extendedAckTriggersImmediateRetransmit() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        assertTrue(phone.sendControl(Iap2Csm.encode(0x1D02), 10))
+        val sent = parseFrames(phone.takeOutput()).single { it.control == 0x40 }
+        // 故意不把数据帧喂给车机（模拟丢包），只回一条 EAK 说「我从这条开始没收到」
+        phone.feed(extendedAckFrame(ack = sent.sequence), 50)
+
+        val retransmitted = parseFrames(phone.takeOutput()).filter { it.control == 0x40 }
+        assertEquals("EAK 后必须立即重发一帧（不等 4s RTO）", 1, retransmitted.size)
+        assertEquals("重传必须沿用原序号", sent.sequence, retransmitted[0].sequence)
+    }
+
+    /**
+     * 重传节拍跟随对端在 sync 里声明的 RTO，本地默认值只作兜底。
+     * 大众声明 2000ms，而本地默认 4000ms——差的那 2 秒在十几秒的窗口里很贵。
+     */
+    @Test
+    fun retransmissionUsesPeerDeclaredTimeout() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(retransmissionTimeoutMillis = 2_000)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        assertTrue(phone.sendControl(Iap2Csm.encode(0x1D02), 10))
+        phone.takeOutput()
+        phone.advanceTime(2_100)
+        val frames = parseFrames(phone.takeOutput())
+        assertEquals(
+            "对端声明 RTO=2s，2.1s 到点就该重传（本地默认 4s 时这里不会有输出）",
+            1,
+            frames.count { it.control == 0x40 },
+        )
+    }
+
+    /** 构造车机侧的 EAK 帧（control=0x60 = ACK|EAK，无载荷，长度 9）。 */
+    private fun extendedAckFrame(
+        ack: Int,
+        sequence: Int = 3,
+    ): ByteArray {
+        val frame = ByteArray(9)
+        frame[0] = 0xFF.toByte()
+        frame[1] = 0x5A
+        frame[2] = 0
+        frame[3] = 9
+        frame[4] = 0x60
+        frame[5] = sequence.toByte()
+        frame[6] = ack.toByte()
+        frame[7] = 10
+        var sum = 0
+        for (index in 0 until 8) sum += frame[index].toInt() and 0xFF
+        frame[8] = (-sum and 0xFF).toByte()
+        return frame
+    }
+
     private fun exchange(
         a: Iap2LinkEngine,
         b: Iap2LinkEngine,
