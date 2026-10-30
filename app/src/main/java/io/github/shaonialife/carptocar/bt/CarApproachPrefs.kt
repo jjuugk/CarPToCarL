@@ -1,0 +1,110 @@
+package io.github.shaonialife.carptocar.bt
+
+import android.content.Context
+
+/**
+ * 「靠近车机自动启动」的偏好与运行时状态（2026-10-30）。
+ *
+ * 存在 `settings` 里与 [io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs]
+ * 同一份文件——两者是同一件事的两层：本类管「怎么被唤醒」（后台静默检测），
+ * AutoConnectPrefs 管「唤醒后要不要连」。
+ */
+object CarApproachPrefs {
+    /**
+     * 默认开：只在**已指定目标车机**时才可能触发（见 CarApproachPolicy.NO_TARGET），
+     * 因此不会误连测试台或其它已配对设备。
+     */
+    const val DEFAULT_ENABLED = true
+
+    private const val PREFS_NAME = "settings"
+    private const val KEY_ENABLED = "car_approach_autostart"
+    private const val KEY_LAST_TRIGGER = "car_approach_last_trigger_at"
+    private const val KEY_SUPPRESSED = "car_approach_suppressed"
+    private const val KEY_BATTERY_PROMPT_AT = "car_approach_battery_prompt_at"
+
+    /**
+     * 「请把本应用加入电池优化白名单」的提醒间隔：7 天。
+     * 太长会让用户永远错过（一旦被限流，功能就是静默失效，他自己看不出来）；
+     * 太短会变成骚扰。拨动开关时不受此限（force）。
+     */
+    const val BATTERY_PROMPT_INTERVAL_MILLIS = 7L * 24 * 3_600_000
+
+    fun enabled(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ENABLED, DEFAULT_ENABLED)
+
+    fun setEnabled(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ENABLED, enabled)
+            .apply()
+    }
+
+    /** 上次触发时刻（墙钟毫秒，0 = 从未触发）。 */
+    fun lastTriggerAt(context: Context): Long =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_TRIGGER, 0L)
+
+    fun markTriggered(
+        context: Context,
+        at: Long = System.currentTimeMillis(),
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_TRIGGER, at)
+            .apply()
+    }
+
+    /**
+     * 用户手动断开/取消后置位：同一段停车期间不再自动拉起。
+     * 车机蓝牙链路断开（ACL_DISCONNECTED，通常意味着人离开了车）时自动清除。
+     */
+    fun suppressed(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SUPPRESSED, false)
+
+    fun setSuppressed(
+        context: Context,
+        suppressed: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_SUPPRESSED, suppressed)
+            .apply()
+    }
+
+    /** 距上次提醒电池优化是否已超过 [BATTERY_PROMPT_INTERVAL_MILLIS]（从未提醒过 = true）。 */
+    fun batteryPromptDue(
+        context: Context,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val last =
+            context
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_BATTERY_PROMPT_AT, 0L)
+        if (last <= 0L) return true
+        val elapsed = now - last
+        // 系统时间被往回调时 elapsed 为负：当作刚提醒过，别趁乱再弹
+        return elapsed >= BATTERY_PROMPT_INTERVAL_MILLIS
+    }
+
+    fun markBatteryPrompt(
+        context: Context,
+        at: Long = System.currentTimeMillis(),
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_BATTERY_PROMPT_AT, at)
+            .apply()
+    }
+}

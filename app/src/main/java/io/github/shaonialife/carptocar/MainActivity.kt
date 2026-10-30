@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.method.ScrollingMovementMethod
@@ -31,6 +32,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.bt.BtProfiles
+import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.buick.ConnectionProfile
 import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
@@ -53,6 +55,13 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogExporter
 import io.github.shaonialife.carptocar.util.SysShell
 import java.util.Locale
+
+/**
+ * 「靠近车机」自动启动标记（2026-10-30）：由 [io.github.shaonialife.carptocar.bt.CarApproachReceiver]
+ * 在检测到目标车机蓝牙靠近时放进 Intent。带这个标记进来 = 冷启动自动连接，
+ * 也可以在 App 已在后台时重新武装一次自动连接（onNewIntent）。
+ */
+const val EXTRA_CAR_APPROACH = "io.github.shaonialife.carptocar.extra.CAR_APPROACH"
 
 /**
  * 手机侧界面（Material 3 暗色重构，设计稿 design/phone-ui-proto.html）：
@@ -192,6 +201,8 @@ class MainActivity : AppCompatActivity() {
                         // connectCancelled 一起让 autoJoin 流程立即中止）
                         wifiJoinDialog?.cancel()
                         wifiJoinDialog = null
+                        // 用户主动取消：同样抑制「靠近车机」的自动拉起，避免取消后立刻又被唤起
+                        CarApproachPrefs.setSuppressed(this, true)
                         SessionController.cancelConnecting(this)
                     },
                 ),
@@ -225,6 +236,55 @@ class MainActivity : AppCompatActivity() {
         autoConnectRequested = false
         log("AUTOCONNECT: 打开 App 即自动发起连接（可在「连接准备」里关闭）")
         proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
+    }
+
+    /**
+     * 电池优化豁免：只在「还没豁免 + 本次会话没提示过」时弹一次。
+     *
+     * 「靠近车机自动启动」依赖系统把蓝牙 ACL 广播投递给**不在前台**的进程；
+     * 一旦被列入电池优化（MagicOS 的「应用启动管理」是同一类限制），系统会冻结进程
+     * 或直接丢弃广播，表现就是「有时候能自动连、有时候毫无反应」。
+     */
+    private fun ensureBatteryExempt(force: Boolean = false) {
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        if (!force && !CarApproachPrefs.batteryPromptDue(this)) return
+        CarApproachPrefs.markBatteryPrompt(this)
+        DarkMessageDialog.show(
+            this,
+            "允许后台运行",
+            "「靠近车机自动启动」要在 App 没打开时收到车机的蓝牙信号。\n\n" +
+                "系统若对本应用限制后台（电池优化 / 应用启动管理），这条信号可能被丢掉，" +
+                "表现为有时能自动连、有时没反应。请在接下来的系统页面里选择「不限制 / 允许」。",
+            listOf(
+                DarkMessageDialog.Action("稍后", DarkMessageDialog.Emphasis.TEXT) {
+                    log("APPROACH: 未豁免电池优化——后台自动启动可能被系统限流")
+                },
+                DarkMessageDialog.Action("去设置", DarkMessageDialog.Emphasis.PRIMARY) {
+                    requestBatteryExemption()
+                },
+            ),
+        )
+    }
+
+    /** 拉起系统的「忽略电池优化」授权页；部分 ROM 不认包名直连，退回列表页。 */
+    private fun requestBatteryExemption() {
+        val direct =
+            Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName"),
+            )
+        val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        val opened =
+            runCatching { startActivity(direct) }.isSuccess ||
+                runCatching { startActivity(fallback) }.isSuccess
+        log(
+            if (opened) {
+                "APPROACH: 已打开电池优化设置——请把本应用设为「不限制」"
+            } else {
+                "APPROACH: 无法打开电池优化设置，请手动在系统设置里允许本应用后台运行"
+            },
+        )
     }
 
     /**
@@ -378,6 +438,10 @@ class MainActivity : AppCompatActivity() {
                 listOf(
                     DarkMessageDialog.Action("取消") {},
                     DarkMessageDialog.Action("断开", DarkMessageDialog.Emphasis.DANGER) {
+                        // 手动断开 = 这一轮停车期间不要被「靠近车机」自动再拉起来
+                        // （车机发现链路断了会立刻回连，不抑制就会变成「断开 → 自动重连」死循环）。
+                        // 车机蓝牙链路真断（人离开/熄火）时由 CarApproachReceiver 自动解除。
+                        CarApproachPrefs.setSuppressed(this, true)
                         SessionController.disconnect(this)
                     },
                 ),
@@ -645,8 +709,15 @@ class MainActivity : AppCompatActivity() {
 
         // 启动后自动连接：只在**冷启动**发起（旋转/重建不重复）。
         // 真正发起由 maybeAutoConnect 判定——前置条件不齐时它会等下一次时机。
-        if (savedInstanceState == null) {
+        // 「靠近车机」拉起的这一轮即使 Activity 正在后台重建，也要重新武装一次。
+        val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
+        if (savedInstanceState == null || launchedByApproach) {
             autoConnectRequested = true
+            if (launchedByApproach) {
+                log("APPROACH: 检测到目标车机蓝牙靠近，App 已被自动拉起")
+                // 消费掉标记：旋转/重建时不再当作一次新的靠近
+                intent?.removeExtra(EXTRA_CAR_APPROACH)
+            }
             mainHandler.postDelayed({ maybeAutoConnect() }, 700L)
         }
     }
@@ -713,6 +784,47 @@ class MainActivity : AppCompatActivity() {
             autoConnectNote.text =
                 if (checked) "打开 App 即自动发起连接（默认开启）" else "关闭后需手动点「启动连接」"
             log("AUTOCONNECT: 启动后自动连接已${if (checked) "开启" else "关闭"}")
+        }
+
+        // 靠近车机自动启动：后台静默检测（只听系统蓝牙 ACL 事件，不扫描不轮询）。
+        // 前提是「目标车机」已指定——否则一律不动作，避免误连测试台/其它已配对设备。
+        val switchCarApproach =
+            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarApproach)
+        val carApproachNote = findViewById<TextView>(R.id.carApproachNote)
+        fun renderCarApproachNote() {
+            val target = TargetDevicePrefs.get(this)
+            carApproachNote.text =
+                when {
+                    !switchCarApproach.isChecked -> "关闭后只在打开 App 时自动连接"
+                    target == null -> "未指定目标车机——先在下方「蓝牙配对」里选定车机"
+                    else -> "「${target.name}」靠近时自动打开 App 并连接（静默检测，不扫描）"
+                }
+        }
+        switchCarApproach.isChecked = CarApproachPrefs.enabled(this)
+        renderCarApproachNote()
+        // 开关默认就是开的，用户可能从没碰过它——进界面时按 7 天节流提醒一次。
+        // 延后 3 秒且要求「免责声明已接受」，避免和首次启动的免责声明弹窗叠在一起。
+        if (switchCarApproach.isChecked && TargetDevicePrefs.get(this) != null) {
+            mainHandler.postDelayed(
+                {
+                    if (!isFinishing && !isDestroyed && DisclaimerPrefs.hasAcceptedCurrent(this)) {
+                        ensureBatteryExempt()
+                    }
+                },
+                3_000L,
+            )
+        }
+        switchCarApproach.setOnCheckedChangeListener { _, checked ->
+            CarApproachPrefs.setEnabled(this, checked)
+            renderCarApproachNote()
+            log(
+                "APPROACH: 靠近车机自动启动已${if (checked) "开启" else "关闭"}" +
+                    (if (checked && TargetDevicePrefs.get(this) == null) "（尚未指定目标车机，暂不会触发）" else ""),
+            )
+            // 手机端能不能「先于别人动手」取决于系统愿不愿意把广播投递过来：
+            // 电池优化一开，后台进程被冻结/限流，ACL 广播就送不到，功能表现为时好时坏。
+            // 用户刚拨开开关 = 明确要用这个功能，此时不受 7 天节流限制。
+            if (checked) ensureBatteryExempt(force = true)
         }
 
         // 本机蓝牙地址：Honor/MagicOS 等机型把 MAC 全面脱敏（连 adb shell 都读不到），
@@ -2351,6 +2463,21 @@ class MainActivity : AppCompatActivity() {
             if (gone >= ids.size || SystemClock.uptimeMillis() >= deadline) return gone
             Thread.sleep(200)
         }
+    }
+
+    /**
+     * App 已在后台/前台时又被「靠近车机」拉起（singleTask + SINGLE_TOP）：
+     * 不重建界面，只重新武装一次自动连接。已在连接或已连上时 [maybeAutoConnect] 自己会跳过。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!intent.getBooleanExtra(EXTRA_CAR_APPROACH, false)) return
+        intent.removeExtra(EXTRA_CAR_APPROACH)
+        if (isFinishing || isDestroyed) return
+        log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行），重新发起连接")
+        autoConnectRequested = true
+        mainHandler.postDelayed({ maybeAutoConnect() }, 400L)
     }
 
     override fun onResume() {
