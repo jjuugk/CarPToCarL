@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import io.github.shaonialife.carptocar.util.LogThrottle
 
 /**
  * 本机 CarLife **车机端（HU）** 客户端。
@@ -126,6 +127,16 @@ class CarLifeHuClient(
     private val sockets = ConcurrentHashMap<Int, Socket>()
     private var cmdOut: OutputStream? = null
     private var touchOut: OutputStream? = null
+
+    /**
+     * 低频诊断日志的限流。
+     *
+     * 「媒体进度」每秒一条、「媒体信息解析为空」每次媒体变化一条——前者在进程被系统
+     * 冻结再解冻时会把积压的几百条一次吐出（2026-10-30 日志里 0.5 秒刷了 100+ 行），
+     * 把真正要看的那几行挤没。这两类信息对定位问题价值很低，限流后每周转一圈即可。
+     */
+    private val progressLog = LogThrottle(10_000L)
+    private val emptyMediaLog = LogThrottle(5_000L)
 
     /** 命令帧写锁：心跳线程、握手线程与视频看门狗会并发下发，必须串行写同一条 socket。 */
     private val writeLock = Any()
@@ -547,7 +558,10 @@ class CarLifeHuClient(
                 // 手机 CarLife 内置播放器开始播放时主动推送的媒体信息（歌名/歌手/封面）
                 val infos = CarLifeProtocol.parseMediaInfoList(payload)
                 if (infos.isEmpty()) {
-                    log("CARLIFE: 收到媒体信息（${payload.size}B）但解析为空")
+                    // 每次媒体变化都会来一包，解析不出内容时对排查无帮助——限流 5 秒
+                    if (emptyMediaLog.allow("media-info-empty")) {
+                        log("CARLIFE: 收到媒体信息（${payload.size}B）但解析为空（同类提示 5 秒最多一行）")
+                    }
                     return
                 }
                 infos.forEach { info ->
@@ -561,7 +575,8 @@ class CarLifeHuClient(
             }
 
             CarLifeProtocol.MD_MEDIA_PROGRESS -> {
-                // 媒体进度条（u32 progressBar，单位 ms），暂只记录
+                // 媒体进度条（u32 progressBar，单位 ms）。只做低频诊断：限流 10 秒，
+                // 否则冻结解冻一次就能把几百行灌进日志（见 progressLog 注释）。
                 val progress = if (payload.size >= 4) {
                     ((payload[0].toInt() and 0xFF) shl 24) or
                         ((payload[1].toInt() and 0xFF) shl 16) or
@@ -570,7 +585,9 @@ class CarLifeHuClient(
                 } else {
                     0
                 }
-                log("CARLIFE: 媒体进度 ${progress}ms")
+                if (progressLog.allow("media-progress")) {
+                    log("CARLIFE: 媒体进度 ${progress}ms（同类提示 10 秒最多一行）")
+                }
             }
 
             in CarLifeProtocol.MD_IGNORED_IDS -> {

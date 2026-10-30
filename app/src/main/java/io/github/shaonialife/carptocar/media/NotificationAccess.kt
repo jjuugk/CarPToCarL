@@ -201,7 +201,13 @@ object NotificationAccess {
             android.service.notification.NotificationListenerService.requestRebind(
                 MediaListenerService.componentName(context),
             )
-            log("MEDIA: 通知监听器未被系统绑定——已请求重绑（系统 API，无需 shell）")
+            // 日志单独限频：动作可以每 10 秒做一次（系统绑定是异步的，多试几次有意义），
+            // 但同一句话每 10 秒写一遍毫无信息量——实测一台机器能刷出 90 多条，
+            // 把会话关键行全顶出可见区。
+            if (now - lastRebindLogAt >= REBIND_LOG_INTERVAL_MS) {
+                lastRebindLogAt = now
+                log("MEDIA: 通知监听器未被系统绑定——已请求重绑（系统 API，无需 shell；同类提示 5 分钟一行）")
+            }
             true
         }.getOrElse {
             log("MEDIA: 请求重绑失败 - ${it.message}")
@@ -211,8 +217,14 @@ object NotificationAccess {
 
     private var lastRebindRequestAt = 0L
 
+    /** 「已请求重绑」这行日志的上次写入时刻：[now] 也是 elapsedRealtime，单位一致。 */
+    private var lastRebindLogAt = 0L
+
     /** 重绑限频：系统绑定是异步的，短时间连点没有意义。 */
     private const val REBIND_MIN_INTERVAL_MS = 10_000L
+
+    /** 同一句「未绑定」提示的落日志间隔：动作照做，话只 5 分钟说一次。 */
+    private const val REBIND_LOG_INTERVAL_MS = 300_000L
 
     private val rebinding = AtomicBoolean(false)
 }

@@ -690,6 +690,7 @@ CarPToCarL/
 | [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)                               | iAP2 / AirPlay 协议依据       |
 | [docs/CARLIFE-GATEWAY-FEASIBILITY.md](docs/CARLIFE-GATEWAY-FEASIBILITY.md)     | 网关方案可行性评估                 |
 | [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)                                     | 开源 / 收费的法律风险梳理与商业化清单      |
+| [docs/process-freeze-recovery.md](docs/process-freeze-recovery.md)             | 进程被系统冻结的判定、PROC 日志与解冻后自动恢复 |
 
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 

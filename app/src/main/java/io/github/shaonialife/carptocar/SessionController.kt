@@ -16,6 +16,7 @@ import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
@@ -507,6 +508,20 @@ object SessionController {
      */
     private const val AUDIO_REBUILD_DELAY_MS = 2_500L
 
+    /**
+     * 解冻后重建会话的退避序列（ms）。
+     *
+     * 车机撤会话到重新开放 AirPlay 端口之间有一段空窗，紧贴着重连只会被
+     * Connection refused 打回；3/6/12/24 秒四轮覆盖 45 秒，足够它把旧会话收干净。
+     */
+    private val recoveryBackoffMillis = longArrayOf(3_000L, 6_000L, 12_000L, 24_000L)
+
+    /** 每次重建后给交接流程的观察窗：配对 + SETUP + RECORD 正常 3~6 秒出首帧。 */
+    private const val RECOVERY_SETTLE_MILLIS = 8_000L
+
+    /** 端口探测超时（本机回环 / 车机同网段，都不该慢）。 */
+    private const val PROBE_TIMEOUT_MILLIS = 800L
+
     /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
     val sessionStarting = AtomicBoolean(false)
 
@@ -545,6 +560,22 @@ object SessionController {
     private var pendingWaitGaveUp: Boolean = false
 
     /**
+     * 最后一次拿到完整热点信息的端点（SSID / 密码 / 地址）。
+     *
+     * 解冻恢复要靠它重走整轮交接：`onCarPlayEndpoint` 认的只有这条报文里的东西，
+     * 而车机不会因为「手机刚从冻结里出来」再补发一遍 0x4301。
+     */
+    @Volatile
+    private var lastGoodEndpoint: Iap2SenderSession.CarPlayEndpoint? = null
+
+    /** 解冻恢复的互斥：一次只允许一条恢复线程，避免冻结抖动叠出好几轮并行重建。 */
+    private val freezeRecovery = AtomicBoolean(false)
+
+    /** 用户当前是否希望保持连接（「启动连接」置 true、「断开」置 false）——解冻恢复的前置条件。 */
+    @Volatile
+    private var sessionWanted: Boolean = false
+
+    /**
      * 当前连接阶段的一句话提示（英雄卡副标题用，详细过程看日志）。
      * 由各阶段显式设置；null 时 UI 显示默认文案。
      */
@@ -581,6 +612,156 @@ object SessionController {
             appendLog(">>> 本轮蓝牙链路断开——释放「会话处理中」，等待车机重连端点接手")
             // 未推流就断链 = 这一轮没连上：报文快照落盘（成功过的轮次在 markLinked 时已丢弃）
             SessionTrace.sessionEnd("蓝牙链路断开，未进入推流")
+        }
+    }
+
+    /**
+     * 保活服务的心跳发现进程刚被系统冻结过（[frozenMillis] 毫秒）——自检并自动重建。
+     *
+     * ## 为什么冻结后必须主动收拾
+     *
+     * 冻结期间本进程一帧没送、一次 keepAlive 也没回，车机那边的判定只有一个：超时。
+     * 实测（2026-10-30 奥迪 MIB3 日志）冻 133 秒后车机先关 AirPlay 控制通道、
+     * 再撤 `_airplay._tcp`、最后断蓝牙 iAP2，一条不留。等它自己回来是等不到的——
+     * 因为车机认为「这台手机已经走了」。
+     *
+     * 判据用 [sessionWanted]（用户意图）而不是 [connectCancelled]：链路一断
+     * [onSenderLinkClosed] 就会把后者置 true，那正是冻结后的常态，用它等于永不恢复。
+     *
+     * 冻结不足 [FreezeWatch.RECOVER_MIN_FROZEN_MS] 的只落日志不动手（多半是主线程跑重活，
+     * 会话没受伤，重建反而多拆一次链）。
+     */
+    fun onProcessResumed(frozenMillis: Long) {
+        if (!sessionWanted) {
+            appendLog("PROC: 解冻后用户已断开——不自动恢复")
+            return
+        }
+        if (!freezeRecovery.compareAndSet(false, true)) {
+            appendLog("PROC: 上一次解冻恢复还在进行——本次跳过")
+            return
+        }
+        Bg.run("freeze-recovery") {
+            try {
+                recoverAfterFreeze(frozenMillis)
+            } catch (error: Exception) {
+                appendLog("PROC: 解冻恢复异常 - ${error.message ?: error.javaClass.simpleName}")
+            } finally {
+                freezeRecovery.set(false)
+            }
+        }
+    }
+
+    /**
+     * 解冻后的恢复流程：先给积压的帧一点时间自己缓过来，仍无画面才按退避重建。
+     *
+     * 退避间隔逐轮翻倍（3/6/12/24 秒）：车机撤会话后要先关旧会话、再重新开放 AirPlay
+     * 端口，这段时间里猛怼只会被 Connection refused 打回来，还多刷一堆失败日志。
+     */
+    private fun recoverAfterFreeze(frozenMillis: Long) {
+        val seconds = frozenMillis / 1_000
+        // 解冻瞬间大量积压回调正在涌出，先让渲染/推流线程把这口气喘完再判定
+        sleepQuietly(1_500)
+        if (isStreaming()) {
+            appendLog("PROC: 解冻 ${seconds}s 后画面仍在推（CarLife 直通没断）——无需重建")
+            return
+        }
+        val endpoint = lastGoodEndpoint
+        val carLifeAlive = probeLocalPort(CarLifeProtocol.PORT_CMD)
+        val airPlayAlive = endpoint != null && probeEndpoint(endpoint)
+        appendLog(
+            "PROC: 解冻 ${seconds}s 自检——CarLife:${CarLifeProtocol.PORT_CMD}=" +
+                (if (carLifeAlive) "在监听" else "已不在（引擎被一起冻掉/退出了）") +
+                "，车机 AirPlay=" +
+                when {
+                    endpoint == null -> "没有端点记录（本轮还没走到热点这一步）"
+                    airPlayAlive -> "端口仍可达"
+                    else -> "不可达（多半已被车机撤掉会话）"
+                } +
+                "，推流=" + (if (isStreaming()) "在" else "已断"),
+        )
+        if (endpoint == null) {
+            // 还没有热点凭据：重连只能靠车机重新下发 0x4301，先把蓝牙监听拉起来等
+            appendLog("PROC: 无端点可重走——重新拉起蓝牙链路，等车机回连")
+            restartBluetoothForRecovery()
+            return
+        }
+        recoveryBackoffMillis.forEachIndexed { index, delay ->
+            if (connectCancelled || isStreaming()) return
+            sleepQuietly(delay)
+            if (connectCancelled || isStreaming()) return
+            appendLog(
+                "PROC: 重建会话 第 ${index + 1}/${recoveryBackoffMillis.size} 次" +
+                    "（退避 ${delay}ms · 端点 ${endpoint.ssid}）",
+            )
+            // 上一轮可能卡在「会话处理中」：冻结后它已不可能再推进，强释放让本轮进场。
+            // 不清的话 onCarPlayEndpoint 会直接以「已有会话在处理中」把恢复请求丢掉。
+            if (sessionStarting.get()) {
+                appendLog("PROC: 上一轮仍占着「会话处理中」——强制释放后重走交接")
+                sessionStarting.set(false)
+            }
+            restartBluetoothForRecovery()
+            onCarPlayEndpoint(endpoint, "解冻后自动恢复 #${index + 1}")
+            // 给这一轮交接起步的时间：配对 + SETUP + RECORD 正常在 3~6 秒内出首帧
+            var waited = 0L
+            while (waited < RECOVERY_SETTLE_MILLIS) {
+                sleepQuietly(500)
+                waited += 500
+                if (connectCancelled || isStreaming()) break
+            }
+            if (isStreaming()) {
+                appendLog("PROC: ✓ 会话已自动恢复（第 ${index + 1} 次尝试）")
+                return
+            }
+        }
+        if (!connectCancelled && !isStreaming()) {
+            appendLog(
+                "PROC: 自动恢复未成功（${recoveryBackoffMillis.size} 次退避都没起来）——" +
+                    "请手动点「启动连接」；若反复如此，把日志发出来",
+            )
+        }
+    }
+
+    /** 恢复前把蓝牙组件拉起来（已运行则空操作）。真车/测试台两条路径都拉，判断交给组件自身。 */
+    private fun restartBluetoothForRecovery() {
+        if (bluetoothClient?.isRunning == true && bluetoothServer?.isRunning == true) return
+        runCatching { bluetoothClient?.start() }
+        runCatching { bluetoothServer?.start() }
+        appendLog("PROC: 蓝牙链路已重新拉起（等车机重新下发 0x4301）")
+    }
+
+    /** 本机端口是否在监听（CarLife 引擎 7240）。600ms 足够，本机回环不会慢。 */
+    private fun probeLocalPort(port: Int): Boolean =
+        try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", port), PROBE_TIMEOUT_MILLIS.toInt())
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+
+    /** 车机 AirPlay 端口是否还能连（默认 7000）。只用来定性，连不上也照样尝试重建。 */
+    private fun probeEndpoint(endpoint: Iap2SenderSession.CarPlayEndpoint): Boolean {
+        val port = if (endpoint.airPlayPort > 0) endpoint.airPlayPort else 7000
+        val host =
+            endpoint.ipAddresses.firstOrNull { EndpointHosts.isIpv4(it) }
+                ?: endpoint.ipAddresses.firstOrNull()
+                ?: return false
+        return try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(host, port), PROBE_TIMEOUT_MILLIS.toInt())
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun sleepQuietly(millis: Long) {
+        try {
+            Thread.sleep(millis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
     }
 
@@ -728,6 +909,8 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
+        sessionWanted = true
         // 报文录制分界：一次点击 = 一段独立对话，事后按这行切分
         SessionTrace.sessionStart("用户点击启动连接")
         // 新一次用户点击 = 新的 5 分钟等待预算（断链重连不再重置，见 pendingWaitBudgetStartedAt）
@@ -764,6 +947,8 @@ object SessionController {
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
         val hadProjection = CarPlayService.mediaProjection != null
+        // 用户终态：解冻恢复不得再自动把会话拉起来
+        sessionWanted = false
         SessionTrace.sessionEnd("用户手动断开")
         pendingEndpointUpdate = null
         retireSession()
@@ -2343,6 +2528,9 @@ object SessionController {
             ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
                 "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",
         )
+        // 记下这一轮的完整端点：进程被系统冻结后车机不会再补发 0x4301，
+        // 解冻恢复只能靠这份快照重走交接（见 onProcessResumed）。
+        lastGoodEndpoint = endpoint
         phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
         // 0x4301 同样带热点密码（BMW iD9 不发 0x5703，AP 信息只走这条路）。
