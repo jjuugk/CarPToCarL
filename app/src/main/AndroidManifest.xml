@@ -94,6 +94,13 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|mediaProjection" />
 
+        <!-- 通知栏「断开」：后台自动连接时界面上没有窗口，断开的入口必须独立于
+             界面存活，所以走广播。exported=false 即可——PendingIntent 由本应用创建，
+             投递时沿用本应用身份。 -->
+        <receiver
+            android:name=".service.NotificationActionReceiver"
+            android:exported="false" />
+
         <!-- 虚拟屏桌面（exported：shell am start 需要可从外部拉起） -->
         <activity
             android:name=".launcher.DockActivity"

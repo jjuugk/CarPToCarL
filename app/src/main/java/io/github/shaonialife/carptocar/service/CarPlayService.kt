@@ -3,23 +3,49 @@ package io.github.shaonialife.carptocar.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import io.github.shaonialife.carptocar.MainActivity
+import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.util.DebugFileLog
 
 /**
  * 前台保活服务：连接建立期间以 connectedDevice 类型常驻，
  * 防止 app 退到后台后被系统/MagicOS 省电策略杀死导致断连。
  * 连接逻辑仍运行在 MainActivity 派生的线程里——本服务负责保住进程。
+ *
+ * ## 通知栏是这个服务的第二个职责：唯一「看得见、关得掉」的界面（2026-10-30）
+ *
+ * 靠近车机自动启动把界面拉成**后台运行**时（系统限制后台弹界面 / 屏幕锁着），
+ * 用户面前没有任何窗口，最近任务里也找不到——连接在跑，人却看不见，更没法停。
+ * 所以常驻通知不能只是一行「运行中」：它必须能回答两个问题——
+ *
+ * 1. **在做什么**（[SessionController.notificationSummary]，每 3 秒刷新一次阶段文案）；
+ * 2. **怎么关**（通知上的「断开」按钮，走 [NotificationActionReceiver]，不依赖界面存活）。
+ *
+ * 通道用 IMPORTANCE_DEFAULT + 静音：LOW 在 MagicOS 上会被折叠进「静默通知」，
+ * 等于没通知；DEFAULT 则常驻通知栏、有图标，但不响不震。
  */
 class CarPlayService : Service() {
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+
+    /** 状态文案刷新：通知栏要跟着阶段走，否则「已连接」和「等车机」长得一样。 */
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val stateTick =
+        object : Runnable {
+            override fun run() {
+                refreshNotification()
+                uiHandler.postDelayed(this, STATE_TICK_MS)
+            }
+        }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,6 +96,9 @@ class CarPlayService : Service() {
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
         )
         acquireLocks()
+        // 通知栏文案跟着会话阶段走：服务一活就开始刷新，销毁时停。
+        uiHandler.removeCallbacks(stateTick)
+        uiHandler.post(stateTick)
         // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
         if (pendingProjectionResult != null) {
             upgradeToProjection()
@@ -124,6 +153,7 @@ class CarPlayService : Service() {
     }
 
     override fun onDestroy() {
+        uiHandler.removeCallbacks(stateTick)
         releaseLocks()
         // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
         // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
@@ -142,8 +172,23 @@ class CarPlayService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "carplay_connection"
+        /**
+         * 通道 id 与 1.2.2 之前**不同**：旧通道 `carplay_connection` 建成了 IMPORTANCE_LOW，
+         * 在 MagicOS 上会被折叠进「静默通知」——用户面前等于没有通知。
+         * 通道的重要级别创建后程序改不了（只有用户能改），所以换 id 重建。
+         */
+        private const val CHANNEL_ID = "carplay_session_v2"
+        private const val LEGACY_CHANNEL_ID = "carplay_connection"
         private const val NOTIFICATION_ID = 1
+
+        /** 通知栏文案刷新间隔：够跟上阶段变化，又不至于频繁唤醒。 */
+        private const val STATE_TICK_MS = 3_000L
+
+        /** 首帧文案（服务刚起来、[SessionController.notificationSummary] 还没跑第一轮时用）。 */
+        private const val DEFAULT_TEXT = "正在准备连接车机…（点「断开」可随时停止）"
+
+        /** 通知上的「断开」——直接断开并停服务，不依赖界面是否存活。 */
+        const val ACTION_DISCONNECT = "io.github.shaonialife.carptocar.action.NOTIFICATION_DISCONNECT"
 
         /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
         @Volatile
@@ -162,39 +207,68 @@ class CarPlayService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
+    /** 文案随会话阶段刷新（通知栏是后台连接时唯一的可见界面）。 */
+    private fun refreshNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching {
+            manager.notify(NOTIFICATION_ID, buildNotification(SessionController.notificationSummary()))
+        }
+    }
+
+    private fun buildNotification(text: String = DEFAULT_TEXT): Notification {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
-                    "CarPToCarL 连接",
-                    NotificationManager.IMPORTANCE_LOW,
+                    "车机连接",
+                    // DEFAULT + 静音：LOW 会被 MagicOS 折叠进「静默通知」，等于看不见；
+                    // DEFAULT 常驻通知栏有图标，但通道里不给声音、不给震动。
+                    NotificationManager.IMPORTANCE_DEFAULT,
                 ).apply {
-                    description = "保持与车机的连接"
+                    description = "连接车机期间常驻，可在此直接断开"
                     setShowBadge(false)
+                    setSound(null, null)
+                    enableVibration(false)
                 },
             )
+            // 旧通道留着只会在设置里多一条「静默」的重复项，删掉
+            runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
         }
         // 点击通知 → 打开 App 主界面（此前缺 setContentIntent，点击无反应）
         val contentIntent =
-            android.app.PendingIntent.getActivity(
+            PendingIntent.getActivity(
                 this,
                 0,
                 Intent(this, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 },
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        // 「断开」用广播而不是 Activity：后台自动连接时界面可能根本不存在，
+        // 通知是用户唯一能点的地方，必须能独立于界面把会话停掉。
+        val disconnectIntent =
+            PendingIntent.getBroadcast(
+                this,
+                1,
+                Intent(this, NotificationActionReceiver::class.java).setAction(ACTION_DISCONNECT),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("CarPToCarL 运行中")
-            .setContentText("正在保持与车机的连接，点开应用可查看日志")
+            .setContentTitle("CarPToCarL · 车机连接")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(contentIntent)
+            .addAction(0, "断开", disconnectIntent)
+            .addAction(0, "打开界面", contentIntent)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(false)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
     }
 }

@@ -706,6 +706,23 @@ object SessionController {
             bluetoothClient?.isRunning == true
 
     /**
+     * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
+     *
+     * 后台自动连接时用户面前没有界面，通知栏是唯一可见的界面——那里若只写
+     * 「运行中」等于什么都没说。这里把当前阶段摊开：已出画面 / 正在连 / 连上了但
+     * 还在等车机下发信息 / 空转，用户一眼能判断「要不要点断开」。
+     */
+    fun notificationSummary(): String {
+        val hint = phaseHint
+        return when {
+            videoSender?.isRunning == true -> "已连上车机，正在镜像手机画面（点「断开」可停止）"
+            sessionStarting.get() -> hint ?: "正在连接车机…"
+            isSessionRunning() -> hint ?: "蓝牙已连上车机，等待它下发连接信息…"
+            else -> hint ?: "空闲——等待车机靠近，或点「打开界面」查看"
+        }
+    }
+
+    /**
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
