@@ -1,20 +1,14 @@
 package io.github.shaonialife.carptocar.bt
 
-import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
-import androidx.core.content.ContextCompat
 import io.github.shaonialife.carptocar.EXTRA_CAR_APPROACH
 import io.github.shaonialife.carptocar.MainActivity
 import io.github.shaonialife.carptocar.SessionController
-import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
-import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.util.DebugFileLog
-import io.github.shaonialife.carptocar.util.DeviceIdentity
 
 /**
  * 靠近车机自动启动（2026-10-30）——**静默检测**的实现方式。
@@ -27,16 +21,21 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
  * - 本接收器是**清单静态注册**：App 没打开、进程没起来也能收（系统投递时拉起进程），
  *   所以不需要常驻前台服务，也就没有常驻通知。
  *
- * 抢在车机自带「车联」之前的关键（2026-10-30 用户要求）：
- * 手机上车联（HiCar/CarWith 之类）同样监听蓝牙事件，谁先动手谁拿到这轮会话。所以
- * 本接收器**不等界面**，广播到达后按下面的顺序抢时间——
- * 1. 立刻 `startActivity`（拉界面是最慢的一环，越早排队越好，其余动作不阻塞它）；
- * 2. 紧接着在后台直接 `SessionController.startConnection`：RFCOMM 拨号立刻发出，
- *    只依赖已缓存的蓝牙地址，不做任何磁盘/网络准备；
- * 3. 最后才写文件日志（磁盘 IO 放在竞速动作之后，不拖慢前两步）。
+ * ## 命中后做什么：只把 App 叫到前台，连接由前台发起
  *
- * 注：荣耀/华为系 ROM 的「应用启动管理」若禁止本应用自启动，系统会拒绝为广播拉起进程，
- * 此时静默检测无效——需在系统设置里允许本应用自启动（并在「后台弹界面」放行）。
+ * 2026-10-30 实车反馈：本接收器原先还会「不等界面，直接在后台起一轮连接」。
+ * 那样确实把链路建了起来，但**会话是残缺的**——车机端收不到任何数据。
+ * 原因是整条管线并不只是 iAP2 拨号：CarLife 劫持、虚拟屏/编码器、以及
+ * 界面侧的启动自检（残留虚拟屏清理、权限门禁）都挂在 Activity 这一路上，
+ * 绕开界面直接连，握手能过，出流的那一段却起不来。
+ *
+ * 所以现在这里只做一件事：**把 App 带到前台**，并在 Intent 里带
+ * [EXTRA_CAR_APPROACH]，前台据此重新武装「启动后自动连接」、走完整的
+ * `ensureBluetoothReady → startConnection` 流程（含权限、自检、换流）。
+ * 界面已经在后台时走 `onNewIntent`，只重新武装一次，不重建界面。
+ *
+ * 拉起失败（Android 10+ 的后台启动限制 / ROM 禁止自启动）时只记一行线索，
+ * 不弹通知：下次用户手动打开 App 仍会照常自动连接，功能不会丢。
  */
 class CarApproachReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -96,22 +95,24 @@ class CarApproachReceiver : BroadcastReceiver() {
             return
         }
 
-        // ---- 抢时间：先抢前台，再抢链路，最后才写日志 ----
+        // ---- 只做一件事：把界面叫到前台，连接交给前台 ----
+        // 顺序仍按「先动作、后写日志」：磁盘 IO 不挡在拉起界面前面。
         CarApproachPrefs.markTriggered(context)
-        launchApp(context)
-        val fastStarted = fastStartSession(context)
+        val launched = launchApp(context)
         DebugFileLog.append(
             context,
-            "APPROACH: 检测到目标车机「${target.name}」靠近——已拉起 App" +
-                (if (fastStarted) "并在后台直接发起连接" else "（后台直连未发起：需 App 前台完成前置检查）"),
+            "APPROACH: 检测到目标车机「${target.name}」靠近——" +
+                if (launched) "已拉起 App，交给前台自动发起连接" else "拉起 App 被系统拒绝（需允许本应用「自启动/后台弹界面」）",
         )
     }
 
     /**
-     * 把 App 拉到前台。带 [EXTRA_CAR_APPROACH]，界面侧据此重新武装自动连接；
-     * Activity 已在后台时走 onNewIntent，不重建界面。
+     * 把 App 带到前台。带 [EXTRA_CAR_APPROACH]，界面侧据此重新武装自动连接；
+     * Activity 已在后台时走 `onNewIntent`，不重建界面。
+     *
+     * @return true = 已成功把启动请求交给系统；false = 被后台启动限制拦下
      */
-    private fun launchApp(context: Context) {
+    private fun launchApp(context: Context): Boolean {
         val launch =
             Intent(context, MainActivity::class.java).apply {
                 addFlags(
@@ -121,46 +122,15 @@ class CarApproachReceiver : BroadcastReceiver() {
                 )
                 putExtra(EXTRA_CAR_APPROACH, true)
             }
-        runCatching { context.startActivity(launch) }
+        return runCatching { context.startActivity(launch) }
             .onFailure {
                 // 后台启动 Activity 被系统拦截（Android 10+ 限制）：不弹通知、不刷日志，
                 // App 下次被打开时仍会按「启动后自动连接」走一遍，功能不会丢。
-                DebugFileLog.append(context, "APPROACH: 后台拉起 App 被系统拒绝（${it.javaClass.simpleName}）——请允许本应用「自启动/后台弹界面」")
-            }
-    }
-
-    /**
-     * 不等界面，直接在后台起一轮连接（这是跑赢车机自带车联的关键一步）。
-     *
-     * 只在「前面已经成功连过」的条件下做：免责声明已接受、且蓝牙地址可用
-     * （用**已缓存**的地址，不触发 shell 解析，避免多花几百毫秒）。
-     * 任一不满足就交给界面侧的完整前置检查——宁慢不半残。
-     *
-     * 后台启动前台服务在 Android 12+ 一般受限，但「收到需要 BLUETOOTH_CONNECT 权限的
-     * 蓝牙广播」是官方豁免项，本次正属于该情形；仍做兜底，失败只记一行。
-     */
-    private fun fastStartSession(context: Context): Boolean {
-        if (!AutoConnectPrefs.enabled(context)) return false
-        // 没有 BLUETOOTH_CONNECT 时既连不上，也拿不到「后台启动前台服务」的豁免，直接交给界面引导授权
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return false
-        }
-        if (!DisclaimerPrefs.hasAcceptedCurrent(context)) return false
-        val mac =
-            DeviceIdentity.overrideBluetoothMac(context)?.takeIf { it != DeviceIdentity.PLACEHOLDER_MAC }
-                ?: DeviceIdentity.cachedBluetoothMac()?.takeIf { it != DeviceIdentity.PLACEHOLDER_MAC }
-                ?: return false
-        return runCatching {
-            SessionController.ensure(context.applicationContext)
-            SessionController.startConnection(context.applicationContext)
-            DebugFileLog.append(context, "APPROACH: 后台已直接发起连接（地址 $mac，不等界面）")
-            true
-        }.getOrElse { error ->
-            DebugFileLog.append(context, "APPROACH: 后台直连失败（${error.javaClass.simpleName}: ${error.message}）——交给界面重试")
-            false
-        }
+                DebugFileLog.append(
+                    context,
+                    "APPROACH: 后台拉起 App 被系统拒绝（${it.javaClass.simpleName}）——请允许本应用「自启动/后台弹界面」",
+                )
+            }.isSuccess
     }
 
     @Suppress("DEPRECATION")

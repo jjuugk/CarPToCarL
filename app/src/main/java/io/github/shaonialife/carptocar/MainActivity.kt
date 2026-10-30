@@ -710,11 +710,16 @@ class MainActivity : AppCompatActivity() {
         // 启动后自动连接：只在**冷启动**发起（旋转/重建不重复）。
         // 真正发起由 maybeAutoConnect 判定——前置条件不齐时它会等下一次时机。
         // 「靠近车机」拉起的这一轮即使 Activity 正在后台重建，也要重新武装一次。
+        //
+        // 这里刻意留 700ms 再判定：`detectResidualDisplays()` 在 onCreate 更靠后执行，
+        // 它会把 startupCheckRunning 置真。延后判定是为了让残留虚拟屏扫描先开跑——
+        // 一边扫描一边起新会话会互相踩（旧屏未清就建新屏）。扫描结束时它也会再调一次
+        // maybeAutoConnect，所以真正的发起时机以自检完成为准，这里只是起步。
         val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
         if (savedInstanceState == null || launchedByApproach) {
             autoConnectRequested = true
             if (launchedByApproach) {
-                log("APPROACH: 检测到目标车机蓝牙靠近，App 已被自动拉起")
+                log("APPROACH: 检测到目标车机蓝牙靠近，App 已被自动拉起——由前台发起连接")
                 // 消费掉标记：旋转/重建时不再当作一次新的靠近
                 intent?.removeExtra(EXTRA_CAR_APPROACH)
             }
@@ -2475,9 +2480,11 @@ class MainActivity : AppCompatActivity() {
         if (!intent.getBooleanExtra(EXTRA_CAR_APPROACH, false)) return
         intent.removeExtra(EXTRA_CAR_APPROACH)
         if (isFinishing || isDestroyed) return
-        log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行），重新发起连接")
+        log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行）——由前台重新发起连接")
         autoConnectRequested = true
-        mainHandler.postDelayed({ maybeAutoConnect() }, 400L)
+        // App 已在后台运行过：启动自检那一轮早就跑完，不必再为它让路。
+        // 只留一个极短延迟，让 onResume 先把窗口恢复到前台（权限弹窗需要已恢复的 Activity）。
+        mainHandler.postDelayed({ maybeAutoConnect() }, 150L)
     }
 
     override fun onResume() {
