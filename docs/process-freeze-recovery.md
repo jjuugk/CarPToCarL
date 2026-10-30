@@ -1,6 +1,6 @@
 # 进程被系统冻结：如何一眼认出来，以及解冻后怎么自己爬起来
 
-> 2026-10-30 立项。对应实现：`service/FreezeWatch.kt`、`CarPlayService`（心跳）、
+> 2026-10-30 立项，随 **1.2.7** 发布。对应实现：`service/FreezeWatch.kt`、`CarPlayService`（心跳）、
 > `SessionController.onProcessResumed`（恢复）、`util/LogThrottle.kt`（降噪）。
 
 ## 1. 症状长什么样
