@@ -1,6 +1,8 @@
 package io.github.shaonialife.carptocar.bt
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -95,5 +97,35 @@ class CarApproachPolicyTest {
     @Test
     fun `上次触发在未来（系统时间被调整）时按节流处理，不连发`() {
         assertEquals(CarApproachPolicy.Decision.THROTTLED, decide(lastTriggerAt = 1_200_000L))
+    }
+
+    @Test
+    fun `抑制窗口内保持安静`() {
+        assertTrue(
+            CarApproachPolicy.suppressionActive(
+                suppressed = true,
+                suppressedAt = 1_000_000L,
+                now = 1_000_000L + 60_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `抑制窗口结束后自动失效——人在车上关掉 App 也能被重新拉起`() {
+        // 车机蓝牙一直连着就不会有 ACL_DISCONNECTED，标记没有别的机会被清除；
+        // 所以窗口之外必须自然失效，否则用户还在车里却永远等不到自动拉起。
+        assertFalse(
+            CarApproachPolicy.suppressionActive(
+                suppressed = true,
+                suppressedAt = 1_000_000L,
+                now = 1_000_000L + CarApproachPolicy.SUPPRESS_AFTER_MANUAL_STOP_MILLIS,
+            ),
+        )
+    }
+
+    @Test
+    fun `旧版本写的抑制标记（无时刻）仍按有效处理`() {
+        assertTrue(CarApproachPolicy.suppressionActive(true, suppressedAt = 0L, now = 2_000_000L))
+        assertFalse(CarApproachPolicy.suppressionActive(false, suppressedAt = 0L, now = 2_000_000L))
     }
 }

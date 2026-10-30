@@ -21,6 +21,7 @@ object CarApproachPrefs {
     private const val KEY_SILENT_UI = "car_approach_silent_ui"
     private const val KEY_LAST_TRIGGER = "car_approach_last_trigger_at"
     private const val KEY_SUPPRESSED = "car_approach_suppressed"
+    private const val KEY_SUPPRESSED_AT = "car_approach_suppressed_at"
     private const val KEY_BATTERY_PROMPT_AT = "car_approach_battery_prompt_at"
     private const val KEY_OVERLAY_PROMPT_AT = "car_approach_overlay_prompt_at"
     private const val KEY_ACL_CONNECTED = "car_approach_acl_connected"
@@ -118,20 +119,38 @@ object CarApproachPrefs {
     /**
      * 用户手动断开/取消后置位：同一段停车期间不再自动拉起。
      * 车机蓝牙链路断开（ACL_DISCONNECTED，通常意味着人离开了车）时自动清除。
+     *
+     * ## 为什么要带时限（2026-10-30 补）
+     *
+     * 这个标记原本只在 ACL 断开时清除。可是「人在车上把 App 关掉」之后，蓝牙链路
+     * **一直连着**、不会再有 ACL_DISCONNECTED，标记就永远不清——用户还在车里，
+     * 却再也等不到自动拉起（连车机重启、信号抖动都唤不醒）。所以给一个
+     * [CarApproachPolicy.SUPPRESS_AFTER_MANUAL_STOP_MILLIS] 的窗口：
+     * 该窗口内安静（防「断了又立刻被拉起」的死循环），过了窗口自然失效。
+     * 用户主动打开 App 时也会立刻清除（见 MainActivity）——他显然是想用了。
      */
-    fun suppressed(context: Context): Boolean =
-        context
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SUPPRESSED, false)
+    fun suppressed(
+        context: Context,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return CarApproachPolicy.suppressionActive(
+            suppressed = prefs.getBoolean(KEY_SUPPRESSED, false),
+            suppressedAt = prefs.getLong(KEY_SUPPRESSED_AT, 0L),
+            now = now,
+        )
+    }
 
     fun setSuppressed(
         context: Context,
         suppressed: Boolean,
+        at: Long = System.currentTimeMillis(),
     ) {
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_SUPPRESSED, suppressed)
+            .putLong(KEY_SUPPRESSED_AT, if (suppressed) at else 0L)
             .apply()
     }
 

@@ -14,6 +14,7 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import io.github.shaonialife.carptocar.MainActivity
 import io.github.shaonialife.carptocar.SessionController
+import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.util.DebugFileLog
 
 /**
@@ -107,6 +108,25 @@ class CarPlayService : Service() {
             upgradeToProjection()
         }
         return START_STICKY
+    }
+
+    /**
+     * 用户从最近任务划掉了 App（2026-10-30 实机反馈）。
+     *
+     * 划卡片只销毁 Activity，**不会**停前台服务——于是出现「窗口关掉了、进程还在、
+     * 通知栏那条还挂着」的观感：用户已经明确表示不要它了，系统却按服务的意愿继续保活。
+     *
+     * 这里把它当作用户的终态指令：走和「通知栏断开」「车机远离 30 秒」一样的收摊路径
+     * （结束会话 → 停服务 → 清通知 → 退进程），并置抑制避免车机还连着时立刻又被拉起。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        CarIdleGuard.shutdown(
+            this,
+            reason = "用户从最近任务划掉了 App",
+            killProcess = true,
+            suppressAutoStart = true,
+        )
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun takeProjection() {

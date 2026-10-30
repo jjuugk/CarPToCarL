@@ -121,7 +121,12 @@ object CarIdleGuard {
             context,
             "IDLE: $reason——结束会话、停止保活服务" + if (killProcess) "，随后退出进程（静默检测保留）" else "",
         )
-        if (suppressAutoStart) CarApproachPrefs.setSuppressed(context, true)
+        // 只有在车机**还连着**蓝牙时才需要抑制：那种情况下链路抖一下就会重发
+        // ACL_CONNECTED，不压一下会变成「关掉 → 立刻又被拉起」。车机已经走了
+        // （aclConnected = false）就没什么可抑制的，下次靠近理应能直接触发。
+        if (suppressAutoStart && CarApproachPrefs.aclConnected(context)) {
+            CarApproachPrefs.setSuppressed(context, true)
+        }
         runCatching { SessionController.disconnect(context) }
             .onFailure {
                 DebugFileLog.append(context, "IDLE: 断开过程异常（${it.javaClass.simpleName}），继续收尾")

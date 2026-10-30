@@ -772,6 +772,14 @@ class MainActivity : AppCompatActivity() {
         // maybeAutoConnect，所以真正的发起时机以自检完成为准，这里只是起步。
         val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
         val silentApproach = launchedByApproach && CarApproachPrefs.silentUi(this)
+        // 用户**自己**点开了 App = 明确想用：立刻解除「刚断开过」的抑制。
+        // 否则在车上（蓝牙一直连着，不会再收到 ACL_DISCONNECTED）关掉 App 之后，
+        // 抑制会一直挂着，之后的抖动/车机重启都唤不醒它（2026-10-30 用户要求：
+        // 还在车上时必须能重新拉起）。自动拉起那一轮不清，避免自己解除自己的防抖。
+        if (!launchedByApproach && CarApproachPrefs.suppressed(this)) {
+            CarApproachPrefs.setSuppressed(this, false)
+            log("APPROACH: 用户主动打开 App——已解除「刚断开过」的抑制，本次仍可自动触发")
+        }
         if (savedInstanceState == null || launchedByApproach) {
             autoConnectRequested = true
             if (launchedByApproach) {

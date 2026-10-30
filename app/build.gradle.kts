@@ -13,7 +13,7 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.4"
+val appVersionName = "1.2.6"
 val appVersionCode =
     appVersionName
         .split(".")

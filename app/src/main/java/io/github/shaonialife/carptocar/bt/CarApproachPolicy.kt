@@ -40,6 +40,28 @@ object CarApproachPolicy {
     }
 
     /**
+     * 「刚断开过」的抑制是否仍然有效。
+     *
+     * 抑制原本只在 ACL 断开时清除，可「人在车上把 App 关掉」之后蓝牙链路一直连着、
+     * 不会再有 ACL_DISCONNECTED——标记就永远不清，用户还在车里却再也等不到自动拉起。
+     * 所以给它一个 [SUPPRESS_AFTER_MANUAL_STOP_MILLIS] 的窗口：窗口内安静（防
+     * 「断了又立刻被拉起」的死循环），窗口外自然失效。
+     *
+     * @param suppressedAt 置位时刻（墙钟毫秒，0 = 旧版本写的标记，按「仍有效」处理）
+     */
+    fun suppressionActive(
+        suppressed: Boolean,
+        suppressedAt: Long,
+        now: Long,
+    ): Boolean {
+        if (!suppressed) return false
+        if (suppressedAt <= 0L) return true
+        val elapsed = now - suppressedAt
+        // 系统时间被往回调时 elapsed 为负：当作刚置位，继续安静
+        return elapsed in 0 until SUPPRESS_AFTER_MANUAL_STOP_MILLIS
+    }
+
+    /**
      * @param eventAddress 系统 ACL 广播里带的设备地址（可能为空）
      * @param targetAddress 用户在「目标车机」里选定的地址（null = 未指定）
      * @param sessionRunning 已有会话在跑或正在连接
