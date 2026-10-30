@@ -716,14 +716,36 @@ class MainActivity : AppCompatActivity() {
         // 一边扫描一边起新会话会互相踩（旧屏未清就建新屏）。扫描结束时它也会再调一次
         // maybeAutoConnect，所以真正的发起时机以自检完成为准，这里只是起步。
         val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
+        val silentApproach = launchedByApproach && CarApproachPrefs.silentUi(this)
         if (savedInstanceState == null || launchedByApproach) {
             autoConnectRequested = true
             if (launchedByApproach) {
-                log("APPROACH: 检测到目标车机蓝牙靠近，App 已被自动拉起——由前台发起连接")
+                log(
+                    "APPROACH: 检测到目标车机蓝牙靠近，App 已被自动拉起——" +
+                        (if (silentApproach) "静默模式（界面不停留，状态在通知栏）" else "由前台发起连接"),
+                )
                 // 消费掉标记：旋转/重建时不再当作一次新的靠近
                 intent?.removeExtra(EXTRA_CAR_APPROACH)
             }
             mainHandler.postDelayed({ maybeAutoConnect() }, 700L)
+        }
+        // 静默触发：界面建好就走（等同按 Home），连接与状态交给通知栏。
+        //
+        // 为什么不是「干脆不建界面」：整条管线（CarLife 接管、虚拟屏/编码器、启动自检）
+        // 都挂在 Activity 这一路上，绕开界面直接连，握手能过但**车机端收不到数据**
+        // （1.2.2 实车结论）。所以先让界面完整建起来，再退到后台——和用户连上后按 Home
+        // 是同一种状态。
+        //
+        // 只有在**冷启动**这一轮才退：旋转/重建、或用户自己点进界面时不该被弹走。
+        // 免责声明未接受时不退——那是要用户读并点同意的，不能在后台替他跳过。
+        if (silentApproach && savedInstanceState == null && !needsDisclaimer) {
+            log("APPROACH: 静默触发——界面不停留，进度与「断开」都在通知栏")
+            overridePendingTransition(0, 0)
+            // 留 1.2 秒：让 onResume/窗口/权限检查先走完一轮，建屏那一步不能被掐断
+            mainHandler.postDelayed(
+                { if (!isFinishing && !isDestroyed) moveTaskToBack(true) },
+                1_200L,
+            )
         }
     }
 
@@ -802,11 +824,46 @@ class MainActivity : AppCompatActivity() {
                 when {
                     !switchCarApproach.isChecked -> "关闭后只在打开 App 时自动连接"
                     target == null -> "未指定目标车机——先在下方「蓝牙配对」里选定车机"
+                    CarApproachPrefs.silentUi(this) ->
+                        "「${target.name}」靠近时自动连接，不弹界面（状态在通知栏）"
                     else -> "「${target.name}」靠近时自动打开 App 并连接（静默检测，不扫描）"
                 }
         }
         switchCarApproach.isChecked = CarApproachPrefs.enabled(this)
         renderCarApproachNote()
+
+        // 「触发后不弹出界面」（2026-10-30）：自动触发的这一轮，界面是留在眼前还是建完就退。
+        // 它只改**呈现方式**、不改「连不连」，因此跟随主开关启用/置灰，不做独立判断。
+        val switchApproachSilent =
+            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchApproachSilent)
+        val approachSilentLabel = findViewById<TextView>(R.id.approachSilentLabel)
+        val approachSilentNote = findViewById<TextView>(R.id.approachSilentNote)
+        fun renderApproachSilent() {
+            val masterOn = switchCarApproach.isChecked
+            val tint = if (masterOn) 1f else 0.45f
+            switchApproachSilent.isEnabled = masterOn
+            switchApproachSilent.alpha = tint
+            approachSilentLabel.alpha = tint
+            approachSilentNote.alpha = tint
+            approachSilentNote.text =
+                when {
+                    !masterOn -> "需先开启上面的「靠近车机自动启动」"
+                    switchApproachSilent.isChecked ->
+                        "连接在后台进行——进度与「断开」都在通知栏，点通知可回到界面"
+                    else -> "自动拉起时把界面留在眼前；开启后改为后台连接，只留通知栏"
+                }
+        }
+        switchApproachSilent.isChecked = CarApproachPrefs.silentUi(this)
+        renderApproachSilent()
+        switchApproachSilent.setOnCheckedChangeListener { _, checked ->
+            CarApproachPrefs.setSilentUi(this, checked)
+            renderApproachSilent()
+            renderCarApproachNote()
+            log(
+                "APPROACH: 触发后" +
+                    if (checked) "不弹出界面——后台连接，状态与「断开」都在通知栏" else "弹出界面",
+            )
+        }
         // 开关默认就是开的，用户可能从没碰过它——进界面时按 7 天节流提醒一次。
         // 延后 3 秒且要求「免责声明已接受」，避免和首次启动的免责声明弹窗叠在一起。
         if (switchCarApproach.isChecked && TargetDevicePrefs.get(this) != null) {
@@ -822,6 +879,7 @@ class MainActivity : AppCompatActivity() {
         switchCarApproach.setOnCheckedChangeListener { _, checked ->
             CarApproachPrefs.setEnabled(this, checked)
             renderCarApproachNote()
+            renderApproachSilent()
             log(
                 "APPROACH: 靠近车机自动启动已${if (checked) "开启" else "关闭"}" +
                     (if (checked && TargetDevicePrefs.get(this) == null) "（尚未指定目标车机，暂不会触发）" else ""),
