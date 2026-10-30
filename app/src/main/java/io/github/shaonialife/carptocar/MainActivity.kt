@@ -2613,6 +2613,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 界面在前台 = 用户正看着：车机远离 30 秒后的收摊要让路（别把正在看的界面掐掉）
+        AppUiPresence.markResumed()
         mainHandler.post(heroTick)
         // 从系统设置/别的界面回来：门禁提示与按钮状态重新对一次（地址可能已补填）
         refreshMacGate()
@@ -2756,6 +2758,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        AppUiPresence.markPaused()
         mainHandler.removeCallbacks(heroTick)
     }
 

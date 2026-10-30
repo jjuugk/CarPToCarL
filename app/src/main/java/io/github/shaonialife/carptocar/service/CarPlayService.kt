@@ -179,7 +179,9 @@ class CarPlayService : Service() {
          */
         private const val CHANNEL_ID = "carplay_session_v2"
         private const val LEGACY_CHANNEL_ID = "carplay_connection"
-        private const val NOTIFICATION_ID = 1
+
+        /** 常驻通知 id：收摊时由 [io.github.shaonialife.carptocar.bt.CarIdleGuard] 兜底撤掉。 */
+        const val NOTIFICATION_ID = 1
 
         /** 通知栏文案刷新间隔：够跟上阶段变化，又不至于频繁唤醒。 */
         private const val STATE_TICK_MS = 3_000L

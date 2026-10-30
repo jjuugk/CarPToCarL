@@ -61,15 +61,37 @@ class CarApproachReceiver : BroadcastReceiver() {
         when (intent.action) {
             BluetoothDevice.ACTION_ACL_CONNECTED -> onConnected(context, intent)
             // 链路断开 = 人走远了（或车机熄火）：解除「手动断开后安静」的抑制，
-            // 并清掉节流时间戳，下次靠近可以正常再触发一次。
-            BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
-                if (CarApproachPrefs.suppressed(context) || CarApproachPrefs.lastTriggerAt(context) > 0L) {
-                    CarApproachPrefs.setSuppressed(context, false)
-                    CarApproachPrefs.markTriggered(context, 0L)
-                    DebugFileLog.append(context, "APPROACH: 车机蓝牙链路断开——已复位，下次靠近可再次自动启动")
-                }
-            }
+            // 并起 30 秒计时——到点还没回连就把会话、保活服务和进程一起收掉。
+            BluetoothDevice.ACTION_ACL_DISCONNECTED -> onDisconnected(context, intent)
         }
+    }
+
+    /**
+     * 车机链路断开（2026-10-30 加收摊计时）。
+     *
+     * 只认**目标车机**：耳机/手表每天都在断连，跟着它们起计时纯属打扰。
+     * 30 秒的窗口留给「车机重启、信号抖动后自己回连」——回连时 [onConnected]
+     * 会把这个计时撤掉，正在恢复的会话不会被误杀。
+     */
+    private fun onDisconnected(
+        context: Context,
+        intent: Intent,
+    ) {
+        val target = TargetDevicePrefs.get(context) ?: return
+        val address = addressOf(context, intent) ?: return
+        if (!address.equals(target.address, ignoreCase = true)) return
+        CarApproachPrefs.setAclConnected(context, false)
+        if (CarApproachPrefs.suppressed(context) || CarApproachPrefs.lastTriggerAt(context) > 0L) {
+            CarApproachPrefs.setSuppressed(context, false)
+            CarApproachPrefs.markTriggered(context, 0L)
+            DebugFileLog.append(context, "APPROACH: 车机蓝牙链路断开——已复位，下次靠近可再次自动启动")
+        }
+        // 先排闹钟再写日志：日志是同步磁盘 IO，不该挡在「30 秒后能自愈」这件事前面。
+        CarIdleGuard.schedule(context)
+        DebugFileLog.append(
+            context,
+            "APPROACH: 车机蓝牙链路断开——30 秒内未回连将结束会话并退出进程（静默检测保留，下次靠近仍会拉起）",
+        )
     }
 
     private fun onConnected(
@@ -77,14 +99,13 @@ class CarApproachReceiver : BroadcastReceiver() {
         intent: Intent,
     ) {
         val target = TargetDevicePrefs.get(context) ?: return
-        val address =
-            runCatching { deviceOf(intent)?.address }.getOrElse { error ->
-                // 没有 BLUETOOTH_CONNECT 时读不到地址（Android 12+）——只记一次线索，不打扰
-                if (error is SecurityException) {
-                    DebugFileLog.append(context, "APPROACH: 缺少蓝牙权限，无法识别靠近的车机（请在 App 内授权后重试）")
-                }
-                null
-            }
+        val address = addressOf(context, intent)
+        // 链路是物理事实：只要连上的是目标车机，就先记状态、撤计时——
+        // 哪怕下面判定为「已有会话 / 刚断开过」不拉起界面，这次回连也算数。
+        if (address != null && address.equals(target.address, ignoreCase = true)) {
+            CarApproachPrefs.setAclConnected(context, true)
+            CarIdleGuard.cancel(context)
+        }
         val sessionRunning = SessionController.isSessionRunning() || SessionController.sessionStarting.get()
         val decision =
             CarApproachPolicy.onAclConnected(
@@ -225,6 +246,18 @@ class CarApproachReceiver : BroadcastReceiver() {
                 .build(),
         )
     }
+
+    /** 读事件里的设备地址；缺 BLUETOOTH_CONNECT（Android 12+）时只留一行线索，不打扰。 */
+    private fun addressOf(
+        context: Context,
+        intent: Intent,
+    ): String? =
+        runCatching { deviceOf(intent)?.address }.getOrElse { error ->
+            if (error is SecurityException) {
+                DebugFileLog.append(context, "APPROACH: 缺少蓝牙权限，无法识别靠近/离开的车机（请在 App 内授权）")
+            }
+            null
+        }
 
     @Suppress("DEPRECATION")
     private fun deviceOf(intent: Intent): BluetoothDevice? =

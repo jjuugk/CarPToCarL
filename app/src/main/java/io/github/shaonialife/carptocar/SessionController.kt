@@ -706,6 +706,15 @@ object SessionController {
             bluetoothClient?.isRunning == true
 
     /**
+     * 是否**真的在推流**（画面已经在车机上跑）。
+     *
+     * 与 [isSessionRunning] 的区别很关键：后者在「点过启动连接、蓝牙服务正监听等
+     * 车机回连」时也是 true，可能持续几分钟；而这里只认「画面真的在送」。
+     * 车机远离后的收摊判定用这个——否则永远判为「会话还在跑」，收摊永不生效。
+     */
+    fun isStreaming(): Boolean = videoSender?.isRunning == true
+
+    /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
      *
      * 后台自动连接时用户面前没有界面，通知栏是唯一可见的界面——那里若只写

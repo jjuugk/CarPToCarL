@@ -23,6 +23,7 @@ object CarApproachPrefs {
     private const val KEY_SUPPRESSED = "car_approach_suppressed"
     private const val KEY_BATTERY_PROMPT_AT = "car_approach_battery_prompt_at"
     private const val KEY_OVERLAY_PROMPT_AT = "car_approach_overlay_prompt_at"
+    private const val KEY_ACL_CONNECTED = "car_approach_acl_connected"
 
     /**
      * 「请把本应用加入电池优化白名单」的提醒间隔：7 天。
@@ -88,6 +89,29 @@ object CarApproachPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_LAST_TRIGGER, at)
+            .apply()
+    }
+
+    /**
+     * 目标车机的蓝牙链路**此刻是否连着**（由 ACL 广播维护，落盘而不是放内存）。
+     *
+     * 为什么要落盘：判断这件事的时机（30 秒收摊闹钟到点）可能发生在**新进程**里——
+     * 旧进程早就被系统回收了，内存里的标志跟着一起没。落盘后闹钟到点读到的
+     * 就是最后一条 ACL 事件留下的真实状态。
+     */
+    fun aclConnected(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ACL_CONNECTED, false)
+
+    fun setAclConnected(
+        context: Context,
+        connected: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ACL_CONNECTED, connected)
             .apply()
     }
 

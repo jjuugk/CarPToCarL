@@ -133,6 +133,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- 车机远离后的收摊闹钟（2026-10-30）：蓝牙断开 30 秒未回连 → 结束会话、
+             停保活服务、退出进程。
+
+             必须 exported="false"：上面那个接收器为了收系统 ACL 广播不得不导出，
+             而「退出进程」这种动作若也放在那里，任何第三方应用发一条广播就能把本应用
+             掐掉。这里只由本应用自己的 PendingIntent 显式投递，不设 intent-filter。 -->
+        <receiver
+            android:name=".service.CarIdleReceiver"
+            android:exported="false" />
+
         <!-- 通知监听（媒体会话枚举）：音乐卡需要「通知使用权」，
              需用户在系统设置里手动授权（不再有 shell 静默授权通道） -->
         <service
