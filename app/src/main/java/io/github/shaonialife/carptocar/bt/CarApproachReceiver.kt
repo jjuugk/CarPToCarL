@@ -1,13 +1,18 @@
 package io.github.shaonialife.carptocar.bt
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import androidx.core.app.NotificationCompat
 import io.github.shaonialife.carptocar.EXTRA_CAR_APPROACH
 import io.github.shaonialife.carptocar.MainActivity
 import io.github.shaonialife.carptocar.SessionController
+import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DebugFileLog
 
 /**
@@ -34,10 +39,21 @@ import io.github.shaonialife.carptocar.util.DebugFileLog
  * `ensureBluetoothReady → startConnection` 流程（含权限、自检、换流）。
  * 界面已经在后台时走 `onNewIntent`，只重新武装一次，不重建界面。
  *
- * 拉起失败（Android 10+ 的后台启动限制 / ROM 禁止自启动）时只记一行线索，
- * 不弹通知：下次用户手动打开 App 仍会照常自动连接，功能不会丢。
+ * 拉起失败（Android 10+ 的后台启动限制 / ROM 禁止自启动）时**不一定能立刻知道**：
+ * 系统是静默拒绝的——不报错、界面就是不出现。所以拉起后会隔 3.5 秒核对
+ * [AppUiPresence]：没盖到章就发一条「车机已靠近，但系统没让 App 到前台」的通知，
+ * 告诉用户去开「显示在其他应用上层」。这一条是兜底，不是常态：权限给到位时它不会出现。
+ *
+ * 通知只在**失败**时发；成功时通知栏里那条是保活服务（CarPlayService）的，不会重复。
  */
 class CarApproachReceiver : BroadcastReceiver() {
+    companion object {
+        private const val BLOCKED_CHANNEL_ID = "carplay_approach"
+
+        /** 「被系统拦下」提示的通知 id（[MainActivity] 起来后会主动撤掉它）。 */
+        const val BLOCKED_NOTIFICATION_ID = 2
+    }
+
     override fun onReceive(
         context: Context,
         intent: Intent,
@@ -113,6 +129,15 @@ class CarApproachReceiver : BroadcastReceiver() {
      * @return true = 已成功把启动请求交给系统；false = 被后台启动限制拦下
      */
     private fun launchApp(context: Context): Boolean {
+        // 后台启动界面的豁免之一就是「持有显示在其他应用上层」——没有它，MagicOS 会
+        // 静默拦掉这次启动（不抛异常、界面不出现）。这里先留一条线索，事后看日志能一眼定因。
+        if (!android.provider.Settings.canDrawOverlays(context)) {
+            DebugFileLog.append(
+                context,
+                "APPROACH: 未授予「显示在其他应用上层」——系统可能拒绝后台打开界面（静默，不报错）",
+            )
+        }
+        val launchedAt = System.currentTimeMillis()
         val launch =
             Intent(context, MainActivity::class.java).apply {
                 addFlags(
@@ -122,15 +147,83 @@ class CarApproachReceiver : BroadcastReceiver() {
                 )
                 putExtra(EXTRA_CAR_APPROACH, true)
             }
-        return runCatching { context.startActivity(launch) }
-            .onFailure {
-                // 后台启动 Activity 被系统拦截（Android 10+ 限制）：不弹通知、不刷日志，
-                // App 下次被打开时仍会按「启动后自动连接」走一遍，功能不会丢。
-                DebugFileLog.append(
-                    context,
-                    "APPROACH: 后台拉起 App 被系统拒绝（${it.javaClass.simpleName}）——请允许本应用「自启动/后台弹界面」",
-                )
-            }.isSuccess
+        val ok =
+            runCatching { context.startActivity(launch) }
+                .onFailure {
+                    // 后台启动 Activity 被系统拦截（Android 10+ 限制）：不弹通知、不刷日志，
+                    // App 下次被打开时仍会按「启动后自动连接」走一遍，功能不会丢。
+                    DebugFileLog.append(
+                        context,
+                        "APPROACH: 后台拉起 App 被系统拒绝（${it.javaClass.simpleName}）——请允许本应用「自启动/后台弹界面」",
+                    )
+                }.isSuccess
+        if (ok) verifyBroughtUp(context, launchedAt)
+        return ok
+    }
+
+    /**
+     * 核对「拉起是否真的生效」（2026-10-30）。
+     *
+     * 系统拦后台启动是**静默**的：不抛异常，界面就是不出现。用户看到的是
+     * 「车机连上了、手机什么都没有」。这里 3.5 秒后比对 [AppUiPresence] 的盖章，
+     * 没盖就发一条通知——至少让这次失败看得见、点得开，并说清要去开哪条权限。
+     */
+    private fun verifyBroughtUp(
+        context: Context,
+        launchedAt: Long,
+    ) {
+        Bg.run("approach-verify") {
+            Thread.sleep(3_500L)
+            if (AppUiPresence.lastBringUpAt >= launchedAt) return@run
+            DebugFileLog.append(
+                context,
+                "APPROACH: 系统没有让 App 到前台（后台启动被拦）——已发通知提示授权",
+            )
+            runCatching { notifyLaunchBlocked(context) }
+        }
+    }
+
+    private fun notifyLaunchBlocked(context: Context) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    BLOCKED_CHANNEL_ID,
+                    "靠近车机提示",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "系统拦下后台打开界面时的提示"
+                    setShowBadge(false)
+                    setSound(null, null)
+                },
+            )
+        }
+        val open =
+            PendingIntent.getActivity(
+                context,
+                0,
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val hint =
+            "系统拒绝了「后台打开界面」，本次没能自动连上。请到 设置 → 应用 → 特殊访问权限 → " +
+                "显示在其他应用上层，允许本应用；或点这里手动打开。"
+        manager.notify(
+            BLOCKED_NOTIFICATION_ID,
+            NotificationCompat
+                .Builder(context, BLOCKED_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setContentTitle("车机已靠近，但系统没让 App 到前台")
+                .setContentText(hint)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(hint))
+                .setContentIntent(open)
+                .addAction(0, "打开界面", open)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     @Suppress("DEPRECATION")

@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar
 
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.ClipData
@@ -31,8 +32,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
+import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.buick.ConnectionProfile
 import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
@@ -262,6 +265,51 @@ class MainActivity : AppCompatActivity() {
                 },
                 DarkMessageDialog.Action("去设置", DarkMessageDialog.Emphasis.PRIMARY) {
                     requestBatteryExemption()
+                },
+            ),
+        )
+    }
+
+    /**
+     * 「显示在其他应用上层」（2026-10-30）。
+     *
+     * 这条权限在这个项目里有第二重身份：Android 10+ 的后台启动界面限制，**豁免条件之一
+     * 就是持有它**。没有它，车机靠近时 `startActivity` 会被系统静默拦下——日志写着
+     * 「已拉起」，屏幕上什么都没有，接收端也因此连不上（实测拒绝时刻与触发时刻完全吻合）。
+     *
+     * 所以它和电池优化是同一件事的两半：一个保「收得到广播」，一个保「起得来界面」。
+     */
+    private fun ensureOverlayPermission(force: Boolean = false) {
+        if (Settings.canDrawOverlays(this)) return
+        if (!force && !CarApproachPrefs.overlayPromptDue(this)) return
+        CarApproachPrefs.markOverlayPrompt(this)
+        DarkMessageDialog.show(
+            this,
+            "允许后台打开界面",
+            "车机靠近时，手机往往黑屏在口袋里——系统默认不许应用在这时把自己弹到前台。\n\n" +
+                "把「显示在其他应用上层」给本应用，系统才会放行这次启动；否则它会静默拦下：" +
+                "日志里写着已拉起，屏幕上却什么也没有，接收端也连不上。",
+            listOf(
+                DarkMessageDialog.Action("稍后", DarkMessageDialog.Emphasis.TEXT) {
+                    log("APPROACH: 未授予「显示在其他应用上层」——后台拉起界面可能被系统拦下")
+                },
+                DarkMessageDialog.Action("去授权", DarkMessageDialog.Emphasis.PRIMARY) {
+                    val opened =
+                        runCatching {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:$packageName"),
+                                ),
+                            )
+                        }.isSuccess
+                    log(
+                        if (opened) {
+                            "APPROACH: 已打开「显示在其他应用上层」设置——请允许本应用"
+                        } else {
+                            "APPROACH: 无法打开悬浮窗设置，请到 特殊访问权限 → 显示在其他应用上层 里允许"
+                        },
+                    )
                 },
             ),
         )
@@ -558,6 +606,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        // 告诉「靠近车机」那边：界面确实起来了（它据此判断后台启动有没有被系统拦下）
+        AppUiPresence.markBroughtUp()
+        // 起来就把「系统没让 App 到前台」那条提示撤掉——它已经没有意义了
+        runCatching {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .cancel(CarApproachReceiver.BLOCKED_NOTIFICATION_ID)
+        }
         // 旋转/重建：沿用原倒计时截止时刻（onResume 据此续弹）
         disclaimerDeadlineAt = savedInstanceState?.getLong(KEY_DISCLAIMER_DEADLINE, 0L) ?: 0L
 
@@ -871,6 +926,8 @@ class MainActivity : AppCompatActivity() {
                 {
                     if (!isFinishing && !isDestroyed && DisclaimerPrefs.hasAcceptedCurrent(this)) {
                         ensureBatteryExempt()
+                        // 两半缺一不可：电池优化保「收得到广播」，悬浮窗保「起得来界面」
+                        ensureOverlayPermission()
                     }
                 },
                 3_000L,
@@ -887,7 +944,10 @@ class MainActivity : AppCompatActivity() {
             // 手机端能不能「先于别人动手」取决于系统愿不愿意把广播投递过来：
             // 电池优化一开，后台进程被冻结/限流，ACL 广播就送不到，功能表现为时好时坏。
             // 用户刚拨开开关 = 明确要用这个功能，此时不受 7 天节流限制。
-            if (checked) ensureBatteryExempt(force = true)
+            if (checked) {
+                ensureBatteryExempt(force = true)
+                ensureOverlayPermission(force = true)
+            }
         }
 
         // 本机蓝牙地址：Honor/MagicOS 等机型把 MAC 全面脱敏（连 adb shell 都读不到），
@@ -2535,6 +2595,12 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // 已在运行被拉到前台：也算「界面到位」，同样撤掉被拦提示
+        AppUiPresence.markBroughtUp()
+        runCatching {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .cancel(CarApproachReceiver.BLOCKED_NOTIFICATION_ID)
+        }
         if (!intent.getBooleanExtra(EXTRA_CAR_APPROACH, false)) return
         intent.removeExtra(EXTRA_CAR_APPROACH)
         if (isFinishing || isDestroyed) return

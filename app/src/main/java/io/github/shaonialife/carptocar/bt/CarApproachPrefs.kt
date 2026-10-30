@@ -22,6 +22,7 @@ object CarApproachPrefs {
     private const val KEY_LAST_TRIGGER = "car_approach_last_trigger_at"
     private const val KEY_SUPPRESSED = "car_approach_suppressed"
     private const val KEY_BATTERY_PROMPT_AT = "car_approach_battery_prompt_at"
+    private const val KEY_OVERLAY_PROMPT_AT = "car_approach_overlay_prompt_at"
 
     /**
      * 「请把本应用加入电池优化白名单」的提醒间隔：7 天。
@@ -133,6 +134,37 @@ object CarApproachPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_BATTERY_PROMPT_AT, at)
+            .apply()
+    }
+
+    /**
+     * 「显示在其他应用上层」的提醒（同样 7 天节流）。
+     *
+     * 这条权限在这个项目里有两副面孔：暗幕（ScreenDimmer）用它盖住屏幕，
+     * 而 Android 10+ 的**后台启动界面**豁免也认它——没有它，车机靠近时
+     * `startActivity` 会被系统**静默拦下**：日志写着「已拉起」，屏幕上什么都没有
+     * （2026-10-30 实测：SYSTEM_ALERT_WINDOW 的拒绝时刻与触发时刻完全吻合）。
+     */
+    fun overlayPromptDue(
+        context: Context,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val last =
+            context
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_OVERLAY_PROMPT_AT, 0L)
+        if (last <= 0L) return true
+        return now - last >= BATTERY_PROMPT_INTERVAL_MILLIS
+    }
+
+    fun markOverlayPrompt(
+        context: Context,
+        at: Long = System.currentTimeMillis(),
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_OVERLAY_PROMPT_AT, at)
             .apply()
     }
 }
