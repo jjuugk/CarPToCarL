@@ -13,13 +13,13 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.6"
+val appVersionName = "1.2.7"
 
 /**
- * 分支标记：只有 `bieke` 分支上非空，拼在 versionName 末尾（`1.2.6-bieke`）。
+ * 分支标记：只有 `bieke` 分支上非空，拼在 versionName 末尾（`1.2.7-bieke`）。
  *
  * 目的只是让包在界面上/日志里一眼看出是别克分支，**不动版本号**：
- * `versionCode` 仍由 [appVersionName] 推导（=10206），与 main 的 1.2.6 相同，
+ * `versionCode` 仍由 [appVersionName] 推导（=10207），与 main 的 1.2.7 相同，
  * 这样两个分支的包可以互相覆盖安装，不会因为「版本号更小」被系统拒绝。
  */
 val appVersionSuffix = "-bieke"

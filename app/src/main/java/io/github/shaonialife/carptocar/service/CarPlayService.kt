@@ -48,6 +48,34 @@ class CarPlayService : Service() {
             }
         }
 
+    /**
+     * 冻结监视：每秒一次心跳，靠 `elapsedRealtime()` 的跳变判定进程是否被系统冻结过。
+     *
+     * 放在前台服务里而不是会话线程里，因为主线程被冻结时 Handler 同样停摆——
+     * 解冻后第一次 tick 就会看到「本该 1 秒前跑的心跳，现在才到」，差值就是冻结时长。
+     */
+    private val freezeWatch = FreezeWatch()
+
+    private val freezeTick =
+        object : Runnable {
+            override fun run() {
+                val frozen = freezeWatch.tick(android.os.SystemClock.elapsedRealtime())
+                if (frozen > 0) {
+                    val seconds = frozen / 1_000
+                    val stalled = freezeWatch.stallMillis(frozen) / 1_000
+                    SessionController.appendLog(
+                        "PROC: 进程被系统冻结 ${seconds} 秒（心跳中断 ${stalled}s）——" +
+                            "冻结期间不发帧、不回 keepAlive，车机多半已按超时撤掉会话",
+                    )
+                    // 短暂迟到（< 10s）只记录不惊动：会话通常没受伤，重建反而多一次断链
+                    if (frozen >= FreezeWatch.RECOVER_MIN_FROZEN_MS) {
+                        SessionController.onProcessResumed(frozen)
+                    }
+                }
+                uiHandler.postDelayed(this, FreezeWatch.DEFAULT_TICK_MS)
+            }
+        }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     /**
@@ -100,6 +128,10 @@ class CarPlayService : Service() {
         // 通知栏文案跟着会话阶段走：服务一活就开始刷新，销毁时停。
         uiHandler.removeCallbacks(stateTick)
         uiHandler.post(stateTick)
+        // 冻结监视：重置起算点后再开始心跳（服务重启时不能拿上一轮的 lastTick 算差值）
+        uiHandler.removeCallbacks(freezeTick)
+        freezeWatch.reset()
+        uiHandler.postDelayed(freezeTick, FreezeWatch.DEFAULT_TICK_MS)
         // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
         if (pendingProjectionResult != null) {
             upgradeToProjection()
@@ -174,6 +206,8 @@ class CarPlayService : Service() {
 
     override fun onDestroy() {
         uiHandler.removeCallbacks(stateTick)
+        uiHandler.removeCallbacks(freezeTick)
+        freezeWatch.reset()
         releaseLocks()
         // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
         // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
