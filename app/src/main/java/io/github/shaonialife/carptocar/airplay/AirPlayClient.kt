@@ -851,7 +851,11 @@ class AirPlayClient(
                             ?: display?.get("UUID")
                             ?: display?.get("displayUUID"),
                     ),
-                maxFps = CarDisplayGeometry.positiveInt(display?.get("maxFPS")) ?: 30,
+                // 0 = 车机没声明。**不能兜成 30**：以前这里写 `?: 30`，凭空给一个
+                // 「车机要求 30fps」的画像，下游再也分不清「车机要 30」和「车机什么都没说」。
+                // 目标帧率的判定是「车机说了跟车机、没说按 60」（见 video/StreamFps.kt），
+                // 兜底值必须在源头保留「未声明」这一个状态。
+                maxFps = CarDisplayGeometry.positiveInt(display?.get("maxFPS")) ?: 0,
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
@@ -860,7 +864,8 @@ class AirPlayClient(
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
                 "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
-                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps}" +
+                "display=${info.displayWidth}x${info.displayHeight}@" +
+                (if (info.maxFps > 0) "${info.maxFps}fps" else "车机未声明fps") +
                 (if (info.displayFromCar) "" else "（车机未通告·手机兜底）") +
                 " displayUuid=${info.displayUuid}",
         )
@@ -1048,6 +1053,12 @@ class AirPlayClient(
          */
         val displayFromCar: Boolean = false,
         val displayUuid: String?,
+        /**
+         * 车机声明的解码帧率上限（`/info displays[0].maxFPS`）。
+         *
+         * **0 = 车机没声明**，不是「0fps」。目标帧率由 `video/StreamFps.kt` 判定：
+         * 有值跟随、0 按 60 声明。
+         */
         val maxFps: Int,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
         val hidDeviceUuids: List<String> = emptyList(),

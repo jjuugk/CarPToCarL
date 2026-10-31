@@ -509,7 +509,8 @@ object VirtualLauncher {
         log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
 
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
-        // 2026-10-25 起帧率固定 60（DisplayPrefs.FPS），不再有 30/60 设置项
+        // 建屏时按默认 60：车机 maxFPS 要到 AirPlay SETUP 之后才知道，
+        // 那一刻 SessionController 会调 setStreamFps() 改成跟随值。
         composer.targetFps = DisplayPrefs.FPS
         this.composer = composer
         val displaysCreated = arrayOf(false)

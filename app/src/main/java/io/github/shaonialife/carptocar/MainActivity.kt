@@ -55,6 +55,7 @@ import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogExporter
 import io.github.shaonialife.carptocar.util.SysShell
+import io.github.shaonialife.carptocar.video.StreamFps
 import java.util.Locale
 
 /**
@@ -1216,7 +1217,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实测帧率。
      * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
-     * 目标帧率不再展示（固定 60，见 [DisplayPrefs.FPS]），只报实测值。
+     * 目标帧率不再展示（车机报 maxFPS 就跟随、没报按 60，见 [StreamFps]），只报实测值。
      *
      * 分辨率报**像素**，不再是「100%」这种只有自己看得懂的比例：车机原值在前，
      * 码流与它不一致时用 `→` 接实际值（直通模式由 CarLife 引擎定尺寸）。
@@ -1501,9 +1502,9 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
-        // 目标帧率（30/60 二选一）已于 2026-10-25 移除：固定 60fps，见 DisplayPrefs.FPS。
-        // 会话建立时 SessionController 按 DisplayPrefs.FPS 申请，运行中不再提供切换。
-        VirtualLauncher.setStreamFps(DisplayPrefs.FPS)
+        // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
+        // 这里先按默认 60 起，等 SETUP 拿到车机值后由 SessionController 覆盖。
+        VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
 
         // 触摸注入节流（0=关闭，步进 8ms）
         val throttleSeek = findViewById<SeekBar>(R.id.throttleSeek)
