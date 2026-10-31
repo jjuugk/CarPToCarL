@@ -9,22 +9,23 @@ LICENSE). The components below remain under their own licenses; the MIT license
 does not apply to them.
 
 --------------------------------------------------------------------------------
-0. Provenance — works this project is based on
+0. Provenance — reference works
 --------------------------------------------------------------------------------
   CarDeck — https://github.com/shaonialife/cardeck
   Copyright (c) 2026 lizhihua, released under the MIT License.
 
-  CarPToCarL is the successor of CarDeck by the same author. It reuses CarDeck's
-  iAP2 / AirPlay protocol implementation, its cryptography wrappers, its
-  Bluetooth link layer and its project skeleton. Both repositories are MIT and
-  share the same copyright holder, so no additional condition applies beyond
-  keeping the copyright notice.
+  CarDeck is an independent third-party project. It is NOT written by the
+  author of CarPToCarL. CarPToCarL's iAP2 / AirPlay protocol implementation, its
+  cryptography wrappers, its Bluetooth link layer and its project skeleton were
+  developed with reference to CarDeck. CarDeck's MIT license requires that its
+  copyright notice and permission notice be retained, and both are reproduced
+  above; no other condition applies.
 
-  Older builds carried the predecessor's name in user-visible strings (the
+  Older builds carried the reference project's name in user-visible strings (the
   "Download/CarDeck" log directory, the "CarDeck" process-start line). Current
   builds use "CarPToCarL" throughout; the old paths may still exist on devices
-  upgraded from those builds. That lineage does not indicate a runtime
-  dependency on the CarDeck application.
+  upgraded from those builds. That naming is inherited from the reference
+  project and does not indicate a runtime dependency on the CarDeck application.
 
 --------------------------------------------------------------------------------
 1. AndroidX / Jetpack  (Apache License 2.0)
