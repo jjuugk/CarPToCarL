@@ -14,6 +14,9 @@ import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
+import io.github.shaonialife.carptocar.buick.ConnectionProfile
+import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
+import io.github.shaonialife.carptocar.buick.DisplayTuning
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
@@ -25,6 +28,7 @@ import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.TouchReports
 import io.github.shaonialife.carptocar.input.TouchRouter
+import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionsState
@@ -408,7 +412,10 @@ object SessionController {
     @Volatile
     var activeScalePercent: Int = 100
 
-    /** 本会话目标帧率：2026-10-25 起固定 60（[DisplayPrefs.FPS]），不再有设置项。 */
+    /**
+     * 本会话目标帧率：默认 60（[DisplayPrefs.FPS]，无设置项），会话建立时按车机
+     * `/info` 的 maxFPS 复核一次——车机报了更低的上限就跟随（见 [DisplayTuning]）。
+     */
     @Volatile
     var activeTargetFps: Int = DisplayPrefs.FPS
 
@@ -3066,8 +3073,36 @@ object SessionController {
                                         ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
                                     val streamH =
                                         ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
+                                    // 帧率：车机报了就跟随（见 DisplayTuning），没报则按本地偏好，
+                                    // 只有声明了兜底的档位（大屏）退回 30。
+                                    val connectionProfile =
+                                        appContext
+                                            ?.let { ConnectionProfilePrefs.get(it) }
+                                            ?: ConnectionProfile.AUTO
+                                    val sessionTargetFps =
+                                        DisplayTuning.targetFps(
+                                            connectionProfile,
+                                            DisplayPrefs.FPS,
+                                            setup.maxFps,
+                                        )
                                     activeScalePercent = scalePct
-                                    activeTargetFps = DisplayPrefs.FPS
+                                    activeTargetFps = sessionTargetFps
+                                    // 出帧节奏同步：合成器按 60 出帧、编码器只吃 30 时，多出来的帧
+                                    // 要么被丢要么白烧编码性能。attach 时它读的是 DisplayPrefs.FPS，
+                                    // 车机上限要到这一步才知道，所以这里补一次。
+                                    VirtualLauncher.setStreamFps(sessionTargetFps)
+                                    if (sessionTargetFps != DisplayPrefs.FPS) {
+                                        val scaleHint =
+                                            DisplayTuning
+                                                .suggestedScalePercent(connectionProfile)
+                                                ?.let { "；建议缩放 ${it}%（当前 ${scalePct}%）" }
+                                                .orEmpty()
+                                        appendLog(
+                                            "CONN: 目标帧率 ${sessionTargetFps}fps——" +
+                                                "车机 maxFPS=${setup.maxFps}，本地偏好 ${DisplayPrefs.FPS}" +
+                                                "（档位「${connectionProfile.label}」）$scaleHint",
+                                        )
+                                    }
                                     // 记录「车机通告分辨率」原值：英雄卡与「显示」卡片要如实
                                     // 展示它，而不是只显示缩放百分比（用户根本看不出画布多大）。
                                     activeCarWidth = setup.displayWidth
@@ -3127,7 +3162,7 @@ object SessionController {
                                             } else {
                                                 "（车机未通告·手机横屏兜底）"
                                             }) +
-                                            " → 流 ${streamOutW}×${streamOutH}（$scalePct%）@${DisplayPrefs.FPS}fps",
+                                            " → 流 ${streamOutW}×${streamOutH}（$scalePct%）@${sessionTargetFps}fps",
                                     )
                                     if (streamOutW != streamW || streamOutH != streamH) {
                                         appendLog(
@@ -3155,7 +3190,7 @@ object SessionController {
                                             frameCipher = screen.cipher,
                                             width = streamOutW,
                                             height = streamOutH,
-                                            targetFps = DisplayPrefs.FPS,
+                                            targetFps = sessionTargetFps,
                                             log = { line -> appendLog(line) },
                                             keepAliveWithStats = setup.keepAliveSendStatsAsBody,
                                             // 直通模式：VideoConfig 声明实时跟随 98311 上报值。

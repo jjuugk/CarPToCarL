@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.buick
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -161,5 +162,78 @@ class ConnectionProfileTest {
         assertFalse(
             B233DialPolicy.mayDial(true, false, 60_000L, 60_000L, 1L),
         )
+    }
+
+    @Test
+    fun `大连屏档强制 B233 且默认等车机接入`() {
+        val big = ConnectionProfile.BUICK_BIGSCREEN
+        assertEquals(big, ConnectionProfile.byId("buick_bigscreen"))
+        assertTrue(big.forcesB233)
+        // 车机没报 maxFPS 时按 30 兜底（大屏车机普遍 30）
+        assertEquals(DisplayTuning.FALLBACK_CAR_MAX_FPS, big.carMaxFpsFallback)
+        // 与「别克 E5（手机拨号）」相反：大屏档默认等车机接入
+        assertFalse(big.b233PhoneInitiates)
+    }
+
+    /**
+     * 大屏档的车型身份未知（很可能不叫 `BUICK_xxxx`），所以**选了档位即认**：
+     * 没选目标设备时不再要求「名字像别克」，否则用户选了档位等于白选。
+     * 但一旦指定了目标，仍只认那一个地址——防止连到旁边的耳机或另一台车。
+     */
+    @Test
+    fun `大连屏档没选目标也命中`() {
+        assertTrue(
+            B233Selection.matches(ConnectionProfile.BUICK_BIGSCREEN, null, "11:22:33:44:55:66", "车机蓝牙", false),
+        )
+        val target = "AA:BB:CC:DD:EE:FF"
+        assertTrue(
+            B233Selection.matches(ConnectionProfile.BUICK_BIGSCREEN, target, target, "随便", false),
+        )
+        assertFalse(
+            B233Selection.matches(
+                ConnectionProfile.BUICK_BIGSCREEN,
+                target,
+                "11:22:33:44:55:66",
+                "BUICK_1234",
+                false,
+            ),
+        )
+    }
+
+    /**
+     * 帧率规则：**车机报了就跟随**，与档位无关。
+     *
+     * 车机 `/info` 的 maxFPS 是接收端解码能力的自述，发得比它快只会丢帧堆队列。
+     * 唯一例外是「车机没报」（<=0）——那时只有声明了兜底的档位（大连屏）退回 30，
+     * 其余档位保持本地偏好，保证没有车机信息时行为与旧版一致。
+     */
+    @Test
+    fun `车机报了就跟随帧率上限`() {
+        // 车机报 30：三个档位都跟随
+        assertEquals(30, DisplayTuning.targetFps(ConnectionProfile.AUTO, 60, 30))
+        assertEquals(30, DisplayTuning.targetFps(ConnectionProfile.BUICK_B233, 60, 30))
+        assertEquals(30, DisplayTuning.targetFps(ConnectionProfile.BUICK_BIGSCREEN, 60, 30))
+        // 车机报得比偏好高 → 不抬高（上限由本地偏好决定）
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.AUTO, 60, 120))
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.BUICK_BIGSCREEN, 60, 120))
+        // 荒谬值（10fps）→ 有下限，不至于卡成 PPT
+        assertEquals(DisplayTuning.MIN_TARGET_FPS, DisplayTuning.targetFps(ConnectionProfile.AUTO, 60, 10))
+    }
+
+    @Test
+    fun `车机没报时只有大屏档按 30 兜底`() {
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.AUTO, 60, 0))
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.BUICK_B233, 60, 0))
+        assertEquals(30, DisplayTuning.targetFps(ConnectionProfile.BUICK_BIGSCREEN, 60, 0))
+    }
+
+    @Test
+    fun `只有大屏档给出缩放建议`() {
+        assertEquals(
+            DisplayTuning.BIGSCREEN_SUGGESTED_SCALE_PERCENT,
+            DisplayTuning.suggestedScalePercent(ConnectionProfile.BUICK_BIGSCREEN),
+        )
+        assertNull(DisplayTuning.suggestedScalePercent(ConnectionProfile.BUICK_B233))
+        assertNull(DisplayTuning.suggestedScalePercent(ConnectionProfile.AUTO))
     }
 }

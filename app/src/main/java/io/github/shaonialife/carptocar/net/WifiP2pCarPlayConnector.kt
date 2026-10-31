@@ -197,13 +197,19 @@ class WifiP2pCarPlayConnector(
                         }
 
                         WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                            // 扫描结果只能主动取；这里不阻塞，取到就存最新一份
-                            runCatching {
+                            // 扫描结果只能主动取；这里不阻塞，取到就存最新一份。
+                            // requestPeers 需要 NEARBY_WIFI_DEVICES（Android 13+）/ 定位权限，
+                            // 缺权限时系统抛 SecurityException —— 显式 catch 而不是靠外层
+                            // runCatching：lint 的 MissingPermission 只认 checkPermission
+                            // 或 catch SecurityException，认不出 runCatching。
+                            try {
                                 channel?.let { ch ->
                                     manager?.requestPeers(ch) { list ->
                                         peers.set(list?.deviceList?.toList().orEmpty())
                                     }
                                 }
+                            } catch (_: SecurityException) {
+                                log("P2P: 缺「附近的设备」权限，拿不到扫描结果（不影响已发起的手动加入）")
                             }
                         }
 
@@ -262,21 +268,27 @@ class WifiP2pCarPlayConnector(
         val latch = CountDownLatch(1)
         val ok = AtomicReference(false)
         val reason = AtomicReference(-1)
-        p2p.connect(
-            ch,
-            config,
-            object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    ok.set(true)
-                    latch.countDown()
-                }
+        try {
+            p2p.connect(
+                ch,
+                config,
+                object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        ok.set(true)
+                        latch.countDown()
+                    }
 
-                override fun onFailure(error: Int) {
-                    reason.set(error)
-                    latch.countDown()
-                }
-            },
-        )
+                    override fun onFailure(error: Int) {
+                        reason.set(error)
+                        latch.countDown()
+                    }
+                },
+            )
+        } catch (_: SecurityException) {
+            // 缺 NEARBY_WIFI_DEVICES（Android 13+）/ 定位权限
+            log("P2P: 缺「附近的设备」权限，无法发起 Wi-Fi Direct 加入——退回站模式")
+            return false
+        }
         // connect() 只表示「请求已下发」，真正建组要等广播；这里只等它接受请求
         latch.await(10, TimeUnit.SECONDS)
         if (!ok.get()) {
@@ -299,7 +311,14 @@ class WifiP2pCarPlayConnector(
         while (SystemClock.uptimeMillis() < deadline) {
             if (isCancelled()) return null
             peers.set(emptyList())
-            p2p.discoverPeers(ch, null)
+            try {
+                p2p.discoverPeers(ch, null)
+            } catch (_: SecurityException) {
+                // 缺 NEARBY_WIFI_DEVICES（Android 13+）/ 定位权限：扫描发不出去，
+                // 继续轮询也没有意义
+                log("P2P: 缺「附近的设备」权限，无法扫描对等体——退回站模式")
+                return null
+            }
             // 单轮扫描 8s；期间 peers 由广播异步填充
             val roundEnd = minOf(deadline, SystemClock.uptimeMillis() + 8_000L)
             while (SystemClock.uptimeMillis() < roundEnd) {

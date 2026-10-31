@@ -39,6 +39,7 @@ import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.buick.ConnectionProfile
 import io.github.shaonialife.carptocar.buick.ConnectionProfilePrefs
+import io.github.shaonialife.carptocar.buick.DisplayTuning
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.TouchRouter
@@ -1227,7 +1228,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实测帧率。
      * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
-     * 目标帧率不再展示（固定 60，见 [DisplayPrefs.FPS]），只报实测值。
+     * 目标帧率不再展示（默认 60，会话建立后按车机 maxFPS 复核，见 DisplayTuning），只报实测值。
      *
      * 分辨率报**像素**，不再是「100%」这种只有自己看得懂的比例：车机原值在前，
      * 码流与它不一致时用 `→` 接实际值（直通模式由 CarLife 引擎定尺寸）。
@@ -1512,8 +1513,9 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
-        // 目标帧率（30/60 二选一）已于 2026-10-25 移除：固定 60fps，见 DisplayPrefs.FPS。
-        // 会话建立时 SessionController 按 DisplayPrefs.FPS 申请，运行中不再提供切换。
+        // 目标帧率（30/60 二选一）已于 2026-10-25 移除：默认 60fps，见 DisplayPrefs.FPS。
+        // 会话建立时 SessionController 会按车机的 /info maxFPS 复核一次（车机报得更低就跟随），
+        // 那时才知道上限，所以这里只是起点值。
         VirtualLauncher.setStreamFps(DisplayPrefs.FPS)
 
         // 触摸注入节流（0=关闭，步进 8ms）
@@ -1714,7 +1716,17 @@ class MainActivity : AppCompatActivity() {
                 ConnectionProfilePrefs.set(this, profile)
                 refreshConnectionRow(button, note)
                 log("CONN: 连接配置改为「${profile.label}」——${profile.summary}")
-                snack("连接配置：${profile.label}（下次连接生效）")
+                // 大屏档只**提示**缩放建议，绝不自动改用户设置：显示参数是用户
+                // 自己在「显示」面板调过的，悄悄覆盖会让人以为设置丢了。
+                val scaleHint = DisplayTuning.suggestedScalePercent(profile)
+                if (scaleHint == null) {
+                    snack("连接配置：${profile.label}（下次连接生效）")
+                } else {
+                    snack(
+                        "连接配置：${profile.label}（下次连接生效）· 建议缩放 $scaleHint%" +
+                            "（当前 ${DisplayPrefs.scalePercent(this)}%），在「显示」面板可改",
+                    )
+                }
             }
             .setNegativeButton("取消", null)
             .show()

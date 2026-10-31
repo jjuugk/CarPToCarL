@@ -91,7 +91,7 @@
 （该 fork 与本仓库同为 MIT，即便引用也无许可障碍）；具体报文与判定阈值来自别克 E2LB 真机日志的
 实测，差异与依据见 [docs/buick-e2lb-availability-silence.md](docs/buick-e2lb-availability-silence.md)。
 
-### 别克这套建链能用在哪几台车上（含大众朗逸 Pro、宝马 iD9）
+### 别克这套建链能用在哪几台车上（含大众朗逸 Pro、宝马 iD9、别克大连屏）
 
 `bieke` 分支这套建链规则（`0x4300` 75 字节双 group、MFi 只认 32B 挑战、不拆 HFP/A2DP、
 默认由车机发起 RFCOMM、车机零回帧时不催问）并不专属别克。**实车验证过，下面三台车走的是
@@ -102,6 +102,7 @@
 | **别克 E5**（B233 / E2LB，SAIC-GM 8155 / Cinemo 栈） | 默认「自动识别」即可命中：0x1D01 里同时有 `buick` + `saic general motors` + 车型代号 |
 | **大众朗逸 Pro** | 「连接配置」→ 手动选 **「别克 E5（车机发起）」** |
 | **宝马 iD9** | 「连接配置」→ 手动选 **「别克 E5（车机发起）」** |
+| **别克大连屏**（GL8 / 世纪 / 君越这类 30 吋宽屏，**尚未实车验证**） | 「连接配置」→ 手动选 **「别克 大连屏（车机发起）」**：建链同 B233；帧率跟随车机 `maxFPS`（该档在车机没上报时按 30 兜底）。依据与验证清单见 [docs/buick-bigscreen-profile.md](docs/buick-bigscreen-profile.md) |
 
 为什么大众、宝马要手动选一次：自动识别只看别克的身份标记，两台车的 0x1D01 里没有这些字样，
 不会被自动判定成 B233，于是会落到通用线（单 group `0x4300`）——而它们要的恰恰是别克那一版报文。
@@ -734,6 +735,7 @@ CarPToCarL/
 | [docs/CARLIFE-GATEWAY-FEASIBILITY.md](docs/CARLIFE-GATEWAY-FEASIBILITY.md)     | 网关方案可行性评估                 |
 | [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)                                     | 开源 / 收费的法律风险梳理与商业化清单      |
 | [docs/process-freeze-recovery.md](docs/process-freeze-recovery.md)             | 进程被系统冻结的判定、PROC 日志与解冻后自动恢复 |
+| [docs/buick-bigscreen-profile.md](docs/buick-bigscreen-profile.md)             | 别克「大连屏」连接档；与参考项目连接池的对比       |
 
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 
