@@ -75,10 +75,11 @@ Android 13 及更早机型该功能不可用。
 
 ## 第三方代码与许可
 
-- **前身项目**：[CarDeck](https://github.com/shaonialife/cardeck)（同作者，MIT）。
-  本应用的 iAP2 / AirPlay 协议实现、密码学封装、蓝牙链路与工程骨架源自该项目；
-  两者同作者、同许可证，仅需保留版权声明。运行时仍可见的历史命名（日志目录
-  `下载/CarDeck`、进程启动行 `CarDeck`）来自这一渊源，不代表依赖该应用。
+- **参考项目**：[CarDeck](https://github.com/shaonialife/cardeck)（MIT，版权归其作者；
+  **独立项目，与本应用非同作者**）。本应用的 iAP2 / AirPlay 协议实现、密码学封装、
+  蓝牙链路与工程骨架参考了该项目；按其 MIT 许可保留版权与许可声明（见
+  [NOTICE](NOTICE) 第 0 节）。运行时仍可见的历史命名（日志目录
+  `下载/CarDeck`、进程启动行 `CarDeck`）沿用自参考对象，不代表依赖该应用。
 - 本仓库 `reference/` 目录（若存在）为**本地参考资料**，已在 `.gitignore` 中排除，
   不会随本仓库分发。其中参考项目（xcertplay / DiPlay 为 GPL-3.0 等）的源码
   及许可义务不适用于本仓库。

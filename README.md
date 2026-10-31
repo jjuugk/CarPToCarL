@@ -48,14 +48,15 @@
 | 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3；测试台：DiPlay / xcertplay）                    |
 | 画面来源 | 本机 **CarLife+** 引擎（荣耀：`com.baidu.carlife.honor` 8.8.5）                        |
 | 音频   | PCM 直通（CarLife 音频通道 → AirPlay 音频通道）                                           |
-| 前身 / 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（同作者的上一代项目，MIT）——本项目的协议层与工程骨架源自它 |
+| 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（MIT，独立项目，与本项目非同作者）——本项目的协议层与工程骨架参考了它的实现 |
 
-### 与 CarDeck 的关系
+### 与参考项目 CarDeck 的关系
 
-[CarDeck](https://github.com/shaonialife/cardeck) 是同作者的上一代项目，目标同样是「让 Android 手机
-扮演 CarPlay 发送端」。本项目在它的基础上继续演进，**复用了它的 iAP2 / AirPlay 协议实现、
-密码学封装、蓝牙链路与工程骨架**（所以日志目录仍是 `下载/CarDeck`、进程启动行仍写 `CarDeck`，
-这些是历史命名，不是依赖）。
+[CarDeck](https://github.com/shaonialife/cardeck) 是一个**独立项目**（MIT 许可，版权归其作者，
+与本项目**不是同一作者**），目标同样是「让 Android 手机扮演 CarPlay 发送端」。本项目在开发中
+**参考了它的 iAP2 / AirPlay 协议实现、密码学封装、蓝牙链路与工程骨架**；按其 MIT 许可，
+版权与许可声明已保留在 [NOTICE](NOTICE) 第 0 节。运行时仍可见的历史命名（日志目录
+`下载/CarDeck`、进程启动行 `CarDeck`）沿用自参考对象，不代表依赖该应用。
 
 两者真正的区别在**画面来源**：
 
@@ -832,8 +833,9 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十、边界、商标与合规
 
-- **前身与参考**：本项目的协议层与工程骨架源自同作者的 [CarDeck](https://github.com/shaonialife/cardeck)
-  （MIT）。两个仓库同作者、同许可证，代码可自由互相引用；CarDeck 中 `reference/` 下的
+- **参考项目**：本项目的协议层与工程骨架参考了 [CarDeck](https://github.com/shaonialife/cardeck)
+  （MIT，版权归其作者；**独立项目，与本项目非同作者**）。按其 MIT 许可，版权与许可声明已列在
+  [NOTICE](NOTICE) 第 0 节，不附加其它条件；CarDeck 中 `reference/` 下的
   GPL-3.0 参考项目与本项目一样**未入库、未分发**。
 - **许可证**：源码以 [MIT](LICENSE) 发布，正文之后附了一段**授权范围说明**：MIT 只授予
   本仓库代码的著作权，**不授予** Apple / 百度的专利、协议规范、MFi 认证或任何商标权利。
@@ -1036,9 +1038,9 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 **把「来自哪里」写进说明**
 
-- README 新增「与 CarDeck 的关系」：本项目是同作者上一代项目
-  [CarDeck](https://github.com/shaonialife/cardeck)（MIT）的后继，复用了它的
-  iAP2 / AirPlay 协议实现、密码学封装、蓝牙链路与工程骨架。
+- README 新增「与参考项目 CarDeck 的关系」：本项目参考了独立项目
+  [CarDeck](https://github.com/shaonialife/cardeck)（MIT）的 iAP2 / AirPlay 协议实现、
+  密码学封装、蓝牙链路与工程骨架；两者非同作者，其版权声明按 MIT 要求保留。
 - `NOTICE` 新增第 0 节 `Provenance`（随 APK 打包进 `assets/NOTICE.txt`）；
   `docs/LEGAL-NOTES.md`、`DISCLAIMER.md` 同步标注来源。
 - 运行时仍可见的历史命名（日志目录 `下载/CarDeck`、进程启动行 `CarDeck`）注明是渊源而非依赖。
