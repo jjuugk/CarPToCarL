@@ -20,14 +20,14 @@
 **最新正式版**（免编译，直接装）：
 
 > **[`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)**
-> —— 固定直链，永远指向最新一版（当前 1.2.8，13.4 MB）
+> —— 固定直链，永远指向最新一版（当前 1.2.9，13.4 MB）
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.8.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.8/CarPToCarL-1.2.8.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.9.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.9/CarPToCarL-1.2.9.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.8，但不要与其它来源的包混装                    |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.9，但不要与其它来源的包混装                    |
 | 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-latest.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
@@ -40,7 +40,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.8`（正式版；音频通道 `9240` / `9241` 断链与沉默看门狗——画面早就有、声音不再干等 88 秒；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.9`（正式版；连接健壮性四处加固——配对错误码不再被丢掉（修「有画面没声音」的真因）、失败定性、阶段预算、多屏选择；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[最新正式版 APK](https://github.com/jjuugk/CarPToCarL/releases/latest)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -694,6 +694,7 @@ CarPToCarL/
 | [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)                                     | 开源 / 收费的法律风险梳理与商业化清单      |
 | [docs/process-freeze-recovery.md](docs/process-freeze-recovery.md)             | 进程被系统冻结的判定、PROC 日志与解冻后自动恢复 |
 | [docs/audio-channel-watchdog.md](docs/audio-channel-watchdog.md)               | 音频通道（9240 / 9241）断链与沉默看门狗：为何「有画面没声音」 |
+| [docs/connect-hardening.md](docs/connect-hardening.md)                         | 配对失败定性、候选地址、阶段预算、多屏选择：连接健壮性四处加固 |
 
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 
@@ -820,6 +821,34 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
+### 1.2.9 —— 2026-11-01（正式版 · 连接健壮性四处加固）
+
+> 修「有画面没声音」背后的真正原因，并把「这次连接多久、慢在哪」写进日志。
+
+- **配对错误码不再被丢掉（最关键）**：`pair-setup` / `pair-verify` 应答里的 TLV
+  `Type=Error`（`0x07`）从 1.0 起就被忽略。日志 221747 里车机对两段都回
+  `{Error:2, State:4}`——`pair-setup` 报成「M4 缺少 proof」，`pair-verify` 只判
+  `State == 4` 干脆**把拒绝读成成功**，派生两把对不上的密钥，加密 SETUP 被静默丢弃
+  10 秒，最后降级明文会话（无共享密钥 → 音频与触摸整条跳过）。
+  现在每个应答先看 Error 再看 State，抛带错误码的异常，并给出一句可执行的建议。
+- **失败分类**：`Error=2`（认证失败）/ `4`（配对数满）/ `5`（次数用尽）属确定性失败，
+  本轮停止重试；`3`（退避）/`7`（忙）/`6`（不可用）与未知码仍重试。确定性失败时
+  **不再触发「断 BT 重来」**（那只会再失败一次，真车还会拆掉 BT 控制通道），
+  但明文会话继续兜底画面，并当场写明「本会话无共享密钥 → 音频与触摸不可用」。
+- **短期记忆**：记忆「这台车确定性拒绝配对」15 分钟，下一轮直接跳过注定失败的
+  120 秒配对窗口；15 分钟后过期、配对成功即清除、明文 SETUP 被拒仍会补做配对。
+- **阶段预算**：每轮连接逐阶段计时并汇总（`STAGE:` 前缀），预算沿用既有常量
+  （等端点 5min / 热点 60s / 配对 120s / SETUP 30s / 首帧 20s），超预算会标出来。
+  新增**首帧门**：SETUP 成功后 20 秒没收到任何视频帧就明确写一行（只报告不拆链，
+  避免与看门狗形成两套超时）。
+- **多屏选择**：`/info` 有多块屏时不再盲取第一块——车机声明了 `type` 就按
+  `type==0 → 面积 → 帧率 → 声明序` 选主屏，未声明 `type` 时保持旧行为；
+  `displayUuid` / `maxFps` 改为取选中那块屏的值。
+- **候选地址**：配对开始打印完整候选列表（含地址族），并说明身份判定只看 `pk`
+  签名、与地址无关；`pk` 校验失败从「一句 `=false`」改为显式告警（可能连到了同网段
+  的另一台 AirPlay 设备），但不中断。
+- 详见 [docs/connect-hardening.md](docs/connect-hardening.md)。
+
 ### 1.2.8 —— 2026-11-01（正式版 · 音频通道看门狗）
 
 > 修「等一会才连上车机，播放音乐也要等一段时间才出音频」里的后半句。
@@ -852,7 +881,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 | 1.2.7  | 2026-10-31 | 进程冻结监视与解冻后自动恢复（`PROC` 日志）；目标帧率改为跟随车机 `maxFPS` |
 
 > `1.1.0`、`1.2.2` ~ `1.2.5` 只出过本地 dev 包，未单独发 Release；
-> `bieke` 分支另有 `1.2.6-bieke` / `1.2.7-bieke` / `1.2.8-bieke` 三个带分支标记的正式包
+> `bieke` 分支另有 `1.2.6-bieke` ~ `1.2.9-bieke` 等带分支标记的正式包
 > （versionCode 与主线相同，可互相覆盖安装）。
 
 ### 1.0.13 —— 2026-10-27（正式版 · 导航播报有声 + 连接稳定性）

@@ -2,7 +2,10 @@ package io.github.shaonialife.carptocar.airplay
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.math.BigInteger
@@ -39,9 +42,123 @@ class AirPlayPairingTest {
         assertArrayEquals(receiver.lastWriteKey, keys.phoneReadKey)
     }
 
+    /**
+     * 日志 221747 的原样现场：pair-setup M4 回 `{Error:2, State:4}`。
+     *
+     * 旧代码只找 `TYPE_PROOF`，找不到就报「M4 缺少 proof」——真实原因（车机拒绝认证）
+     * 从来没进过日志。现在必须抛带错误码的 [PairingRejectedException]，且判为确定性失败。
+     */
     @Test
-    fun tlv8FragmentationRoundTrip() {
-        val big = ByteArray(600) { (it % 251).toByte() }
+    fun pairSetupM4RejectionCarriesErrorCode() {
+        val receiver = MockReceiver()
+        val transport =
+            TlvTransport { path, body ->
+                if (path == "/pair-setup" && stateOf(body) == 3) {
+                    errorReply(state = 4, code = 2)
+                } else {
+                    receiver.handle(path, body)
+                }
+            }
+        val keyPair = AirPlayCrypto.ed25519Generate()
+        val identity = ControllerIdentity("c", keyPair.privateKey, keyPair.publicKey)
+
+        val error =
+            assertThrows(PairingRejectedException::class.java) {
+                PairSetupClient(identity, transport) { }.run()
+            }
+        assertEquals(PairingStage.PAIR_SETUP, error.stage)
+        assertEquals(PairingErrorCode.AUTHENTICATION, error.code)
+        assertEquals(2, error.rawCode)
+        assertEquals(4, error.state)
+        assertTrue("Error=2 是车机状态，重试无意义", error.deterministic)
+    }
+
+    /**
+     * 最严重的一条历史 bug：pair-verify M4 回 `{Error:2, State:4}` 时，
+     * 旧代码只判 `State == 4`（成功标记）→ **把拒绝读成成功**，派生两把对不上的密钥，
+     * 后续加密 SETUP 被车机静默丢弃，最后降级明文（无共享密钥 → 没有声音、没有触摸）。
+     */
+    @Test
+    fun pairVerifyM4RejectionIsNotTreatedAsSuccess() {
+        val receiver = MockReceiver()
+        val transport =
+            TlvTransport { path, body ->
+                if (path == "/pair-verify" && stateOf(body) == 3) {
+                    errorReply(state = 4, code = 2)
+                } else {
+                    receiver.handle(path, body)
+                }
+            }
+        val keyPair = AirPlayCrypto.ed25519Generate()
+        val identity = ControllerIdentity("c", keyPair.privateKey, keyPair.publicKey)
+        PairSetupClient(identity, transport) { }.run()
+
+        val error =
+            assertThrows(PairingRejectedException::class.java) {
+                PairVerifyClient(identity, transport) { }.run(receiver.staticKey.publicKey)
+            }
+        assertEquals(PairingStage.PAIR_VERIFY, error.stage)
+        assertEquals(PairingErrorCode.AUTHENTICATION, error.code)
+        assertTrue(error.deterministic)
+        // 拒绝时不得留下任何"密钥已建立"的假象
+        assertNull(receiver.lastReadKey)
+    }
+
+    /** pair-verify M2 就回错误（车机连临时公钥都不给）：也要带错误码，不能报「缺少 publicKey」。 */
+    @Test
+    fun pairVerifyM2RejectionCarriesErrorCode() {
+        val receiver = MockReceiver()
+        val transport =
+            TlvTransport { path, body ->
+                if (path == "/pair-verify") errorReply(state = 4, code = 2) else receiver.handle(path, body)
+            }
+        val keyPair = AirPlayCrypto.ed25519Generate()
+        val identity = ControllerIdentity("c", keyPair.privateKey, keyPair.publicKey)
+
+        val error =
+            assertThrows(PairingRejectedException::class.java) {
+                PairVerifyClient(identity, transport) { }.run()
+            }
+        assertEquals(PairingStage.PAIR_VERIFY, error.stage)
+        assertEquals(PairingErrorCode.AUTHENTICATION, error.code)
+    }
+
+    /** `{Error:3}`（退避）不是确定性失败：车机只是要求「等会再来」。 */
+    @Test
+    fun backoffIsNotDeterministic() {
+        val receiver = MockReceiver()
+        val transport =
+            TlvTransport { path, body ->
+                if (path == "/pair-setup") errorReply(state = 2, code = 3) else receiver.handle(path, body)
+            }
+        val keyPair = AirPlayCrypto.ed25519Generate()
+        val identity = ControllerIdentity("c", keyPair.privateKey, keyPair.publicKey)
+
+        val error =
+            assertThrows(PairingRejectedException::class.java) {
+                PairSetupClient(identity, transport) { }.run()
+            }
+        assertEquals(PairingErrorCode.BACKOFF, error.code)
+        assertFalse(error.deterministic)
+        assertTrue(PairingPolicy.shouldRetrySameStage(error.code))
+    }
+
+    private fun stateOf(body: ByteArray): Int = Tlv8.decode(body)[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xFF) ?: 0
+
+    /** 真机拒绝应答的形状：State 仍是「正常值」，错误码单独在 TYPE_ERROR。 */
+    private fun errorReply(
+        state: Int,
+        code: Int,
+    ): ByteArray =
+        Tlv8.encode(
+            listOf(
+                Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(state.toByte())),
+                Tlv8.Item(Tlv8.TYPE_ERROR, byteArrayOf(code.toByte())),
+            ),
+        )
+
+    @Test
+    fun tlv8FragmentationRoundTrip() {        val big = ByteArray(600) { (it % 251).toByte() }
         val encoded =
             Tlv8.encode(
                 listOf(

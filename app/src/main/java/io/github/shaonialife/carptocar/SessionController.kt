@@ -4,6 +4,8 @@ import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
+import io.github.shaonialife.carptocar.airplay.PairingGate
+import io.github.shaonialife.carptocar.airplay.PairingMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
@@ -39,6 +41,8 @@ import io.github.shaonialife.carptocar.net.WifiSavedNetworks
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
+import io.github.shaonialife.carptocar.util.ConnectBudget
+import io.github.shaonialife.carptocar.util.ConnectStage
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.util.SysShell
@@ -80,6 +84,14 @@ object SessionController {
 
     @Volatile
     private var appContext: Context? = null
+
+    /**
+     * 本轮连接的阶段计时器：进阶段打一行、结束打汇总。
+     *
+     * 存在的意义是回答「这次连接为什么慢、慢在哪」——旧实现这个答案散落在七个阶段的
+     * 各自日志里，只能人工掐时间（2026-11-01 日志 090105：连接 29.7s，音频等 88s）。
+     */
+    private val connectBudget = ConnectBudget(sink = { line -> appendLog(line) })
 
     /** WiFi 等待用户操作的窗口（打开 WLAN 开关 / 手动加入热点的轮询上限）。 */
     private const val WLAN_WAIT_TIMEOUT_MS = 120_000L
@@ -2488,6 +2500,36 @@ object SessionController {
         return null
     }
 
+    /**
+     * 首帧门：SETUP 成功之后等首帧，超时**只报告不拆链**。
+     *
+     * 为什么不拆：拆链由视频看门狗与冻结恢复负责，再叠一套超时就是两套语义互相打架
+     * （这台项目历史上反复踩过）。这里要的只是「把没有画面这件事说清楚」——
+     * 旧日志在「SETUP 成功」之后就断片了，到底是黑屏、还是 CarLife 没在投，
+     * 事后完全无从判断（2026-11-01 日志 090105 就缺这一段）。
+     */
+    private fun startFirstFrameGate() {
+        Bg.run("first-frame-gate") {
+            val budget = ConnectStage.FIRST_FRAME.budgetMs
+            val deadline = android.os.SystemClock.uptimeMillis() + budget
+            while (android.os.SystemClock.uptimeMillis() < deadline) {
+                if (CarLifeHijack.isStreaming) {
+                    connectBudget.markStreaming()
+                    return@run
+                }
+                // 只在「会话被整体收掉」（retireSession 会把 videoSender 置空）或用户取消时退出；
+                // 不用 isRunning 当条件——它在这条通道刚起时可能还是 false，会让门直接失效。
+                if (connectCancelled || videoSender == null) return@run
+                sleepQuietly(250)
+            }
+            appendLog(
+                "STAGE: ⚠ ${ConnectStage.FIRST_FRAME.label}超时（${budget / 1000}s 内没收到任何视频帧）——" +
+                    "画面来自本机 CarLife+：确认它处于「无线连接」且引擎在推流（7240）；" +
+                    "会话本身已建立，不需要重连车机",
+            )
+        }
+    }
+
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
         endpoint: Iap2SenderSession.CarPlayEndpoint,
@@ -2513,6 +2555,8 @@ object SessionController {
         // 新一轮交接开始：清掉上一轮（可能中途失败）遗留的晚到端点暂存，
         // 否则它会在本轮的 drain 阶段覆盖掉本会话刚解析出的端点。
         pendingEndpointUpdate = null
+        // 阶段计时清零：从这里开始算「这次连接一共多久」。
+        connectBudget.begin(source)
         // 空端点 = 新协议车机（GM/Cinemo 等）声明会发 0x4301 但窗口内未到。
         // Iap2SenderSession 已不再为此拆链，保活泵会把晚到的 0x4301 经 onLateEndpoint
         // 送回本函数重走完整流程。这里**不占 sessionStarting**（晚到端点要走「上一轮
@@ -2674,19 +2718,51 @@ object SessionController {
                     BtSessionGate.sessionActive = true
                     // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                     phaseHint = "AirPlay 配对中…"
+                    connectBudget.enter(ConnectStage.PAIRING)
                     var client = newClient()
                     currentClient = client
                     drainPendingEndpoint(client)
+                    // 候选地址全打出来：0x4301 与 mDNS 给的可能既不同族也不同值，
+                    // 两者都只是候选，**身份判定靠 pair-verify 的 pk 签名**。连错屏/连不上时
+                    // 这一行就是唯一能看出「按什么顺序试了哪些地址」的证据。
+                    appendLog(
+                        "AIRPLAY: 连接候选 ${EndpointHosts.describeCandidates(client.currentEndpoint.ipAddresses)}" +
+                            "（身份判定只看 pk，与地址无关）",
+                    )
                     // pre-HomeKit 老车机（CarPlay 210.81 时代，奥迪 4xxx 固件）在
                     // `_airplay._tcp` 里**不声明** HK_PAIRING_AND_ENCRYPT：它们只接受
                     // 明文 SETUP（et=NONE）+ AES-CTR 屏幕流，走 pair-setup 必然失败。
                     // catplay 的接收端分类 1 即此形态；旧实现会在这里空转 120s 配对窗口，
                     // 用户看到的就是「连不上」。
-                    val noPairing =
+                    val txtNoPairing =
                         AirPlayFeatures.supportsPairing(client.currentEndpoint.advertisedFeatures) == false
+                    // 短期记忆：上次被车机确定性拒绝配对（Error=2 这类），本轮直接跳过
+                    // pair-setup——它会一直回同一个码，120s 窗口纯属白等（日志 221747）。
+                    // 记忆只影响「要不要再试一次重复动作」，不影响明文会话，也不影响
+                    // 明文 SETUP 失败后的补配对（见下方 retryWithPairing）。
+                    val pairingReceiverKey =
+                        PairingMemory.receiverKey(
+                            client.currentEndpoint.publicKey,
+                            client.currentEndpoint.deviceIdentifier,
+                            endpoint.ssid,
+                        )
+                    val pairingGate =
+                        PairingMemory.decide(
+                            PairingMemory.read(context),
+                            pairingReceiverKey,
+                            System.currentTimeMillis(),
+                        )
+                    val noPairing = txtNoPairing || pairingGate == PairingGate.SKIP_SETUP
                     var keys: PairVerifyClient.ControlKeys? =
                         if (noPairing) {
-                            client.skipPairing("TXT features 未声明 HK_PAIRING_AND_ENCRYPT")
+                            if (pairingGate == PairingGate.SKIP_SETUP) {
+                                client.skipPairing(
+                                    "上次连接被车机确定性拒绝配对（15 分钟内不重复尝试；" +
+                                        "配对成功或过期后自动恢复）",
+                                )
+                            } else {
+                                client.skipPairing("TXT features 未声明 HK_PAIRING_AND_ENCRYPT")
+                            }
                             client.reconnect()
                             null
                         } else {
@@ -2707,6 +2783,7 @@ object SessionController {
                             pairingForbidden = client.pairingForbidden,
                             attemptedPairing = client.attemptedPairing,
                             pairingUnsupported = client.pairingUnsupported,
+                            pairingTerminal = client.pairingTerminal,
                         )
                     if (fallbackAfterFirstRound.useBtRetireHack) {
                         // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
@@ -2748,6 +2825,7 @@ object SessionController {
                             pairingForbidden = client.pairingForbidden,
                             attemptedPairing = client.attemptedPairing,
                             pairingUnsupported = client.pairingUnsupported,
+                            pairingTerminal = client.pairingTerminal,
                         ).usePlainSession
                     if (plainSession) {
                         phaseHint = "建立明文会话…"
@@ -2755,6 +2833,15 @@ object SessionController {
                             "AIRPLAY: 配对不可用（${if (client.pairingUnsupported) "接收端不支持" else "配对失败"}）" +
                                 "——改用 et=NONE 明文会话 + AES-CTR 屏幕流（catplay 接收端分类 1/2）",
                         )
+                        if (client.pairingTerminal) {
+                            // 把「画面能用、但为什么没声音」写在连接当场，而不是等用户来问。
+                            // 旧日志对这类会话的说法是「加密 SETUP 被拒（403）」/「弹窗里没勾声音」，
+                            // 两条都是假线索（1.1.2 起 `audioEnabledForSession` 默认就是 true）。
+                            appendLog(
+                                "AIRPLAY: ⚠ 本会话无共享密钥（车机拒绝配对）：画面正常，**音频与触摸不可用**。" +
+                                    "要恢复声音需在车机侧删掉本机的配对记录后重连",
+                            )
+                        }
                         // 配对循环结束时 socket 已关/状态机不可用：SETUP 前必须重连一次。
                         // 失败不直接判死：车机 AirPlay 端口可能还没开，下面会按窗口重试。
                         if (!client.reconnect()) {
@@ -2763,6 +2850,19 @@ object SessionController {
                     }
                     // keys 是 lambda 内的可变捕获变量：Kotlin 无法智能转换，先固化成不可变值。
                     val pairedKeys = keys
+                    // 把配对结果落成「短期记忆」：确定性拒绝则记住（下轮省掉 120s 白等），
+                    // 成功则立刻清除（车机侧删过配对记录后能自己恢复，不用等 TTL）。
+                    client.pairingTrouble?.let { trouble ->
+                        if (trouble.deterministic) {
+                            PairingMemory.record(context, pairingReceiverKey, trouble.stage, trouble.rawCode)
+                            uiHintSink?.invoke("配对失败：${trouble.advice}")
+                            appendLog(
+                                "AIRPLAY: 车机确定性拒绝配对（${trouble.text}）——已记录，15 分钟内不再重复尝试。" +
+                                    "建议：${trouble.advice}",
+                            )
+                        }
+                    }
+                    if (pairedKeys != null) PairingMemory.clear(context)
                     if (pairedKeys != null || plainSession) {
                         phaseHint = if (pairedKeys != null) "配对完成，建立 CarPlay 会话…" else "建立明文会话…"
                         if (pairedKeys != null) {
@@ -2774,6 +2874,7 @@ object SessionController {
                         }
                         // 已配对 → 共享密钥；明文会话 → null（流加密降级为 AES-CTR 零密钥）
                         var sessionKey = pairedKeys?.sharedSecret
+                        connectBudget.enter(ConnectStage.SETUP)
                         var setup = runInitialSetup(client, plainSession, noPairing)
                         if (setup == null && plainSession && noPairing) {
                             // catplay 的「加密升级」路径：只有在**我们主动跳过配对**（TXT 未声明
@@ -2781,6 +2882,9 @@ object SessionController {
                             // 反过来（配对先试过且失败）再试一次没有意义，只会多等 30s。
                             val upgraded = client.retryWithPairing(PAIRING_UPGRADE_WINDOW_MS)
                             if (upgraded != null) {
+                                // 补配对真的成了：说明「上次确定性拒绝」的记录已经过时，
+                                // 立刻清掉，下一轮不必再走明文。
+                                PairingMemory.clear(context)
                                 sessionKey = upgraded.sharedSecret
                                 setup = client.runSetup()
                             }
@@ -2802,6 +2906,7 @@ object SessionController {
                             }
                         }
                         if (setup != null) {
+                            connectBudget.enter(ConnectStage.FIRST_FRAME)
                             // 记录会话凭据：投影授权晚于连接时用于动态补启音频。
                             // 用 client.currentEndpoint 而非 effectiveEndpoint：配对期间
                             // mDNS 刷新过端点时，真正连上的是 client 里的地址（2026-10-18：
@@ -3205,6 +3310,7 @@ object SessionController {
                                                 "「无线连接」，画面会自动接上（无需重连车机）",
                                         )
                                     }
+                                    startFirstFrameGate()
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                 // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
@@ -3233,13 +3339,15 @@ object SessionController {
                     // 配对线程任何异常都不能留下「已有会话在处理中」的卡死状态
                     appendLog("AIRPLAY: 配对线程异常 - ${error.message ?: error.javaClass.simpleName}")
                 } finally {
+                    // 阶段汇总：成功也打——「这次连接一共多久、花在哪」是用户最常问的问题
+                    // （2026-11-01 日志 090105 就是靠人工掐时间才拆出 29.7s 的构成）。
+                    appendLog(connectBudget.summary())
                     sessionStarting.set(false)
                     // 配对未成功建立推流（fail/异常/start 失败提前退出）时解除静默降噪，
                     // 否则 BT-C 会永久停在门闸外、连真车路径失效。
                     // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
                     if (videoSender?.isRunning != true) {
-                        BtSessionGate.sessionActive = false
-                        // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
+                        BtSessionGate.sessionActive = false                        // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
                         // 窗口内到达，会被暂存但没人消费。此处补投一次——车机等 15s
                         // 无人连入就拆链，错过这一投就是整轮失败（2026-10-18 分析）。
                         val pending = pendingEndpointUpdate
@@ -3271,6 +3379,7 @@ object SessionController {
             // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
             // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
             // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
+            connectBudget.enter(ConnectStage.WIFI)
             Bg.run("wifi-join-on-endpoint") {
                 // 第一步永远是登记「WiFi 建议」——幂等、不等结果、不弹框。
                 // 用户授权过一次之后，系统会在进入范围时自动关联车机热点，
@@ -3398,9 +3507,18 @@ internal fun pairingFallback(
     pairingForbidden: Boolean,
     attemptedPairing: Boolean,
     pairingUnsupported: Boolean,
+    /**
+     * 车机**确定性**拒绝配对（TLV `{Error:2}` 这类，见 [PairingPolicy]）。
+     *
+     * 影响只有一条：禁止「断 BT 二段 hack」。那个 hack 的前提是「换个链路层状态可能就好」，
+     * 而确定性拒绝是车机侧的判断——断 BT 只会再失败一次，真车还会顺手拆掉 BT 控制通道
+     * （即空间接失效）。明文会话照旧兜底，因为画面不需要共享密钥。
+     */
+    pairingTerminal: Boolean = false,
 ): PairingFallback {
     if (keysEstablished) return PairingFallback(useBtRetireHack = false, usePlainSession = false)
-    val useBtRetireHack = !noPairing && !pairSetupRejected && !pairingForbidden && attemptedPairing
+    val useBtRetireHack =
+        !pairingTerminal && !noPairing && !pairSetupRejected && !pairingForbidden && attemptedPairing
     val usePlainSession = !pairingForbidden && (pairingUnsupported || attemptedPairing)
     return PairingFallback(useBtRetireHack = useBtRetireHack, usePlainSession = usePlainSession)
 }
