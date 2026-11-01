@@ -126,6 +126,27 @@ class AirPlayClient(
         private set
 
     /**
+     * 本轮配对失败的定性结果——**只有车机明确回了 TLV 错误码时才有值**。
+     *
+     * 与 [pairingForbidden]（403）、[pairingUnsupported]（404/405/501/455）并列：
+     * 那两类是 HTTP 层面的拒绝，这一类是配对协议内部的 `{Error:N}`。
+     * 三者不能混用：403 是「车机还没就绪，等它重邀」，Error=2 是「这台手机不被接受」。
+     */
+    @Volatile
+    var pairingTrouble: PairingTrouble? = null
+        private set
+
+    /**
+     * 车机**确定性**拒绝配对（[PairingTrouble.deterministic]）：本轮已停止重试。
+     *
+     * 依据是日志 221747 的现场：车机对 pair-setup 与 pair-verify 都回 `Error=2`，
+     * 我们在 120s 窗口里每 2s 重试一次，每一次的结果都一模一样——纯等待，零收益。
+     */
+    @Volatile
+    var pairingTerminal: Boolean = false
+        private set
+
+    /**
      * 接收端**根本不支持** HomeKit 配对（/pair-setup 回 404/405/501 或 455）。
      *
      * 这类是 pre-HomeKit 老车机（CarPlay 210.81 时代，catplay 的接收端分类 1）：
@@ -283,6 +304,20 @@ class AirPlayClient(
                     try {
                         PairSetupClient(identity, transport, log).run()
                         null
+                    } catch (rejected: PairingRejectedException) {
+                        // 车机明确回了错误码：这是**协议层**的拒绝，不是「端口没开」。
+                        // 先落一条带错误码的日志（旧代码这里只有「M4 缺少 proof」这种误导文案），
+                        // 再按错误语义决定「改走已配对快路径」还是「本轮到此为止」。
+                        val trouble = troubleOf(rejected)
+                        pairingTrouble = trouble
+                        log("AIRPLAY: ${trouble.text}——${trouble.advice}")
+                        when {
+                            // 「车机不接受再注册一次」≈ 403：它大概率已经存了我们的公钥，
+                            // 正确动作是直接 pair-verify（下面 "403" 分支就是这条路径）。
+                            PairingPolicy.shouldTryPairedFastPath(rejected.stage, rejected.code) -> "403"
+                            rejected.deterministic -> "terminal"
+                            else -> "failed"
+                        }
                     } catch (error: IOException) {
                         val message = error.message.orEmpty()
                         val forbidden = message.contains("403")
@@ -306,6 +341,13 @@ class AirPlayClient(
                         }
                         if (forbidden) "403" else "failed"
                     }
+                if (setupStatus == "terminal") {
+                    // pair-setup 被确定性拒绝且不值得走快路径（例如 MAX_PEERS / MAX_TRIES）：
+                    // 继续在本轮重试只会拿到同一个错误码，直接交还调用方。
+                    pairingTerminal = true
+                    close()
+                    return null
+                }
                 // 403 后旧连接的状态机不可用：换全新连接走快路径
                 if (setupStatus == "403") {
                     close()
@@ -315,6 +357,9 @@ class AirPlayClient(
                     val keys = PairVerifyClient(identity, fastPathTransport, log).run(receiverStaticKey)
                     cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
                     log("AIRPLAY: 控制通道加密已启用（已配对快路径）")
+                    // 快路径成功 = 车机其实认得我们：pair-setup 那次拒绝只是「不用再注册」，
+                    // 清掉记录，避免下游把这次会话当失败去做退避。
+                    pairingTrouble = null
                     return keys
                 }
                 val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
@@ -322,7 +367,24 @@ class AirPlayClient(
                 // pair-verify 之后双方立即启用加密（接收端在 M4 应答后开启）
                 cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
                 log("AIRPLAY: 控制通道加密已启用")
+                pairingTrouble = null
                 return keys
+            } catch (rejected: PairingRejectedException) {
+                // 走到这里的是 pair-verify 段的拒绝（pair-setup 段的在里层单独处理），
+                // 典型现场：`pair-verify` M4 回 `{Error:2, State:4}` —— 车机不认这台手机的
+                // 配对身份。旧代码把它当成功，于是派生出两把对不上的密钥，加密 SETUP 被
+                // 静默丢弃 10s，最后降级明文（无共享密钥 → 没有声音、没有触摸）。
+                val trouble = troubleOf(rejected)
+                pairingTrouble = trouble
+                log("AIRPLAY: 配对第 $attempt 次尝试失败 - ${trouble.text}")
+                if (rejected.deterministic) {
+                    pairingTerminal = true
+                    log("AIRPLAY: 车机确定性拒绝配对（${trouble.text}）——本轮停止重试：${trouble.advice}")
+                    close()
+                    return null
+                }
+                // 非确定性（BACKOFF/BUSY/未知码）：让车机喘一口，别 2s 一次猛刷它的状态机。
+                Thread.sleep(if (rejected.code == PairingErrorCode.BACKOFF) 5_000L else 1_000L)
             } catch (error: IOException) {
                 val message = error.message.orEmpty()
                 // verify/认证段的 403 与 pair-setup 403 同源（车机信任已建立），
@@ -344,6 +406,16 @@ class AirPlayClient(
         log("AIRPLAY: 配对最终失败（接收端 RTSP 无应答）")
         return null
     }
+
+    /** 把带错误码的拒绝翻译成「定性结果 + 一句人话」，日志与界面共用同一份文案。 */
+    private fun troubleOf(error: PairingRejectedException): PairingTrouble =
+        PairingTrouble(
+            stage = error.stage,
+            code = error.code,
+            rawCode = error.rawCode,
+            deterministic = error.deterministic,
+            advice = PairingPolicy.advice(error.stage, error.code),
+        )
 
     /** 拉取并解析 /info（注意：接收端在活跃会话期间可能不应答）。 */
     fun fetchInfo(timeoutMillis: Int = 5_000): Map<*, *>? {
@@ -754,11 +826,21 @@ class AirPlayClient(
         var infoRoot: Map<*, *>? = null
         val infoMap = loadInfoWithDiagnostics()
         infoRoot = infoMap
-        val display = (infoMap?.get("displays") as? List<*>)?.firstOrNull() as? Map<*, *>
-        // 车机分辨率：`displays[0].widthPixels/heightPixels`。宽容解析见 CarDisplayGeometry——
+        // 候选屏全表。旧实现写死 `displays[0]`——多屏车机（大连屏/仪表）若先声明副屏，
+        // 画面就被推到那块屏上，比例与触摸坐标全错，而日志里看不出选错了。
+        // 选择规则与「只在车机声明 type 时才排序」的兼容性说明见 CarDisplayGeometry。
+        val screens = CarDisplayGeometry.screens(infoMap)
+        val selected = CarDisplayGeometry.select(screens)
+        if (screens.size > 1) {
+            log(
+                "AIRPLAY: /info 共 ${screens.size} 块屏候选：${CarDisplayGeometry.describe(screens)}" +
+                    " → 选中 displays[${selected?.index}]",
+            )
+        }
+        // 车机分辨率：`displays[].widthPixels/heightPixels`。宽容解析见 CarDisplayGeometry——
         // 这里一旦静默落空，整条链路（流画布 / 虚拟屏 / CarLife 98311 / 触摸映射）就全部
         // 按手机分辨率跑，画面比例当场错，所以成功与失败都必须落一条日志。
-        val carDisplay = CarDisplayGeometry.fromInfo(infoMap)
+        val carDisplay = selected?.let(CarDisplayGeometry::sizeOf)
         val fallbackDisplay = phoneFallbackSize()
         if (carDisplay == null) {
             log(
@@ -767,7 +849,10 @@ class AirPlayClient(
                     "HID 设备为空 → 车机不会发 hidSendReport（触摸不可用）",
             )
         } else {
-            log("AIRPLAY: 车机显示屏 ${carDisplay.text}（${carDisplay.source}）")
+            log(
+                "AIRPLAY: 车机显示屏 ${carDisplay.text}（${carDisplay.source}）" +
+                    if (screens.size > 1) "，${screens.size} 块候选中的主屏" else "",
+            )
         }
         // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
@@ -843,15 +928,15 @@ class AirPlayClient(
                 // 来源标记：UI 要据此区分「车机通告的」与「手机兜底的」，
                 // 后者意味着车机没执行 /info，画面比例与触摸都可能不准。
                 displayFromCar = carDisplay != null,
-                // /info displays[0] 的显示屏 UUID（真实 iPhone 会把它回填进屏幕流 SETUP；
-                // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
-                displayUuid =
-                    uuidText(
-                        display?.get("uuid")
-                            ?: display?.get("UUID")
-                            ?: display?.get("displayUUID"),
-                    ),
-                maxFps = CarDisplayGeometry.positiveInt(display?.get("maxFPS")) ?: 30,
+                // /info 主屏的显示屏 UUID（真实 iPhone 会把它回填进屏幕流 SETUP）。
+                // 取**选中那块屏**的 uuid，不是 displays[0] 的——多屏车机上两者不是一回事，
+                // 车机会校验这个 uuid 与它下发的一致性。
+                displayUuid = selected?.uuid,
+                // 别克分支的帧率策略与主线**尚未统一**（已知分叉，见
+                // docs/buick-bigscreen-profile.md）：车机没声明时这里仍兜 30
+                // （= buick/DisplayTuning.FALLBACK_CAR_MAX_FPS），主线是保留 0 由
+                // StreamFps 按 60 声明。统一之前不要顺手改这里——它决定实车发多少帧。
+                maxFps = selected?.maxFps?.takeIf { it > 0 } ?: 30,
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
@@ -3106,30 +3191,6 @@ class AirPlayClient(
             is Map<*, *> -> "dict(${value.size})"
             is String -> "str(${value.length})"
             else -> value.javaClass.simpleName
-        }
-
-    /**
-     * `/info displays[].uuid` 统一字符串化。
-     *
-     * 三种编码都见过：字符串（奥迪 "0"/"1"、部分固件给 36 位 UUID）、
-     * **16 字节 UUID 类型**（bplist 0xB，`toString()` 会变成 `[B@1f2e3d4` 这种垃圾）、
-     * CFKeyedArchiver 的 UID（整数）。屏幕流 SETUP 里的 `uuid` 必须与接收端声明的
-     * **完全一致**，否则车机可能收下流却不往任何屏上绑（表现为「连上了没画面」）。
-     */
-    private fun uuidText(value: Any?): String? =
-        when (value) {
-            null -> null
-            is String -> value.takeIf { it.isNotBlank() }
-            is ByteArray ->
-                if (value.size == 16) {
-                    val hex = value.joinToString("") { "%02x".format(it) }
-                    "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-" +
-                        "${hex.substring(16, 20)}-${hex.substring(20)}"
-                } else {
-                    value.joinToString("") { "%02x".format(it) }
-                }
-            is Number -> value.toString()
-            else -> value.toString().takeIf { it.isNotBlank() }
         }
 
     private fun logInfoSummary(root: Map<*, *>) {

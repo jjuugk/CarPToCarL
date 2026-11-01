@@ -38,8 +38,31 @@ object EndpointHosts {
      */
     fun hasUsable(addresses: List<String>): Boolean = candidates(addresses).isNotEmpty()
 
-    /** 排序 + 去重。空串/纯 scope 一律剔除。 */
-    fun candidates(addresses: List<String>): List<String> {
+    /**
+     * 候选地址的一行描述（进日志用）：`192.168.43.1（IPv4）、fe80::1%wlan0（链路本地 IPv6）`。
+     *
+     * 为什么要单独能打出来：mDNS 解析到的地址与 0x4301 自报的地址**可能既不同族也不同值**
+     * （现场一台 DiPlay：0x4301 给 IPv6 link-local，mDNS 通告 IPv4 192.168.43.1）。
+     * 两者都只是「连接候选」，**身份判定靠 pair-verify 的 pk 签名，与地址无关**——
+     * 但排查时必须能一眼看到「这次按什么顺序试了哪些地址」，否则连错屏/连不上都只能猜。
+     */
+    fun describeCandidates(addresses: List<String>): String {
+        val ordered = candidates(addresses)
+        if (ordered.isEmpty()) return "无可用地址"
+        return ordered.joinToString("、") { host ->
+            val base = stripScope(host)
+            val family =
+                when {
+                    isIpv4(base) -> "IPv4"
+                    isLinkLocalIpv6(base) -> "链路本地 IPv6"
+                    else -> "全局 IPv6"
+                }
+            "$host（$family）"
+        }
+    }
+
+
+    /** 排序 + 去重。空串/纯 scope 一律剔除。 */    fun candidates(addresses: List<String>): List<String> {
         val seen = HashSet<String>()
         val out = ArrayList<String>(addresses.size)
 

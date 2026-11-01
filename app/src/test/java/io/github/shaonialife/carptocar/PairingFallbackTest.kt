@@ -103,6 +103,24 @@ class PairingFallbackTest {
     }
 
     @Test
+    fun `车机确定性拒绝配对 - 禁断 BT - 保留明文兜底`() {
+        // 日志 221747：pair-setup / pair-verify 都回 {Error:2, State:4}。
+        // 断 BT 只会再失败一次（真车还会拆掉 BT 控制通道），但明文会话仍能给画面。
+        val f =
+            pairingFallback(
+                false,
+                noPairing = false,
+                pairSetupRejected = false,
+                pairingForbidden = false,
+                attemptedPairing = true,
+                pairingUnsupported = false,
+                pairingTerminal = true,
+            )
+        assertFalse("确定性拒绝与链路层状态无关，断 BT 无意义", f.useBtRetireHack)
+        assertTrue("画面不需要共享密钥，明文会话继续兜底", f.usePlainSession)
+    }
+
+    @Test
     fun `重试退避 - 403 长 - 其余短`() {
         assertEquals(5_000L, pairingRetryBackoffMs("RTSP/1.0 403 Forbidden"))
         assertEquals(5_000L, pairingRetryBackoffMs("HTTP/1.1 403"))
