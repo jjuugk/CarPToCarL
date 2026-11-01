@@ -19,16 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)**
-> —— 固定直链，永远指向最新一版（当前 1.0.13，13.3 MB）
+> **[`CarPToCarL-1.2.8-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.8-bieke/CarPToCarL-1.2.8-bieke.apk)**
+> —— 别克分支正式包（`1.2.8-bieke`，versionCode 10208，13.4 MB）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.8.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.0.13-release.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.0.13/CarPToCarL-1.0.13-release.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.8-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.8-bieke/CarPToCarL-1.2.8-bieke.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.0.7，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-latest.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.8，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.8-bieke.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -40,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.0.13`（正式版；接入 CarLife TTS 通道 `9241`，修「地图导航播报没声音」；新增「设备适配」一轮连接修复；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[最新正式版 APK](https://github.com/jjuugk/CarPToCarL/releases/latest)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.8-bieke`（别克分支正式版，versionCode 与主线相同；音频通道 `9240` / `9241` 断链与沉默看门狗——画面早就有、声音不再干等 88 秒；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[别克分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-bieke` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -688,8 +689,9 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 - 产物：debug → `app/build/outputs/apk/debug/app-debug.apk`；  
   release → `app/build/outputs/apk/release/app-release.apk`（归档到 `dist/`，`dist/` 不入版本库）。
 - **不自己编译也行**：正式包在各版本的
-  [Releases](https://github.com/jjuugk/CarPToCarL/releases) 页面直接下载，
-  固定直链 <https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk> 始终指向最新版。
+  [Releases](https://github.com/jjuugk/CarPToCarL/releases) 页面直接下载。
+  本分支的包名带 `-bieke` 标记（`CarPToCarL-X.Y.Z-bieke.apk`）；GitHub 的 `latest`
+  会随**主线**发版跳走，所以别克分支没有 always-latest 直链，认准版本号下载即可。
 
 ### 安装与调试
 
@@ -862,6 +864,42 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.8 —— 2026-11-01（正式版 · 音频通道看门狗）
+
+> 修「等一会才连上车机，播放音乐也要等一段时间才出音频」里的后半句。
+> 别克分支同版本号发布（`1.2.8-bieke`，versionCode 10208），内容一致。
+
+- **根因是漏配，不是慢**：WiFi 入网把引擎重启后，视频 / 媒体 / TTS 三条 socket 同时
+  `Connection reset`。视频有看门狗会重连，音频链路一条都没有——`audioReader()` 读到异常
+  只打一行日志就结束，`sockets[9240]` 还留在表里没人重建，声音只能等引擎自己复位推流
+  （日志 090105 里等了 88 秒：`08:57:38` 断，`09:00:22` 才见「媒体 音频格式宣告」）。
+- **路径 A（主项）**：媒体 `9240` / TTS `9241` 各挂通道状态，看门狗每秒检查，读线程退出即
+  判死并重连该端口。用「代次」防止旧读线程把刚接上的新通道秒判死（否则死循环）。
+- **路径 B**：socket 活着但 20 秒零 PCM、建立已过 20 秒宽限、视频 3 秒内有帧、且确实该有声
+  （引擎发过 `0x30002` 未发 `0x30003`，或音乐会话在播）→ 重连一次，退避 20/40/60 秒、
+  最多 3 次。三重设限是必要的：屏幕上没在放声音是常态，只按静默判会反复打断引擎音频管道。
+- **格式宣告状态跨重连保留**：它原是读函数的局部变量，重连后新线程会报 48kHz 兜底值，
+  把真实的 44.1kHz 覆盖掉（声音变调）。
+- 重连只换 socket 与读线程，不动 sink / 发送端，车机侧 RTP 不中断（听感「卡一下」）。
+- 详见 [docs/audio-channel-watchdog.md](docs/audio-channel-watchdog.md)。
+
+### 1.1.1 ~ 1.2.7 —— 2026-10-29 ~ 10-31（补记索引）
+
+这一段此前只写在各版 Releases 正文里，没回填到本节。要点按版本索引如下，
+细节点版本号看 [Releases](https://github.com/jjuugk/CarPToCarL/releases)：
+
+| 版本     | 日期         | 主题                                          |
+| ------ | ---------- | ------------------------------------------- |
+| 1.1.1  | 2026-10-29 | 车机分辨率读全 + 界面显示像素                            |
+| 1.1.2  | 2026-10-29 | 界面显示真实码流尺寸（1412 申请、实编 1280 不再谎报同尺寸）         |
+| 1.2.1  | 2026-10-30 | 靠近车机自动启动 + 通话音频通道                           |
+| 1.2.6  | 2026-10-30 | 靠近车机自动拉起并自动连接；划掉最近任务也收摊、抑制加时限               |
+| 1.2.7  | 2026-10-31 | 进程冻结监视与解冻后自动恢复（`PROC` 日志）；目标帧率改为跟随车机 `maxFPS` |
+
+> `1.1.0`、`1.2.2` ~ `1.2.5` 只出过本地 dev 包，未单独发 Release。
+> 本分支（`bieke`）另有 `1.2.6-bieke` / `1.2.7-bieke` / `1.2.8-bieke` 三个带分支标记的正式包，
+> versionCode 与主线相同，可互相覆盖安装。
 
 ### 1.0.13 —— 2026-10-27（正式版 · 导航播报有声 + 连接稳定性）
 
