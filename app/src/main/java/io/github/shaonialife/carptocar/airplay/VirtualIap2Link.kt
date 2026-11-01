@@ -8,6 +8,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
+import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.security.SecureRandom
@@ -451,15 +452,26 @@ class VirtualIap2Link(
      */
     private fun startNextMfiChallengeLocked() {
         val identity = mfiIdentity ?: return
+        // 车机专版：奥迪 MIB3 只用 20B/16B——3801 对 32B 是「ACK 挑战帧后整段静默」，
+        // 不是拒绝也不是拆链，会挂成僵尸并把 0xAA02→0xAA05 这一段预算耗光。
+        // 其余（含 DiPlay 测试台，它只认精确 32B）保持 20 → 32 → 16 的通用基线。
+        val audiMib3 = ReceiverProfile.isAudiMib3(identity)
         if (mfiOrder.isEmpty()) {
             mfiMemory = MfiLengthMemory.load(mfiContext, identity)
-            mfiOrder = MfiLengthMemory.orderAttempts(TUNNEL_MFI_BASELINE, mfiMemory)
-            if (!mfiMemory.isEmpty) {
-                log(
-                    "IAPLINK: 隧道 MFi 按车机记忆：${MfiLengthMemory.describe(mfiMemory)}" +
-                        " → 本轮顺序 ${mfiOrder.joinToString("/")}B",
+            mfiOrder =
+                MfiLengthMemory.orderAttempts(
+                    if (audiMib3) AUDI_TUNNEL_MFI_BASELINE else TUNNEL_MFI_BASELINE,
+                    mfiMemory,
                 )
-            }
+            log(
+                "IAPLINK: 隧道 MFi 基线 ${if (audiMib3) "奥迪专版 20/16" else "通用 20/32/16"}" +
+                    "（身份 $identity）" +
+                    if (mfiMemory.isEmpty) {
+                        " → 本轮顺序 ${mfiOrder.joinToString("/")}B"
+                    } else {
+                        " 记忆：${MfiLengthMemory.describe(mfiMemory)} → 本轮顺序 ${mfiOrder.joinToString("/")}B"
+                    },
+            )
         }
         mfiPosition += 1
         if (mfiPosition >= mfiOrder.size) {
@@ -471,7 +483,13 @@ class VirtualIap2Link(
             return
         }
         mfiCurrentLength = mfiOrder[mfiPosition]
-        val base = TUNNEL_MFI_WINDOWS[mfiCurrentLength] ?: TUNNEL_MFI_SILENT_WINDOW_MS
+        val base =
+            when {
+                // 奥迪专版 20B：真机 390–430ms 应答，1.5s = 3.5 倍余量（通用值是 6s，
+                // 那是为「MMI 0000 对 20B 静默 6 秒」留的，对 3801 是纯浪费）。
+                audiMib3 && mfiCurrentLength == 20 -> AUDI_TUNNEL_MFI_WINDOW_20_MS
+                else -> TUNNEL_MFI_WINDOWS[mfiCurrentLength] ?: TUNNEL_MFI_SILENT_WINDOW_MS
+            }
         mfiWindowMillis =
             if (mfiCurrentLength in mfiMemory.silent && mfiCurrentLength != mfiMemory.succeeded) {
                 minOf(base, TUNNEL_MFI_SILENT_WINDOW_MS)
@@ -937,6 +955,18 @@ class VirtualIap2Link(
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
         val TUNNEL_MFI_WINDOWS = mapOf(20 to 6_000L, 32 to 3_000L, 16 to 3_000L)
         const val TUNNEL_MFI_SILENT_WINDOW_MS = 1_500L
+
+        /**
+         * 奥迪 MIB3 专版隧道 MFi 基线：**只有 20B / 16B**，刻意不含 32B。
+         *
+         * 与通用基线（[TUNNEL_MFI_BASELINE]：20 → 32 → 16）的差别不在顺序而在有无 32：
+         * 3801 对 32B 是「ACK 挑战帧后整段静默」，既不拒绝也不拆链，最后把
+         * 0xAA02→0xAA05 这一段预算耗光。通用基线留着 32 是为了 DiPlay 测试台。
+         */
+        val AUDI_TUNNEL_MFI_BASELINE = listOf(20, 16)
+
+        /** 奥迪 MIB3 专版 20B 窗口（真机 390–430ms 应答，1.5s 即 3.5 倍余量）。 */
+        const val AUDI_TUNNEL_MFI_WINDOW_20_MS = 1_500L
 
         /**
          * 车机在事件通道上连续发到第几个 SYN marker 才判定「它在等我们回 marker」。

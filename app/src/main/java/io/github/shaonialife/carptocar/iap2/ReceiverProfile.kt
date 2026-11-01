@@ -120,4 +120,62 @@ object ReceiverProfile {
     fun describe(profile: Profile): String =
         "PROFILE: era=${profile.era} wifiGen=${profile.wifiGen} key=${MfiLengthMemory.receiverKey(profile.identityKey)}" +
             " 依据[" + profile.reasons.joinToString("；") + "]"
+
+    // ---- 车机专版 ----
+
+    /**
+     * **车机专版**：把「已实测出最优连接时序」的车型收口成一档，让连接参数按车机分流，
+     * 而不是全项目只维护一套通用值。
+     *
+     * 为什么必须分流：**同一个品牌的不同固件，对 MFi 挑战长度与 0x5703 交接节奏的偏好相反**。
+     *  - 奥迪 MIB3 3801：20B **秒答**（390–430ms），对 32B 会「ACK 挑战帧后整段静默」，
+     *    会话变僵尸——留着 32B 等于 20B 失败后主动把这一轮打死；
+     *  - 奥迪 MMI 0000（旧固件）：20B 静默 **6 秒**，反而 32B 0.64 秒应答。
+     *
+     * 通用值只能在两者之间折中（每次连接都白等 6 秒），专版才能各取最优。
+     * 兜底靠 [MfiLengthMemory]：它按车机身份记住**成功过的档位并强制排第一**，
+     * 即使专版基线里没有那一档——所以旧固件连过一次之后不会被专版打死。
+     */
+    enum class Variant {
+        /** 奥迪 MIB3（DELPHI 代工）：MFi 20B 单档 + 0x5703 五轮交接重试。 */
+        AUDI_MIB3,
+
+        /** 未识别的车机：沿用通用参数（含 DiPlay 测试台的 32B 兼容）。 */
+        GENERIC,
+    }
+
+    /**
+     * 按身份文本判专版（纯函数，可单测）。
+     *
+     * 输入取自 0x1D01 的 name+model+manufacturer（实测奥迪 MIB3 为
+     * `GeXu-Audi / AUDI 3260 / DELPHI`）。**车型号（3260/3874）与固件版本（3801）
+     * 一律不写死**：固件升级不该让专版失效，同代车机的连接时序是一致的；
+     * 反过来，固件字符串（`CL37_MIB3H_AU_AS_G4x_2302700PROD`）里也读不出 3801/3874
+     * 这种版本号，按它分流等于靠猜。
+     *
+     * 两条判据：
+     *  1. 身份里含 `audi`（车机名或 model 带）；
+     *  2. 含 `delphi` **且** 含 `mib`（个别车机 model 只报 `MIB3`，厂商字段给 DELPHI）。
+     *
+     * 为什么不能更宽：只凭 `delphi` 会命中别的车厂（DELPHI 不只供奥迪）；
+     * 只凭 `mib` 会命中 HARMAN 的 MIB2（Porsche/旧款 Audi），而那类车机认 32B，
+     * 正好与本专版相反。
+     */
+    fun variantOf(identityText: String): Variant {
+        val text = identityText.lowercase()
+        return when {
+            "audi" in text -> Variant.AUDI_MIB3
+            "delphi" in text && "mib" in text -> Variant.AUDI_MIB3
+            else -> Variant.GENERIC
+        }
+    }
+
+    fun isAudiMib3(identityText: String): Boolean = variantOf(identityText) == Variant.AUDI_MIB3
+
+    /** 一行可读判定（进文件日志，判错时能直接看出命中的是哪条信号）。 */
+    fun describeVariant(variant: Variant): String =
+        when (variant) {
+            Variant.AUDI_MIB3 -> "奥迪 MIB3 专版（MFi 20B 单档 + 0x5703 五轮交接重试）"
+            Variant.GENERIC -> "通用参数"
+        }
 }

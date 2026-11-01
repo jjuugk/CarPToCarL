@@ -264,6 +264,18 @@ class Iap2SenderSession(
          */
         const val LEGACY_WIFI_FIRST_WAIT_NANOS = 1_000_000_000L
 
+        /**
+         * 真车系 0x5703 交接重试：每轮等待窗口，**同时就是轮间隔**。
+         *
+         * 真 iPhone 交接卡住时以 3 秒为间隔连发 `0x4E0E + 0x5702`（2026-10-15 sysdiagnose
+         * 实测 9.87 / 12.96 / 15.97 / 18.99 / 21.99s，逐轮 3.00s）。窗口一满立刻重发即可，
+         * **不要再额外 sleep**：旧写法 sleep(3s) + 等 3s = 每轮 6 秒，5 轮预算只跑得动 2 轮。
+         */
+        const val WIFI_CONFIG_ROUND_NANOS = 3_000_000_000L
+
+        /** 0x5703 交接重试总预算：5 轮 × 3 秒（与真 iPhone 的 15 秒一致）。 */
+        const val WIFI_CONFIG_RETRY_TOTAL_NANOS = 15_000_000_000L
+
         /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
         const val START_SESSION_RAW_LOG_BYTES = 1_024
 
@@ -321,6 +333,29 @@ class Iap2SenderSession(
 
         /** 挑战档位（长度, 首次试探窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
         private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
+
+        /**
+         * 奥迪 MIB3 专版的 MFi 挑战档位：**只有 20B 与 16B，刻意不含 32B**。
+         *
+         * 与通用档位（[MFI_ATTEMPTS]：32 → 20 → 16）的区别不是顺序，而是**根本没有 32**。
+         * 奥迪 3801 对 32B 的处置是「ACK 挑战帧后整段静默」——不是明确拒绝，也不是拆链，
+         * 所以既记不进「被拒」档，又会把会话挂成僵尸、把整轮 bring-up 预算耗光。
+         * 通用档位之所以还留着 32，是为了 DiPlay 测试台（只认精确 32B）；
+         * 奥迪专版没有这个负担（对方 MIB3 3801 实车 5 轮 × 3 秒重试全通）。
+         *
+         * 旧固件（MMI 0000 认 32B）不会被这条打死：[MfiLengthMemory] 把该车机成功过的
+         * 档位**强制排第一**，即使基线里没有 32 也会先试 32。
+         */
+        private val AUDI_MFI_LENGTHS = listOf(20, 16)
+
+        /**
+         * 奥迪 MIB3 专版 20B 的等待窗口。
+         *
+         * 真机 `0xAA03` 应答在 390–430ms（4 次握手样本，对方 3801 实测），1.5s 已是
+         * 3.5 倍余量。通用值的 6s 是为「MMI 0000 对 20B 静默 6 秒」留的，
+         * 对 3801 是纯浪费——整轮 bring-up 只有十几秒预算，这一档就吃掉 6s。
+         */
+        private const val AUDI_MFI_WINDOW_20_MS = 1_500L
 
         /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
         private val LEGACY_RECEIVER_MARKERS = listOf("audi", "delphi", "mib", "harman", "porsche")
@@ -392,6 +427,11 @@ class Iap2SenderSession(
         if (legacyCar) {
             log("iap2 识别为真车系（$identityText）——MFi 首选 20B（真 iPhone 实录长度；32B 对真车处置不稳定）")
         }
+        // 车机专版：奥迪 MIB3 在通用参数之上再收一档（见 ReceiverProfile.Variant）。
+        // 判定必须早于 MFi：专版的核心差异就是挑战档位与等待窗口，晚一步就白等一轮。
+        val variant = ReceiverProfile.variantOf(identityText)
+        val audiMib3 = variant == ReceiverProfile.Variant.AUDI_MIB3
+        log("iap2 车机专版：${ReceiverProfile.describeVariant(variant)}（身份 $identityText）")
         send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
         val certificate = expect(Iap2MessageIds.MFI_CERTIFICATE, deadline)
         log("iap2 rx=0xaa01 certificate bytes=${certificate.body.size}（跳过校验）")
@@ -402,7 +442,13 @@ class Iap2SenderSession(
         //    32B→20B 的会话全部卡死，20B→（记忆命中）的会话全部秒通。
         //  - 测试台 DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，长度不符直接断链。
         // 全部无应答也不中止——我们不校验签名（0xAA05 自报），由 0x5702 是否应答判定放行。
-        runMfiChallenge(deadline, prefer20First = legacyCar, receiverKey = identityText, buickStrict = buickB233)
+        runMfiChallenge(
+            deadline,
+            prefer20First = legacyCar,
+            receiverKey = identityText,
+            buickStrict = buickB233,
+            audiMib3 = audiMib3,
+        )
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
@@ -465,6 +511,11 @@ class Iap2SenderSession(
                 null
             } else {
                 send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+                // 首轮窗口：真车系（含奥迪 MIB3）给**一整轮预算 3 秒**——真 iPhone 交接
+                // 卡住时就是以 3 秒为间隔重发，首轮同样只给 3 秒；不是旧版的 1 秒。
+                // 其它车机保持 1 秒短窗口 + 并行兜底（代际判错时靠它救命）。
+                val firstWaitNanos =
+                    if (legacyCar) WIFI_CONFIG_ROUND_NANOS else LEGACY_WIFI_FIRST_WAIT_NANOS
                 // **并行兜底**：先给 0x5702 一个短窗口（真车应答都在毫秒级），窗口内没回
                 // 就立刻把 0x4300 也发出去，两条请求并行等，谁先回用谁。
                 // 不再把车机十几秒的启动预算全耗在「死等 0x5703」上——代际判错时
@@ -473,7 +524,7 @@ class Iap2SenderSession(
                 var wifiConfiguration =
                     expectOrNull(
                         Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
-                        minOf(deadline, System.nanoTime() + LEGACY_WIFI_FIRST_WAIT_NANOS),
+                        minOf(deadline, System.nanoTime() + firstWaitNanos),
                     )
                 if (wifiConfiguration == null) {
                     // 走到这里说明车机对 0x5702 一声不吭——不管画像是怎么判的，它都不走旧协议。
@@ -481,15 +532,22 @@ class Iap2SenderSession(
                     // 对奥迪这类「1 秒内就回 0x5703」的车机，本分支永不会进；对收 0x4300 无反应
                     // 的车机，多发这一帧也只换来一条链路 ACK（原流程后面本来也要发它）。
                     log(
-                        "iap2 并行兜底：0x5702 在 ${LEGACY_WIFI_FIRST_WAIT_NANOS / 1_000_000}ms 内无应答" +
-                            "（车机不走旧协议）——不再死等 0x5703，同时发出 0x4300",
+                        "iap2 并行兜底：0x5702 在 ${firstWaitNanos / 1_000_000}ms 内无应答" +
+                            "——同时发出 0x4300",
                     )
                     framesBeforeAvailability = channel.peerFrameCount
                     lastNudgePeerFrames = framesBeforeAvailability
                     sendAvailability()
                     availabilitySent = true
                     wifiConfiguration =
-                        expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                        if (legacyCar) {
+                            // 真车系交接卡住：每 3 秒补发一对 0x4E0E + 0x5702，共 5 轮。
+                            // **不能只等不催**——车机可能把上一轮的请求丢了，或它自己的热点还没
+                            // 拉起来；光等满 deadline 只会白等到超时（用户侧就是「一直连不上」）。
+                            retryWifiConfiguration(deadline)
+                        } else {
+                            expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                        }
                 }
                 if (wifiConfiguration == null) {
                     log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
@@ -1181,6 +1239,7 @@ class Iap2SenderSession(
         prefer20First: Boolean = false,
         receiverKey: String,
         buickStrict: Boolean = false,
+        audiMib3: Boolean = false,
     ) {
         // 别克 B233 是硬要求档：只认精确 32 字节，不符立即断链，**绝不回落** 20B/16B。
         // 也不能让按车机记忆把顺序改掉——旧记忆里若存着 20B 成功，回落一次车机就把会话掐了。
@@ -1189,10 +1248,10 @@ class Iap2SenderSession(
             return
         }
         val baselineLengths =
-            if (prefer20First) {
-                listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
-            } else {
-                MFI_ATTEMPTS.map { it.first }
+            when {
+                audiMib3 -> AUDI_MFI_LENGTHS
+                prefer20First -> listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
+                else -> MFI_ATTEMPTS.map { it.first }
             }
         val windowOf = MFI_ATTEMPTS.associate { it.first to it.second }
         val memory = MfiLengthMemory.load(context, receiverKey)
@@ -1205,7 +1264,12 @@ class Iap2SenderSession(
         }
         for ((position, size) in order.withIndex()) {
             // 已知「静默过」的档位缩短窗口：它已经失败过一次，没必要再等满。
-            val baseWindow = windowOf[size] ?: MFI_ATTEMPTS.last().second
+            val baseWindow =
+                when {
+                    // 奥迪专版 20B：真机 390–430ms 应答，1.5s 足够（见 AUDI_MFI_WINDOW_20_MS）。
+                    audiMib3 && size == 20 -> AUDI_MFI_WINDOW_20_MS
+                    else -> windowOf[size] ?: MFI_ATTEMPTS.last().second
+                }
             val windowMillis =
                 if (size in memory.silent && size != memory.succeeded) {
                     minOf(baseWindow, MFI_SILENT_RETRY_WINDOW_MS)
@@ -1354,6 +1418,45 @@ class Iap2SenderSession(
         }
         log("iap2 tx=0x${messageId.toString(16).padStart(4, '0')}（发后不管）")
         SessionTrace.csm(SessionTrace.Dir.TX, "bt", messageId, body, "fire-and-forget")
+    }
+
+    /**
+     * `0x5703` 交接重试：每 3 秒补发一对 `0x4E0E + 0x5702`，最多 5 轮 / 15 秒。
+     *
+     * 依据（真 iPhone sysdiagnose，2026-10-15，`docs/iphone-ref-1015.md` §3.1）：
+     * 交接卡住时 iPhone 以 **3 秒** 为间隔连发 `0x4E0E + 0x5702`，共 5 轮，最后一轮到
+     * 21.99s；而顺利的那一次一次都没重试。旧实现只在首个窗口里等一次，超时就改走
+     * `0x4300/0x4301`——车机若是「慢半拍」（热点还没拉起来、上一帧丢了），
+     * 就永远拿不到 AP 信息，用户侧表现是「一直停在等待车机热点」。
+     *
+     * 只对真车系启用（调用点用 [LEGACY_RECEIVER_MARKERS] 判出的 `legacyCar`）：
+     * 走这条旧协议路径的就是 Audi/Porsche/HARMAN 那一类车机；别克 B233 已在更外层排除
+     * （它对催问会「收下但不 ACK」，多催只会拖死握手）。
+     *
+     * **不额外 sleep**：每轮本身就是「等满 [WIFI_CONFIG_ROUND_NANOS] 窗口」，
+     * 窗口一满立刻重发即为 3 秒间隔。旧写法 sleep(3s) + 等 3s = 每轮 6 秒，
+     * 5 轮预算只跑得动 2 轮（2026-10-30 日志「第 1 轮 16.717 / 第 2 轮 22.720」）。
+     */
+    private fun retryWifiConfiguration(deadline: Long): Iap2Csm.Frame? {
+        val retryDeadline = minOf(deadline, System.nanoTime() + WIFI_CONFIG_RETRY_TOTAL_NANOS)
+        val maxRounds = (WIFI_CONFIG_RETRY_TOTAL_NANOS / WIFI_CONFIG_ROUND_NANOS).toInt()
+        var round = 1
+        var frame: Iap2Csm.Frame? = null
+        while (frame == null && channel.isAlive && System.nanoTime() < retryDeadline) {
+            log("iap2 0x5703 第 $round 轮未到——补发 0x4e0e + 0x5702（真机交接卡住时每 3 秒重试，共 $maxRounds 轮）")
+            sendFireAndForget(
+                Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
+                Iap2Csm.string(0, bluetoothMac),
+            )
+            send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+            frame =
+                expectOrNull(
+                    Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                    minOf(retryDeadline, System.nanoTime() + WIFI_CONFIG_ROUND_NANOS),
+                )
+            round++
+        }
+        return frame
     }
 
     private fun expect(

@@ -107,4 +107,69 @@ class ReceiverProfileTest {
         assertTrue(text.contains("wifiGen=LEGACY"))
         assertTrue(text.contains("srcvers=450.14.2"))
     }
+
+    // ---- 车机专版（奥迪 MIB3 3801 优化连接）----
+
+    @Test
+    fun audiMib3VariantFromRealIdentity() {
+        // 实测 0x1D01：name=GeXu-Audi / model=AUDI 3260 / manufacturer=DELPHI
+        assertEquals(
+            ReceiverProfile.Variant.AUDI_MIB3,
+            ReceiverProfile.variantOf("gexu-audi audi 3260 delphi"),
+        )
+        // 大小写无关（0x1D01 原文是大写，会话内比较用小写）
+        assertTrue(ReceiverProfile.isAudiMib3("GeXu-Audi AUDI 3260 DELPHI"))
+    }
+
+    @Test
+    fun audiMib3VariantWhenOnlyDelphiAndMib() {
+        // 个别车机 model 只报 MIB3，品牌信息在厂商字段
+        assertEquals(ReceiverProfile.Variant.AUDI_MIB3, ReceiverProfile.variantOf("mib3 delphi"))
+    }
+
+    @Test
+    fun harmanMib2IsNotAudiVariant() {
+        // HARMAN 的 MIB2（Porsche / 旧款 Audi）认 32B、与专版时序相反——不能被判成专版
+        assertEquals(ReceiverProfile.Variant.GENERIC, ReceiverProfile.variantOf("porsche mib2 harman"))
+    }
+
+    @Test
+    fun otherReceiversStayGeneric() {
+        // 别克 E2LB（B233 硬要求 32B）与 DiPlay 测试台都不走专版
+        assertEquals(ReceiverProfile.Variant.GENERIC, ReceiverProfile.variantOf("buick e2lb b233"))
+        assertEquals(
+            ReceiverProfile.Variant.GENERIC,
+            ReceiverProfile.variantOf("diplay carlinkit authv3 ec"),
+        )
+    }
+
+    @Test
+    fun variantDescribeIsExplicit() {
+        assertTrue(
+            ReceiverProfile.describeVariant(ReceiverProfile.Variant.AUDI_MIB3).contains("20B"),
+        )
+        assertTrue(
+            ReceiverProfile.describeVariant(ReceiverProfile.Variant.GENERIC).contains("通用"),
+        )
+    }
+
+    /**
+     * 专版最关键的安全网：基线去掉 32B，但**记忆里的成功档位照样排第一**。
+     *
+     * 奥迪专版基线是 `[20, 16]`（3801 对 32B 会静默成僵尸）；而旧固件（MMI 0000）
+     * 反过来只认 32B。它在本项目的历史版本上已经连过很多次，记忆里存着「32B 成功」——
+     * [MfiLengthMemory.orderAttempts] 会把 succeeded 强制放进顺序首位，哪怕基线里没有它。
+     * 冷启动第一次会多花 1.5s + 3s，之后直达 32B。
+     */
+    @Test
+    fun audiBaselineWithout32StillHonoursMemoryOfOldFirmware() {
+        val picked = MfiLengthMemory.orderAttempts(listOf(20, 16), MfiLengthMemory.Entry(succeeded = 32))
+        assertEquals(listOf(32, 20, 16), picked)
+    }
+
+    @Test
+    fun audiBaselineColdStartSkips32() {
+        val picked = MfiLengthMemory.orderAttempts(listOf(20, 16), MfiLengthMemory.Entry())
+        assertEquals(listOf(20, 16), picked)
+    }
 }

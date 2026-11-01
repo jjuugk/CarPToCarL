@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.9-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.9-bieke/CarPToCarL-1.2.9-bieke.apk)**
-> —— 别克分支正式包（`1.2.9-bieke`，versionCode 10209，13.5 MB）；主线包见
+> **[`CarPToCarL-1.2.10-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— 别克分支正式包（`1.2.10-bieke`，versionCode 10210）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.9.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.9-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.9-bieke/CarPToCarL-1.2.9-bieke.apk) |
+| 本版固定包    | `CarPToCarL-1.2.10-bieke.apk`（见 Releases 页；1.2.10 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
 | 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.9，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.9-bieke.apk`                              |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.10-bieke.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,12 +41,12 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.9-bieke`（别克分支正式版，versionCode 与主线相同；连接健壮性四处加固——配对错误码不再被丢掉（修「有画面没声音」的真因）、失败定性、阶段预算、多屏选择；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.10-bieke`（别克分支正式版；新增**奥迪 MIB3 3801 专版连接优化**——MFi 20B 单档 + 0x5703 五轮交接重试，连别克/测试台行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[别克分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-bieke` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
-| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3；测试台：DiPlay / xcertplay）                    |
+| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3、别克 E5；测试台：DiPlay / xcertplay）。1.2.10-bieke 起对奥迪 MIB3 3801 走专版连接参数（**尚未实车验证**，见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)）                    |
 | 画面来源 | 本机 **CarLife+** 引擎（荣耀：`com.baidu.carlife.honor` 8.8.5）                        |
 | 音频   | PCM 直通（CarLife 音频通道 → AirPlay 音频通道）                                           |
 | 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（MIT，独立项目，与本项目非同作者）——本项目的协议层与工程骨架参考了它的实现 |
@@ -91,6 +91,23 @@
 需要说明的是：以上是**方案与真车结论**的参考，本仓库代码为独立实现，未复制其源码
 （该 fork 与本仓库同为 MIT，即便引用也无许可障碍）；具体报文与判定阈值来自别克 E2LB 真机日志的
 实测，差异与依据见 [docs/buick-e2lb-availability-silence.md](docs/buick-e2lb-availability-silence.md)。
+
+### 奥迪 MIB3（3801）专版的参考来源
+
+1.2.10-bieke 里那套奥迪专版参数，参考了 **[xi_zhu/AuDiCar（CarTolife+）](https://cnb.cool/xi_zhu/AuDiCar)**
+——该仓库自本项目分叉后收敛为「奥迪 MIB3 3801 专属」实现（MIT，2026-11-01 起）。
+只取其**连接时序**部分：
+
+| 参考点 | 本项目对应实现 |
+|---|---|
+| 专版识别按 0x1D01 身份、不写死车型号/固件版本 | `iap2/ReceiverProfile.kt`（`Variant` / `variantOf`） |
+| MFi 去掉 32B（3801 对 32B 会静默成僵尸）、20B 窗口 1.5s | `iap2/Iap2SenderSession.kt`、`airplay/VirtualIap2Link.kt` |
+| `0x5703` 交接 3 秒 × 5 轮（对齐真 iPhone sysdiagnose 节奏） | `iap2/Iap2SenderSession.retryWifiConfiguration` |
+
+**刻意没抄的**：MFi 固定单档并删掉记忆机制（我们还要兼容别克 B233 与 DiPlay 测试台）、
+默认画布写死 1412×654（本项目有按车机记忆画布的 `CarCanvasMemory`）、撤掉 `0x4155`
+通话状态推送（与连接建立无关）、TEARDOWN 补 `type`（本项目没有音频显式 TEARDOWN 这条路径）。
+详见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)。
 
 ### 别克这套建链能用在哪几台车上（含大众朗逸 Pro、宝马 iD9、别克大连屏）
 
@@ -740,6 +757,7 @@ CarPToCarL/
 | [docs/audio-channel-watchdog.md](docs/audio-channel-watchdog.md)               | 音频通道（9240 / 9241）断链与沉默看门狗：为何「有画面没声音」 |
 | [docs/buick-bigscreen-profile.md](docs/buick-bigscreen-profile.md)             | 别克「大连屏」连接档；与参考项目连接池的对比       |
 | [docs/connect-hardening.md](docs/connect-hardening.md)                         | 配对失败定性、候选地址、阶段预算、多屏选择：连接健壮性四处加固 |
+| [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)                               | 奥迪 MIB3（3801）专版连接优化：专版识别、MFi 去 32B、0x5703 五轮交接 |
 
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 
@@ -865,6 +883,34 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.10-bieke —— 2026-11-01（别克分支 · 奥迪 MIB3 3801 专版连接优化）
+
+> **仅 `bieke` 分支**，主线仍是 1.2.9。本版起两边的包不再保证互相覆盖安装
+> （`versionCode` 已到 10210，主线 10209 会被系统判为降级）。
+
+连奥迪时走一套为 3801 校准过的参数，连别克/测试台时行为**完全不变**。
+
+- **车机专版判定**：按 0x1D01 身份（`name + model + manufacturer`）判 `AUDI_MIB3`，
+  判据只看「含 `audi`」或「含 `delphi` 且含 `mib`」。**不写死车型号（3260/3874）
+  与固件版本（3801）**——固件字符串里读不出这两个数字，同代车机时序是一致的。
+  日志打 `iap2 车机专版：…`，判错时能一眼看出命中的是哪条信号。
+- **MFi 挑战去掉 32B**：专版基线从 `32 → 20 → 16` 改成 **`20 → 16`**，20B 窗口
+  从 6 秒压到 **1.5 秒**。3801 对 32B 是「ACK 挑战帧后整段静默」——不拒绝、不拆链，
+  只把会话挂成僵尸，留着它等于 20B 一失败就主动把这一轮打死。
+  蓝牙链路与隧道链路（AirPlay 之上的虚拟 iAP2）两处都改了。
+- **旧固件不会被误伤**：`MfiLengthMemory` 把该车机成功过的档位**强制排第一**，
+  哪怕基线里没有 32B。老 MMI 0000（只认 32B）在本项目上连过很多次，记忆里存着
+  「32B 成功」→ 升级后仍先试 32B，只有冷启动第一次多等 4.5 秒。
+- **0x5703 交接改成 3 秒 × 5 轮**：首轮窗口 1s → **3s**，没回就每 3 秒补发一对
+  `0x4E0E + 0x5702`，共 5 轮 / 15 秒（照搬真 iPhone sysdiagnose 的
+  9.87 / 12.96 / 15.97 / 18.99 / 21.99s）。旧写法只等一次就改走 0x4300，
+  车机「慢半拍」时永远拿不到热点信息。**不额外 sleep**（轮间隔就是等满 3 秒窗口，
+  否则 5 轮预算只跑得动 2 轮）。仅对真车系启用，别克 B233 不受影响。
+- 详见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)。
+- ⚠ **未实车验证**：参数依据来自参考项目 `xi_zhu/AuDiCar`（MIT，同源分叉）的 3801
+  实车日志与本项目旧日志，本机还没跑过 3801。首连重点看
+  `iap2 车机专版：…`、`challenge=20B（…窗口 1500ms）`、`0x5703 第 N 轮未到`。
 
 ### 1.2.9 —— 2026-11-01（正式版 · 连接健壮性四处加固）
 
