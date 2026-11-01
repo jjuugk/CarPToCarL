@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.10-bieke.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— 别克分支正式包（`1.2.10-bieke`，versionCode 10210）；主线包见
+> **[`CarPToCarL-1.2.10-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.10-switchpool`，versionCode 10210）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.9.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.10-bieke.apk`（见 Releases 页；1.2.10 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.10-switchpool.apk`（见 Releases 页；1.2.10 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.9，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.10-bieke.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.10，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.10-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,12 +41,12 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.10-bieke`（别克分支正式版；新增**奥迪 MIB3 3801 专版连接优化**——MFi 20B 单档 + 0x5703 五轮交接重试，连别克/测试台行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[别克分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-bieke` 的包；见上方「立即下载」）       |
+| 当前版本 | `1.2.10-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**奥迪 MIB3 3801 专版连接优化**——MFi 20B 单档 + 0x5703 五轮交接重试，连别克/测试台行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
-| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3、别克 E5；测试台：DiPlay / xcertplay）。1.2.10-bieke 起对奥迪 MIB3 3801 走专版连接参数（**尚未实车验证**，见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)）                    |
+| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3、别克 E5；测试台：DiPlay / xcertplay）。1.2.10-switchpool 起对奥迪 MIB3 3801 走专版连接参数（**尚未实车验证**，见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)）                    |
 | 画面来源 | 本机 **CarLife+** 引擎（荣耀：`com.baidu.carlife.honor` 8.8.5）                        |
 | 音频   | PCM 直通（CarLife 音频通道 → AirPlay 音频通道）                                           |
 | 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（MIT，独立项目，与本项目非同作者）——本项目的协议层与工程骨架参考了它的实现 |
@@ -71,9 +71,9 @@
 两个仓库都未声明或使用任何第三方的 MFi 授权，法律边界见
 [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)。
 
-### 别克（`bieke`）分支的参考来源
+### 别克建链的参考来源（现 `switch-pool` 分支）
 
-`bieke` 分支上这套别克 E5 建链，参考了 **[chengshl/cardeck](https://github.com/chengshl/cardeck)
+`switch-pool` 分支上这套别克 E5 建链，参考了 **[chengshl/cardeck](https://github.com/chengshl/cardeck)
 的别克（Buick）CarPlay 连接池**——该仓库是 CarDeck 的别克适配 fork，`Buick` / `Buick-E5` /
 `Buick-Test` 三条长期分支专门做别克 E5（B233 / E2LB）实车适配，同样以 MIT 发布。
 
@@ -94,7 +94,7 @@
 
 ### 奥迪 MIB3（3801）专版的参考来源
 
-1.2.10-bieke 里那套奥迪专版参数，参考了 **[xi_zhu/AuDiCar（CarTolife+）](https://cnb.cool/xi_zhu/AuDiCar)**
+1.2.10-switchpool 里那套奥迪专版参数，参考了 **[xi_zhu/AuDiCar（CarTolife+）](https://cnb.cool/xi_zhu/AuDiCar)**
 ——该仓库自本项目分叉后收敛为「奥迪 MIB3 3801 专属」实现（MIT，2026-11-01 起）。
 只取其**连接时序**部分：
 
@@ -111,7 +111,7 @@
 
 ### 别克这套建链能用在哪几台车上（含大众朗逸 Pro、宝马 iD9、别克大连屏）
 
-`bieke` 分支这套建链规则（`0x4300` 75 字节双 group、MFi 只认 32B 挑战、不拆 HFP/A2DP、
+`switch-pool` 分支这套建链规则（`0x4300` 75 字节双 group、MFi 只认 32B 挑战、不拆 HFP/A2DP、
 默认由车机发起 RFCOMM、车机零回帧时不催问）并不专属别克。**实车验证过，下面三台车走的是
 同一条路**：
 
@@ -707,8 +707,8 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
   release → `app/build/outputs/apk/release/app-release.apk`（归档到 `dist/`，`dist/` 不入版本库）。
 - **不自己编译也行**：正式包在各版本的
   [Releases](https://github.com/jjuugk/CarPToCarL/releases) 页面直接下载。
-  本分支的包名带 `-bieke` 标记（`CarPToCarL-X.Y.Z-bieke.apk`）；GitHub 的 `latest`
-  会随**主线**发版跳走，所以别克分支没有 always-latest 直链，认准版本号下载即可。
+  本分支的包名带 `-switchpool` 标记（`CarPToCarL-X.Y.Z-switchpool.apk`，本分支原名
+  `bieke`）；GitHub 的 `latest` 会随**最近一次发版**跳走，认准版本号下载即可。
 
 ### 安装与调试
 
@@ -884,9 +884,9 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
-### 1.2.10-bieke —— 2026-11-01（别克分支 · 奥迪 MIB3 3801 专版连接优化）
+### 1.2.10-switchpool —— 2026-11-01（`switch-pool` 分支 · 奥迪 MIB3 3801 专版连接优化）
 
-> **仅 `bieke` 分支**，主线仍是 1.2.9。本版起两边的包不再保证互相覆盖安装
+> **仅 `switch-pool` 分支**（原名 `bieke`，即「切换连接池」分支），主线仍是 1.2.9。本版起两边的包不再保证互相覆盖安装
 > （`versionCode` 已到 10210，主线 10209 会被系统判为降级）。
 
 连奥迪时走一套为 3801 校准过的参数，连别克/测试台时行为**完全不变**。
@@ -907,6 +907,9 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
   9.87 / 12.96 / 15.97 / 18.99 / 21.99s）。旧写法只等一次就改走 0x4300，
   车机「慢半拍」时永远拿不到热点信息。**不额外 sleep**（轮间隔就是等满 3 秒窗口，
   否则 5 轮预算只跑得动 2 轮）。仅对真车系启用，别克 B233 不受影响。
+- **分支改名**：`bieke` → **`switch-pool`**（切换连接池），包名后缀同步为 `-switchpool`。
+  本分支早已不只服务别克（大众朗逸 Pro、宝马 iD9、别克大连屏、奥迪 MIB3 走的是同一套
+  建链规则），旧名会误导。历史 tag 与 Release（`v1.2.6-bieke` ~ `v1.2.9-bieke`）原样保留。
 - 详见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)。
 - ⚠ **未实车验证**：参数依据来自参考项目 `xi_zhu/AuDiCar`（MIT，同源分叉）的 3801
   实车日志与本项目旧日志，本机还没跑过 3801。首连重点看
@@ -970,7 +973,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 | 1.2.7  | 2026-10-31 | 进程冻结监视与解冻后自动恢复（`PROC` 日志）；目标帧率改为跟随车机 `maxFPS` |
 
 > `1.1.0`、`1.2.2` ~ `1.2.5` 只出过本地 dev 包，未单独发 Release。
-> 本分支（`bieke`）另有 `1.2.6-bieke` ~ `1.2.9-bieke` 等带分支标记的正式包，
+> 本分支（`switch-pool`，原名 `bieke`）另有 `1.2.6-bieke` ~ `1.2.9-bieke` 等带分支标记的正式包，
 > versionCode 与主线相同，可互相覆盖安装。
 
 ### 1.0.13 —— 2026-10-27（正式版 · 导航播报有声 + 连接稳定性）

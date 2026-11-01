@@ -1,6 +1,6 @@
 # 别克「大连屏」连接档：它和现有连接池是什么关系
 
-> 2026-10-31 立项，随 `bieke` 分支发布。实现：`buick/ConnectionProfile.kt`（档位 +
+> 2026-10-31 立项，随 `bieke` 分支发布（该分支 1.2.10 起改名 `switch-pool`）。实现：`buick/ConnectionProfile.kt`（档位 +
 > `DisplayTuning`）、`SessionController`（建链时按档位定帧率）、`MainActivity`（下拉项与提示）。
 > 参考对象：`CarDeck 0.1.28 别克适配版`（`Downloads/CarDeck-0.1.28-别克适配版-源码/cardeck-buick`）。
 
@@ -69,7 +69,7 @@ mDNS 与 `/info`（features 位图、srcvers、HID 描述符）、实车行为�
 
 ### 对照
 
-| 维度 | 本项目（bieke） | 参考项目（CarDeck 别克适配版） |
+| 维度 | 本项目（`switch-pool`） | 参考项目（CarDeck 别克适配版） |
 |---|---|---|
 | 载体 | `ConnectionProfile` 枚举，用户显式选择，SharedPreferences 持久化 | `ReceiverProfile` 纯函数画像，自动判定，无用户选项 |
 | 分派依据 | 品牌/型号文本 + 用户档位 | features 位图、srcvers、收发清单、HID 描述符等**能力信号** |

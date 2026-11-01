@@ -1,6 +1,6 @@
 # 奥迪 MIB3（3801）专版连接优化
 
-> 分支：`bieke`　版本：1.2.10-bieke　2026-11-01
+> 分支：`switch-pool`（切换连接池，原名 `bieke`）　版本：1.2.10-switchpool　2026-11-01
 >
 > 参考实现：[`xi_zhu/AuDiCar`（CarTolife+，MIT）](https://cnb.cool/xi_zhu/AuDiCar)
 > ——该项目自本项目分叉后收敛为「奥迪 MIB3 3801 专属」实现，本文只取其
