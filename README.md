@@ -735,6 +735,7 @@ CarPToCarL/
 | [docs/CARLIFE-GATEWAY-FEASIBILITY.md](docs/CARLIFE-GATEWAY-FEASIBILITY.md)     | 网关方案可行性评估                 |
 | [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)                                     | 开源 / 收费的法律风险梳理与商业化清单      |
 | [docs/process-freeze-recovery.md](docs/process-freeze-recovery.md)             | 进程被系统冻结的判定、PROC 日志与解冻后自动恢复 |
+| [docs/audio-channel-watchdog.md](docs/audio-channel-watchdog.md)               | 音频通道（9240 / 9241）断链与沉默看门狗：为何「有画面没声音」 |
 | [docs/buick-bigscreen-profile.md](docs/buick-bigscreen-profile.md)             | 别克「大连屏」连接档；与参考项目连接池的对比       |
 
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
