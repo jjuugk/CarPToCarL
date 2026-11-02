@@ -236,4 +236,57 @@ class ConnectionProfileTest {
         assertNull(DisplayTuning.suggestedScalePercent(ConnectionProfile.BUICK_B233))
         assertNull(DisplayTuning.suggestedScalePercent(ConnectionProfile.AUTO))
     }
+
+    /**
+     * 奥迪档是**人工兜底**：自动判定（身份含 `audi`，或含 `delphi` 且含 `mib`）
+     * 判不出来时用它。三条都必须成立，否则这个开关等于没用：
+     *  1. id 读得回来（SharedPreferences 存的就是它）；
+     *  2. `forcesAudiMib3` 为 true；
+     *  3. **不牵连别克**——B233 与奥迪专版是两个独立维度，选奥迪不该顺手打开别克流程。
+     */
+    @Test
+    fun `奥迪档强制专版且不牵连别克`() {
+        val audi = ConnectionProfile.AUDI_MIB3
+        assertEquals(audi, ConnectionProfile.byId("audi_mib3"))
+        assertTrue(audi.forcesAudiMib3)
+        assertFalse(audi.forcesB233)
+        assertFalse(audi.b233PhoneInitiates)
+        // 与帧率、缩放无关：它只改连接参数，不碰画质
+        assertNull(audi.carMaxFpsFallback)
+        assertNull(DisplayTuning.suggestedScalePercent(audi))
+    }
+
+    /**
+     * 守「只有一个档开奥迪专版」这条底线。
+     *
+     * 一旦 AUTO / STANDARD 也被标成 `forcesAudiMib3`，所有车机都会走 `20→16` 的
+     * MFi 基线——只认 32B 的 DiPlay 测试台与老 MMI 会当场连不上，属于最糟的回归。
+     */
+    @Test
+    fun `只有奥迪档开奥迪专版`() {
+        val forced = ConnectionProfile.entries.filter { it.forcesAudiMib3 }
+        assertEquals(listOf(ConnectionProfile.AUDI_MIB3), forced)
+        assertFalse(ConnectionProfile.AUTO.forcesAudiMib3)
+        assertFalse(ConnectionProfile.STANDARD.forcesAudiMib3)
+        assertFalse(ConnectionProfile.BUICK_B233.forcesAudiMib3)
+        assertFalse(ConnectionProfile.BUICK_B233_ACTIVE.forcesAudiMib3)
+        assertFalse(ConnectionProfile.BUICK_BIGSCREEN.forcesAudiMib3)
+    }
+
+    /**
+     * 奥迪档不走别克判定：即使名字像别克、历史上也确认过 B233，选中奥迪档时
+     * 不应把这条连接塞进 B233 分支（两个档位的 `0x4300` 报文体与 MFi 硬要求相反）。
+     */
+    @Test
+    fun `奥迪档不进别克分支`() {
+        assertFalse(
+            B233Selection.matches(
+                profile = ConnectionProfile.AUDI_MIB3,
+                selectedAddress = null,
+                peerAddress = "AA:BB:CC:DD:EE:FF",
+                peerName = "BUICK_1234",
+                observedB233 = true,
+            ),
+        )
+    }
 }

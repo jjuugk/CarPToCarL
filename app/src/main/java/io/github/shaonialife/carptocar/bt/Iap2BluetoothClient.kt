@@ -727,6 +727,9 @@ class Iap2BluetoothClient(
                 // 只有用户**显式**选了别克档才强制 B233；自动档命中蓝牙名时仍交给
                 // 0x1D01 身份文本判定（万一不是 B233，别把别的别克车型带进死路径）。
                 forceBuickE5 = connectionProfile.forcesB233 && knownBuick,
+                // 奥迪档**不设「先认出车机」的前提**：它存在的理由就是身份判不出来时
+                // 也能强制走专版，再加一道已知设备校验等于把这个开关重新锁死。
+                forceAudiMib3 = connectionProfile.forcesAudiMib3,
             )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")

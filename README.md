@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.10-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.10-switchpool`，versionCode 10210）；主线包见
+> **[`CarPToCarL-1.2.11-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.11-switchpool`，versionCode 10211）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.9.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.10-switchpool.apk`（见 Releases 页；1.2.10 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.11-switchpool.apk`（见 Releases 页；1.2.11 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.10，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.10-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.11，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.11-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,12 +41,12 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.10-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**奥迪 MIB3 3801 专版连接优化**——MFi 20B 单档 + 0x5703 五轮交接重试，连别克/测试台行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.11-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**奥迪 MIB3 强制档**——自动判定不到身份时可手动指定，其余车机行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
-| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3、别克 E5；测试台：DiPlay / xcertplay）。1.2.10-switchpool 起对奥迪 MIB3 3801 走专版连接参数（**尚未实车验证**，见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)）                    |
+| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3、别克 E5；测试台：DiPlay / xcertplay）。1.2.11-switchpool 起对奥迪 MIB3 3801 走专版连接参数（**尚未实车验证**，见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)）                    |
 | 画面来源 | 本机 **CarLife+** 引擎（荣耀：`com.baidu.carlife.honor` 8.8.5）                        |
 | 音频   | PCM 直通（CarLife 音频通道 → AirPlay 音频通道）                                           |
 | 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（MIT，独立项目，与本项目非同作者）——本项目的协议层与工程骨架参考了它的实现 |
@@ -883,6 +883,30 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.11-switchpool —— 2026-11-02（`switch-pool` 分支 · 奥迪 MIB3 强制档）
+
+> **仅 `switch-pool` 分支**，主线仍是 1.2.9。在此之前奥迪专版**只**靠 0x1D01 身份
+> 自动判定，判不出来时用户手里没有任何开关——这一版补的就是那个开关。
+
+- **新增「奥迪 MIB3（3801 强制）」档**：`ConnectionProfile.AUDI_MIB3`（id `audi_mib3`）。
+  选中即认、**忽略身份文本**，直接走专版三项：MFi 基线 `20→16`、20B 窗口 1.5 秒、
+  `0x5703` 交接 3 秒 × 5 轮。
+- **选中奥迪档即排除别克流程**（`allowsB233 = false`）。两个档位的 `0x4300` 报文体与
+  MFi 硬要求正好相反（别克 75 字节双 group + 32B，奥迪单 group + 20B/16B），
+  不关的话「选了奥迪却连了台名字像别克的设备」会被 `looksLikeBuick` 拉进 B233，
+  表现为「选了奥迪反而更连不上」。
+- **结论必须带到 AirPlay 侧**：`CarPlayEndpoint.forceAudiMib3` → `VirtualIap2Link`。
+  隧道里是**另一次** MFi，不显式带过去就会退回通用基线 `20/32/16`，把 3801 又挂成僵尸。
+- **自动判定一个字没改**：AUTO 档照旧按身份判（含 `audi`，或含 `delphi` 且含 `mib`），
+  别克/宝马/大众/测试台流程不变。
+- 日志区分来源，排查时一眼看出是谁定的：
+  `iap2 车机专版：奥迪 MIB3 专版（下拉框指定，忽略身份判定）（身份 …）`、
+  `IAPLINK: 隧道 MFi 基线 奥迪专版 20/16（下拉框指定奥迪档）（身份 …）`。
+- 单测 **354 例全绿**（新增 3 例：id 往返、唯一位、不牵连别克）。
+- ⚠ 这一档**未实车验证**。3801 车上仍建议先用 AUTO 看日志能否自判（打出
+  `奥迪 MIB3 专版` 就说明判出来了），判不出来再切强制档。
+  细节见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)。
 
 ### 1.2.10-switchpool —— 2026-11-01（`switch-pool` 分支 · 奥迪 MIB3 3801 专版连接优化）
 

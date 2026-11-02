@@ -42,6 +42,15 @@ enum class ConnectionProfile(
      * 打开它以后：选了档位即认，语义从「猜」变成「用户明确指定」。
      */
     val forceWhenNoTarget: Boolean = false,
+    /**
+     * 该档位是否强制走「奥迪 MIB3 专版」连接参数（MFi `20→16`、`0x5703` 三秒五轮）。
+     *
+     * 奥迪本来是**自动判定**的（看 0x1D01 里有没有 `audi`，或有 `delphi` 且有 `mib`），
+     * 不需要用户选。但身份字段是车厂自己写的：写私有串、或厂商字段不是 DELPHI 的固件
+     * 判不出来，而那时用户手里没有任何开关。这一档就是那个人工兜底——**选中即认，
+     * 不再看身份**，与「别克大连屏」档同一个思路（型号未知时只能靠人指定）。
+     */
+    val forcesAudiMib3: Boolean = false,
 ) {
     AUTO(
         "auto",
@@ -95,6 +104,34 @@ enum class ConnectionProfile(
         forcesB233 = true,
         carMaxFpsFallback = DisplayTuning.FALLBACK_CAR_MAX_FPS,
         forceWhenNoTarget = true,
+    ),
+
+    /**
+     * 奥迪 MIB3（3801）强制档（2026-11-02 新增，实车待验证）。
+     *
+     * **正常情况下不该用它**：奥迪走自动判定就够（`ReceiverProfile.variantOf` 看
+     * 0x1D01 身份含 `audi`，或含 `delphi` 且含 `mib`）。这一档存在的唯一理由是
+     * 自动判定有盲区——身份串由车厂填写，遇到写私有串的固件就判不出来，用户又没有
+     * 别的手动开关。
+     *
+     * 选中后强制启用专版三项：MFi 基线 `20→16`（去掉 32B）、20B 窗口压到 1.5 秒、
+     * `0x5703` 交接 3 秒 × 5 轮。**不影响别克/宝马/大众档**，也不改任何画质参数。
+     *
+     * 风险提示（写进 summary 与日志）：它**忽略身份判定**，所以选错档也不会自己
+     * 退回去。若连的是 MMI 0000（旧固件，只认 32B），专版基线里没有 32B 会让
+     * MFi 多试一轮；不过 `MfiLengthMemory` 会把这台车成功过的档位强制排第一，
+     * 连过一次之后就自动纠正，最坏只是冷启动首次多等几秒。
+     */
+    AUDI_MIB3(
+        "audi_mib3",
+        "奥迪 MIB3（3801 强制）",
+        "强制奥迪专版：MFi 20→16、0x5703 三秒五轮；自动识别不到身份时用，选错不会自动退回",
+        // 显式指定了奥迪就**排除**别克流程：两个档位的 0x4300 报文体与 MFi 硬要求
+        // 正好相反（别克要 75 字节双 group + 32B，奥迪要单 group + 20B/16B）。
+        // 不关的话，用户选了奥迪却连了台名字像别克的设备（换车测试、借车），
+        // 会被 looksLikeBuick 拉进 B233，症状是「选了奥迪反而更连不上」。
+        allowsB233 = false,
+        forcesAudiMib3 = true,
     ),
     ;
 

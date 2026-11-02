@@ -64,6 +64,14 @@ class VirtualIap2Link(
      */
     private val isBuickB233: Boolean = false,
     /**
+     * 本轮是否按「奥迪 MIB3 专版」参数走隧道 MFi（`20→16`，20B 窗口 1.5 秒）。
+     *
+     * 正常情况下这里只按 [mfiIdentity] 自动判定；但用户在下拉框里显式选了奥迪档时，
+     * 蓝牙阶段的身份未必被判出来（正是判不出来才需要这个开关），结论会经
+     * `CarPlayEndpoint.forceAudiMib3` 带过来，此处**不再重复判身份**。
+     */
+    private val forceAudiMib3: Boolean = false,
+    /**
      * 当前通话状态提供者（iAP2 `CallState`：0=无通话、1=来电、2=拨出、3=通话中）。
      *
      * 0x4154（StartCallStateUpdates）订阅到达时用它回**真实值**。恒回 0 的后果不是
@@ -455,7 +463,7 @@ class VirtualIap2Link(
         // 车机专版：奥迪 MIB3 只用 20B/16B——3801 对 32B 是「ACK 挑战帧后整段静默」，
         // 不是拒绝也不是拆链，会挂成僵尸并把 0xAA02→0xAA05 这一段预算耗光。
         // 其余（含 DiPlay 测试台，它只认精确 32B）保持 20 → 32 → 16 的通用基线。
-        val audiMib3 = ReceiverProfile.isAudiMib3(identity)
+        val audiMib3 = forceAudiMib3 || ReceiverProfile.isAudiMib3(identity)
         if (mfiOrder.isEmpty()) {
             mfiMemory = MfiLengthMemory.load(mfiContext, identity)
             mfiOrder =
@@ -465,6 +473,7 @@ class VirtualIap2Link(
                 )
             log(
                 "IAPLINK: 隧道 MFi 基线 ${if (audiMib3) "奥迪专版 20/16" else "通用 20/32/16"}" +
+                    (if (forceAudiMib3) "（下拉框指定奥迪档）" else "") +
                     "（身份 $identity）" +
                     if (mfiMemory.isEmpty) {
                         " → 本轮顺序 ${mfiOrder.joinToString("/")}B"

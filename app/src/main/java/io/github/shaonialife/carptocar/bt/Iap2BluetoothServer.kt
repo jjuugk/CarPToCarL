@@ -151,6 +151,8 @@ class Iap2BluetoothServer(
     }
 
     private fun runSession(socket: BluetoothSocket) {
+        // 本轮档位只读一次：B233 与奥迪专版是两个独立开关，分开取容易读到两份不同快照。
+        val profile = ConnectionProfilePrefs.get(context)
         val stream =
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
@@ -171,7 +173,9 @@ class Iap2BluetoothServer(
                 onLinkClosed = onLinkClosed,
                 // 入站会话不区分是哪台车连进来，所以只看档位：用户显式选了别克档才强制 B233，
                 // 其它档位仍由 0x1D01 身份文本自动判定（既有车机行为不变）。
-                forceBuickE5 = ConnectionProfilePrefs.get(context).forcesB233,
+                // 奥迪档同理——它是自动判定判不出来时的人工兜底，选中即认。
+                forceBuickE5 = profile.forcesB233,
+                forceAudiMib3 = profile.forcesAudiMib3,
             )
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")

@@ -1493,6 +1493,9 @@ class AirPlayClient(
                     // 别克 B233：0x5001/0x4171 这类「车机可能根本不 ACK」的推送不做致命重传，
                     // 否则链路看门狗约 20 秒后把整条会话杀掉（E2LB 日志里的典型死法）。
                     isBuickB233 = endpoint.isBuickB233,
+                    // 奥迪专版：隧道里是**另一次** MFi，身份认不出来就会退回通用基线
+                    // 20/32/16（对 3801 等于白挂 32B 那一轮）。下拉框指定过就按标记走。
+                    forceAudiMib3 = endpoint.forceAudiMib3,
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }

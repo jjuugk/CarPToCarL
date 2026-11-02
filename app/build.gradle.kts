@@ -13,7 +13,7 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.10"
+val appVersionName = "1.2.11"
 
 /**
  * 分支标记：只有 `switch-pool` 分支（切换连接池）上非空，拼在 versionName 末尾

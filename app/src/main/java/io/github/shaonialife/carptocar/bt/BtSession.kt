@@ -27,6 +27,11 @@ internal fun Iap2LinkChannel.runSenderSession(
      * 默认 false：其它车机仍按 0x1D01 身份文本自动判定，流程不变。
      */
     forceBuickE5: Boolean = false,
+    /**
+     * 强制按「奥迪 MIB3 专版」建链（用户在下拉框里指定了奥迪档）。
+     * 默认 false：奥迪仍按 0x1D01 身份文本自动判定，其它车机流程不变。
+     */
+    forceAudiMib3: Boolean = false,
 ) {
     val session =
         Iap2SenderSession(
@@ -40,6 +45,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             context.applicationContext,
             nowPlayingProvider,
             forceBuickE5,
+            forceAudiMib3,
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

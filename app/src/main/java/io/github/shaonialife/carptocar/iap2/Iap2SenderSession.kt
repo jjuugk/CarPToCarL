@@ -60,6 +60,15 @@ class Iap2SenderSession(
      * 默认 false —— 奥迪/宝马/凯迪拉克等既有车机的流程完全不变。
      */
     private val forceBuickE5: Boolean = false,
+    /**
+     * 强制按「奥迪 MIB3 专版」建链，不看 0x1D01 身份文本。
+     *
+     * 由「连接配置」下拉框的奥迪档传入。奥迪本来靠身份自动判定（含 `audi`，或含
+     * `delphi` 且含 `mib`），但身份串是车厂填的，写私有串的固件判不出来——那时
+     * 用户没有任何开关。这一档就是兜底：选中即认。
+     * 默认 false —— 别克/宝马/大众/测试台的流程完全不变。
+     */
+    private val forceAudiMib3: Boolean = false,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -93,6 +102,14 @@ class Iap2SenderSession(
          * 0x5001/0x4171 不做致命重传）、蓝牙层成功后要把该地址记为 B233。
          */
         val isBuickB233: Boolean = false,
+        /**
+         * 本轮是否按「奥迪 MIB3 专版」参数建链。
+         *
+         * 下游要用它的地方：虚拟 iAP2 链路（AirPlay 之上的隧道）是**另一次** MFi，
+         * 那里若认不出身份就会退回通用基线 20/32/16 —— 对 3801 等于白挂 32B 那一轮。
+         * 下拉框指定奥迪档时，蓝牙阶段身份未必被判出来，必须把结论显式带过去。
+         */
+        val forceAudiMib3: Boolean = false,
     )
 
     private val parser = Iap2Csm.Parser()
@@ -142,6 +159,18 @@ class Iap2SenderSession(
      * 保持 false，所有既有车机的行为与改动前逐字节一致。
      */
     private var buickB233: Boolean = false
+
+    /**
+     * 本轮是否走「奥迪 MIB3 专版」参数（MFi `20→16`、20B 窗口 1.5s、0x5703 五轮）。
+     *
+     * 判定来源两个：构造参数 [forceAudiMib3]（用户在「连接配置」里指定了奥迪档，
+     * 此时不看身份），或 0x1D01 身份文本被判为 [ReceiverProfile.Variant.AUDI_MIB3]。
+     *
+     * 存成成员而不是局部变量，是因为端点回传（[CarPlayEndpoint]）要把它带给
+     * AirPlay 侧——隧道里的虚拟 iAP2 链路是**另一次** MFi，那里认不出身份就会
+     * 退回通用基线（20/32/16），把 3801 又挂成僵尸。
+     */
+    private var audiMib3: Boolean = false
 
     /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
     private var lastLateStartSessionSignature: Int? = null
@@ -429,9 +458,19 @@ class Iap2SenderSession(
         }
         // 车机专版：奥迪 MIB3 在通用参数之上再收一档（见 ReceiverProfile.Variant）。
         // 判定必须早于 MFi：专版的核心差异就是挑战档位与等待窗口，晚一步就白等一轮。
+        // 下拉框显式选了奥迪档时**忽略身份判定**（身份是车厂填的，判不出来时用户没开关）。
         val variant = ReceiverProfile.variantOf(identityText)
-        val audiMib3 = variant == ReceiverProfile.Variant.AUDI_MIB3
-        log("iap2 车机专版：${ReceiverProfile.describeVariant(variant)}（身份 $identityText）")
+        audiMib3 = forceAudiMib3 || variant == ReceiverProfile.Variant.AUDI_MIB3
+        log(
+            "iap2 车机专版：" +
+                (
+                    if (forceAudiMib3) {
+                        "奥迪 MIB3 专版（下拉框指定，忽略身份判定）"
+                    } else {
+                        ReceiverProfile.describeVariant(variant)
+                    }
+                ) + "（身份 $identityText）",
+        )
         send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
         val certificate = expect(Iap2MessageIds.MFI_CERTIFICATE, deadline)
         log("iap2 rx=0xaa01 certificate bytes=${certificate.body.size}（跳过校验）")
@@ -685,8 +724,9 @@ class Iap2SenderSession(
         val endpoint =
             if (startSession != null) {
                 val parsed = parseStartSession(startSession, wifiFromExchange)
-                // 下游（虚拟 iAP2 链路切 B233 骨架、蓝牙层记下该地址是 B233）要这个标记
-                if (buickB233) parsed.copy(isBuickB233 = true) else parsed
+                // 下游（虚拟 iAP2 链路切 B233 骨架 / 奥迪专版 MFi 基线、蓝牙层记下该
+                // 地址是 B233）要这两个标记
+                parsed.copy(isBuickB233 = buickB233, forceAudiMib3 = audiMib3)
             } else {
                 // 不能断言「该车机不发」：Audi MMI 0000 声明会发、也确实发，只是晚到
                 // 2 分 35 秒（2026-10-18 日志）。措辞必须保留「稍后可能补发」的预期，
@@ -1204,7 +1244,7 @@ class Iap2SenderSession(
                     "——交给主控热更新端点/重试配对",
             )
         }
-        onEndpointUpdate?.invoke(if (buickB233) endpoint.copy(isBuickB233 = true) else endpoint)
+        onEndpointUpdate?.invoke(endpoint.copy(isBuickB233 = buickB233, forceAudiMib3 = audiMib3))
     }
 
     /** 0x4301 原始体只记一次：车机间端点字段差异（有无 IPv4/端口/公钥）只能靠它定谳。 */
