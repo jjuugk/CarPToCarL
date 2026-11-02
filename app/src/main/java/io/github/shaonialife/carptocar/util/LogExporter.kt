@@ -88,7 +88,7 @@ object LogExporter {
         buildString {
             appendLine("CarPToCarL 运行日志")
             appendLine("导出时间: " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
-            appendLine("应用版本: " + versionName(context))
+            appendLine("应用版本: " + AppVersion.name(context))
             appendLine("导出范围: " + scope.label)
             appendLine(
                 "设备: ${Build.MANUFACTURER} ${Build.MODEL} | " +
@@ -127,13 +127,4 @@ object LogExporter {
                 appendLine("（本轮没有连接失败报文快照——没发生未建链的会话，或快照已被清理）")
             }
         }
-
-    @Suppress("DEPRECATION")
-    private fun versionName(context: Context): String =
-        runCatching {
-            context.packageManager
-                .getPackageInfo(context.packageName, 0)
-                .versionName
-                .orEmpty()
-        }.getOrDefault("?")
 }
