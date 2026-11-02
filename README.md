@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.14-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.14-switchpool`，versionCode 10214）；主线包见
+> **[`CarPToCarL-1.2.15-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.15-switchpool`，versionCode 10215）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.12.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.14-switchpool.apk`（见 Releases 页；1.2.14 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.15-switchpool.apk`（见 Releases 页；1.2.15 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.14，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.14-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.15，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.15-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -883,6 +883,59 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.15-switchpool —— 2026-11-02（`switch-pool` 分支 · 全代码自查修补）
+
+> **仅 `switch-pool` 分支**（主线对应 1.2.12 + 同名修补，本条不单独发主线包）。
+> 这一版把主线全量走查（155 个 Kotlin 文件、约 1.7 万行）找出的 12 处缺陷合并进本
+> 分支。其中三条会直接表现成「功能看起来没生效」，且都是本分支同样中招的。
+
+- **视频通道断了，上层永远不知道**：`VideoSender` 的 `onEnded` 只挂在
+  `drainEncoder()` 的 finally 上，而产品实际只走 `startPassthrough()`——保活写失败
+  只 `stop()` 不回调。后果是 `BtSessionGate.sessionActive` 永远停在 true（车机再邀请
+  也不重连，只能手动点「启动连接」）、暗幕 45s 后把手机屏变黑、横屏覆盖不复原。
+  现在两条收尾路径统一走 `endOnce()`（`AtomicBoolean` 只触发一次）。
+- **蓝牙 iAP2 服务识别恒判「没有」**：`device.uuids` 是 `List<ParcelUuid>`，
+  `it == ACCESSORY_IAP2_UUID` 拿 `ParcelUuid` 和 `UUID` 比恒为 false（`ParcelUuid.equals()`
+  只认 `ParcelUuid`）。于是 SDP 里明明带 `…caff` 的车机被判 MISSING 整轮跳过，
+  自动模式下永远连不上；缓存快路径也永不命中，每台设备每轮白等两次 SDP（约 5s）。
+- **旧视频读线程会把刚重连好的通道判死**：`reopenVideo()` 清零 `videoDead` 后，
+  旧读线程若还卡在帧写入里，它的 finally 会在清零之后又置回 true → 看门狗下一轮
+  关掉健康 socket 并 `restartEncoding()`，画面周期性黑屏 1~3 秒。改为只在「仍是
+  当前 socket」时判死（音频侧早有 generation 守卫，视频侧一直漏着）。
+
+其余九处：
+
+- **CarLife 手写 protobuf 解析补边界**：`parseModuleStatus` 在 tag 是最后一个字节时
+  越界、子消息 `cursor` 未与 `end` 比较、`parseMediaInfo` 的 `copyOfRange` 在 varint
+  跨边界时抛 `IllegalArgumentException`。这些异常会冒到 `workerLoop` 的 `finally stop()`
+  ——一个畸形包就把 cmd/视频/音频三条通道全拆掉重来。
+- **媒体监听器按 token 存回调并真正注销**：原来 `onListenerDisconnected` 只 `clear()`
+  集合、不 `unregisterCallback`，重绑后同一批会话重复注册（每次播放变化触发 N 次
+  refresh，旧回调还强引用旧 Service 与封面位图）；`onListenerConnected` 还会重复
+  post 1Hz 轮询。
+- **`CarPlayServiceBrowser.discovering` 加 `@Volatile`**：NSD 回调线程写、会话线程读，
+  `stop()` 可能读到陈旧 false 提前返回导致 discovery 没注销，下一次 `discoverServices`
+  撞 `listener already in use` 抛进配对流程。同时把 `discoverServices` 折成不抛异常
+  （失败强制停一次再试，仍失败走直连端点兜底）。
+- **ctrl 广播异步注册失败时关端口**：`onRegistrationFailed` 只把 `registered` 打回
+  false，旧 `ServerSocket` 与 accept 线程无人可关（下次 `start()` 用新 socket 覆盖
+  字段，`stop()` 再也够不到旧的）→ 每失败一次漏一个 fd + 一条常驻线程。
+- **恢复手机媒体音量加回读校验**：ROM 拒绝写音量时不抛异常，旧实现无条件删备份并
+  写「已恢复」，手机可能永久停在静音。现在回读校验，未生效则保留备份并告警。
+- **`SysShell` 读取线程与调用方同锁**：原来并发读写同一个 `StringBuilder`，且
+  `reader.join(200)` 只是「最多等 200ms」——`dumpsys` 这类大输出被截断成半截字符串
+  （解析侧只表现为「没找到」）。改为写入/读取同锁，`join` 放宽到 2s。
+- **`MainActivity.logListener` 的 `!isFinishing || !isDestroyed` 写反**（应为 `&&`，
+  与同文件 `uiHintSink` 不一致）：finish 后仍在往拆除中的视图追加日志。
+- **`CarLifeHijack` 的 `audioSink`/`ttsSink` 补 `@Volatile`**：hijack 线程写、媒体通知
+  线程读，车机暂停联动时灵时不灵。
+- **`CarLifeHijack.attach` 先补历史 GOP 再开实时通路**：原来先置 `sender` 再补缓存帧，
+  补帧期间到达的新帧会先发、更旧的缓存帧后发（解码顺序倒置、画面回跳），两个线程
+  还会并发 `noteDelivered`。
+
+顺带修了 `TouchRouter` 横屏地图命中区漏扣 `CARD_MARGIN_PX`（整块左移 16px；该链路
+目前是死代码，仅保持一致性）。单测 374 例全绿。
 
 ### 1.2.14-switchpool —— 2026-11-02（`switch-pool` 分支 · 自查修补）
 
