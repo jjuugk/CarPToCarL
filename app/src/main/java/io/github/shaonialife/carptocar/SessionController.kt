@@ -40,6 +40,7 @@ import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
+import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
 import io.github.shaonialife.carptocar.net.WifiP2pCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiP2pGroupNames
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
@@ -147,6 +148,15 @@ object SessionController {
      * 旧值 5s 会在成功前 116ms 误判失败并放弃整轮会话（见 bindCarWifiAndRegister）。
      */
     private const val WIFI_BIND_WAIT_S = 15L
+
+    /**
+     * 热点被动断开后自动重绑的最小间隔（毫秒）。
+     *
+     * 车机熄火 / 走出范围 / ROM 踢关联都会连发多次 `onLost`，没有闸门就会形成
+     * 「重绑→失败→再来一轮」的风暴，而每轮重绑都要 release + requestNetwork，
+     * 恰好把正在恢复的关联又打断一次。15 秒 > 一次应用专属网络的关联+DHCP 时间。
+     */
+    private const val WIFI_REBIND_MIN_INTERVAL_MS = 15_000L
 
     /**
      * 等应用专属网络（`WifiNetworkSpecifier`）确认框的上限。
@@ -799,6 +809,33 @@ object SessionController {
     @Volatile
     var lastWifiPsk: String? = null
 
+    /**
+     * 最近一次 0x5703 的**完整**热点凭据：应用专属网络被系统被动断开时用它原地重绑。
+     *
+     * 只存密码不够——重绑要重新走 `WifiNetworkSpecifier`，需要 SSID/安全类型/BSSID。
+     * 与 [lastWifiPsk] 一样只在内存里，不落盘。
+     */
+    @Volatile
+    private var lastCarWifi: Iap2SenderSession.WifiConfiguration? = null
+
+    /**
+     * 本轮会话中 wlan0 是否丢过（被动断开或我们自己的 release）。
+     *
+     * 存在的理由：网络一断，走它的 socket 已经随网络销毁，**本轮会话不会自愈**。
+     * 重绑只能把网络拉回来（让 CarLife 引擎与下一轮建链能用），不能救当前这一轮；
+     * 建链层据此把日志写清楚，而不是让用户对着「已连接」却黑屏的界面猜。
+     */
+    @Volatile
+    var wifiLinkLost: Boolean = false
+        private set
+
+    /** 自动重绑闸门：ROM 抖动会连发多次 onLost，不设间隔会形成重绑风暴。 */
+    private val wifiRebindLock = Any()
+    private var lastWifiRebindAt = 0L
+
+    /** wlan0 状态心跳：断链后靠它回答「那一刻 WiFi 到底动没动」。 */
+    private var wifiWatchdog: WifiLinkWatchdog? = null
+
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
     var ssidSink: ((String) -> Unit)? = null
@@ -828,16 +865,20 @@ object SessionController {
             if (bluetoothServer != null) return
             wifiConnector =
                 WifiCarPlayConnector(context) { line -> appendLog(line) }.also { connector ->
-                    // 应用专属网络被系统断开（车机熄火/离开范围）：明确告知用户，
-                    // 而不是让英雄卡在「已连接」与失败之间静默摇摆
-                    connector.onNetworkLost = { ssid ->
-                        boundCarSsid = null
-                        phaseHint = "车机热点已断开（$ssid）"
-                        uiHintSink?.invoke("车机热点 \"$ssid\" 已断开——请重新启动连接")
-                        appendLog(">>> 车机热点 \"$ssid\" 已断开——本次会话需重新连接")
-                    }
+                    // 应用专属网络被系统断开（车机熄火/离开范围/ROM 踢关联）：
+                    // 除了告知用户，还要**原地重绑一次**——网络没了，走它的 socket 已随
+                    // 网络销毁，不重绑的话连 CarLife 引擎都会一直断着（实测重绑后 8 秒
+                    // 内引擎会掉线一次，重绑回来它才自己恢复）。
+                    connector.onNetworkLost = { ssid -> onCarWifiLost(ssid) }
                 }
             p2pConnector = WifiP2pCarPlayConnector(context) { line -> appendLog(line) }
+            wifiWatchdog =
+                WifiLinkWatchdog(
+                    context = context,
+                    log = { line -> appendLog(line) },
+                    carNetwork = { wifiConnector?.currentNetwork },
+                    boundSsid = { boundCarSsid },
+                )
             val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
             // 目标车机动态读取：选择后下一轮连接尝试/下一次连入即生效，无需重启链路
@@ -939,6 +980,9 @@ object SessionController {
         connectCancelled = false
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
         sessionWanted = true
+        // 新一轮 = 新的链路状态：上一轮丢过的 wlan0 不影响这一轮的判定
+        wifiLinkLost = false
+        wifiWatchdog?.start()
         // 报文录制分界：一次点击 = 一段独立对话，事后按这行切分
         SessionTrace.sessionStart("用户点击启动连接")
         // 新一次用户点击 = 新的 5 分钟等待预算（断链重连不再重置，见 pendingWaitBudgetStartedAt）
@@ -994,6 +1038,7 @@ object SessionController {
         endpointBrowser?.stop()
         wifiConnector?.release()
         p2pConnector?.release()
+        wifiWatchdog?.stop()
         boundCarSsid = null
         if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
@@ -1076,11 +1121,14 @@ object SessionController {
         // mDNS（DiPlay 视为手机重新上线、再拉一轮 RFCOMM）。只刷新密码缓存。
         if (videoSender?.isRunning == true) {
             lastWifiPsk = wifi.passphrase
+            lastCarWifi = wifi
             appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
             return
         }
         ssidSink?.invoke(wifi.ssid)
         lastWifiPsk = wifi.passphrase
+        // 完整凭据留给「网络被动断开后自动重绑」用（见 onCarWifiLost）
+        lastCarWifi = wifi
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // ctrl 广播已在 startConnection 时发布（catplay：连接前保持发布能力在线）。
@@ -1093,6 +1141,51 @@ object SessionController {
         // 手机连着公司 WiFi 时会误判已在车机热点（ctrl 广播落在错误网络 → 双方互等死锁），
         // 必须先核对真实 SSID 再决定绑定或切换
         autoJoinCarWifi(wifi)
+    }
+
+    /**
+     * 车机热点**被动断开**后的处置：留痕、告知、原地重绑一次。
+     *
+     * 旧实现只做前三件里的两件（改提示 + 写日志），不重绑。后果在 2026-11-01 日志里
+     * 看得很清楚：断链后 8 秒重绑发生、再 8 秒 CarLife 引擎报「7240 未监听」——
+     * 引擎在等网络回来，而旧代码从来不会把网络拉回来，只能等下一轮连接流程重建。
+     *
+     * 重绑的范围刻意收窄：**只把网络拉回来**，不主动重建 CarPlay 会话。会话重建要
+     * 重新配对/建链，会把 CarLife 引擎再踢一次（它比 AirPlay 更脆），风险远大于收益。
+     * 因此这里明确写进日志：本轮会话仍需重建，重绑只是让下一次能连上。
+     */
+    private fun onCarWifiLost(ssid: String) {
+        val label = ssid.ifBlank { "车机热点" }
+        boundCarSsid = null
+        wifiLinkLost = true
+        phaseHint = "车机热点已断开（$label）"
+        appendLog(">>> 车机热点 \"$label\" 已断开——走它的 socket 已随网络销毁，本轮会话不会自愈")
+        val target = lastCarWifi
+        if (target == null) {
+            // 没凭据（0x5703 还没到 / 本轮是手动连的）：只能提示，重绑无从谈起
+            uiHintSink?.invoke("车机热点 \"$label\" 已断开——请重新启动连接")
+            return
+        }
+        if (!sessionWanted) {
+            appendLog("WIFI: 用户已主动断开——不自动重绑")
+            return
+        }
+        val now = android.os.SystemClock.uptimeMillis()
+        synchronized(wifiRebindLock) {
+            if (now - lastWifiRebindAt < WIFI_REBIND_MIN_INTERVAL_MS) {
+                appendLog("WIFI: ${WIFI_REBIND_MIN_INTERVAL_MS / 1_000}s 内已重绑过一次——跳过这次抖动")
+                return
+            }
+            lastWifiRebindAt = now
+        }
+        uiHintSink?.invoke("车机热点 \"$label\" 已断开——正在自动重绑")
+        Bg.run("wifi-rebind") {
+            appendLog(
+                "WIFI: 自动重绑车机热点 \"${target.ssid}\"——只恢复网络，" +
+                    "本轮 CarPlay 会话仍需重建（旧 socket 已失效）",
+            )
+            autoJoinCarWifi(target)
+        }
     }
 
     /**
@@ -1212,6 +1305,11 @@ object SessionController {
             }
         if (result is WifiCarPlayConnector.JoinResult.Joined) {
             boundCarSsid = wifi.ssid
+            if (wifiLinkLost) {
+                // 会话已经死过一次，重绑成功也不代表它能自己活过来——只把状态摆正
+                wifiLinkLost = false
+                appendLog("WIFI: 车机热点已重新绑定——网络恢复，本轮会话需重建后才生效")
+            }
             phaseHint = "已加入车机热点"
             // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
             ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
