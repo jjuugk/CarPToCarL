@@ -51,7 +51,14 @@ object SysShell {
             val reader =
                 Thread({
                     runCatching {
-                        started.inputStream.bufferedReader().forEachLine { output.appendLine(it) }
+                        // 与调用方共用同一把锁：join 超时后调用方会 toString()，
+                        // 此时读取线程可能仍在 append（并发写 StringBuilder 会拿到半截
+                        // 字符串甚至抛异常，表现为「命令执行失败」或解析莫名不匹配）。
+                        started.inputStream.bufferedReader().use { reader ->
+                            reader.forEachLine { line ->
+                                synchronized(output) { output.appendLine(line) }
+                            }
+                        }
                     }
                 }, "sys-shell-read").apply {
                     isDaemon = true
@@ -61,8 +68,11 @@ object SysShell {
                 started.destroy()
                 return Result(-1, "命令超时（${timeoutMs}ms）")
             }
-            reader.join(200)
-            Result(started.exitValue(), output.toString().trim())
+            // 进程已退出，管道必然 EOF：给读取线程足够时间收完最后几行（旧实现只等
+            // 200ms，dumpsys 这类大输出会被截断，解析侧只会表现为「没找到」）。
+            reader.join(2_000)
+            val text = synchronized(output) { output.toString().trim() }
+            Result(started.exitValue(), text)
         } catch (error: Exception) {
             runCatching { process?.destroy() }
             Result(-1, "命令执行失败：${error.message ?: error.javaClass.simpleName}")

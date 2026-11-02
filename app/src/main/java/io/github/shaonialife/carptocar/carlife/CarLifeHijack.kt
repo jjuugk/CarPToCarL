@@ -112,6 +112,14 @@ object CarLifeHijack {
     @Volatile
     private var sender: VideoSender? = null
 
+    /**
+     * 当前会话的音频 sink。
+     *
+     * 写方是 carlife-hijack 线程（[start] 里创建），读方是**媒体通知线程**
+     * （[mediaPlaybackListener] 里的 `setPlaybackPaused`）。普通字段没有可见性保证，
+     * 车机按暂停时可能读到 null 或已 stop 的旧实例，表现为「暂停联动时灵时不灵」。
+     */
+    @Volatile
     private var audioSink: CarLifeAudioSink? = null
 
     /**
@@ -122,6 +130,7 @@ object CarLifeHijack {
      * 两者各自 configure，共用同一个 [io.github.shaonialife.carptocar.audio.AudioSender]
      * （feedPcm 逐包带采样率，由发送端重采样到 48k 立体声）。
      */
+    @Volatile
     private var ttsSink: CarLifeAudioSink? = null
 
     /** 最近一条 CarLife 媒体信息（0x10035，歌名/歌手/封面）。供 iAP2 0x5001 转发。 */
@@ -402,15 +411,12 @@ object CarLifeHijack {
             gopBytes = 0
             snapshot
         }
-        sender = videoSender
         // 缓存里的 SPS/PPS 先交给视频层：即使下面一帧都补不出来（缓存为空 / 新会话首帧
         // 是裸 P 帧），第一个到达的帧也能立刻发出 VideoConfig，不必干等引擎重建编码器。
         spsPps?.let { videoSender.seedCsd(it) }
-        startFirstFrameWatchdog(videoSender)
-        if (pending.isEmpty()) {
-            log("CARLIFE: 尚无可补的历史帧（缓存为空），等待 CarLife 推流…")
-            return
-        }
+        // **先补历史帧、再打开实时通路**：旧实现先 `sender = videoSender` 再灌缓存，
+        // 期间到达的实时新帧会先写进车机通道，随后才补上更旧的缓存帧 —— 解码顺序倒置
+        // （画面回跳一段旧内容），且 noteDelivered 被两条线程同时调用。
         var pushed = 0
         for ((data, key) in pending) {
             if (videoSender.submitH264(data, key)) {
@@ -418,7 +424,29 @@ object CarLifeHijack {
                 noteDelivered(data.size)
             }
         }
-        log("CARLIFE: 已补 ${pending.size} 帧历史画面（实际推送 $pushed）")
+        // 补帧期间到达的帧会落进 GOP 缓存（此时 sender 仍为 null）：一并补发，
+        // 否则它们既没进过车机，也不会再被 flush。
+        val late = synchronized(gopLock) {
+            val snapshot = gop.toList()
+            gop.clear()
+            gopBytes = 0
+            snapshot
+        }
+        if (late.isNotEmpty()) {
+            for ((data, key) in late) {
+                if (videoSender.submitH264(data, key)) {
+                    pushed++
+                    noteDelivered(data.size)
+                }
+            }
+        }
+        sender = videoSender
+        startFirstFrameWatchdog(videoSender)
+        if (pending.isEmpty() && late.isEmpty()) {
+            log("CARLIFE: 尚无可补的历史帧（缓存为空），等待 CarLife 推流…")
+            return
+        }
+        log("CARLIFE: 已补 ${pending.size + late.size} 帧历史画面（实际推送 $pushed）")
         // 一帧都没送出去 = 缓存里没有 SPS/PPS（VideoConfig 发不出去就会全速丢帧）。
         // 让引擎重建编码器，它随后会补一个带 SPS 的 IDR，画面即可恢复。
         if (pushed == 0) {

@@ -24,6 +24,16 @@ class CarPlayServiceBrowser(
     }
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+
+    /**
+     * 是否正在发现。
+     *
+     * `@Volatile` 必不可少：写方是 NsdManager 的回调线程（onStartDiscoveryFailed /
+     * onDiscoveryStopped），读方是会话线程（start/stop）。没有可见性保证时 stop() 可能
+     * 读到陈旧 false 直接 return —— discovery 没注销，紧接着的 start() 撞
+     * "listener already in use" 并把异常抛进配对流程。
+     */
+    @Volatile
     private var discovering = false
 
     /**
@@ -62,9 +72,25 @@ class CarPlayServiceBrowser(
             return
         }
         log("$TAG: 开始发现 $serviceType")
-        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
-        discovering = true
+        if (registerDiscovery(serviceType)) {
+            discovering = true
+            return
+        }
+        // "listener already in use"：上一次 stop 还没在 NSD 侧收尾。强制停一次再重试，
+        // 仍失败就放弃发现（配对流程还有「直连端点」兜底），不要把异常抛进会话线程。
+        log("$TAG: 发现启动失败——强制停止后重试一次")
+        runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+        discovering = registerDiscovery(serviceType)
+        if (!discovering) log("$TAG: 发现仍未启动——本轮改为直连端点兜底")
     }
+
+    /** 真正发起发现；任何异常都折成 false（不抛给调用方）。 */
+    private fun registerDiscovery(serviceType: String): Boolean =
+        runCatching {
+            nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+        }.onFailure {
+            log("$TAG: discoverServices 异常 - ${it.message}")
+        }.isSuccess
 
     fun stop() {
         if (!discovering) return

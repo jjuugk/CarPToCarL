@@ -247,12 +247,26 @@ class AudioSender(
                     target,
                     0,
                 )
-                log("AUDIO: 已恢复手机媒体音量（$target）")
+                // 回读校验：`setStreamVolume` 被 ROM/勿扰拒绝时**不抛异常**、音量仍是 0。
+                // 旧实现在这里无条件写「已恢复」并删掉持久化备份 —— 手机就永久停在静音，
+                // 且日志完全看不出失败（下一次静音时 saved 与 current 两个判据双双失效）。
+                val after = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                if (after == target) {
+                    log("AUDIO: 已恢复手机媒体音量（$target）")
+                    prefs.edit().remove(KEY_SAVED_VOLUME).apply()
+                } else {
+                    // 保留备份：下一轮恢复还会再试，用户手动调音量也能被 saved 兜住。
+                    log(
+                        "AUDIO: ⚠ 恢复手机媒体音量未生效（目标 $target，回读 $after）——" +
+                            "备份已保留，请手动按音量键调整",
+                    )
+                }
             } else {
                 log("AUDIO: 无有效原音量记录，手机媒体保持当前值（请按音量键调整）")
+                prefs.edit().remove(KEY_SAVED_VOLUME).apply()
             }
-            prefs.edit().remove(KEY_SAVED_VOLUME).apply()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            log("AUDIO: 恢复手机媒体音量失败 - ${error.message}")
         }
         mutedOriginalVolume = -1
     }

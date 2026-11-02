@@ -183,7 +183,10 @@ class Iap2BluetoothClient(
 
         fun cachedHas(): Boolean =
             runCatching {
-                device.uuids?.any { it == ACCESSORY_IAP2_UUID } == true
+                // `device.uuids` 是 List<ParcelUuid>，ParcelUuid.equals() 只认 ParcelUuid，
+                // 直接和 UUID 比较**恒为 false** —— 这会让「SDP 明明有 iAP2」的车机被判成
+                // MISSING 而整轮跳过（同文件排序处用的是 `it.uuid == ...`）。
+                device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
             }.getOrDefault(false)
 
         if (cachedHas()) {
