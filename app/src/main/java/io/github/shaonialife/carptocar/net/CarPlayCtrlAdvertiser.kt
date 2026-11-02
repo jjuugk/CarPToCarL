@@ -82,6 +82,17 @@ class CarPlayCtrlAdvertiser(
         inviteCount = 0
     }
 
+    /**
+     * 收到车机 ctrl 邀请时回调（每次邀请都回调，跑在 ctrl 服务线程池）。
+     *
+     * 邀请是「车机已发现手机、AirPlay 窗口已开」的**唯一权威信号**：空闲态收到它
+     * 意味着对方正在等我们连。旧实现只 `inviteCount++` + 打一行日志，会话失败后
+     * 车机一分钟一次地邀请、我们一次都不应（2026-11-02 日志：11 分钟 5 次邀请全丢）。
+     * 回调里**必须快速返回**（会占用应答前的窗口），耗时动作自己丢到后台线程。
+     */
+    @Volatile
+    var onInvite: ((receiverId: String?) -> Unit)? = null
+
     /** 注册时的 WiFi SSID：换网（2.4G→5G 或车机热点切换）后旧注册不可见，需重新注册。 */
     private var registeredSsid: String? = null
 
@@ -274,6 +285,9 @@ class CarPlayCtrlAdvertiser(
                         ?.trim()
                 inviteCount++
                 log("$TAG: ✓ 车机 ctrl 邀请（第 $inviteCount 次，receiver=${receiverId ?: "?"}）——AirPlay 窗口已开启")
+                // 回调里可能再走一轮连接（会话失败后的恢复入口），异常不能打死应答
+                runCatching { onInvite?.invoke(receiverId) }
+                    ?.onFailure { log("$TAG: 邀请回调异常 - ${it.message ?: it.javaClass.simpleName}") }
             }
 
             val output = client.getOutputStream()

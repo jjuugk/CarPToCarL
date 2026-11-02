@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.12-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.12-switchpool`，versionCode 10212）；主线包见
-> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.9.apk`
+> **[`CarPToCarL-1.2.13-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.13-switchpool`，versionCode 10213）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.11.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.12-switchpool.apk`（见 Releases 页；1.2.12 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.13-switchpool.apk`（见 Releases 页；1.2.13 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.12，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.12-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.13，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.13-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -883,6 +883,28 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.13-switchpool —— 2026-11-02（`switch-pool` 分支 · 连不上时的自救）
+
+> **仅 `switch-pool` 分支**（主线对应 1.2.11，内容相同）。这一版不改善「正常车机能连多快」，
+> 只解决「连不上之后**没有人再试**」：现场日志里 18:01 失败之后 11 分钟零动作，
+> 而车机在这期间发了 5 次邀请，我们一次都没应。
+
+- **同一 SSID 的入网请求互斥 + 5 秒去重**（新增 `net/WifiJoinGate`）：`0x5703` 与
+  `0x4301` 会在同一瞬间各触发一次入网，而 `joinCarPlayNetwork` 第一行就是
+  `release()`——后发的把先发的**就地注销**：先发的白等 15s、`onNetworkLost` 回调
+  一起消失（1.2.12 刚加的「被动断开自动重绑」于是完全失效）、用户还要面对确认框。
+  现在同 SSID 只有一发在跑，其余的等它的结果。
+- **建链失败按 3s / 10s / 30s 退避自动重试**：旧实现失败即收工，用户只能自己再点。
+  三次用完才停，并明确写「请重启车机侧 CarPlay」——继续怼只会刷屏、还把 CarLife
+  引擎反复踢下线。
+- **车机 ctrl 邀请即时响应**（`CarPlayCtrlAdvertiser.onInvite`）：空闲态收到邀请
+  = 对方正在等我们连，立刻作废退避计时器、马上起一轮。忙（正在连/已推流）时不动。
+- **半握手快速定性**：SETUP 回了 200，但 `/info` 没有 displays **且**事件口连不上
+  ——不再按手机尺寸兜一个画布硬推，直接判定车机侧服务异常并提示重启车机。
+  屏幕流 SETUP 失败也不再静默收工，日志会写清是事件口还是 `/info` 不通。
+- 单测 **372 例全绿**（新增 10 例）。排查与判读见
+  [docs/connect-recovery.md](docs/connect-recovery.md)。
 
 ### 1.2.12-switchpool —— 2026-11-02（`switch-pool` 分支 · WiFi 断链排查）
 
