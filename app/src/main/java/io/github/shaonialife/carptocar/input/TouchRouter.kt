@@ -193,7 +193,11 @@ object TouchRouter {
                 (launcher.mapFullscreen || launcher.dashboardMode) &&
                 launcher.tileSlideFraction <= 0.01f
             ) {
-                val tileX = px - dockW
+                // 绘制侧地图卡的左缘是 dockW + CARD_MARGIN_PX（见 DualDisplayComposer
+                // 的 SPLIT 分支）；命中区必须扣掉同一段边距，否则整体左移 16px：
+                // 左侧黑缝里的点击会被注入地图，tile 最右侧 16px 反而落到应用屏。
+                // 竖屏分支（上面）一直是扣掉的，这里是横屏独有的遗漏。
+                val tileX = px - dockW - CARD_MARGIN_PX
                 val tileVisibleW = if (launcher.mapFullscreen) Int.MAX_VALUE else launcher.mapTileWidth
                 if (tileX in 0 until tileVisibleW) {
                     inDock = false

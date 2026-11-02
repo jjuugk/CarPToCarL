@@ -378,35 +378,51 @@ internal object CarLifeProtocol {
     fun parseModuleStatus(payload: ByteArray): List<Pair<Int, Int>> {
         val result = ArrayList<Pair<Int, Int>>()
         var index = 0
-        while (index < payload.size) {
-            val tag = payload[index].toInt() and 0xFF
-            index++
-            if (tag == 0x08) {
-                // cnt，跳过
-                while (index < payload.size && (payload[index].toInt() and 0x80) != 0) index++
+        // 手写解析必须自己守边界：这个包来自车机引擎（重启/拼包异常时会截断），
+        // 越界异常会冒到 CarLifeHuClient.workerLoop 的 catch → finally 直接 stop()，
+        // 也就是「一个畸形包把整条 CarLife 连接（cmd/视频/音频）全部拆掉重来」。
+        try {
+            while (index < payload.size) {
+                val tag = payload[index].toInt() and 0xFF
                 index++
-            } else if (tag == 0x12) {
-                val length = payload[index].toInt() and 0xFF
-                index++
-                val end = (index + length).coerceAtMost(payload.size)
-                var moduleId = 0
-                var status = 0
-                var cursor = index
-                while (cursor < end) {
-                    val subTag = payload[cursor].toInt() and 0xFF
-                    cursor++
-                    when (subTag) {
-                        0x08 -> moduleId = payload[cursor].toInt() and 0xFF
-                        0x10 -> status = payload[cursor].toInt() and 0xFF
-                        else -> break
+                if (tag == 0x08) {
+                    // cnt，跳过
+                    while (index < payload.size && (payload[index].toInt() and 0x80) != 0) index++
+                    index++
+                } else if (tag == 0x12) {
+                    if (index >= payload.size) break
+                    val length = payload[index].toInt() and 0xFF
+                    index++
+                    val end = (index + length).coerceAtMost(payload.size)
+                    var moduleId = 0
+                    var status = 0
+                    var cursor = index
+                    while (cursor < end) {
+                        val subTag = payload[cursor].toInt() and 0xFF
+                        cursor++
+                        when (subTag) {
+                            0x08 -> {
+                                if (cursor >= end) break
+                                moduleId = payload[cursor].toInt() and 0xFF
+                            }
+
+                            0x10 -> {
+                                if (cursor >= end) break
+                                status = payload[cursor].toInt() and 0xFF
+                            }
+
+                            else -> break
+                        }
+                        cursor++
                     }
-                    cursor++
+                    result += moduleId to status
+                    index = end
+                } else {
+                    break
                 }
-                result += moduleId to status
-                index = end
-            } else {
-                break
             }
+        } catch (_: RuntimeException) {
+            // 截断/畸形包：返回已解析出来的部分，绝不把异常交给上层（见上）。
         }
         return result
     }
@@ -429,29 +445,35 @@ internal object CarLifeProtocol {
     fun parseMediaInfoList(payload: ByteArray): List<CarLifeMediaInfo> {
         val result = ArrayList<CarLifeMediaInfo>()
         var index = 0
-        while (index < payload.size) {
-            val tag = payload[index].toInt() and 0xFF
-            index++
-            when (tag) {
-                0x08 -> {
-                    // cnt（varint），跳过即可
-                    index = skipVarint(payload, index)
-                }
+        // 同 parseModuleStatus：截断包不能让异常逃到 workerLoop（否则整条 CarLife
+        // 连接被 finally 的 stop() 拆掉）。
+        try {
+            while (index < payload.size) {
+                val tag = payload[index].toInt() and 0xFF
+                index++
+                when (tag) {
+                    0x08 -> {
+                        // cnt（varint），跳过即可
+                        index = skipVarint(payload, index)
+                    }
 
-                0x12 -> {
-                    // mediaInfo 子消息（length-delimited）
-                    val length = readVarint(payload, index)
-                    index += varintLen(payload, index)
-                    val end = (index + length).coerceAtMost(payload.size)
-                    parseMediaInfo(payload, index, end)?.let { result += it }
-                    index = end
-                }
+                    0x12 -> {
+                        // mediaInfo 子消息（length-delimited）
+                        val length = readVarint(payload, index)
+                        index += varintLen(payload, index)
+                        val end = (index + length).coerceAtMost(payload.size)
+                        if (index <= end) parseMediaInfo(payload, index, end)?.let { result += it }
+                        index = end
+                    }
 
-                else -> {
-                    // 未知字段：无法安全跳过，停止解析（保护性退出）
-                    return result
+                    else -> {
+                        // 未知字段：无法安全跳过，停止解析（保护性退出）
+                        return result
+                    }
                 }
             }
+        } catch (_: RuntimeException) {
+            // 返回已解析部分
         }
         return result
     }
@@ -483,6 +505,9 @@ internal object CarLifeProtocol {
                     val length = readVarint(payload, index)
                     index += varintLen(payload, index)
                     val valueEnd = (index + length).coerceAtMost(end)
+                    // varint 可能跨过子消息边界（畸形包）：此时 index > valueEnd，
+                    // copyOfRange 会抛 IllegalArgumentException。
+                    if (index > valueEnd) return null
                     val bytes = payload.copyOfRange(index, valueEnd)
                     when (field) {
                         1 -> source = bytes.toString(Charsets.UTF_8)

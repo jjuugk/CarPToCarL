@@ -170,7 +170,10 @@ class MainActivity : AppCompatActivity() {
 
     private val logListener: (String) -> Unit = { line ->
         runOnUiThread {
-            if (!isFinishing || !isDestroyed) appendConsole(line)
+            // 与上面 uiHintSink 保持一致：`||` 等于「只要没同时满足两个条件就继续用视图」，
+            // finish() 之后到 onDestroy 之间（isFinishing=true、isDestroyed=false）仍会
+            // 往正在拆除的控件里追加文本。
+            if (!isFinishing && !isDestroyed) appendConsole(line)
         }
     }
 

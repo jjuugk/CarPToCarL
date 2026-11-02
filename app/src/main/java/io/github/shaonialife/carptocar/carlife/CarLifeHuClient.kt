@@ -356,7 +356,7 @@ class CarLifeHuClient(
 
         startReader("carlife-cmd") { cmdReader(cmd.getInputStream()) }
         sockets[CarLifeProtocol.PORT_VIDEO]?.let { video ->
-            startReader("carlife-video") { videoReader(video.getInputStream()) }
+            startReader("carlife-video") { videoReader(video.getInputStream(), video) }
         }
         // 音频：媒体（9240）/ TTS（9241）各挂一条读线程，挂上即为沉默判定的宽限起点
         sockets[CarLifeProtocol.PORT_MEDIA]?.let { openAudio(mediaChan, it) }
@@ -725,7 +725,20 @@ class CarLifeHuClient(
 
     // ---- 视频接收 ----
 
-    private fun videoReader(input: InputStream) {
+    /**
+     * 读 9242。[owner] 是这条线程负责的 socket：退出时只有它**仍是当前 socket** 才允许
+     * 置 `videoDead`。
+     *
+     * 为什么需要这个判断：`reopenVideo()` 先关旧 socket、再连新的、再把 `videoDead`
+     * 清零；若旧读线程此刻还卡在 `onVideoFrame`（socket 写入）里，它的 `finally` 会在
+     * 清零**之后**把标志又置回 true —— 看门狗下一轮就会把刚建好的健康 socket 关掉、
+     * 重连并 `restartEncoding()`，表现为画面周期性黑屏 1~3 秒。音频侧早就用
+     * generation 做了同样的事（见 `openAudio`），视频侧一直漏着。
+     */
+    private fun videoReader(
+        input: InputStream,
+        owner: Socket? = null,
+    ) {
         val data = DataInputStream(input)
         // 实测帧率窗口：每 5 秒统计一次，回答「98311 声明 60 到底有没有让引擎真的吐 60 帧」。
         var windowStart = android.os.SystemClock.uptimeMillis()
@@ -779,7 +792,11 @@ class CarLifeHuClient(
             if (running.get()) log("CARLIFE: 视频通道断开 - ${error.message}")
         } finally {
             // 无论 EOF 还是 reset，都交给看门狗重连：这条 socket 已经不可用了。
-            videoDead = true
+            // 但只有「仍是当前 socket」才允许判死——旧线程晚到的 finally 不能把新一轮
+            // 刚建好的通道一起判死（否则看门狗立刻关掉它，周期性黑屏）。
+            if (owner == null || sockets[CarLifeProtocol.PORT_VIDEO] === owner) {
+                videoDead = true
+            }
         }
     }
 
@@ -850,7 +867,7 @@ class CarLifeHuClient(
             videoDead = false
             lastFrameAt = android.os.SystemClock.uptimeMillis()
             reinitCount = 0
-            startReader("carlife-video") { videoReader(socket.getInputStream()) }
+            startReader("carlife-video") { videoReader(socket.getInputStream(), socket) }
             true
         } catch (error: Exception) {
             runCatching { socket.close() }

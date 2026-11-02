@@ -384,9 +384,15 @@ class CarPlayCtrlAdvertiser(
                 serviceInfo: NsdServiceInfo,
                 errorCode: Int,
             ) {
-                // 重置状态：下一次 ensureForNetwork（新会话的 0x5703）会重新注册
+                // 注册是异步的：这里失败时 `start()` 已经把 registered 置 true 并起好了
+                // accept 线程。只把标志打回 false 会留下「旧 ServerSocket + 旧 accept
+                // 线程」无人可关（下一次 start() 用新 socket 覆盖字段，stop() 再也够不到
+                // 旧的），每失败一次漏一个 fd 和一条常驻线程。
                 registered = false
-                log("$TAG: mDNS 注册失败 code=$errorCode（下次会话自动重试）")
+                runCatching { serverSocket?.close() }
+                serverSocket = null
+                activeListener = null
+                log("$TAG: mDNS 注册失败 code=$errorCode（已释放端口，下次会话重试）")
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit

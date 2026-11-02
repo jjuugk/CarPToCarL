@@ -90,6 +90,15 @@ class VideoSender(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
+
+    /**
+     * [onEnded] 是否已触发过（只触发一次）。
+     *
+     * 直通/编码两条收尾路径都可能到达：保活线程写失败、帧线程收尾。重复触发会把
+     * 上层收尾做两遍（蓝牙门闸复位、暗幕解除、横屏复原都是幂等的，但
+     * `attributeAudioTeardown` 会重复记账，日志也会重复成两条）。
+     */
+    private val ended = AtomicBoolean(false)
     private var frameCounter = 0L
 
     /**
@@ -287,6 +296,7 @@ class VideoSender(
             codec.start()
             encoder = codec
             inputSurface = surface
+            ended.set(false)
             running.set(true)
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
 
@@ -333,6 +343,7 @@ class VideoSender(
         if (running.get()) return true
         if (!openDataPort()) return false
         passthrough = true
+        ended.set(false)
         running.set(true)
         lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
         // 新一轮会话：上一轮的「最后一帧」不能拿来重发（车机解码器已重建，
@@ -379,6 +390,12 @@ class VideoSender(
             // `isRunning` 会一直为 true，接收端重发 0x4301 时被「会话推流中」挡掉，
             // 表现为「车机重连了但画面永远不再出现」（2026-10-24 日志实测）。
             stop()
+            // 这条路径同样意味着「会话真的结束了」，必须通知上层——否则
+            // `BtSessionGate.sessionActive` 永远停在 true（蓝牙探测被门闸挡住，车机
+            // 再邀请也不会重连）、暗幕 45s 后把手机屏变黑、横屏覆盖不复原。
+            // 旧实现只在 `drainEncoder` 的 finally 里回调，而当前产品只走直通，
+            // 那个方法根本不会执行（2026-11-02 自查）。
+            endOnce()
             log("VIDEO: 直通通道已失效——等待车机重新建立会话")
         }
     }
@@ -598,8 +615,18 @@ class VideoSender(
         } finally {
             stop()
             // 会话真实结束信号（静默降噪解除 / 状态收尾）
-            runCatching { onEnded?.invoke() }
+            endOnce()
         }
+    }
+
+    /**
+     * 会话结束回调（只触发一次）。
+     *
+     * 两条收尾路径都可能到达：直通保活线程写失败、编码帧线程退出。
+     */
+    private fun endOnce() {
+        if (!ended.compareAndSet(false, true)) return
+        runCatching { onEnded?.invoke() }
     }
 
     /**

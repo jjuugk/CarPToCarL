@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.media
 
 import android.content.ComponentName
 import android.media.MediaMetadata
+import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
@@ -38,6 +39,9 @@ class MediaListenerService : NotificationListenerService() {
             )
             MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
             update(manager.getActiveSessions(componentName(this)))
+            // 重绑（disallow/allow 自愈、系统重连）会再走一遍 onListenerConnected：
+            // 先摘掉上一条轮询，否则 1Hz 刷新会按重连次数叠加，永不退出。
+            mainHandler.removeCallbacks(periodicRefresh)
             mainHandler.post(periodicRefresh)
         } catch (_: SecurityException) {
             // 通知使用权被撤销：静默（授权后系统会重新绑定本服务）
@@ -53,12 +57,19 @@ class MediaListenerService : NotificationListenerService() {
         // 甚至「正在播放 + 无法读取播放信息」的自相矛盾显示（2026-10-19 实测：
         // 重装后监听器未被系统绑定，卡片长时间停在旧状态）。
         MediaSessionsState.publish(null)
-        watched.clear()
+        // 注销回调再清集合：只 clear() 会让 MediaController 侧的回调一直挂着（重绑后叠加）。
+        unregisterAll()
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(periodicRefresh)
         runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }
+        unregisterAll()
+        // 静态钩子/线程池都在 object 与实例之间互相持有：不复位就会把已销毁的服务、
+        // Handler 和封面位图一直留在内存里（每次重绑新增一个 media-art 线程）。
+        if (MediaSessionsState.resyncHook != null) MediaSessionsState.resyncHook = null
+        runCatching { artExecutor.shutdownNow() }
+        cachedArt = null
         MediaSessionsState.publish(null)
         super.onDestroy()
     }
@@ -72,8 +83,8 @@ class MediaListenerService : NotificationListenerService() {
             update(controllers ?: emptyList())
         }
 
-    /** 已注册播放回调的会话（避免重复注册）。 */
-    private val watched = HashSet<android.media.session.MediaSession.Token>()
+    /** 已注册播放回调的会话（避免重复注册）：token → 回调，断开时按句柄注销。 */
+    private val watched = HashMap<android.media.session.MediaSession.Token, MediaController.Callback>()
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -104,8 +115,9 @@ class MediaListenerService : NotificationListenerService() {
 
     private fun update(controllers: List<android.media.session.MediaController>) {
         controllers.forEach { controller ->
-            if (watched.add(controller.sessionToken)) {
-                controller.registerCallback(
+            val token = controller.sessionToken
+            if (watched[token] == null) {
+                val callback =
                     object : android.media.session.MediaController.Callback() {
                         override fun onPlaybackStateChanged(state: PlaybackState?) {
                             refresh()
@@ -114,12 +126,31 @@ class MediaListenerService : NotificationListenerService() {
                         override fun onMetadataChanged(metadata: MediaMetadata?) {
                             refresh()
                         }
-                    },
-                    android.os.Handler(android.os.Looper.getMainLooper()),
-                )
+                    }
+                // 回调必须留句柄：`watched.clear()` 只是把集合清了，MediaController 那边
+                // 仍然挂着回调 —— 监听器重绑（NotificationAccess 的 disallow/allow 自愈）
+                // 后会给同一批会话再注册一个，之后每次播放状态变化触发 N 次 refresh()，
+                // 且旧回调强引用旧 Service 实例与封面位图。
+                watched[token] = callback
+                runCatching {
+                    controller.registerCallback(callback, mainHandler)
+                }.onFailure { watched.remove(token) }
             }
         }
         refresh()
+    }
+
+    /** 注销所有播放回调（断开/销毁时）。 */
+    private fun unregisterAll() {
+        watched.forEach { (token, callback) ->
+            runCatching {
+                manager
+                    .getActiveSessions(componentName(this))
+                    .firstOrNull { it.sessionToken == token }
+                    ?.unregisterCallback(callback)
+            }
+        }
+        watched.clear()
     }
 
     /** 从活跃会话提取正在播放态：优先 PLAYING 的会话，否则保留第一个有元数据的。 */
