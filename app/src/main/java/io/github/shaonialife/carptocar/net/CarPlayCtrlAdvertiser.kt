@@ -218,7 +218,13 @@ class CarPlayCtrlAdvertiser(
             }
             true
         } catch (error: Exception) {
+            // 端口是刚 bind 的真实资源：注册失败/异常时必须关掉，否则每失败一次就
+            // 漏一个监听端口 + 一条 accept 线程（registerService 之前就 throw，连
+            // accept 线程都还没起，socket 谁也不会再管）。
             log("$TAG: 启动失败 - ${error.message}")
+            runCatching { serverSocket?.close() }
+            serverSocket = null
+            registered = false
             false
         }
     }

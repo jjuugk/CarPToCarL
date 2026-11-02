@@ -179,6 +179,9 @@ class AacLcEncoder(
     /** stop() 之后仍到达的 encode 次数（竞态被丢弃的帧，收尾时汇总一行，不逐帧刷屏）。 */
     private var droppedAfterStop = 0L
 
+    /** 编码器输入缓冲满 / 拿不到输入缓冲导致丢弃的 PCM 帧数（限频提示）。 */
+    private var droppedInputBusy = 0L
+
     /** ADTS 剥离只提示一次，避免刷屏。 */
     private var adtsStripped = false
 
@@ -248,14 +251,28 @@ class AacLcEncoder(
             val output = mutableListOf<ByteArray>()
             try {
                 val inputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
-                if (inputIndex >= 0) {
+                if (inputIndex < 0) {
+                    // 编码器 10ms 内都没空出输入槽（瞬时过载 / 车机侧卡顿）：这一帧
+                    // PCM 只能丢。旧实现连计数都没有，日志里表现为「音频好好的突然
+                    // 卡了一下」，无从判断是解码器慢还是采集侧丢帧。
+                    droppedInputBusy++
+                    if (droppedInputBusy == 1L || droppedInputBusy % 200L == 0L) {
+                        log("AUDIO: 编码器输入缓冲满——已丢 $droppedInputBusy 帧 PCM（不影响会话）")
+                    }
+                } else {
                     val buffer = encoder.getInputBuffer(inputIndex)
-                    if (buffer == null) {
+                    // 送进 codec 的字节数必须与 put 进去的一致：`put` 会被 capacity
+                    // 截断，而 queueInputBuffer 若仍按原始 size 记账，codec 会去读
+                    // 没写过的区域（个别 ROM 直接抛 IllegalArgumentException）。
+                    val length = size.coerceAtMost(buffer?.capacity() ?: 0).coerceAtMost(pcm.size)
+                    if (buffer == null || length <= 0) {
+                        // 拿不到输入缓冲：不排队空 buffer（那会被当成一帧空音频）
                         encoder.queueInputBuffer(inputIndex, 0, 0, presentationUs, 0)
+                        droppedInputBusy++
                     } else {
                         buffer.clear()
-                        buffer.put(pcm, 0, size.coerceAtMost(buffer.capacity()))
-                        encoder.queueInputBuffer(inputIndex, 0, size, presentationUs, 0)
+                        buffer.put(pcm, 0, length)
+                        encoder.queueInputBuffer(inputIndex, 0, length, presentationUs, 0)
                         presentationUs += FRAME_SAMPLES * 1_000_000L / sampleRate
                     }
                 }
@@ -360,6 +377,10 @@ class AacLcEncoder(
             if (droppedAfterStop > 0) {
                 log("AUDIO: 编码器已停止，丢弃停止后到达的 $droppedAfterStop 帧（收尾竞态，已忽略）")
                 droppedAfterStop = 0
+            }
+            if (droppedInputBusy > 0) {
+                log("AUDIO: 本轮编码器输入缓冲满共丢 $droppedInputBusy 帧 PCM（过载丢帧，会话未中断）")
+                droppedInputBusy = 0
             }
         }
     }

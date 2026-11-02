@@ -824,6 +824,7 @@ object SessionController {
         val endpoint = lastGoodEndpoint ?: return
         var delay = 0L
         var attempt = 0
+        var generation = 0
         synchronized(connectRetryLock) {
             if (connectRetryScheduled) {
                 appendLog("RETRY: 已有一轮重试在排队——本次失败不再叠加")
@@ -839,8 +840,11 @@ object SessionController {
             attempt = connectRetryAttempt
             delay = CONNECT_RETRY_BACKOFF_MS[attempt]
             connectRetryScheduled = true
+            // 令牌必须与「占用排队位」在同一把锁里取：分两步读时，中间若有用户点击/
+            // 车机邀请把令牌 +1，这一次退避就会把**新一轮**的令牌当成自己的，
+            // 醒来后判定「没过期」并再起一轮 —— 正是要避免的两轮并行交接。
+            generation = connectRetryGeneration
         }
-        val generation = synchronized(connectRetryLock) { connectRetryGeneration }
         Bg.run("connect-retry") {
             try {
                 appendLog(
@@ -1327,7 +1331,9 @@ object SessionController {
         appendLog(">>> 车机热点 \"$label\" 已断开——走它的 socket 已随网络销毁，本轮会话不会自愈")
         val target = lastCarWifi
         if (target == null) {
-            // 没凭据（0x5703 还没到 / 本轮是手动连的）：只能提示，重绑无从谈起
+            // 本轮压根没拿到过凭据（0x5703 与 0x4301 都没到 / 用户手动连的）：
+            // 没有密码就发不出入网请求，只能提示
+            appendLog("WIFI: 本轮没有热点凭据（0x5703/0x4301 都未到）——无法自动重绑")
             uiHintSink?.invoke("车机热点 \"$label\" 已断开——请重新启动连接")
             return
         }
@@ -3444,7 +3450,12 @@ object SessionController {
                             // 车机只是答应了前半段，后面什么都不通。此时按手机屏幕尺寸
                             // 兜一个画布硬推没有任何意义（屏上不会出现画面，触摸也没通路），
                             // 只会把「连不上」演成「连上了但黑屏」。
-                            if (!setup.displayFromCar && !eventChannelOk) {
+                            //
+                            // 前提是**确实有事件口可连**：接收端压根没下发 eventPort 时
+                            // `connectEventChannel` 是「没试过」而不是「连不上」，把它当证据
+                            // 会误判一台本来能用的车（这类固件正是画布兜底要照顾的对象）。
+                            val eventChannelRejected = setup.eventPort != 0 && !eventChannelOk
+                            if (!setup.displayFromCar && eventChannelRejected) {
                                 appendLog(
                                     "AIRPLAY: ⚠ 车机侧 CarPlay 服务半握手——SETUP 回了 200，" +
                                         "但 /info 无 displays 且事件口连不上（端口 ${setup.eventPort}）",
@@ -3465,7 +3476,11 @@ object SessionController {
                                 appendLog(
                                     "AIRPLAY: ⚠ /info 没有 displays——画布按本机横屏兜底，" +
                                         "比例与触摸映射都可能不准（事件口" +
-                                        (if (eventChannelOk) "已连上，先按兜底画布继续" else "也没连上") +
+                                        when {
+                                            eventChannelOk -> "已连上，先按兜底画布继续"
+                                            setup.eventPort == 0 -> "接收端未下发，先按兜底画布继续"
+                                            else -> "也没连上"
+                                        } +
                                         "）",
                                 )
                             }
@@ -3827,6 +3842,11 @@ object SessionController {
                 endpoint.channel,
                 endpoint.securityType,
             )
+        // 被动断开后的自动重绑要的是「完整凭据」，而 0x4301 里就有一份（BMW iD9 /
+        // 通用车机根本不发 0x5703，AP 信息只走这条路）。旧实现只在 onWifiCredentials
+        // 里记 lastCarWifi —— 这类车型上 onCarWifiLost 永远走「没凭据，只能提示」，
+        // 1.2.10 加的自动重绑对它们等于不存在（只有 0x5703 车型才生效）。
+        lastCarWifi = wifiConfig
         if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)

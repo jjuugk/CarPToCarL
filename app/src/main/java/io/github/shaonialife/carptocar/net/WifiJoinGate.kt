@@ -49,7 +49,13 @@ class WifiJoinGate(
          * 等这一发的结果。返回 null = 窗口内没等到（调用方按失败处理，别再自己发一次）。
          */
         fun await(timeoutMillis: Long): Boolean? {
-            runCatching { latch.await(timeoutMillis, TimeUnit.MILLISECONDS) }
+            try {
+                latch.await(timeoutMillis, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                // 被中断也是「没等到」；但必须把中断位还回去，否则调用方后面的
+                // 阻塞操作（socket 连接、视频收尾）全都会静默失效
+                Thread.currentThread().interrupt()
+            }
             return succeeded
         }
     }
@@ -107,10 +113,15 @@ class WifiJoinGate(
         nowMillis: Long,
     ) {
         synchronized(lock) {
-            lastSsid = ticket.ssid
-            lastAtMillis = nowMillis
-            lastSucceeded = succeeded
-            if (pending === ticket) pending = null
+            // 只有「仍然是当前这一发」才写去重状态：换了 SSID 之后旧 ticket 才结束
+            // 时它属于**另一条热点**，把它写进 lastSsid/lastSucceeded 会让新热点的
+            // 正常重试被 5 秒窗口误挡（而旧热点自己反而没被记住）。
+            if (pending === ticket) {
+                pending = null
+                lastSsid = ticket.ssid
+                lastAtMillis = nowMillis
+                lastSucceeded = succeeded
+            }
             ticket.succeeded = succeeded
         }
         ticket.latch.countDown()

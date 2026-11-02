@@ -114,4 +114,32 @@ class WifiJoinGateTest {
         gate.finish(run.ticket, succeeded = true, nowMillis = 9_000L)
         org.junit.Assert.assertNull(gate.runningSsid())
     }
+
+    @Test
+    fun supersededTicketDoesNotPolluteDedupe() {
+        val gate = gate()
+        val first = gate.decide("Audi_5GHz", nowMillis = 1_000L) as WifiJoinGate.Decision.Run
+        gate.decide("ID7Pro WiFi 5G", nowMillis = 1_010L) as WifiJoinGate.Decision.Run
+        // 旧的那发晚一拍才失败：它属于**另一条热点**，不能替新热点点亮去重窗口
+        gate.finish(first.ticket, succeeded = false, nowMillis = 12_000L)
+        val again = gate.decide("Audi_5GHz", nowMillis = 12_100L)
+        assertTrue("被顶替的旧请求失败不该挡住这一条的重试", again is WifiJoinGate.Decision.Run)
+    }
+
+    @Test
+    fun supersededTicketStillWakesItsWaiter() {
+        val gate = gate()
+        val first = gate.decide("Audi_5GHz", nowMillis = 1_000L) as WifiJoinGate.Decision.Run
+        val waiter = gate.decide("Audi_5GHz", nowMillis = 1_050L) as WifiJoinGate.Decision.Wait
+        gate.decide("ID7Pro WiFi 5G", nowMillis = 1_100L)
+        val done = CountDownLatch(1)
+        var observed: Boolean? = null
+        Thread {
+            observed = waiter.ticket.await(2_000L)
+            done.countDown()
+        }.start()
+        gate.finish(first.ticket, succeeded = true, nowMillis = 1_400L)
+        assertTrue("被顶替也要唤醒等待方，否则它要白等到超时", done.await(2, TimeUnit.SECONDS))
+        assertTrue(observed == true)
+    }
 }
