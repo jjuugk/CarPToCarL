@@ -19,16 +19,16 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.11.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.11/CarPToCarL-1.2.11.apk)**
-> —— 主线固定直链（当前 1.2.11，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.12.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.12/CarPToCarL-1.2.12.apk)**
+> —— 主线固定直链（当前 1.2.12，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.11.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.11/CarPToCarL-1.2.11.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.12.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.12/CarPToCarL-1.2.12.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.11，但不要与其它来源的包混装                    |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.12，但不要与其它来源的包混装                    |
 | 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-latest.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
@@ -821,6 +821,43 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.12 —— 2026-11-02（正式版 · 自查修补）
+
+> 这一版不加功能，只补「已经写下的逻辑里的漏洞」。其中有三条会直接表现为
+> 「功能看起来没生效」：只发 `0x4301` 的车型自动重绑形同不存在、退避重试可能
+> 自己和自己撞车、无事件口固件被误判成车机坏了。
+
+- **只发 `0x4301` 的车型（BMW iD9 / 部分通用车机）自动重绑从没生效**：`lastCarWifi`
+  只在 `0x5703` 里赋值，而这类车机根本不发 `0x5703`（AP 信息只走 `0x4301`）→
+  断开后永远走「没凭据，只能提示」。现在端点交接处也用 `0x4301` 的
+  ssid/passphrase/channel/securityType 记一份。
+- **退避重试的令牌改在同一把锁内取**：原来先占排队位、出锁后才读令牌，中间若被
+  用户点击或车机邀请 +1，这一次退避会把**新一轮**的令牌当成自己的，醒来判「没过期」
+  并再起一轮——两轮同时配对必然互相 `retireSession`。
+- **半握手判定要求「接收端确实下发了 `eventPort`」**：`eventPort == 0` 时
+  `connectEventChannel` 是「没试过」而不是「连不上」，旧判定会让本来能用的无事件口
+  固件被误判成「车机服务异常、请重启车机」而放弃本轮。
+- **`WifiJoinGate.finish` 只记录「仍是当前那一发」的结果**：换过 SSID 后旧 ticket
+  才结束时，会把**另一条热点**的失败写进去重状态（反向污染）；`await` 被中断时
+  补回中断位。
+- **`VideoSender` 的 `configSent` / `passthrough` 加 `@Volatile`**：帧线程写、保活
+  线程读，无可见性保证时可能一直看到旧值——空闲重发全被丢（画面静止几十秒后车机
+  拆链），或重连后漏发 config（一帧都过不去）。
+- **AAC 编码器两处**：`put` 被 capacity 截断却按原始 size 记账（个别 ROM 抛
+  `IllegalArgumentException`）；`encode`/`stop` 完全没有互斥，收尾并发必抛
+  `Invalid to call during stop(); only valid in executing state`。现在统一排队长度、
+  加锁互斥、停止后到达的帧静默丢弃并汇总一行。
+- **同步包 ICMP 就地补发**：车机 `controlPort` 没监听时每包都被回 ICMP 端口不可达，
+  而连接式 UDP 延后一拍上报 → 恒定「失败 1 次、成功 1 次」交替，锚点密度只有设计值
+  一半、日志每秒刷两行。现在同一套接字立刻补发一次，锚点仍每秒一包（只提示一次）。
+- **WiFi 心跳日志两处**：`eventCount` 每轮启动清零（否则「本轮抖动次数」是历史总和）；
+  起点兜底校验 `TRANSPORT_WIFI`（WiFi 掉线切蜂窝后不会再 `rmnet_data0` 写进 `wifi=`
+  项，看起来像「WiFi 接口变成了蜂窝」）。
+- **`CarPlayCtrlAdvertiser.start` 异常路径关端口**：注册失败时既不关 `ServerSocket`
+  也不复位 `registered`，每失败一次漏一个监听端口。
+- 单测 **332 例全绿**（新增 2 例：被顶替的 ticket 不污染去重、仍唤醒等待方）。
+- 逐条记录见 [docs/connect-recovery.md](docs/connect-recovery.md) 的「七、自查修补」。
 
 ### 1.2.11 —— 2026-11-02（正式版 · 连不上时的自救）
 
