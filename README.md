@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.12-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**WiFi 断链排查与被动断开自动重绑**——wlan0 状态心跳让「断链是不是 WiFi 造成的」可对照时间戳判定，其余车机行为不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.16-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；同步主线按**奥迪 MIB3H SW3874 固件**调整的 CarPlay 链接方法——视频编码显式 Baseline、链路重传按对端声明取舍；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
