@@ -20,14 +20,14 @@
 **最新正式版**（免编译，直接装）：
 
 > **[`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)**
-> —— 固定直链，永远指向最新一版（当前 1.2.9，13.4 MB）
+> —— 固定直链，永远指向最新一版（当前 1.2.10，13.5 MB）
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.9.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.9/CarPToCarL-1.2.9.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.10.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.10/CarPToCarL-1.2.10.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.9，但不要与其它来源的包混装                    |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.10，但不要与其它来源的包混装                    |
 | 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-latest.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
@@ -40,7 +40,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.9`（正式版；连接健壮性四处加固——配对错误码不再被丢掉（修「有画面没声音」的真因）、失败定性、阶段预算、多屏选择；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.10`（正式版；WiFi 断链排查——被动断开自动重绑 + wlan0 状态心跳，另有连接健壮性四处加固；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[最新正式版 APK](https://github.com/jjuugk/CarPToCarL/releases/latest)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -820,6 +820,31 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.10 —— 2026-11-02（正式版 · WiFi 断链排查）
+
+> 把「WiFi 到底断没断、什么时候断的」从猜变成能对着时间戳看的日志，同时让被动
+> 断开的热点自己回来。
+
+起因：多份现场日志里 CarPlay 会话每 40~80 秒被拆一次，断链前 3 秒却毫无异常；
+而「切 WiFi 把链路带走」这个假设无法证伪——旧日志只记录我们主动 `release` 和
+`onLost`，**系统侧的被动变化（ROM 踢关联、换信道、热点重启、双 WLAN 争抢）全程静默**。
+
+- **`onLost` 不再只提示**（`SessionController.onCarWifiLost`）：应用专属网络被系统
+  断开后，用最近一次 `0x5703` 凭据**原地重绑一次**。旧实现只改提示 + 写日志，
+  网络永远不会回来——实测重绑后 8 秒内 CarLife 引擎会报 `7240 未监听`，
+  引擎在等网络，而旧代码不会把它拉回来。
+- **重绑有 15 秒闸门**：熄火/出范围会连发多次 `onLost`，没闸门就是「重绑→失败→再重绑」
+  的风暴，每轮都要 release + requestNetwork，恰好把正在恢复的关联又打断一次。
+- **只恢复网络，不自动重建会话**（刻意的取舍）：会话重建要重新配对/建链，会把
+  CarLife 引擎再踢一次（它比 AirPlay 脆）。日志明确写「本轮 CarPlay 会话仍需重建」。
+- **wlan0 状态心跳**（`net/WifiLinkWatchdog`）：`registerNetworkCallback` 收
+  `onAvailable`/`onLost`/`onCapabilitiesChanged`（毫秒级），外加每 5 秒轮询
+  「车机网络 / 进程默认网络 / 绑定 SSID」的签名，**只在签名变化时记一行**。
+  只监听不请求，避免诊断本身多建一条网络、反过来干扰被测对象。
+- 排查口径写进 [docs/wifi-link-watchdog.md](docs/wifi-link-watchdog.md)：
+  断链瞬间没有 `WIFI:` 行 → 可以排除 wlan0；有 `onLost` → 才是网络侧。
+- 单测 **362 例全绿**（新增 6 例：签名稳定/顺序无关/换热点/丢车机网络/默认网络变化/空态）。
 
 ### 1.2.9 —— 2026-11-01（正式版 · 连接健壮性四处加固）
 
