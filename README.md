@@ -19,16 +19,16 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.10.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.10/CarPToCarL-1.2.10.apk)**
-> —— 主线固定直链（当前 1.2.10，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.11.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.11/CarPToCarL-1.2.11.apk)**
+> —— 主线固定直链（当前 1.2.11，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.10.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.10/CarPToCarL-1.2.10.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.11.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.11/CarPToCarL-1.2.11.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.10，但不要与其它来源的包混装                    |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.11，但不要与其它来源的包混装                    |
 | 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-latest.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.10`（正式版；WiFi 断链排查——被动断开自动重绑 + wlan0 状态心跳，另有连接健壮性四处加固；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.11`（正式版；连接失败自救——同 SSID 入网互斥、失败退避自动重试、车机邀请即时响应、半握手快速定性；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[最新正式版 APK](https://github.com/jjuugk/CarPToCarL/releases/latest)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -821,6 +821,31 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.11 —— 2026-11-02（正式版 · 连不上时的自救）
+
+> 这一版不改善「正常车机能连多快」，只解决「连不上之后**没有人再试**」。
+> 现场日志里最刺眼的一处：18:01 失败之后 11 分钟零动作，而车机在这期间发了 5 次
+> 邀请，我们一次都没应。
+
+- **同一 SSID 的入网请求互斥 + 5 秒去重**（新增 `net/WifiJoinGate`）：`0x5703` 与
+  `0x4301` 会在同一瞬间各触发一次入网，而 `joinCarPlayNetwork` 第一行就是
+  `release()`——后发的把先发的**就地注销**：先发的白等 15s、`onNetworkLost` 回调
+  一起消失（上一版刚加的「被动断开自动重绑」于是完全失效）、用户还要面对确认框。
+  现在同 SSID 只有一发在跑，其余的等它的结果。日志 2026-11-02 的三处症状同源。
+- **建链失败按 3s / 10s / 30s 退避自动重试**：旧实现失败即收工，用户只能自己再点。
+  三次用完才停，并明确写「请重启车机侧 CarPlay」——继续怼只会刷屏、还把 CarLife
+  引擎反复踢下线。
+- **车机 ctrl 邀请即时响应**（`CarPlayCtrlAdvertiser.onInvite`）：空闲态收到邀请
+  = 对方正在等我们连，立刻作废退避计时器、马上起一轮。忙（正在连/已推流）时不动，
+  交给在跑的那轮。
+- **半握手快速定性**：SETUP 回了 200，但 `/info` 没有 displays **且**事件口连不上
+  ——不再按手机尺寸兜一个画布硬推（屏上不会出现画面、触摸也没通路，只会把
+  「连不上」演成「连上了但黑屏」），直接判定车机侧服务异常并提示重启车机。
+  屏幕流 SETUP 失败也不再静默收工，日志会写清是事件口还是 `/info` 不通。
+- 单测 **330 例全绿**（新增 10 例：入网互斥/等待方拿到结果/换热点不阻塞/去重窗口/
+  force 语义/成功后不去重）。
+- 排查与判读见 [docs/connect-recovery.md](docs/connect-recovery.md)。
 
 ### 1.2.10 —— 2026-11-02（正式版 · WiFi 断链排查）
 

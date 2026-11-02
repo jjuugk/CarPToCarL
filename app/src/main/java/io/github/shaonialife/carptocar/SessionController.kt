@@ -37,6 +37,7 @@ import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
+import io.github.shaonialife.carptocar.net.WifiJoinGate
 import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
 import io.github.shaonialife.carptocar.service.CarPlayService
@@ -169,6 +170,39 @@ object SessionController {
      * 建议已被用户授权时系统通常 1~3 秒内就连上，比 specifier 快且无弹框。
      */
     private const val SUGGESTION_JOIN_WAIT_MS = 8_000L
+
+    /**
+     * 同 SSID 入网请求的去重窗口（毫秒）。
+     *
+     * 0x5703 与 0x4301 两条路都会触发入网，且**在同一个瞬间**各发一次（2026-11-02
+     * 日志：06.581 / 06.586 两行「以应用专属网络加入」）。`joinCarPlayNetwork` 第一行
+     * 就是 `release()`——后发的那次会把先发的请求就地注销，网络回调一起消失，
+     * 于是「被动断开自动重绑」失效、本次入网白花 28 秒（15s 超时 + 弹窗重试）。
+     * 5 秒只是挡住这种紧挨着的重复，用户手点「重试」走 force 通道不受影响。
+     */
+    private const val WIFI_JOIN_DEDUPE_MS = 5_000L
+
+    /**
+     * 建链失败后的自动重试退避（毫秒）。
+     *
+     * 车机侧会话残留时立刻重连必然失败（对方还没清干净旧会话），等它一拍才有机会：
+     * 3s 覆盖「刚被拆、马上能重进」，10s 覆盖「车机重启 AirPlay 服务」，30s 覆盖
+     * 「上一轮被硬断后 TCP 端口彻底关掉再开」。三次用完还在失败就是车机侧真坏了
+     * （2026-11-02 MBUX：SETUP 回 200 却 7ms 后 FIN），继续怼只会刷屏。
+     */
+    private val CONNECT_RETRY_BACKOFF_MS = longArrayOf(3_000L, 10_000L, 30_000L)
+
+    /**
+     * 建链失败自动重试的互斥 + 序号。
+     *
+     * [retryGeneration] 是「这一轮重试还算不算数」的令牌：车机 ctrl 邀请到达时
+     * 会把它 +1 并立刻另起一轮，挂在退避睡眠里的旧线程醒来后发现令牌变了就安静退出，
+     * 不会叠出两轮并行交接（两轮同时配对必然互相 retireSession）。
+     */
+    private val connectRetryLock = Any()
+    private var connectRetryScheduled = false
+    private var connectRetryAttempt = 0
+    private var connectRetryGeneration = 0
 
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
@@ -402,6 +436,14 @@ object SessionController {
 
     /** WiFi 绑定互斥：auto-join 与端点交接两条路径可能同时绑定同一热点。 */
     private val wifiBindLock = Any()
+
+    /**
+     * 「入网请求」互斥与去重（见 [WifiJoinGate] 与 [WIFI_JOIN_DEDUPE_MS]）。
+     *
+     * 两条路径（0x5703 / 0x4301）会在同一瞬间各发一次入网，而
+     * `joinCarPlayNetwork` 第一行就是 `release()`——后发的会把先发的注销掉。
+     */
+    private val wifiJoinGate = WifiJoinGate(WIFI_JOIN_DEDUPE_MS)
 
     /** DCL 双检锁的可发布字段（无 volatile 的双检锁是坏发布——虽然当前仅主线程调用，别留隐患）。 */
     @Volatile
@@ -756,6 +798,110 @@ object SessionController {
         appendLog("PROC: 蓝牙链路已重新拉起（等车机重新下发 0x4301）")
     }
 
+    /**
+     * 一轮建链失败后的自动重试（3s / 10s / 30s 三档）。
+     *
+     * 旧实现失败即收工：2026-11-02 日志里 18:01:17 失败后到 18:12:47 整整 11 分钟
+     * 零动作，而车机在这期间发了 5 次 ctrl 邀请。车机侧「半握手」状态（SETUP 回 200
+     * 却立刻 FIN、事件口 ECONNREFUSED）多半只是上一轮被硬断后没清干净——它自己会好，
+     * 我们不去试就永远连不上。
+     *
+     * 三次用完就停：还在失败说明是车机侧真的坏了（需要重启车机侧 CarPlay），
+     * 继续怼只会刷屏并把 CarLife 引擎反复踢下线。
+     */
+    private fun scheduleConnectRetry(reason: String) {
+        if (connectCancelled || !sessionWanted || isStreaming()) return
+        val endpoint = lastGoodEndpoint ?: return
+        var delay = 0L
+        var attempt = 0
+        synchronized(connectRetryLock) {
+            if (connectRetryScheduled) {
+                appendLog("RETRY: 已有一轮重试在排队——本次失败不再叠加")
+                return
+            }
+            if (connectRetryAttempt >= CONNECT_RETRY_BACKOFF_MS.size) {
+                appendLog(
+                    "RETRY: 已连续失败 ${connectRetryAttempt} 轮，停止自动重试——" +
+                        "请在车机上把 CarPlay 关掉再打开（或熄火重上电）后，手动点「启动连接」",
+                )
+                return
+            }
+            attempt = connectRetryAttempt
+            delay = CONNECT_RETRY_BACKOFF_MS[attempt]
+            connectRetryScheduled = true
+        }
+        val generation = synchronized(connectRetryLock) { connectRetryGeneration }
+        Bg.run("connect-retry") {
+            try {
+                appendLog(
+                    "RETRY: $reason——${delay / 1_000}s 后自动重试" +
+                        "（第 ${attempt + 1}/${CONNECT_RETRY_BACKOFF_MS.size} 次）",
+                )
+                sleepQuietly(delay)
+                val stale =
+                    synchronized(connectRetryLock) {
+                        connectRetryGeneration != generation
+                    }
+                if (stale) {
+                    appendLog("RETRY: 等待期间已有新一轮接手（车机邀请/用户操作）——本次重试作废")
+                    return@run
+                }
+                if (connectCancelled || !sessionWanted || isStreaming() || sessionStarting.get()) {
+                    appendLog("RETRY: 条件已变（取消/正在连/已出画面）——跳过本次重试")
+                    return@run
+                }
+                synchronized(connectRetryLock) { connectRetryAttempt = attempt + 1 }
+                appendLog("RETRY: 发起第 ${attempt + 1} 次自动重试（端点 ${endpoint.ssid}）")
+                onCarPlayEndpoint(endpoint, "建链失败自动重试 #${attempt + 1}")
+            } finally {
+                synchronized(connectRetryLock) { connectRetryScheduled = false }
+            }
+        }
+    }
+
+    /**
+     * 车机 ctrl 邀请到达（车机已发现手机、AirPlay 窗口已开）。
+     *
+     * 空闲态收到邀请 = 对方正在等我们连，比任何退避计时器都权威：立刻把挂着的重试
+     * 作废、马上起一轮。忙（正在连/已在推流）时什么都不做，让在跑的那轮自己走完。
+     */
+    private fun onCtrlInvite(receiverId: String?) {
+        if (!sessionWanted || connectCancelled || isStreaming()) return
+        val endpoint = lastGoodEndpoint
+        if (endpoint == null) {
+            appendLog("CTRL: 车机邀请到达（receiver=${receiverId ?: "?"}）——但还没有热点端点，等它下发 0x4301/0x5703")
+            return
+        }
+        if (sessionStarting.get()) {
+            appendLog("CTRL: 车机邀请到达——本轮已有会话在处理中，交给它（不并行再起一轮）")
+            return
+        }
+        val exhausted =
+            synchronized(connectRetryLock) {
+                if (connectRetryAttempt >= CONNECT_RETRY_BACKOFF_MS.size) {
+                    true
+                } else {
+                    // 邀请打断退避：令牌 +1，挂在睡眠里的重试线程醒来就作废
+                    connectRetryGeneration++
+                    connectRetryScheduled = false
+                    false
+                }
+            }
+        if (exhausted) {
+            appendLog(
+                "CTRL: 车机仍在邀请（本轮共 ${ctrlAdvertiser?.inviteCount ?: 0} 次），" +
+                    "但已连续失败 ${CONNECT_RETRY_BACKOFF_MS.size} 轮——不再自动重连；" +
+                    "请重启车机侧 CarPlay 后手动点「启动连接」",
+            )
+            return
+        }
+        appendLog("CTRL: 车机邀请到达（receiver=${receiverId ?: "?"}）且当前空闲——立即发起一轮连接")
+        Bg.run("ctrl-invite-connect") {
+            if (connectCancelled || !sessionWanted || isStreaming()) return@run
+            onCarPlayEndpoint(endpoint, "车机 ctrl 邀请触发")
+        }
+    }
+
     /** 本机端口是否在监听（CarLife 引擎 7240）。600ms 足够，本机回环不会慢。 */
     private fun probeLocalPort(port: Int): Boolean =
         try {
@@ -901,7 +1047,12 @@ object SessionController {
                     nowPlayingProvider = nowPlayingProvider,
                     onLinkClosed = ::onSenderLinkClosed,
                 )
-            ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
+            ctrlAdvertiser =
+                CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }.also { advertiser ->
+                    // 空闲态收到邀请 = 车机正在等我们连（会话失败后唯一的恢复入口）。
+                    // 回调本身只入队，真正的建链在后台线程做——它会占用应答窗口。
+                    advertiser.onInvite = { receiverId -> onCtrlInvite(receiverId) }
+                }
             endpointBrowser =
                 CarPlayServiceBrowser(
                     context,
@@ -969,6 +1120,13 @@ object SessionController {
         connectCancelled = false
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
         sessionWanted = true
+        // 新一次点击 = 新的重试预算（上一轮用完的三次不该算到这一轮头上）；
+        // 令牌 +1 让还在退避睡眠里的旧线程作废，避免与手动这一轮并行交接
+        synchronized(connectRetryLock) {
+            connectRetryAttempt = 0
+            connectRetryGeneration++
+            connectRetryScheduled = false
+        }
         // 新一轮 = 新的链路状态：上一轮丢过的 wlan0 不影响这一轮的判定
         wifiLinkLost = false
         wifiWatchdog?.start()
@@ -1010,6 +1168,13 @@ object SessionController {
         val hadProjection = CarPlayService.mediaProjection != null
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
+        // 用户终态同样作废排队中的自动重试——它醒来第一件事就是检查 sessionWanted，
+        // 但先让令牌变一次，日志就能明确写出「用户已断开，本次重试作废」
+        synchronized(connectRetryLock) {
+            connectRetryGeneration++
+            connectRetryScheduled = false
+            connectRetryAttempt = 0
+        }
         SessionTrace.sessionEnd("用户手动断开")
         pendingEndpointUpdate = null
         retireSession()
@@ -1220,6 +1385,7 @@ object SessionController {
     private fun joinCarWifiSpecifier(
         wifi: Iap2SenderSession.WifiConfiguration,
         shellReady: Boolean,
+        force: Boolean = false,
     ): WifiCarPlayConnector.JoinResult {
         val connector = wifiConnector ?: return WifiCarPlayConnector.JoinResult.Unavailable
         // 已保存到系统配置里才询问是否清除：不擅自删用户网络（有的场景就是要用
@@ -1229,25 +1395,7 @@ object SessionController {
             if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
         }
         phaseHint = "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
-        appendLog(
-            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
-        )
-        val result =
-            synchronized(wifiBindLock) {
-                val existing = connector.currentNetwork
-                if (boundCarSsid == wifi.ssid && existing != null) {
-                    appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
-                    WifiCarPlayConnector.JoinResult.Joined(existing)
-                } else {
-                    connector.joinCarPlayNetwork(
-                        ssid = wifi.ssid,
-                        passphrase = wifi.passphrase,
-                        securityType = wifi.securityType,
-                        timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
-                        isCancelled = { connectCancelled },
-                    )
-                }
-            }
+        val result = joinCarWifiOnce(connector, wifi, force)
         if (result is WifiCarPlayConnector.JoinResult.Joined) {
             boundCarSsid = wifi.ssid
             if (wifiLinkLost) {
@@ -1269,6 +1417,81 @@ object SessionController {
             )
         }
         return result
+    }
+
+    /**
+     * 真正发起一次入网请求——**同一 SSID 全程只允许一次在跑**。
+     *
+     * 为什么必须互斥：`WifiCarPlayConnector.joinCarPlayNetwork` 第一行是 `release()`
+     * （注销回调 + 解绑进程网络）。两个线程同时要同一个 SSID 时，后来的那次会把
+     * 先发的那次**就地注销**：先发的永远等不到 onAvailable（白等 15s 超时），
+     * `onNetworkLost` 也随回调一起消失（于是自动重绑整条链路失效）。
+     * 2026-11-02 日志里「06.581 / 06.586 两行加入 + 28 秒才连上 + 断网时没有任何
+     * 断开日志」就是它，三处症状是同一个 bug。
+     *
+     * @param force 用户显式点了「重试」——绕过 [WIFI_JOIN_DEDUPE_MS] 去重窗口
+     *   （那次失败是用户面前的，重试是他明确要求的动作）。
+     */
+    private fun joinCarWifiOnce(
+        connector: WifiCarPlayConnector,
+        wifi: Iap2SenderSession.WifiConfiguration,
+        force: Boolean,
+    ): WifiCarPlayConnector.JoinResult {
+        val wired = connector.currentNetwork
+        if (boundCarSsid == wifi.ssid && wired != null) {
+            appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
+            return WifiCarPlayConnector.JoinResult.Joined(wired)
+        }
+        return when (val decision = wifiJoinGate.decide(wifi.ssid, android.os.SystemClock.uptimeMillis(), force)) {
+            is WifiJoinGate.Decision.Skip -> {
+                appendLog(
+                    "WIFI: \"${wifi.ssid}\" ${decision.sinceMillis / 1_000}s 前刚加入失败——" +
+                        "${WIFI_JOIN_DEDUPE_MS / 1_000}s 去重窗口内不重复请求" +
+                        "（再发一次会把可能在跑的那次 release 掉）",
+                )
+                WifiCarPlayConnector.JoinResult.Unavailable
+            }
+
+            is WifiJoinGate.Decision.Wait -> {
+                appendLog(
+                    "WIFI: \"${wifi.ssid}\" 已有一次入网请求在跑——等它的结果，" +
+                        "不重复请求（再发一次会把在跑的那次 release 掉）",
+                )
+                val ok = decision.ticket.await(SPECIFIER_JOIN_TIMEOUT_MS + 5_000L)
+                val network = connector.currentNetwork
+                if (ok == true && network != null) {
+                    appendLog("WIFI: 等到的结果是「已加入」——直接复用那条网络（$network）")
+                    WifiCarPlayConnector.JoinResult.Joined(network)
+                } else {
+                    WifiCarPlayConnector.JoinResult.Unavailable
+                }
+            }
+
+            is WifiJoinGate.Decision.Run -> {
+                appendLog(
+                    ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
+                )
+                val result =
+                    try {
+                        connector.joinCarPlayNetwork(
+                            ssid = wifi.ssid,
+                            passphrase = wifi.passphrase,
+                            securityType = wifi.securityType,
+                            timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                            isCancelled = { connectCancelled },
+                        )
+                    } catch (error: Exception) {
+                        appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
+                        WifiCarPlayConnector.JoinResult.Unavailable
+                    }
+                wifiJoinGate.finish(
+                    decision.ticket,
+                    result is WifiCarPlayConnector.JoinResult.Joined,
+                    android.os.SystemClock.uptimeMillis(),
+                )
+                result
+            }
+        }
     }
 
     /**
@@ -1404,7 +1627,8 @@ object SessionController {
         if (connectCancelled) return
         when (choice) {
             true -> {
-                when (val retry = joinCarWifiSpecifier(wifi, shellReady)) {
+                // force：用户明确点了「重试」——绕过 5 秒去重窗口
+                when (val retry = joinCarWifiSpecifier(wifi, shellReady, force = true)) {
                     is WifiCarPlayConnector.JoinResult.Joined -> Unit
                     WifiCarPlayConnector.JoinResult.Unsupported -> legacyJoinCarWifi(wifi, shellReady)
                     WifiCarPlayConnector.JoinResult.Unavailable -> {
@@ -3013,7 +3237,8 @@ object SessionController {
                             currentSharedSecret = sessionKey
                             currentAudioHost =
                                 client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
-                            client.connectEventChannel(sessionKey, setup) { command ->
+                            val eventChannelOk =
+                                client.connectEventChannel(sessionKey, setup) { command ->
                                 when (command["type"]) {
                                     "hidSendReport" -> {
                                         val uuid = command["uuid"]?.toString()
@@ -3158,6 +3383,42 @@ object SessionController {
                                                     }.take(600),
                                         )
                                 }
+                            }
+                            // 「半握手」判定（2026-11-02 MBUX 两轮实测）：
+                            // SETUP 回了 200，但 /info 一条 displays 都没给、事件通道还连不上——
+                            // 车机只是答应了前半段，后面什么都不通。此时按手机屏幕尺寸
+                            // 兜一个画布硬推没有任何意义（屏上不会出现画面，触摸也没通路），
+                            // 只会把「连不上」演成「连上了但黑屏」。
+                            if (!setup.displayFromCar && !eventChannelOk) {
+                                appendLog(
+                                    "AIRPLAY: ⚠ 车机侧 CarPlay 服务半握手——SETUP 回了 200，" +
+                                        "但 /info 无 displays 且事件口连不上（端口 ${setup.eventPort}）",
+                                )
+                                appendLog(
+                                    "AIRPLAY: 本轮不再按手机尺寸兜底硬推——请重启车机侧 CarPlay" +
+                                        "（中控把 CarPlay 关掉再打开，或熄火重上电）后重连",
+                                )
+                                phaseHint = "车机侧 CarPlay 服务异常，请重启车机"
+                                uiHintSink?.invoke(
+                                    "车机侧 CarPlay 服务异常（只答应了 SETUP，事件口/信息口都不通）——" +
+                                        "请在车机上把 CarPlay 关掉再打开后重试",
+                                )
+                                runCatching { client.close() }
+                                return@run
+                            }
+                            if (!setup.displayFromCar) {
+                                appendLog(
+                                    "AIRPLAY: ⚠ /info 没有 displays——画布按本机横屏兜底，" +
+                                        "比例与触摸映射都可能不准（事件口" +
+                                        (if (eventChannelOk) "已连上，先按兜底画布继续" else "也没连上") +
+                                        "）",
+                                )
+                            }
+                            if (!eventChannelOk) {
+                                appendLog(
+                                    "AIRPLAY: ⚠ 事件通道未建立——触摸/车机媒体键/资源仲裁本轮都收不到" +
+                                        "（视频与音频仍可继续）",
+                                )
                             }
                             // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
                             client.assertModes()
@@ -3421,6 +3682,18 @@ object SessionController {
                                     appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
                                     client.record()
                                 }
+                            } else {
+                                // 屏幕流 SETUP 失败：会话已经死了，但旧实现到这里什么都不说，
+                                // 日志只剩一行「本轮小结」——用户看到的却是「连上了又断」。
+                                appendLog(
+                                    "AIRPLAY: 主屏流 SETUP 失败——本轮不会有画面（事件口" +
+                                        (if (eventChannelOk) "已连上" else "不通") +
+                                        "、/info " + (if (setup.displayFromCar) "有 displays" else "无 displays") +
+                                        "）；若反复如此请在车机上重启 CarPlay",
+                                )
+                                phaseHint = "车机拒绝了屏幕流（SETUP）"
+                                uiHintSink?.invoke("车机拒绝了屏幕流（SETUP）——若反复如此请重启车机侧 CarPlay")
+                                runCatching { client.close() }
                             }
                         } else {
                             // 会话级 SETUP 被拒（典型：接收端按设备过滤回 403，见
@@ -3445,7 +3718,8 @@ object SessionController {
                     // 否则 BT-C 会永久停在门闸外、连真车路径失效。
                     // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
                     if (videoSender?.isRunning != true) {
-                        BtSessionGate.sessionActive = false                        // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
+                        BtSessionGate.sessionActive = false
+                        // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
                         // 窗口内到达，会被暂存但没人消费。此处补投一次——车机等 15s
                         // 无人连入就拆链，错过这一投就是整轮失败（2026-10-18 分析）。
                         val pending = pendingEndpointUpdate
@@ -3455,7 +3729,15 @@ object SessionController {
                             Bg.run("late-endpoint-retry") {
                                 onCarPlayEndpoint(pending, "0x4301 晚到（本轮收尾补投）")
                             }
+                        } else {
+                            // 既没连上、也没有晚到端点可补投：按退避自动重试
+                            // （旧实现到此就收工，等用户自己再点一次——MBUX 那 11 分钟
+                            // 零动作就是这么来的）
+                            scheduleConnectRetry("本轮未建立会话")
                         }
+                    } else {
+                        // 起来了：重试计数归零，下次断链重新从 3s 起算
+                        synchronized(connectRetryLock) { connectRetryAttempt = 0 }
                     }
                 }
             }

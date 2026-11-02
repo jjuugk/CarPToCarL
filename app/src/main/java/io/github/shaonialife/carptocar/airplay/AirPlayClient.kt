@@ -2459,17 +2459,21 @@ class AirPlayClient(
      * Events-Read 读我们的数据）；**null = 未配对会话，通道全程明文**（catplay
      * `EventsServer::unencrypted` 同款，pre-HomeKit 老车机只认这种）。
      * 读取线程把明文按 RTSP 报文重组、解析 plist 命令（如 hidSendReport 触摸）并回调 [onCommand]。
+     *
+     * @return true = 端口已连上且读线程已启动；false = 无 eventPort / 连不上。
+     * 连接流程拿它判「半握手」：SETUP 回 200 但这里连不上，说明车机侧 CarPlay
+     * 服务只答应了前半段，再往下推不会有画面（见 SessionController 的判定）。
      */
     fun connectEventChannel(
         sessionKey: ByteArray?,
         setup: SetupInfo,
         onCommand: (Map<*, *>) -> Unit = {},
-    ) {
+    ): Boolean {
         if (setup.eventPort == 0) {
             log("EVENT: SETUP 未提供 eventPort，跳过")
-            return
+            return false
         }
-        val host = receiverHost() ?: return
+        val host = receiverHost() ?: return false
         try {
             val socket = Socket()
             socket.connect(InetSocketAddress(resolveAddress(host), setup.eventPort), 5_000)
@@ -2607,8 +2611,12 @@ class AirPlayClient(
                 start()
             }
         } catch (error: IOException) {
+            // 返回值给调用方判定「半握手」用：SETUP 回 200 但事件口拒绝连接，
+            // 是车机侧 CarPlay 服务没起来的典型形态（2026-11-02 MBUX 两轮实测）。
             log("EVENT: 连接失败 - ${error.message}")
+            return false
         }
+        return true
     }
 
     /** 流式 RTSP 报文重组器：喂入任意分片明文，弹出完整消息（首行 + body）。 */
