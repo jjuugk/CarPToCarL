@@ -61,7 +61,9 @@ release()   // unregisterNetworkCallback + bindProcessToNetwork(null)
 判定条件（两条同时成立）：
 
 1. `/info` 没给任何 displays（`setup.displayFromCar == false`）；
-2. 事件通道连不上（`connectEventChannel` 返回 false）。
+2. 事件通道连不上（`connectEventChannel` 返回 false）——**前提是接收端确实下发了
+   `eventPort`**：压根没下发时那是「没试过」而不是「连不上」，当成证据会误判一台
+   本来能用的车（这类固件正是画布兜底要照顾的对象）。
 
 两条同时成立就是车机侧 CarPlay 服务「只答应了前半段」：SETUP 回 200，随后 7~8ms
 就把 RTSP 连接 FIN 掉，事件口 `ECONNREFUSED`，屏幕流 SETUP 也过不去。这时按手机
@@ -90,3 +92,21 @@ release()   // unregisterNetworkCallback + bindProcessToNetwork(null)
 - **通话声音不上车机**：车机 telephony 档不含 AAC-LC/PCM 立体声位，协议层上限。
 - **会话 40~80 秒被对端关闭**：需抓断链前原始字节才能定性（见
   `docs/audio-channel-watchdog.md` 的抓包口子）。
+
+## 七、自查修补（1.2.11 之后，版本号未变）
+
+这一轮只动「已经写下的逻辑里的漏洞」，不加新功能：
+
+| 修补 | 原来的问题 | 后果 |
+| --- | --- | --- |
+| `0x4301` 也记 `lastCarWifi` | 只在 `0x5703` 里记完整凭据；BMW iD9 等**不发 0x5703** 的车型永远没有凭据 | 这些车被动断开后走「没凭据，只能提示」——1.2.10 的自动重绑对它们等于不存在；现在日志会写「本轮没有热点凭据（0x5703/0x4301 都未到）」 |
+| 退避令牌与「占用排队位」同锁读取 | 令牌是出了锁才读的，中间若被用户点击/邀请 +1，这一次退避会把**新一轮**的令牌当成自己的 | 醒来判「没过期」→ 再起一轮 → 两轮并行交接（必然互相 `retireSession`） |
+| 半握手判定要求「确实有 eventPort」 | 接收端不下发 `eventPort` 时 `connectEventChannel` 返回 false（但它其实没试过） | 少见的无事件口固件会被误判成「车机服务异常、请重启车机」而放弃本轮；现在退回画布兜底 |
+| `WifiJoinGate.finish` 只记录「仍是当前那一发」的结果 | 换过 SSID 后旧 ticket 才结束时，会把**另一条热点**的失败写进去重状态；`await` 被中断时还吞掉了中断位 | 新热点刚失败过就被误判（反向污染）；旧热点自己的失败反而没被记住；等待方后续的阻塞调用会静默失效 |
+| `VideoSender.configSent` / `passthrough` 加 `@Volatile` | 帧线程/重连线程写，保活线程读，普通字段无可见性保证 | 极端时序下空闲重发全被丢（画面静止几十秒后车机拆链），或重连后漏发 config（一帧都过不去） |
+| `AacLcEncoder` 输入缓冲长度与排队长度一致 | `put` 被 capacity 截断，`queueInputBuffer` 仍按原始 size 记账；输入槽拿不到时静默丢帧 | 个别 ROM 抛 `IllegalArgumentException`；丢帧无计数，日志里只表现为「声音卡了一下」 |
+| `CarPlayCtrlAdvertiser.start` 失败时关端口 | 异常路径既不关 `ServerSocket` 也不复位 `registered` | 每失败一次漏一个监听端口 |
+| `WifiLinkWatchdog.eventCount` 每轮启动清零 | 计数跨轮累计，「本轮收到 N 次抖动」实际是历史总和 | 收尾日志会报上一轮的抖动次数，读日志的人按错误次数判断链路质量 |
+| `WifiLinkWatchdog` 起点兜底校验 `TRANSPORT_WIFI` | WiFi 掉线后 `activeNetwork` 切到蜂窝，被当成「当前 WiFi 接口」写进 `wifi=` 项 | 日志里出现 `wifi=[rmnet_data0/10.x]`，看起来像「WiFi 接口变成了蜂窝」——其实那是 `default` 项 |
+| `AacLcEncoder` 的 `encode`/`stop` 互斥 | 没有锁：收尾路径 `stop()` 与采集/注入线程的 `encode()` 并发，直接抛 `Invalid to call during stop(); only valid in executing state` | 会话收尾瞬间必现异常日志，未编码的音频帧还会碰已 release 的 codec |
+| `AudioSender.sendSyncOnce` 识别 ICMP 端口不可达就地补发 | 车机 `controlPort` 没监听时每包都被拒，连接式 UDP 还是延后一拍上报 → 恒定「失败 1 次、成功 1 次」交替 | 锚点密度只有设计值一半，日志每秒刷两行；现在同一套接字立刻补发一次，锚点仍每秒一包（只提示一次） |

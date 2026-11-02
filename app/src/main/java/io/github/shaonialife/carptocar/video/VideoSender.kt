@@ -91,7 +91,20 @@ class VideoSender(
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
     private var frameCounter = 0L
+
+    /**
+     * VideoConfig 是否已发出。
+     *
+     * 写它的是**帧线程 / 重连线程**（`sendConfigFromNals`、`reconnectDataPort`），
+     * 读它的却是**保活线程**（[maybeResendIdleFrame] → [sendFrameFromNals]）——
+     * 普通字段的写对别的线程不保证可见：保活线程可能一直看到旧的 false 而把
+     * 空闲重发全丢掉（表现是「画面静止 30 秒后车机拆链」），也可能在重连后仍看到
+     * true 而漏发新 config（表现是「重连后一帧都过不去」）。
+     */
+    @Volatile
     private var configSent = false
+
+    @Volatile
     private var passthrough = false
     private var droppedBeforeConfig = 0L
 

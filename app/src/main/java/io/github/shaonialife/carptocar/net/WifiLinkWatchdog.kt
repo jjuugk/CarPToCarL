@@ -125,6 +125,9 @@ class WifiLinkWatchdog(
             return
         }
         // 首次签名不计入「变化」，但要落一行，否则读日志的人不知道起点是什么。
+        // eventCount 每轮清零：这是「本轮抖动了几次」的计数，累计值只会让人误判
+        // （上一轮抖了 5 次、这一轮 0 次，收尾却报「本轮收到 5 次」）。
+        eventCount = 0
         lastSignature = currentSignature()
         log("WIFI: 状态心跳已启动（起点 ${lastSignature}）")
         val thread =
@@ -169,14 +172,17 @@ class WifiLinkWatchdog(
     }
 
     private fun currentSignature(): String {
+        val known = synchronized(wifiEndpoints) { wifiEndpoints.toSet() }
         val wifi =
-            synchronized(wifiEndpoints) {
-                if (running && wifiEndpoints.isEmpty()) {
-                    // 回调还没跑过：显式取一次当前 WiFi，避免起点写成「没有任何网络」
-                    endpoint(cm?.activeNetwork)?.takeIf { it != "-" }?.let { setOf(it) } ?: emptySet()
-                } else {
-                    wifiEndpoints.toSet()
-                }
+            if (known.isEmpty() && running) {
+                // 回调还没跑过：显式取一次当前 WiFi，避免起点写成「没有任何网络」。
+                // **必须校验 TRANSPORT_WIFI**：Wi-Fi 掉线后 activeNetwork 会切到蜂窝，
+                // 直接拿来用会在 `wifi=[]` 里写一条 `rmnet_data0/10.x`，读日志的人会
+                // 以为「wifi 接口换成了 rmnet」——而它其实是下面的 default 项。
+                val active = cm?.activeNetwork
+                if (active != null && isWifi(active)) setOf(endpoint(active)) else emptySet()
+            } else {
+                known
             }
         return WifiLinkSignature.of(
             wifi = wifi,
@@ -185,6 +191,12 @@ class WifiLinkWatchdog(
             ssid = boundSsid(),
         )
     }
+
+    /** 这条网络是不是 WiFi（区分「Wi-Fi 掉线切了蜂窝」与「真的换了 WiFi 接口」）。 */
+    private fun isWifi(network: Network): Boolean =
+        runCatching {
+            cm?.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }.getOrDefault(false)
 
     /**
      * 网络的可读标识：`接口/IPv4`。
