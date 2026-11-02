@@ -19,8 +19,9 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)**
-> —— 固定直链，永远指向最新一版（当前 1.2.10，13.5 MB）
+> **[`CarPToCarL-1.2.10.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.10/CarPToCarL-1.2.10.apk)**
+> —— 主线固定直链（当前 1.2.10，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
