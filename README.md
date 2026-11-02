@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.13-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.13-switchpool`，versionCode 10213）；主线包见
-> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.11.apk`
+> **[`CarPToCarL-1.2.14-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.14-switchpool`，versionCode 10214）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.12.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.13-switchpool.apk`（见 Releases 页；1.2.13 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.14-switchpool.apk`（见 Releases 页；1.2.14 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.13，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.13-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.14，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.14-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -883,6 +883,38 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.14-switchpool —— 2026-11-02（`switch-pool` 分支 · 自查修补）
+
+> **仅 `switch-pool` 分支**（主线对应 1.2.12，内容相同）。这一版不加功能，只补
+> 「已经写下的逻辑里的漏洞」。其中三条会直接表现为「功能看起来没生效」。
+
+- **只发 `0x4301` 的车型（BMW iD9 / 部分通用车机）自动重绑从没生效**：`lastCarWifi`
+  只在 `0x5703` 里赋值，而这类车机根本不发 `0x5703`（AP 信息只走 `0x4301`）→
+  断开后永远走「没凭据，只能提示」。现在端点交接处也用 `0x4301` 的
+  ssid/passphrase/channel/securityType 记一份。
+- **退避重试的令牌改在同一把锁内取**：原来先占排队位、出锁后才读令牌，中间若被
+  用户点击或车机邀请 +1，这一次退避会把**新一轮**的令牌当成自己的，醒来判「没过期」
+  并再起一轮——两轮同时配对必然互相 `retireSession`。
+- **半握手判定要求「接收端确实下发了 `eventPort`」**：`eventPort == 0` 时
+  `connectEventChannel` 是「没试过」而不是「连不上」，旧判定会让本来能用的无事件口
+  固件被误判成「车机服务异常、请重启车机」而放弃本轮。
+- **`WifiJoinGate.finish` 只记录「仍是当前那一发」的结果**：换过 SSID 后旧 ticket
+  才结束时，会把**另一条热点**的失败写进去重状态（反向污染）；`await` 被中断时
+  补回中断位。
+- **`VideoSender` 的 `configSent` / `passthrough` 加 `@Volatile`**：帧线程写、保活
+  线程读，无可见性保证时可能一直看到旧值——空闲重发全被丢（画面静止几十秒后车机
+  拆链），或重连后漏发 config（一帧都过不去）。
+- **AAC 编码器排队长度与写入长度统一**：`put` 会被 capacity 截断却按原始 size 记账
+  （个别 ROM 抛 `IllegalArgumentException`）；输入槽拿不到时补计数并按 1/200/收尾
+  限频打印。
+- **WiFi 心跳日志两处**：`eventCount` 每轮启动清零（否则「本轮抖动次数」是历史总和）；
+  起点兜底校验 `TRANSPORT_WIFI`（WiFi 掉线切蜂窝后不会再把 `rmnet_data0` 写进
+  `wifi=` 项）。
+- **`CarPlayCtrlAdvertiser.start` 异常路径关端口**：注册失败时既不关 `ServerSocket`
+  也不复位 `registered`，每失败一次漏一个监听端口。
+- 单测 **374 例全绿**（新增 2 例：被顶替的 ticket 不污染去重、仍唤醒等待方）。
+- 逐条记录见 [docs/connect-recovery.md](docs/connect-recovery.md) 的「七、自查修补」。
 
 ### 1.2.13-switchpool —— 2026-11-02（`switch-pool` 分支 · 连不上时的自救）
 
