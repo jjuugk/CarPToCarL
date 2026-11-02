@@ -72,4 +72,28 @@ class AacLcEncoderTest {
         assertEquals(1024, AudioTuning.RAW_SPF.spf)
         assertTrue(!AudioTuning.RAW_SPF.highAccuracyTimestamps)
     }
+
+    /**
+     * 收尾竞态：会话断开时采集线程比 stop() 晚一拍，仍会喂帧进来。
+     *
+     * 2026-11-01 小米 → MIB3 日志里的 `Invalid to call during stop(); only valid in
+     * executing state` 就是这一路；契约必须是「停止后喂帧只返回空表，绝不碰 codec」。
+     */
+    @Test
+    fun encodeAfterStopDropsFramesWithoutTouchingCodec() {
+        val encoder = AacLcEncoder(44_100, 2, log = {})
+        assertTrue(!encoder.started)
+
+        // 从未启动过：encode 只是丢弃，不抛异常（本机 JVM 里 MediaCodec 是空壳，
+        // 一旦误碰就会 IllegalStateException/RuntimeException）
+        assertTrue(encoder.encode(ByteArray(encoder.inputFrameBytes), encoder.inputFrameBytes).isEmpty())
+
+        // stop() 幂等且不依赖已启动状态
+        encoder.stop()
+        encoder.stop()
+        assertTrue(!encoder.started)
+
+        // 停止后继续喂：仍旧静默丢弃
+        assertTrue(encoder.encode(ByteArray(encoder.inputFrameBytes), encoder.inputFrameBytes).isEmpty())
+    }
 }

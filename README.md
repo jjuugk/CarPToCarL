@@ -903,7 +903,16 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 - 日志区分来源，排查时一眼看出是谁定的：
   `iap2 车机专版：奥迪 MIB3 专版（下拉框指定，忽略身份判定）（身份 …）`、
   `IAPLINK: 隧道 MFi 基线 奥迪专版 20/16（下拉框指定奥迪档）（身份 …）`。
-- 单测 **354 例全绿**（新增 3 例：id 往返、唯一位、不牵连别克）。
+- **音频收尾竞态修掉**（小米 → MIB3 日志实证，`docs/audio-call-issues.md`）：
+  会话断开时采集/直通线程还在喂帧，另一条收尾路径已 `stop()`，下一次
+  `dequeueInputBuffer` 抛 `Invalid to call during stop(); only valid in executing state`。
+  `AacLcEncoder` 现在让 `encode`/`stop` 互斥，停止后到达的帧静默丢弃、收尾汇总一行。
+- **同步包 ICMP 拒绝不再刷屏、也不再隔包丢**（同一份日志实证）：车机 `controlPort`
+  全程不监听，每包都回 ICMP 端口不可达，而连接式 UDP 该错误**延后一拍**上报 →
+  旧实现「失败→恢复」每秒交替、锚点密度只有设计值一半。现在识别到
+  `ECONNREFUSED` 就在同一套接字上就地补发一次，只有真实失败才计数。
+- 单测 **356 例全绿**（新增 5 例：奥迪档 id 往返 / 唯一位 / 不牵连别克、
+  编码器停止后喂帧不碰 codec、同步包 ICMP 判定）。
 - ⚠ 这一档**未实车验证**。3801 车上仍建议先用 AUTO 看日志能否自判（打出
   `奥迪 MIB3 专版` 就说明判出来了），判不出来再切强制档。
   细节见 [docs/audi-mib3-3801.md](docs/audi-mib3-3801.md)。

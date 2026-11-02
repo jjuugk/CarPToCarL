@@ -165,6 +165,20 @@ class AacLcEncoder(
     private val bufferInfo = MediaCodec.BufferInfo()
     private var presentationUs = 0L
 
+    /**
+     * [encode] 与 [stop] 的互斥闸门。
+     *
+     * 2026-11-01 实测（小米 → 奥迪 MIB3，会话收尾）：采集线程/直通注入线程还在喂帧，
+     * 另一条收尾路径已经 `stop()` → 下一次 `dequeueInputBuffer` 抛
+     * `Invalid to call during stop(); only valid in executing state`。
+     * 只加一个「已停止」标志挡不住**正在执行**的那一次调用（它已经拿到了 codec 引用），
+     * 必须让 stop 等它走完；反之 encode 也不该踩到已 release 的 codec。
+     */
+    private val lock = Any()
+
+    /** stop() 之后仍到达的 encode 次数（竞态被丢弃的帧，收尾时汇总一行，不逐帧刷屏）。 */
+    private var droppedAfterStop = 0L
+
     /** ADTS 剥离只提示一次，避免刷屏。 */
     private var adtsStripped = false
 
@@ -180,67 +194,83 @@ class AacLcEncoder(
     var started: Boolean = false
         private set
 
-    fun start(): Boolean {
-        if (started) return true
-        return try {
-            val format =
-                MediaFormat.createAudioFormat(MIME, sampleRate, channels).apply {
-                    setInteger(
-                        MediaFormat.KEY_AAC_PROFILE,
-                        MediaCodecInfo.CodecProfileLevel.AACObjectLC,
-                    )
-                    setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, inputFrameBytes)
-                }
-            val created = MediaCodec.createEncoderByType(MIME)
-            created.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            created.start()
-            codec = created
-            presentationUs = 0L
-            started = true
-            log(
-                "AUDIO: AAC-LC 编码器就绪（${sampleRate}Hz ${channels}ch " +
-                    "${bitRate / 1000}kbps，帧=${FRAME_SAMPLES}采样/${inputFrameBytes}B）",
-            )
-            true
-        } catch (error: Exception) {
-            log("AUDIO: AAC-LC 编码器启动失败 - ${error.message}（本档位放弃）")
-            started = false
-            false
+    fun start(): Boolean =
+        synchronized(lock) {
+            if (started) return true
+            try {
+                val format =
+                    MediaFormat.createAudioFormat(MIME, sampleRate, channels).apply {
+                        setInteger(
+                            MediaFormat.KEY_AAC_PROFILE,
+                            MediaCodecInfo.CodecProfileLevel.AACObjectLC,
+                        )
+                        setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, inputFrameBytes)
+                    }
+                val created = MediaCodec.createEncoderByType(MIME)
+                created.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                created.start()
+                codec = created
+                presentationUs = 0L
+                started = true
+                log(
+                    "AUDIO: AAC-LC 编码器就绪（${sampleRate}Hz ${channels}ch " +
+                        "${bitRate / 1000}kbps，帧=${FRAME_SAMPLES}采样/${inputFrameBytes}B）",
+                )
+                true
+            } catch (error: Exception) {
+                log("AUDIO: AAC-LC 编码器启动失败 - ${error.message}（本档位放弃）")
+                started = false
+                false
+            }
         }
-    }
 
     /**
      * 喂一帧 PCM（[inputFrameBytes] 字节），返回本次编出的全部 AAC 帧。
      *
      * 编码器内部有延迟（首帧通常要喂 1~2 帧才吐第一包），所以返回值可能为空，
      * 调用方按「拿到的帧逐个发包」处理即可。
+     *
+     * **已停止时返回空表**：收尾阶段（会话断开、重连、手动断开）采集线程与注入线程
+     * 可能比 [stop] 晚一拍到达，此时绝不能再去碰已 release 的 codec——2026-11-01
+     * 日志里那条 `Invalid to call during stop()` 就是这条路走出来的。
      */
     fun encode(
         pcm: ByteArray,
         size: Int,
-    ): List<ByteArray> {
-        val encoder = codec ?: return emptyList()
-        val output = mutableListOf<ByteArray>()
-        try {
-            val inputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
-            if (inputIndex >= 0) {
-                val buffer = encoder.getInputBuffer(inputIndex)
-                if (buffer == null) {
-                    encoder.queueInputBuffer(inputIndex, 0, 0, presentationUs, 0)
-                } else {
-                    buffer.clear()
-                    buffer.put(pcm, 0, size.coerceAtMost(buffer.capacity()))
-                    encoder.queueInputBuffer(inputIndex, 0, size, presentationUs, 0)
-                    presentationUs += FRAME_SAMPLES * 1_000_000L / sampleRate
-                }
+    ): List<ByteArray> =
+        synchronized(lock) {
+            val encoder = codec
+            if (encoder == null || !started) {
+                droppedAfterStop++
+                return emptyList()
             }
-            drain(encoder, output)
-        } catch (error: Exception) {
-            log("AUDIO: AAC 编码异常 - ${error.message}")
+            val output = mutableListOf<ByteArray>()
+            try {
+                val inputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
+                if (inputIndex >= 0) {
+                    val buffer = encoder.getInputBuffer(inputIndex)
+                    if (buffer == null) {
+                        encoder.queueInputBuffer(inputIndex, 0, 0, presentationUs, 0)
+                    } else {
+                        buffer.clear()
+                        buffer.put(pcm, 0, size.coerceAtMost(buffer.capacity()))
+                        encoder.queueInputBuffer(inputIndex, 0, size, presentationUs, 0)
+                        presentationUs += FRAME_SAMPLES * 1_000_000L / sampleRate
+                    }
+                }
+                drain(encoder, output)
+            } catch (error: IllegalStateException) {
+                // 兜底：codec 在别处被停/释放（理论上 lock 已排掉，这里防 ROM 的意外行为）。
+                // 不是「异常」，是一次可预期的收尾竞态，记一行即可，别继续喂。
+                codec = null
+                started = false
+                log("AUDIO: AAC 编码器已释放，停止编码（${error.message}）——收尾竞态，已忽略")
+            } catch (error: Exception) {
+                log("AUDIO: AAC 编码异常 - ${error.message}")
+            }
+            output
         }
-        return output
-    }
 
     private fun drain(
         encoder: MediaCodec,
@@ -317,11 +347,20 @@ class AacLcEncoder(
     /** 组 7 字节 ADTS 头（无 CRC）：MPEG-4 / LC / 对应采样率与声道。 */
     private fun buildAdts(raw: ByteArray): ByteArray = adtsHeader(raw.size, sampleRate, channels) + raw
 
+    /** 停止并释放编码器（幂等）。与 [encode] 互斥，停止后到达的帧静默丢弃。 */
     fun stop() {
-        val encoder = codec ?: return
-        codec = null
-        started = false
-        runCatching { encoder.stop() }
-        runCatching { encoder.release() }
+        synchronized(lock) {
+            val encoder = codec
+            codec = null
+            started = false
+            if (encoder != null) {
+                runCatching { encoder.stop() }
+                runCatching { encoder.release() }
+            }
+            if (droppedAfterStop > 0) {
+                log("AUDIO: 编码器已停止，丢弃停止后到达的 $droppedAfterStop 帧（收尾竞态，已忽略）")
+                droppedAfterStop = 0
+            }
+        }
     }
 }

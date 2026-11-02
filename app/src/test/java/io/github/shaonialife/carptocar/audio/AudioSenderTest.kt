@@ -84,4 +84,28 @@ class AudioSenderTest {
         // 明文相同但 nonce 递增：密文必须不同（防 nonce 复用）
         org.junit.Assert.assertFalse(cipherA.contentEquals(cipherB))
     }
+
+    /**
+     * 同步包「延后一拍上报」的识别：只有 ICMP 端口不可达才就地补发，
+     * 真正的链路错误（网卡不可达 / 套接字已关）必须继续走失败计数，免得把断链当成正常。
+     */
+    @Test
+    fun icmpPortUnreachableIsClassifiedAsDeferred() {
+        // Android 的实际文本（小米 → MIB3 日志里逐秒出现）
+        org.junit.Assert.assertTrue(
+            AudioSender.isSyncIcmpRejection(
+                java.net.SocketException("sendto failed: ECONNREFUSED (Connection refused)"),
+            ),
+        )
+        org.junit.Assert.assertTrue(
+            AudioSender.isSyncIcmpRejection(java.net.PortUnreachableException("ICMP Port Unreachable")),
+        )
+        // 非 ICMP：不能当延后上报处理
+        org.junit.Assert.assertFalse(
+            AudioSender.isSyncIcmpRejection(java.net.SocketException("Socket closed")),
+        )
+        org.junit.Assert.assertFalse(
+            AudioSender.isSyncIcmpRejection(java.net.NoRouteToHostException("No route to host")),
+        )
+    }
 }

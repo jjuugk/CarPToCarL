@@ -79,6 +79,22 @@ class AudioSender(
         /** 同步包发送间隔（规范：每秒一个）。 */
         const val SYNC_INTERVAL_MILLIS = 1_000L
 
+        /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
+        private const val SYNC_SEND_ATTEMPTS = 2
+
+        /**
+         * 是否是「车机 controlPort 没监听」引起的 ICMP 端口不可达。
+         *
+         * Android 抛的是 `SocketException: sendto failed: ECONNREFUSED (Connection refused)`，
+         * 部分实现抛 [java.net.PortUnreachableException]，两种都算。这类错误对连接式 UDP
+         * **是延后一拍上报的**（本次 send 抛出，说的其实是上一发），所以不能当链路故障。
+         */
+        internal fun isSyncIcmpRejection(error: Exception): Boolean {
+            if (error is java.net.PortUnreachableException) return true
+            val message = error.message?.uppercase() ?: return false
+            return "ECONNREFUSED" in message || "PORT UNREACHABLE" in message
+        }
+
         private const val RTP_HEADER_LEN = 12
         private const val TAG_SIZE = 16
         private const val NONCE_SIZE = 8
@@ -117,6 +133,12 @@ class AudioSender(
 
     /** 同步包连续失败次数（诊断 + 决定何时重开套接字）。 */
     private var syncFailures = 0
+
+    /** 成功发出的同步包数（收尾汇总用）。 */
+    @Volatile private var syncSent = 0L
+
+    /** 被车机 ICMP 端口不可达拒掉、已就地补发成功的次数（= 车机没监听 controlPort）。 */
+    @Volatile private var syncIcmpDeferrals = 0L
 
     /** 首个同步包（X 位=1）是否已成功发出。 */
     private var syncFirstSent = false
@@ -521,6 +543,12 @@ class AudioSender(
         thread = null
         passthroughBuffer.reset()
         restorePhoneMedia()
+        if (syncSent > 0 && syncIcmpDeferrals > 0) {
+            log(
+                "AUDIO: 同步包共发出 $syncSent 个，其中 $syncIcmpDeferrals 次被车机 controlPort 的 " +
+                    "ICMP 拒绝（已就地补发，锚点未丢）",
+            )
+        }
         log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB）")
     }
 
@@ -554,44 +582,68 @@ class AudioSender(
         }
 
     /**
-     * 发一个同步包。**失败不再终止同步线程**。
+     * 发一个同步包。**失败不终止同步线程，也不放弃锚点**。
      *
      * 2026-10-26 实证（奥迪 MIB3）：音频 SETUP 后 1 秒，第一个同步包引发
      * `ECONNREFUSED`（车机此刻还没在 controlPort 上监听），旧实现 `catch` 后直接
      * 退出线程 —— 整场会话再没有任何同步包，RTP↔NTP 锚点永久缺失。
-     * 连接式 UDP 的 ICMP 错误是一次性的，继续发往往就能成功，所以这里只记数不放弃：
-     *  - 前 3 次逐条记，之后每 60 次记一条，避免刷屏；
-     *  - 连续失败满 10 次重开套接字（车机侧可能换了监听 socket）。
+     *
+     * 2026-11-01 实证（小米 → 奥迪 MIB3，10 分钟日志）：现象不是「一次就好」，而是
+     * 恒定的「失败 1 次 → 恢复 → 失败 1 次」交替 —— 说明车机 controlPort 全程没监听，
+     * 每一包都被回 ICMP 端口不可达；而连接式 UDP 把这个错误**延后一拍**上报（本次 send
+     * 抛异常，说的其实是上一发）。后果是锚点密度只有设计值的一半，日志每秒刷两行。
+     *
+     * 现在的处理：识别出 ICMP 端口不可达后**在同一条套接字上立刻重发一次**——挂起的
+     * 错误已被取走，补发必成；只有真正的发送失败（链路断）才计入连续失败。
      */
     @Synchronized
     private fun sendSyncOnce(first: Boolean): Boolean {
         val client = syncSocket ?: return false
-        return try {
+        var deferred = false
+        for (attempt in 0 until SYNC_SEND_ATTEMPTS) {
             val next = timestamp
             val current = (next - samplesPerPacket).coerceAtLeast(0L)
-            val ntp = TimingServer.ntpFromNanos(System.nanoTime())
-            val packet = AudioSyncPacket.build(syncSequence, current, next, ntp, first)
-            client.send(DatagramPacket(packet, packet.size))
-            syncSequence = (syncSequence + 1) and 0xFFFF
-            if (syncFailures > 0) {
-                log("AUDIO: 同步包恢复（连续失败 $syncFailures 次后发出）——锚点重建")
-                syncFailures = 0
+            try {
+                val ntp = TimingServer.ntpFromNanos(System.nanoTime())
+                val packet = AudioSyncPacket.build(syncSequence, current, next, ntp, first)
+                client.send(DatagramPacket(packet, packet.size))
+                syncSequence = (syncSequence + 1) and 0xFFFF
+                syncSent++
+                if (deferred) {
+                    syncIcmpDeferrals++
+                    if (syncIcmpDeferrals == 1L) {
+                        log(
+                            "AUDIO: 车机 controlPort 未监听（ICMP 端口不可达）——每包延后一拍报错，" +
+                                "已就地在同一套接字补发，锚点仍每秒一包（此提示只打一次）",
+                        )
+                    }
+                }
+                if (syncFailures > 0) {
+                    log("AUDIO: 同步包恢复（连续失败 $syncFailures 次后发出）——锚点重建")
+                    syncFailures = 0
+                }
+                return true
+            } catch (error: Exception) {
+                if (attempt + 1 < SYNC_SEND_ATTEMPTS && isSyncIcmpRejection(error)) {
+                    deferred = true
+                    continue
+                }
+                syncFailures++
+                if (syncFailures <= 3 || syncFailures % 60 == 0) {
+                    log(
+                        "AUDIO: 同步包发送失败（第 $syncFailures 次）- ${error.message}" +
+                            "——继续每秒重试，不放弃锚点",
+                    )
+                }
+                // 会话已收尾时不要重开（否则 socket 泄漏在 stop 之后）
+                if (syncFailures % 10 == 0 && running.get()) {
+                    runCatching { client.close() }
+                    syncSocket = openSyncSocket()
+                }
+                return false
             }
-            true
-        } catch (error: Exception) {
-            syncFailures++
-            if (syncFailures <= 3 || syncFailures % 60 == 0) {
-                log(
-                    "AUDIO: 同步包发送失败（第 $syncFailures 次）- ${error.message}" +
-                        "——继续每秒重试，不放弃锚点",
-                )
-            }
-            if (syncFailures % 10 == 0) {
-                runCatching { client.close() }
-                syncSocket = openSyncSocket()
-            }
-            false
         }
+        return false
     }
 
     /**
