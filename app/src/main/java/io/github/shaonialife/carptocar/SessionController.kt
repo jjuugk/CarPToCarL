@@ -2995,11 +2995,35 @@ object SessionController {
                 if (connectCancelled || videoSender == null) return@run
                 sleepQuietly(250)
             }
+            if (CarLifeHijack.isStreaming) {
+                connectBudget.markStreaming()
+                return@run
+            }
+            // 会话已建立但 CarLife 始终没推流：车机此时大概率黑屏。把提示文字渲染成单帧
+            // H.264 推到车机屏幕（代替黑屏），并持续保活显示，直到 CarLife 真正出帧接管。
+            val noticeLines = listOf("未劫持到手机车联画面", "请在手机 CarLife+ 进入「无线连接」")
+            val pushed = videoSender?.isRunning == true &&
+                (videoSender?.pushNotice(noticeLines) ?: false)
             appendLog(
                 "STAGE: ⚠ ${ConnectStage.FIRST_FRAME.label}超时（${budget / 1000}s 内没收到任何视频帧）——" +
                     "画面来自本机 CarLife+：确认它处于「无线连接」且引擎在推流（7240）；" +
-                    "会话本身已建立，不需要重连车机",
+                    "会话本身已建立，不需要重连车机" +
+                    if (pushed) "；已向车机屏幕推送提示「未劫持到手机车联画面」" else "",
             )
+            if (pushed) {
+                // 车机偶尔会丢掉首帧：每 5s 重推一次，最多 60s；CarLife 一旦出帧就停止。
+                var repeats = 0
+                while (videoSender?.isRunning == true &&
+                    !CarLifeHijack.isStreaming &&
+                    !connectCancelled &&
+                    repeats < 12
+                ) {
+                    sleepQuietly(5_000)
+                    if (CarLifeHijack.isStreaming || connectCancelled) break
+                    videoSender?.pushNotice(noticeLines)
+                    repeats++
+                }
+            }
         }
     }
 

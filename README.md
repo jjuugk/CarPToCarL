@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.18-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.18-switchpool`，versionCode 10218）；主线包见
+> **[`CarPToCarL-1.2.19-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.19-switchpool`，versionCode 10219）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.14.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.18-switchpool.apk`（见 Releases 页；1.2.18 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.19-switchpool.apk`（见 Releases 页；1.2.19 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.18，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.18-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.19，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.19-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.18-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；按 2026-11-03 大众 ID7 黑屏断流日志修三处：**新会话必须等 IDR**、**推流中车机邀请不再静默丢弃**、**音频 SETUP 被拒时补 `ct`/`sr` 重试**；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.19-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；在 1.2.18 修 ID7 黑屏的基础上，新增「CarLife 未劫持画面时向车机推送提示文字」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -883,6 +883,24 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.19-switchpool —— 2026-11-03（`switch-pool` 分支 · CarLife 未劫持时向车机推送提示）
+
+> 用户需求：连接已成功、但 CarLife 没劫持到本机车联画面时，把提示文字推到车机屏幕，
+> 而不是一直黑屏。详见 [`docs/carlife-notice-frame.md`](docs/carlife-notice-frame.md)。
+
+- **新增「未劫持到手机车联画面」提示帧**：`SessionController.startFirstFrameGate()` 在首帧
+  超时（会话已建立但 CarLife 始终没推流）后，调用 `VideoSender.pushNotice(...)` 把两行文字
+  （「未劫持到手机车联画面」/「请在手机 CarLife+ 进入「无线连接」」）渲染成单帧 H.264
+  （`NoticeFrameEncoder`：MediaCodec Surface 编码器 → 文字位图 → 长度前缀转 AnnexB），
+  注入视频通道显示到车机。
+- **持续保活**：提示帧记成 `lastIdrNals`，空闲重发机制持续把它维持在车机屏幕上；
+  之后 CarLife 一旦出帧（`isStreaming` 变 true），其 IDR 会自然接管、覆盖提示。
+- **防丢帧重推**：首推后每 5s 重推一次（最多 60s），应对车机丢掉首帧；CarLife 接管或会话
+  结束时停止。
+- **失败兜底**：编码器不可用 / 编码失败时 `pushNotice` 返回 false，上层仍保留原有日志提示，
+  不会因这条新逻辑而丢信息。
+- 单测未新增（该路径依赖真机 MediaCodec，无法在 JVM 单测里验证）；`assembleRelease` 通过。
 
 ### 1.2.18-switchpool —— 2026-11-03（`switch-pool` 分支 · 修 ID7 黑屏反复断流：等 IDR / 邀请重建 / 音频重试）
 

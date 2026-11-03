@@ -681,6 +681,34 @@ class VideoSender(
         }
     }
 
+    /**
+     * 把一行提示文字渲染成单帧 H.264 推到车机——用于「CarLife 没劫持到画面」时
+     * 在车机屏幕上显示文字，代替黑屏。
+     *
+     * 只在直通模式下有意义（此时 VideoSender 不持有编码器，画面来自外部 H.264）。
+     * 编码失败一律返回 false，调用方保留「仅日志」兜底即可。
+     */
+    fun pushNotice(lines: List<String>): Boolean {
+        if (!running.get() || !passthrough) return false
+        val frame = runCatching { NoticeFrameEncoder.encodeNotice(width, height, lines) }
+            .getOrElse { error ->
+                log("VIDEO: 通知帧编码异常 - ${error.message}")
+                return false
+            } ?: run {
+                log("VIDEO: 通知帧编码失败（编码器返回空）——保留日志兜底")
+                return false
+            }
+        // SPS/PPS + IDR 拼成一段 AnnexB 一次提交：submitH264 会先发 VideoConfig 再发帧，
+        // 并把这一帧记成 lastIdrNals，空闲保活会持续重发维持显示，直到 CarLife 接管。
+        val sent = submitH264(frame.csd + frame.idr, true)
+        if (sent) {
+            log("VIDEO: 已向车机推送提示帧（${lines.firstOrNull() ?: ""}）")
+        } else {
+            log("VIDEO: 通知帧送出失败（通道可能正在重连）")
+        }
+        return sent
+    }
+
     // ---- 编码输出 → 协议封装发送 ----
 
     private fun drainEncoder() {
