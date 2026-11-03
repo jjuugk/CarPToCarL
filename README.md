@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk)**
-> —— 主线固定直链（当前 1.2.16，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk)**
+> —— 主线固定直链（当前 1.2.17，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.16，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.16.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.17，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.17.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.16`（正式版；从 `switch-pool` 分支同步**通用修复**——等 IDR 再喂帧、推流中车机邀请主动重建、音频 SETUP 400 回退重试、CarLife 未劫持提示帧、首帧闸门按「已送达帧」判定；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.17`（正式版；参考 CarVeX 补**送帧闸门**——用 CarLife 帧头时间戳算排队延迟、写入耗时测背压，只有结构性堆积才跳 IDR；帧率改为取「车机声明」与「本机能力」的较小值；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,27 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.17 —— 2026-11-03（送帧闸门：帧龄/背压可见 + 帧率取较小值，正式版）
+
+> 参考 [iamr0s/carvex-carplay-research](https://github.com/iamr0s/carvex-carplay-research)
+> 的 `VideoDeliveryGate` / `VideoRatePolicy`。**动作没有照抄**：CarVeX 自己持有编码器，
+> 帧龄超 150ms 就丢帧并 `setParameters` 要一个 IDR；我们的编码器在 CarLife 引擎里，
+> 丢 P 帧会花屏到下一个 IDR、也没法请求 IDR（98316 帧率变更、码率配置实测都无效），
+> 所以只保留「观察」与「极端情况下跳 IDR」。
+
+- **送帧闸门**（`video/VideoDeliveryGate`）：CarLife 帧头 `[4..7]` 本来就是毫秒时间戳，
+  此前 `videoReader` 只读 `[0..3]` 的长度就把它丢了。现在用它算**排队延迟**：
+  `(now - ts) - 历史最小 offset`，绝对基准被基线消掉，所以时间戳是 `uptimeMillis`、
+  `currentTimeMillis` 还是别的毫秒都不影响。写入耗时另算背压：≥80ms 记慢写、
+  ≥400ms 记卡顿，每 5 秒打一行 `送帧统计 … 排队 p50/p95/max；写入 p95/max`。
+- **时间戳不老实就自动停用**：探测期 20 帧里取值少于 3 种、非单调超 5 次、
+  或算出 >30 秒的排队，一律判定「这字段不是时间戳」，退回只测写入耗时，**绝不动画面**。
+- **唯一的动作**：排队 ≥1500ms 且持续 ≥2s、当前帧非关键帧、距上次 >10s，
+  才 `beginAwaitingKeyFrame()` 跳到下一个 IDR（代价 ≤1 个 GOP）。抖动只记账。
+- **帧率取较小值**（`video/StreamFps`，对齐 CarVeX 的 `min(接收端, 宿主 hint)`）：
+  车机报 120/240/999 一律按 60 声明——编码器与合成器最高只出 60，声明高了车机按
+  更高节拍排帧却等不到帧，反而抖；车机报 30 仍然 30（硬约束必须让）。
 
 ### 1.2.16 —— 2026-11-03（从 switch-pool 同步通用修复，正式版）
 
