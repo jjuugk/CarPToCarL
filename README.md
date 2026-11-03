@@ -822,6 +822,31 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
+### 1.2.14 —— 2026-11-03（按 MIB3H 固件分析对齐协议参数，**尚未发版**）
+
+> 对照一份针对 MIB3H（SW 3874 / `CL37_MIB3H_AU_AS_G4x_2302700PROD`）的静态逆向报告，
+> 把「车机侧已经写明的事实」与本项目逐条核对（18 条，见
+> [`docs/mib3-firmware-3874.md`](docs/mib3-firmware-3874.md)）。绝大多数条目本来就一致
+> ——这套实现就是照着这台车的实车抓包长出来的。真正的差异三处，前两处已改：
+
+- **视频编码器显式声明 Baseline profile**：车机 `carplay.json → screen.esogfx` 把解码
+  格式写死为 `VIDEO_H264_BP`，且 `cropping/scaling` 全关、只有 5 个 OMX 输入缓冲、
+  `badFramesThreshold: 4`——编出一帧它不认的 profile 就是黑屏，没有降级路径。我们过去
+  不声明、吃设备默认值（多数机型默认就是 Baseline，所以能跑），换到默认 Main/High 的
+  机型就会「连上了没画面」。现在先请求 `AVCProfileBaseline` + 按分辨率选 level
+  （≤480p→3.0、≤720p→3.1、1080p→4.0、1080p60→4.2），**编码器不接受就退回不声明的
+  老路径**，不会把原本能用的机型打死。
+- **链路重传次数 4 → 10，并真正采纳对端声明**：固件里车机在 BT 通道声明
+  `maxNumberOfRetransmissions: 30`、RTO 3000ms。我们此前只给自己 4 次——蓝牙侧偶发
+  丢一帧时 12 秒就自己拆链，而车机愿意等 90 秒。折中取 10 次（30 秒），并让
+  `Iap2LinkEngine` 按 LSP 语义**对本地与对端取较小值**（以前对端声明多少完全没用上）。
+- **补齐消息目录**：OOB（`0x00B0~0x00B4`，无线 CarPlay 的带外蓝牙配对）、
+  `0xEA02` RequestAppLaunch、`0xAA06` MFi 证书序号、location（`0xFFF0/FA/FB/FC`）、
+  communications 全套（`0x4155~0x4172`）、power（`0xAE00~0xAE03`）、
+  vehicleStatus（`0xA100/0xA101`）。以前这些帧在日志里只显示 `0x00B2`，看不出属于哪一族。
+
+> 没做的三件（以及为什么）写在文档 §3：不改链路协商 60s 上限、不改 GOP、不实现 OOB 应答。
+
 ### 1.2.13 —— 2026-11-02（正式版 · 全代码自查修补）
 
 > 这一版不加功能：对 155 个 Kotlin 文件、约 1.7 万行做了一次全量走查（含 lint），
