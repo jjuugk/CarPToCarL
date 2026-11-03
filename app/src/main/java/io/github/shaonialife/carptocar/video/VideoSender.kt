@@ -172,6 +172,14 @@ class VideoSender(
         get() = running.get() && lastFrameAtMs > 0 &&
             android.os.SystemClock.uptimeMillis() - lastFrameAtMs < 5_000
 
+    /**
+     * 送帧闸门：帧龄（排队延迟）+ 写入耗时。
+     *
+     * 以前这条链路只有「帧 #N 已发送」，看不出「发得出去、但已经是 1.5 秒前的画面」。
+     * 判据与动作见 [VideoDeliveryGate]：抖动只记账，只有结构性堆积才跳下一个 IDR。
+     */
+    private val deliveryGate = VideoDeliveryGate()
+
     /** 上一次空闲重发的时刻。 */
     private var lastIdleResendAt = 0L
 
@@ -567,6 +575,9 @@ class VideoSender(
         awaitingKeyFrameSince = android.os.SystemClock.uptimeMillis()
         awaitingKeyFrameAfterRestart = true
         droppedBeforeRestartKey = 0
+        // 等 IDR = 换了一路码流的时间基准，排队延迟的基线必须跟着重来。
+        // 顺着这里做而不是各调用点各写一遍，理由同上面那两个时间戳。
+        deliveryGate.reset()
     }
 
     /**
@@ -592,7 +603,19 @@ class VideoSender(
         log("VIDEO: 已用缓存 SPS/PPS 预置 csd（${sps.size}B/${pps.size}B）")
     }
 
-    fun submitH264(data: ByteArray, keyFrame: Boolean): Boolean {
+    /**
+     * 直通模式送一帧 H.264（来自 CarLife 引擎）。
+     *
+     * @param sourceTimestampMs CarLife 帧头 `[4..7]` 的毫秒时间戳（0/负 = 取不到）。
+     *   只用来算「排队延迟」——基准未知也没关系，闸门内部取历史最小值当基线。
+     *   缓存回放（[CarLifeHijack.attach] 补历史 GOP）**不要**传：那批帧本来就旧，
+     *   传进来会被误判成「已经在排队」。
+     */
+    fun submitH264(
+        data: ByteArray,
+        keyFrame: Boolean,
+        sourceTimestampMs: Long? = null,
+    ): Boolean {
         if (!running.get()) return false
         val output = try {
             socket?.getOutputStream()
@@ -659,8 +682,25 @@ class VideoSender(
                     }
                 }
             }
+            val writeStartMs = android.os.SystemClock.uptimeMillis()
             sendFrameFromNals(nalUnits, keyFrame, output)
-            lastFrameAtMs = android.os.SystemClock.uptimeMillis()
+            val writtenAtMs = android.os.SystemClock.uptimeMillis()
+            // 写入耗时本身就是背压指标：socket 写不动时会直接阻塞在这里，
+            // 而这条调用链跑在 CarLife 的读线程上，一卡就是一整条视频通路在卡。
+            val verdict = deliveryGate.onFrame(
+                nowMs = writtenAtMs,
+                sourceTsMs = sourceTimestampMs,
+                writeMs = writtenAtMs - writeStartMs,
+                keyFrame = keyFrame || isIdr,
+            )
+            if (verdict.resync) {
+                log("VIDEO: ⚠ ${verdict.reason}")
+                // 跳到下一个 IDR：丢弃此后的 P 帧直到新 IDR 到达（≤1 个 GOP，引擎配的是 1s）。
+                // 不复位 frameCounter——nonce 复用会让车机整轮 AEAD 校验失败。
+                beginAwaitingKeyFrame()
+            }
+            deliveryGate.summaryIfDue(writtenAtMs)?.let { log(it.describe()) }
+            lastFrameAtMs = writtenAtMs
             if (keyFrame || nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 5 }) {
                 lastIdrNals = nalUnits
             }

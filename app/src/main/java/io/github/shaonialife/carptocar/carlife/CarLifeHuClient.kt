@@ -34,7 +34,13 @@ import io.github.shaonialife.carptocar.util.LogThrottle
 class CarLifeHuClient(
     private val host: String = "127.0.0.1",
     private val log: (String) -> Unit,
-    private val onVideoFrame: (data: ByteArray, keyFrame: Boolean) -> Unit,
+    /**
+     * 一节视频帧。
+     *
+     * @param sourceTimestampMs 引擎帧头 `[4..7]` 的毫秒时间戳，原样带过去（不做基准换算）。
+     *   下游 [io.github.shaonialife.carptocar.video.VideoDeliveryGate] 用它算排队延迟。
+     */
+    private val onVideoFrame: (data: ByteArray, keyFrame: Boolean, sourceTimestampMs: Long) -> Unit,
     private val onVideoParams: (width: Int, height: Int, fps: Int) -> Unit = { _, _, _ -> },
     /**
      * **码流真实分辨率**（SPS 解析值）确认/变更时回调。
@@ -776,6 +782,9 @@ class CarLifeHuClient(
                     log("CARLIFE: 视频帧长度异常（$length），放弃该通道")
                     break
                 }
+                // 帧头 [4..7] 是引擎给的毫秒时间戳（[8..11] 是包类型），此前一直被丢掉。
+                // 按无符号读：若是 currentTimeMillis 量级，当 Int 读会变成负数。
+                val sourceTimestampMs = readU32(header, 4).toLong() and 0xFFFF_FFFFL
                 val payload = ByteArray(length)
                 if (length > 0) data.readFully(payload)
                 if (length <= 0) continue
@@ -810,7 +819,7 @@ class CarLifeHuClient(
                     windowStart = now
                     windowFrames = 0
                 }
-                onVideoFrame(payload, isKeyFrame(payload))
+                onVideoFrame(payload, isKeyFrame(payload), sourceTimestampMs)
             }
         } catch (error: Exception) {
             if (running.get()) log("CARLIFE: 视频通道断开 - ${error.message}")

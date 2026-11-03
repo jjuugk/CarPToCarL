@@ -932,11 +932,12 @@ class AirPlayClient(
                 // 取**选中那块屏**的 uuid，不是 displays[0] 的——多屏车机上两者不是一回事，
                 // 车机会校验这个 uuid 与它下发的一致性。
                 displayUuid = selected?.uuid,
-                // 别克分支的帧率策略与主线**尚未统一**（已知分叉，见
-                // docs/buick-bigscreen-profile.md）：车机没声明时这里仍兜 30
-                // （= buick/DisplayTuning.FALLBACK_CAR_MAX_FPS），主线是保留 0 由
-                // StreamFps 按 60 声明。统一之前不要顺手改这里——它决定实车发多少帧。
-                maxFps = selected?.maxFps?.takeIf { it > 0 } ?: 30,
+                // 0 = 车机没声明。**这里不能兜 30**：兜了就等于替车机表态，
+                // 下游 DisplayTuning.targetFps 再也分不清「车机要 30」和「车机什么都没说」，
+                // 于是「兜底只给声明了 carMaxFpsFallback 的档位（大屏）」这条规则永远走不到，
+                // 所有车机都被按 30 发。参考 CarVeX 的参数决策：取「接收端声明」与
+                // 「宿主能力」的较小值，未声明就别编一个。
+                maxFps = selected?.maxFps ?: 0,
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
@@ -945,7 +946,8 @@ class AirPlayClient(
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
                 "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
-                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps}" +
+                "display=${info.displayWidth}x${info.displayHeight}@" +
+                (if (info.maxFps > 0) "${info.maxFps}fps" else "车机未声明fps") +
                 (if (info.displayFromCar) "" else "（车机未通告·手机兜底）") +
                 " displayUuid=${info.displayUuid}",
         )
