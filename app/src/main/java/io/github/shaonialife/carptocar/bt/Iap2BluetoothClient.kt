@@ -733,6 +733,9 @@ class Iap2BluetoothClient(
                 // 奥迪档**不设「先认出车机」的前提**：它存在的理由就是身份判不出来时
                 // 也能强制走专版，再加一道已知设备校验等于把这个开关重新锁死。
                 forceAudiMib3 = connectionProfile.forcesAudiMib3,
+                // 大众 ID（MEB ICAS3）档：识别阶段双向，补发我方 0x1D01。
+                // 其它档位 false —— 既有车机（奥迪/别克/老大众）一个字节都不变。
+                sendDeviceIdentification = connectionProfile.sendsDeviceIdentification,
             )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")

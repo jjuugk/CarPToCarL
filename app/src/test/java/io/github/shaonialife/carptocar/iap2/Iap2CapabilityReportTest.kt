@@ -48,9 +48,11 @@ class Iap2CapabilityReportTest {
     @Test
     fun describeUsesCatalogueNameOnlyWhenKnown() {
         assertEquals("0x5200(StartRouteGuidanceUpdates)", Iap2CapabilityReport.describe(0x5200))
-        // 目录里没有的号：不能编名字，原样输出
-        assertFalse(Iap2CapabilityReport.hasName(0xAD00))
-        assertEquals("0xad00", Iap2CapabilityReport.describe(0xAD00))
+        // 目录里没有的号：不能编名字，原样输出。
+        // 用 0x7A01 而不是 0xAD00：2026-11-03 补全消息目录后 AppDiscovery 那一族
+        // （0xAD00/0xAD02/0xAD03）已经有名字了，拿它当「未知」会随目录更新而失效。
+        assertFalse(Iap2CapabilityReport.hasName(0x7A01))
+        assertEquals("0x7a01", Iap2CapabilityReport.describe(0x7A01))
     }
 
     @Test
@@ -94,9 +96,9 @@ class Iap2CapabilityReportTest {
 
     @Test
     fun unknownIdsAreListedSeparately() {
-        report("可收清单", listOf(0x5200, 0xAD00, 0xAD03), isReceiveList = true)
+        report("可收清单", listOf(0x5200, 0x7A01, 0x7A03), isReceiveList = true)
 
-        assertTrue(lines.any { it.contains("陌生 ID(2)=0xad00 0xad03") })
+        assertTrue(lines.any { it.contains("陌生 ID(2)=0x7a01 0x7a03") })
         // 有名字的不能被算进陌生 ID
         assertFalse(lines.any { it.contains("陌生 ID(3)") })
     }

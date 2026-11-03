@@ -289,4 +289,51 @@ class ConnectionProfileTest {
             ),
         )
     }
+
+    /**
+     * 大众 ID（MEB ICAS3）档：**唯一**开「补发我方 0x1D01」的档位。
+     *
+     * 这是本档存在的全部理由——ICAS3 用苹果原厂栈，识别阶段要求双向。
+     * 一旦默认档（AUTO / STANDARD）也被标上，所有车机都会多收一帧识别，
+     * 奥迪/别克的既有流程就被无端改动了；这条断言守的就是这个边界。
+     */
+    @Test
+    fun `只有大众 ID 档补发识别帧`() {
+        val vw = ConnectionProfile.VW_MEB
+        assertEquals(vw, ConnectionProfile.byId("vw_meb"))
+        assertTrue(vw.sendsDeviceIdentification)
+        // 与其它专版互斥：它不改 MFi 长度基线，也不进别克分支
+        assertFalse(vw.forcesAudiMib3)
+        assertFalse(vw.forcesB233)
+        assertFalse(vw.b233PhoneInitiates)
+        // 画质一律跟随车机：不设帧率兜底，也就不会提示改缩放
+        assertNull(vw.carMaxFpsFallback)
+        assertNull(DisplayTuning.suggestedScalePercent(vw))
+        assertEquals(
+            listOf(ConnectionProfile.VW_MEB),
+            ConnectionProfile.entries.filter { it.sendsDeviceIdentification },
+        )
+    }
+
+    /** 大众档不进别克分支：名字像别克、历史也确认过 B233，选大众档时仍走通用流程。 */
+    @Test
+    fun `大众档不进别克分支`() {
+        assertFalse(
+            B233Selection.matches(
+                profile = ConnectionProfile.VW_MEB,
+                selectedAddress = null,
+                peerAddress = "AA:BB:CC:DD:EE:FF",
+                peerName = "BUICK_1234",
+                observedB233 = true,
+            ),
+        )
+    }
+
+    /** 帧率：大众档跟随车机（报 30 就 30、报 120 也不抬高、没报就保持本地偏好）。 */
+    @Test
+    fun `大众档帧率完全跟随车机`() {
+        assertEquals(30, DisplayTuning.targetFps(ConnectionProfile.VW_MEB, 60, 30))
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.VW_MEB, 60, 120))
+        assertEquals(60, DisplayTuning.targetFps(ConnectionProfile.VW_MEB, 60, 0))
+    }
 }

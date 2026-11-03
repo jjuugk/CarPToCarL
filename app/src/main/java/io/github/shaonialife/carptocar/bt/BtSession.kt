@@ -32,6 +32,10 @@ internal fun Iap2LinkChannel.runSenderSession(
      * 默认 false：奥迪仍按 0x1D01 身份文本自动判定，其它车机流程不变。
      */
     forceAudiMib3: Boolean = false,
+    /**
+     * 识别阶段补发我方 `0x1D01`（只给大众 ID 档；默认 false = 既有车机流程不变）。
+     */
+    sendDeviceIdentification: Boolean = false,
 ) {
     val session =
         Iap2SenderSession(
@@ -46,6 +50,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             nowPlayingProvider,
             forceBuickE5,
             forceAudiMib3,
+            sendDeviceIdentification,
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

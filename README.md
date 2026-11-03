@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.16-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；同步主线按**奥迪 MIB3H SW3874 固件**调整的 CarPlay 链接方法——视频编码显式 Baseline、链路重传按对端声明取舍；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.17-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**大众 ID（MEB ICAS3）**连接档——识别阶段补发我方 `0x1D01`，并按 CSV 补全 40+ 条消息命名；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -883,6 +883,30 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.17-switchpool —— 2026-11-03（`switch-pool` 分支 · 新增「大众 ID（MEB ICAS3）」连接档）
+
+> 依据两份大众固件逆向材料：MEB ICAS3（`ICAS3GP_CN4_VW_R4220L` / MU 6422 / 苹果原厂
+> CarPlay 栈 320.17.7 + iAP2 3.0）协议栈分析报告，以及同一固件反汇编出的 74 条 iAP2
+> 消息 ID 表。逐项核对结论与档位行为见 [`docs/vw-id-icas3.md`](docs/vw-id-icas3.md)。
+
+- **新增连接档「大众 ID（MEB ICAS3）」**：只做一件事——识别阶段**补发我方 `0x1D01`**
+  （名称/型号/制造商 + 本方会发/可收两张消息位图，升序写出）。ICAS3 用苹果原厂栈，
+  识别是双向的：车机收不到手机的识别帧就不发 `0x4301`。奥迪（Delphi）、别克
+  （SAIC-GM/Cinemo）、老大众（探歌 MQB）都容忍「只回 `0x1D02` 不发 `0x1D01`」，
+  所以这个开关**只对本档打开，默认档一个字节都不动**；连不上改回「通用（标准）」即可复原。
+- **默认链路方式逐条核对后「不需要改」**（10 项，见文档第二节）。三条最容易被误改的：
+  ①帧头 9 字节/校验和偏移 8 本来一致（报告把 offset 6 标成 SessionID 疑似字段错位，
+  按它的读法会把 ACK 当会话号）；②视频必须继续发 **AVCC 长度前缀**，改 Annex-B 会被
+  车机的 AVCC→AnnexB 转换啃坏；③画布（1264×640）与帧率一律跟随 `/info`，**不加** 30fps
+  兜底（没有证据说 MEB 只能 30）。
+- **消息目录补全 40+ 条**：目的地信息、通话控制、媒体库、蓝牙组件、辅助触控、VoiceOver、
+  App 发现、电源、USB 音频等（此前在日志里只显示 `0x4c00` 这种裸号）。纯命名，不改行为。
+- 已知缺口：识别帧里的 **EAP 协议名**没有字面量证据（两份材料都只给了车机侧的
+  `com.audi.*`），位置已留在 `DeviceIdentification.Spec.eapProtocols`，等一次真 iPhone
+  的 `0x1D01` 抓包填进去。
+- 单测：新增 9 例（识别帧往返一致 / 位图升序 / 默认清单含 `0x4300/0x4301` / 无重复无空洞 /
+  档位互斥），另把两条「拿 `0xAD00` 当未知 ID」的旧用例改成目录外的 `0x7A01`。
 
 ### 1.2.16-switchpool —— 2026-11-03（`switch-pool` 分支 · 同步「奥迪 MIB3H SW3874 固件」的链接方法调整）
 

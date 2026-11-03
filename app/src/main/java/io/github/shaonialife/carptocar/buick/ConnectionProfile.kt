@@ -51,6 +51,18 @@ enum class ConnectionProfile(
      * 不再看身份**，与「别克大连屏」档同一个思路（型号未知时只能靠人指定）。
      */
     val forcesAudiMib3: Boolean = false,
+    /**
+     * 识别阶段是否**补发我方自己的 `0x1D01`**（含本方会发/可收的消息位图）。
+     *
+     * 默认 false：本项目一直只「收车机的 0x1D01、回 0x1D02」，奥迪（Delphi）、
+     * 别克（SAIC-GM/Cinemo）、老大众（探歌，MQB）都容忍这种做法并照常下发 `0x4301`。
+     *
+     * 打开它的理由：大众 MEB（ID 系列）的 ICAS3 用**苹果原厂栈**
+     * （`AppleCarPlay_CommunicationPlugin` 320.17.7 + `libiAP2Service-3.0.so`），
+     * 识别阶段是双向的——收不到手机的识别帧就不开 CarPlay 会话
+     * （依据见 `docs/vw-id-icas3.md` 第 3 节）。默认档不动，只有显式选了这个档才发。
+     */
+    val sendsDeviceIdentification: Boolean = false,
 ) {
     AUTO(
         "auto",
@@ -132,6 +144,41 @@ enum class ConnectionProfile(
         // 会被 looksLikeBuick 拉进 B233，症状是「选了奥迪反而更连不上」。
         allowsB233 = false,
         forcesAudiMib3 = true,
+    ),
+
+    /**
+     * 大众 MEB（ID 系列）档（2026-11-03 新增，**实车待验证**）。
+     *
+     * 目标车机：大众 MEB 平台的 ICAS3（`ICAS3GP_CN4_VW_R4220L` / MU 6422 / 1.422.4，
+     * Samsung Exynos Auto V9，QNX + LGE Linux + Android VM）。与老 MQB 大众（探歌那类
+     * Cinemo/自研栈）不是一套东西：MEB 上跑的是**苹果原厂 CarPlay 栈**
+     * （插件 320.17.7 + iAP2 3.0 + `libAirPlay.so` 接收端）。
+     *
+     * 这一档只有**一处**行为改动：
+     *  - [sendsDeviceIdentification] = true —— 识别阶段补发我方 `0x1D01`。
+     *    苹果栈对识别的双向性要求，是静默分析与老大众实车差异之间最可能的那一条。
+     *
+     * 其余一律**跟随车机**，刻意不加任何硬编码：
+     *  - 画布 1264×640、帧率上限、音频档位全部来自 `/info` 与 `0x1D01`（ICAS3 会报
+     *    `widthPixels=1264 / heightPixels=640`），没有证据支持再压一个 30fps 兜底；
+     *  - 视频载荷保持 AVCC（长度前缀）——报告明确「iPhone 发 AVCC，车机转 Annex-B」，
+     *    与本仓库现有实现一致，**不能**改成 Annex-B；
+     *  - AP 凭据仍走 `0x5702 → 0x5703`（ICAS3 声明了 `0x5703`，且它也会自己下发）；
+     *    1 秒无应答后的并行兜底（同时发 `0x4300`）保留，老大众实测过这条救命。
+     *
+     * 风险与退路：
+     *  - 补发识别帧的内容里**没有 EAP 协议名**（两份材料都没给字面量，见
+     *    `DeviceIdentification` 的「已知缺口」）。若车机仍不回 `0x4301`，
+     *    下一步是抓一次真 iPhone 的 `0x1D01` 补上，而不是继续加开关；
+     *  - 万一这台车机因为多收了一帧识别反而更差，改选「通用（标准）」即可完全回到
+     *    旧流程，不需要卸载重装。
+     */
+    VW_MEB(
+        "vw_meb",
+        "大众 ID（MEB ICAS3）",
+        "补发我方识别帧（0x1D01 含消息位图）；其余跟随车机上报。实车待验证，连不上可退回「通用」",
+        allowsB233 = false,
+        sendsDeviceIdentification = true,
     ),
     ;
 

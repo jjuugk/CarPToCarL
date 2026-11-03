@@ -69,6 +69,15 @@ class Iap2SenderSession(
      * 默认 false —— 别克/宝马/大众/测试台的流程完全不变。
      */
     private val forceAudiMib3: Boolean = false,
+    /**
+     * 是否在识别阶段**补发我方自己的 `0x1D01`**（含消息位图）。
+     *
+     * 只给「大众 ID（MEB ICAS3）」档打开：ICAS3 用苹果原厂栈，识别阶段要求双向，
+     * 收不到手机的识别帧就不发 `0x4301`。奥迪/别克/老大众都容忍「只回 0x1D02 不发
+     * 0x1D01」，所以默认关闭——**默认档一个字节都不动**，不为新车型去动已跑通的车机。
+     * 帧的构造见 [DeviceIdentification]，开启位置在 [run] 里的 `0x1D02` 之后。
+     */
+    private val sendDeviceIdentification: Boolean = false,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -413,6 +422,9 @@ class Iap2SenderSession(
         logIdentification(identification)
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
+        // 我方识别帧：只在大众 ID 档发（见构造函数注释）。放在 0x1D02 之后，与真 iPhone
+        // 的时序一致——先接受车机的识别，再补上自己的。
+        if (sendDeviceIdentification) sendOwnIdentification()
 
         // EA 协议解析（启动时机见下方 MFi 完成后——2026-10-11 DiPlay 实测：
         // 认证前发 0xEA00 会让测试台状态机停摆，不再回 0xAA01；奥迪对此不敏感）
@@ -859,6 +871,13 @@ class Iap2SenderSession(
             // 丢弃（2026-10-18 Audi MMI 0000「连上后 15 秒自动断开」的根因）。
             if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
                 handleLateStartSession(frame)
+            }
+            // 识别应答（接受/拒绝）也可能晚到：同样必须排在限流之前，否则同一 ID
+            // 连续到达会被 `repeatCount % 100` 吞掉。
+            if (frame.messageId == Iap2MessageIds.IDENTIFICATION_ACCEPTED ||
+                frame.messageId == Iap2MessageIds.IDENTIFICATION_REJECTED
+            ) {
+                noteIdentificationReply(frame)
             }
             // 0x5000 NowPlaying 订阅：蓝牙链路（测试台）在这里订阅，回一次 0x5001。
             // 真车（MIB3）的 NowPlaying 订阅走 WiFi 隧道（VirtualIap2Link），此处
@@ -1557,6 +1576,9 @@ class Iap2SenderSession(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                     "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
             )
+            // 车机对我方识别帧的应答（只在大众 ID 档出现）：单独说清楚接受/拒绝，
+            // 否则「0x1d03 拒绝」会被埋进「非预期，暂存」这种看不出结论的行里。
+            noteIdentificationReply(frame)
             pendingFrames += frame
             if (pendingFrames.size > maxPendingFrames) {
                 pendingFrames.removeFirst()
@@ -1806,6 +1828,45 @@ class Iap2SenderSession(
             log("iap2 0x1d01 EA 组件[$groupId] protocol=$protocolId name=$name")
         }
         return out
+    }
+
+    /**
+     * 补发我方自己的 `0x1D01`（只在大众 ID 档开启，见构造函数 [sendDeviceIdentification]）。
+     *
+     * 内容 = 名称/型号/制造商 + 本方会发/可收的两张消息位图；EAP 协议表留空（缺证据，
+     * 见 [DeviceIdentification] 的「已知缺口」）。发出去之后车机会回它自己的 0x1D02/0x1D03，
+     * 由 [noteIdentificationReply] 记账——**拒绝也要能看见**，否则「车机不理我们」会被
+     * 误判成「车机不认这台手机」。
+     */
+    private fun sendOwnIdentification() {
+        val spec = DeviceIdentification.defaultSpec(deviceName)
+        val body = DeviceIdentification.body(spec)
+        send(Iap2MessageIds.IDENTIFICATION_INFORMATION, body)
+        log("iap2 tx=0x1d01 我方识别 ${DeviceIdentification.describe(spec)} ${body.size}B")
+        val params = DeviceIdentification.readBack(body)
+        if (params == null) {
+            log("iap2 tx=0x1d01 ⚠ 回读失败——帧结构不符预期（这条日志本身就是证据）")
+        }
+    }
+
+    /**
+     * 车机对我方识别帧的应答（0x1D02 接受 / 0x1D03 拒绝）。
+     *
+     * 只有在大众 ID 档才会走到这里（默认档我们从不发 0x1D01，车机也就不会回）；
+     * 出现 0x1D03 基本等于「声明内容它不认」，此时 0x4301 通常也不会来——
+     * 日志里把这两个事实连起来看，比反复重连有效。
+     */
+    private fun noteIdentificationReply(frame: Iap2Csm.Frame) {
+        when (frame.messageId) {
+            Iap2MessageIds.IDENTIFICATION_ACCEPTED ->
+                log("iap2 rx=0x1d02 车机接受我方识别（${frame.body.size}B）——可以等 0x4301")
+
+            Iap2MessageIds.IDENTIFICATION_REJECTED ->
+                log(
+                    "iap2 rx=0x1d03 ⚠ 车机**拒绝**了我方识别（${frame.body.size}B）——" +
+                        "多半是消息位图/协议声明它不认；本档后续大概率收不到 0x4301",
+                )
+        }
     }
 
     private fun logIdentification(frame: Iap2Csm.Frame) {

@@ -13,14 +13,14 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.16"
+val appVersionName = "1.2.17"
 
 /**
  * 分支标记：只有 `switch-pool` 分支（切换连接池）上非空，拼在 versionName 末尾
- * （`1.2.16-switchpool`）。
+ * （`1.2.17-switchpool`）。
  *
  * 目的只是让包在界面上/日志里一眼看出是哪个分支，**不动版本号**：
- * `versionCode` 仍由 [appVersionName] 推导（=10216）。
+ * `versionCode` 仍由 [appVersionName] 推导（=10217）。
  *
  * 本分支原名 `bieke`（别克），1.2.10 起改名为 `switch-pool`——它早已不只服务别克
  * （大众朗逸 Pro、宝马 iD9、别克大连屏、奥迪 MIB3 都走同一套建链），再叫「别克分支」

@@ -176,6 +176,8 @@ class Iap2BluetoothServer(
                 // 奥迪档同理——它是自动判定判不出来时的人工兜底，选中即认。
                 forceBuickE5 = profile.forcesB233,
                 forceAudiMib3 = profile.forcesAudiMib3,
+                // 大众 ID（MEB ICAS3）档：识别开始前补发我方 0x1D01（见 ConnectionProfile 注释）
+                sendDeviceIdentification = profile.sendsDeviceIdentification,
             )
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")
