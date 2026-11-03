@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.13.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.13/CarPToCarL-1.2.13.apk)**
-> —— 主线固定直链（当前 1.2.13，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**
+> —— 主线固定直链（当前 1.2.14，13.4 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.13.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.13/CarPToCarL-1.2.13.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.13，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.13.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.14，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.14.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.13`（正式版；全代码自查 12 处修补——版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[最新正式版 APK](https://github.com/jjuugk/CarPToCarL/releases/latest)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.14`（正式版；按奥迪 MIB3H SW3874 固件调整 CarPlay 链接方法——视频编码显式 Baseline、链路重传采纳对端声明；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -822,7 +822,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
-### 1.2.14 —— 2026-11-03（按 MIB3H 固件分析对齐协议参数，**尚未发版**）
+### 1.2.14 —— 2026-11-03（正式版 · 按奥迪 MIB3H SW3874 固件对齐协议参数）
 
 > 对照一份针对 MIB3H（SW 3874 / `CL37_MIB3H_AU_AS_G4x_2302700PROD`）的静态逆向报告，
 > 把「车机侧已经写明的事实」与本项目逐条核对（18 条，见
