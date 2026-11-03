@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**
-> —— 主线固定直链（当前 1.2.14，13.4 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk)**
+> —— 主线固定直链（当前 1.2.16，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.14，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.14.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.16，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.16.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -42,7 +42,7 @@
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
 | 当前版本 | `1.2.16`（正式版；从 `switch-pool` 分支同步**通用修复**——等 IDR 再喂帧、推流中车机邀请主动重建、音频 SETUP 400 回退重试、CarLife 未劫持提示帧、首帧闸门按「已送达帧」判定；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**（见上方「立即下载」）       |
+| 下载   | **[`CarPToCarL-1.2.16.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.16/CarPToCarL-1.2.16.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -822,7 +822,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
-### 1.2.16 —— 2026-11-03（从 switch-pool 同步通用修复，**尚未发版**）
+### 1.2.16 —— 2026-11-03（从 switch-pool 同步通用修复，正式版）
 
 > 只搬「与车型无关、主线和分支都会踩」的修复，`switch-pool` 的连接档位体系
 > （AUTO/通用/别克大屏/奥迪 MIB3/大众 ID MEB）、Wi-Fi Direct P2P 建链、别克 B233
@@ -854,7 +854,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
   VideoConfig 声明改用确认值，修声明错配导致的 10 秒拆链。
 - **单测 345 例全绿**；release 13,520,741 B。
 
-### 1.2.15 —— 2026-11-03（新增 MIB3 车机控制面板，**尚未发版**）
+### 1.2.15 —— 2026-11-03（新增 MIB3 车机控制面板，未单独发版，已并入 1.2.16）
 
 > 首页多了一张「MIB3 车机控制」卡，点开是一个**只读 + 控制**两段式面板。链路是
 > iAP2 的 EA 隧道（`0xEA00` 建会话、`0xEA03` 状态、`0xEA04` 数据），车机那头接到
