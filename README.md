@@ -19,14 +19,14 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.20-switchpool`，versionCode 10220）；主线包见
-> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.14.apk`
+> **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.20-switchpool`，versionCode 10220，13.5 MB）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.16.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.20-switchpool.apk`（见 Releases 页；1.2.20 之前的历史包也在同页）                    |
+| 本版固定包    | [`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)（1.2.20 之前的历史包见 Releases 页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
 | 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.20，但不要与其它来源的包混装                    |
 | 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.20-switchpool.apk`                              |
@@ -42,7 +42,7 @@
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
 | 当前版本 | `1.2.20-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；在 1.2.19 增提示帧的基础上，修正「首帧闸门误用 CarLife 推流状态，导致 CarLife 在推但车机未收到帧时不弹提示」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
+| 下载   | **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
