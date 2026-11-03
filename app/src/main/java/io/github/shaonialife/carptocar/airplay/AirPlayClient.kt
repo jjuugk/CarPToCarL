@@ -935,7 +935,8 @@ class AirPlayClient(
                 // 0 = 车机没声明。**不能兜成 30**：以前这里写 `?: 30`，凭空给一个
                 // 「车机要求 30fps」的画像，下游再也分不清「车机要 30」和「车机什么都没说」。
                 // 目标帧率的判定是「车机说了跟车机、没说按 60」（见 video/StreamFps.kt），
-                // 兜底值必须在源头保留「未声明」这一个状态。
+                // 兜底值必须在源头保留「未声明」这一个状态。参考 CarVeX 的参数决策：
+                // 取「接收端声明」与「宿主能力」的较小值，未声明就别替它编一个。
                 maxFps = selected?.maxFps ?: 0,
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,

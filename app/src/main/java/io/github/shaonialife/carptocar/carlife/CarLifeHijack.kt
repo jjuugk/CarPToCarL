@@ -557,7 +557,7 @@ object CarLifeHijack {
             val hu = CarLifeHuClient(
                 host = "127.0.0.1",
                 log = { line -> logSink?.invoke(line) },
-                onVideoFrame = { data, key -> onFrame(data, key) },
+                onVideoFrame = { data, key, ts -> onFrame(data, key, ts) },
                 onVideoParams = { w, h, f -> logSink?.invoke("CARLIFE: 手机编码参数 ${w}x$h@$f") },
                 // SPS 是码流的真相：确认后立刻告诉上层（界面显示、落盘快照都跟着它）。
                 onStreamSize = { w, h -> onActualStreamSize?.invoke(w, h) },
@@ -717,6 +717,7 @@ object CarLifeHijack {
     private fun onFrame(
         data: ByteArray,
         keyFrame: Boolean,
+        sourceTimestampMs: Long,
     ) {
         recvWindowFrames++
         recvWindowBytes += data.size
@@ -740,7 +741,7 @@ object CarLifeHijack {
         val frame = ensureSpsPps(data)
         val target = sender
         if (target != null) {
-            if (target.submitH264(frame, keyFrame)) noteDelivered(frame.size)
+            if (target.submitH264(frame, keyFrame, sourceTimestampMs)) noteDelivered(frame.size)
             return
         }
         synchronized(gopLock) {
