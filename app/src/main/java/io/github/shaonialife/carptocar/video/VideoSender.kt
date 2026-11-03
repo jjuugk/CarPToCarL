@@ -163,6 +163,15 @@ class VideoSender(
     @Volatile
     private var lastFrameAtMs = 0L
 
+    /**
+     * 是否有**真实视频流**正在写进车机通道（最近 5s 内写过帧）。
+     * 判定只认「帧真正发出去了」（[lastFrameAtMs] 只在 sendFrameFromNals 成功后更新），
+     * 不认 CarLife 侧的握手/进程状态——UI 与提示逻辑都用它，避免「显示已劫持却没画面」。
+     */
+    val isVideoFlowing: Boolean
+        get() = running.get() && lastFrameAtMs > 0 &&
+            android.os.SystemClock.uptimeMillis() - lastFrameAtMs < 5_000
+
     /** 上一次空闲重发的时刻。 */
     private var lastIdleResendAt = 0L
 
@@ -692,7 +701,12 @@ class VideoSender(
         if (!running.get() || !passthrough) return false
         val frame = runCatching { NoticeFrameEncoder.encodeNotice(width, height, lines) }
             .getOrElse { error ->
-                log("VIDEO: 通知帧编码异常 - ${error.message}")
+                // 带异常类型与调用栈：MediaCodec 的厂商异常 message 经常语焉不详（如"10 > -2145395697"），
+                // 只有类型+堆栈才能一次定位。
+                val top = error.stackTrace.take(5).joinToString(" ← ") {
+                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                }
+                log("VIDEO: 通知帧编码异常 - ${error.javaClass.simpleName}: ${error.message} @ $top")
                 return false
             } ?: run {
                 log("VIDEO: 通知帧编码失败（编码器返回空）——保留日志兜底")

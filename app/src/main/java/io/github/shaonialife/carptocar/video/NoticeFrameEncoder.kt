@@ -36,19 +36,46 @@ object NoticeFrameEncoder {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, 1_500_000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, 1)
+            // 1fps 会被部分厂商编码器拒收（本机实测抛异常）——反正是单帧，给个常规值保险。
+            setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
             setInteger(MediaFormat.KEY_LEVEL, avcLevelFor(w, h))
         }
+        // configure 显式 profile/level 被拒时，去掉这两项重试一次（与 VideoSender 主编码路径同策略）。
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        } catch (first: Exception) {
+            format.removeKey(MediaFormat.KEY_PROFILE)
+            format.removeKey(MediaFormat.KEY_LEVEL)
+            try {
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (second: Exception) {
+                runCatching { codec.release() }
+                throw IllegalStateException(
+                    "configure 失败（带档位=${first.javaClass.simpleName}:${first.message}；" +
+                        "去档位=${second.javaClass.simpleName}:${second.message}）",
+                    second,
+                )
+            }
+        }
+        val surface = try {
+            codec.createInputSurface()
         } catch (error: Exception) {
             runCatching { codec.release() }
-            return null
+            throw IllegalStateException(
+                "createInputSurface 失败: ${error.javaClass.simpleName}: ${error.message}", error,
+            )
         }
-        val surface = codec.createInputSurface()
-        codec.start()
+        try {
+            codec.start()
+        } catch (error: Exception) {
+            runCatching { surface.release() }
+            runCatching { codec.release() }
+            throw IllegalStateException(
+                "codec.start 失败: ${error.javaClass.simpleName}: ${error.message}", error,
+            )
+        }
         try {
             drawNotice(surface, w, h, lines)
             codec.signalEndOfInputStream()
@@ -62,10 +89,27 @@ object NoticeFrameEncoder {
                 return null
             }
             if (csd == null || idr == null) return null
-            val parsed = parseAvcC(csd) ?: return null
-            val lenSize = (csd[4].toInt() and 0x03) + 1
-            val csdAnnexB = annexB(parsed.first) + annexB(parsed.second)
-            val idrAnnexB = toAnnexB(idr, lenSize)
+            // csd-0 有两种布局：avcC（多数编码器）或 AnnexB（个别厂商编码器，本机实测是这种）。
+            // 按 avcC 硬解析 AnnexB 会读出巨值长度直接炸（2026-11-03 实测），所以先探测格式。
+            val csdAnnexB: ByteArray
+            val idrAnnexB: ByteArray
+            if (isAnnexB(csd)) {
+                val nals = splitAnnexB(csd)
+                val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
+                    ?: return null
+                val pps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
+                    ?: return null
+                csdAnnexB = annexB(sps) + annexB(pps)
+                idrAnnexB = when {
+                    isAnnexB(idr) -> normalizeAnnexB(idr)
+                    else -> toAnnexB(idr, 4)
+                }
+            } else {
+                val parsed = parseAvcC(csd) ?: return null
+                val lenSize = (csd[4].toInt() and 0x03) + 1
+                csdAnnexB = annexB(parsed.first) + annexB(parsed.second)
+                idrAnnexB = toAnnexB(idr, lenSize)
+            }
             if (idrAnnexB.isEmpty()) return null
             return NoticeFrame(csdAnnexB, idrAnnexB)
         } finally {
@@ -123,7 +167,10 @@ object NoticeFrameEncoder {
 
     /** 画一帧黑底白字（自动按短边缩放字号，多行垂直居中对齐）。 */
     private fun drawNotice(surface: Surface, w: Int, h: Int, lines: List<String>) {
-        val canvas = surface.lockCanvas(null) ?: return
+        // lockCanvas 返回 null 不能静默 return——finally 里的 unlockCanvasAndPost(null) 会再抛一个
+        // 更难懂的异常把真实原因盖掉。这里显式抛出，让上层日志能看到确切卡点。
+        val canvas = surface.lockCanvas(null)
+            ?: throw IllegalStateException("Surface.lockCanvas 返回 null——编码器输入面不支持 CPU Canvas 绘制")
         try {
             canvas.drawColor(Color.BLACK)
             val textSize = (h * 0.055f).coerceAtMost(w * 0.085f)
@@ -168,11 +215,48 @@ object NoticeFrameEncoder {
 
     private fun readNal(buf: ByteArray, off: Int, lenSize: Int): ByteArray? {
         if (off + lenSize > buf.size) return null
-        var len = 0
-        for (i in 0 until lenSize) len = (len shl 8) or (buf[off + i].toInt() and 0xFF)
+        // 用 Long 累积：4 字节长度顶到符号位时 Int 会变负，越界判断随之失效
+        // （2026-11-03 实测 copyOfRange(10, -2145396213) 异常就是它）。
+        var len = 0L
+        for (i in 0 until lenSize) len = (len shl 8) or (buf[off + i].toLong() and 0xFF)
         val start = off + lenSize
-        if (start + len > buf.size) return null
-        return buf.copyOfRange(start, start + len)
+        if (len <= 0 || len > buf.size - start) return null
+        return buf.copyOfRange(start, start + len.toInt())
+    }
+
+    /** csd/帧是否为 AnnexB（00 00 01 或 00 00 00 01 起始码开头）。 */
+    private fun isAnnexB(buf: ByteArray): Boolean =
+        buf.size >= 4 && buf[0] == 0.toByte() && buf[1] == 0.toByte() &&
+            (buf[2] == 1.toByte() || (buf[2] == 0.toByte() && buf[3] == 1.toByte()))
+
+    /** 按 AnnexB 起始码拆 NAL（返回的每个 NAL 不含起始码）。 */
+    private fun splitAnnexB(buf: ByteArray): List<ByteArray> {
+        val nals = mutableListOf<ByteArray>()
+        var i = 0
+        var start = -1
+        while (i < buf.size - 2) {
+            val sc3 = buf[i] == 0.toByte() && buf[i + 1] == 0.toByte() && buf[i + 2] == 1.toByte()
+            val sc4 = i < buf.size - 3 &&
+                buf[i] == 0.toByte() && buf[i + 1] == 0.toByte() &&
+                buf[i + 2] == 0.toByte() && buf[i + 3] == 1.toByte()
+            if (sc3 || sc4) {
+                val scLen = if (sc4) 4 else 3
+                if (start >= 0 && i > start) nals += buf.copyOfRange(start, i)
+                start = i + scLen
+                i += scLen
+            } else {
+                i++
+            }
+        }
+        if (start in 0 until buf.size) nals += buf.copyOfRange(start, buf.size)
+        return nals
+    }
+
+    /** 把 AnnexB 里的 3 字节起始码统一成 4 字节（车机通道侧按 4 字节约定拆帧）。 */
+    private fun normalizeAnnexB(buf: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        splitAnnexB(buf).filter { it.isNotEmpty() }.forEach { out.write(annexB(it)) }
+        return out.toByteArray()
     }
 
     /** 长度前缀流 → AnnexB（每个 NAL 前加 00 00 00 01）。 */

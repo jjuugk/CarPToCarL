@@ -2976,6 +2976,18 @@ object SessionController {
     /**
      * 首帧门：SETUP 成功之后等首帧，超时**只报告不拆链**。
      *
+     * 等的是「车机真的收到首帧」（`CarLifeHijack.framesDelivered` 相对本次会话起点有增长），
+     * **不是** `CarLifeHijack.isStreaming`（CarLife 单方面在推流）。
+     * 后者为 true 只代表 CarLife 把帧扔进了劫持层，不代表帧进了车机通道——一旦 SPS/VideoConfig、
+     * 重连等待新 IDR、或 socket 任一处卡住，`submitH264` 会返回 false，车机永远等不到画面，
+     * 但 isStreaming 早已为 true。旧逻辑只判断 isStreaming，于是「连接上却一直等视频」时立刻
+     * return，把故障当成正常，也不弹任何提示（用户实测：CarPlay 已连、App 显示「已劫持」、
+     * 车机却一直等视频、且不提示「未劫持」）。
+     *
+     * 注意 framesDelivered 是跨会话累加、从不归零的，必须用「本次会话起点」的差值判断，
+     * 否则会把上一次成功会话的帧数误当成已送达（CarLifeHijack 侧的 startFirstFrameWatchdog
+     * 也是同一套 baseline 思路）。
+     *
      * 为什么不拆：拆链由视频看门狗与冻结恢复负责，再叠一套超时就是两套语义互相打架
      * （这台项目历史上反复踩过）。这里要的只是「把没有画面这件事说清楚」——
      * 旧日志在「SETUP 成功」之后就断片了，到底是黑屏、还是 CarLife 没在投，
@@ -2983,10 +2995,12 @@ object SessionController {
      */
     private fun startFirstFrameGate() {
         Bg.run("first-frame-gate") {
+            // 以本次会话起点的累计送达数为基准：framesDelivered 不归零，必须用差值判断。
+            val base = CarLifeHijack.framesDelivered
             val budget = ConnectStage.FIRST_FRAME.budgetMs
             val deadline = android.os.SystemClock.uptimeMillis() + budget
             while (android.os.SystemClock.uptimeMillis() < deadline) {
-                if (CarLifeHijack.isStreaming) {
+                if (CarLifeHijack.framesDelivered > base) {
                     connectBudget.markStreaming()
                     return@run
                 }
@@ -2995,32 +3009,51 @@ object SessionController {
                 if (connectCancelled || videoSender == null) return@run
                 sleepQuietly(250)
             }
-            if (CarLifeHijack.isStreaming) {
+            if (CarLifeHijack.framesDelivered > base) {
                 connectBudget.markStreaming()
                 return@run
             }
-            // 会话已建立但 CarLife 始终没推流：车机此时大概率黑屏。把提示文字渲染成单帧
-            // H.264 推到车机屏幕（代替黑屏），并持续保活显示，直到 CarLife 真正出帧接管。
-            val noticeLines = listOf("未劫持到手机车联画面", "请在手机 CarLife+ 进入「无线连接」")
+            // 超时仍没有任何帧送进车机通道。按「源侧最近是否真出过帧」区分两种失败
+            // （sourceActive 带新鲜度；不用 isStreaming——hasVideo 一旦置位就挂着，
+            // 源停摆时会误判。判定一律以真实视频流为准，不认 CarLife 进程状态）：
+            //  - 源没出帧：CarLife 没劫持到画面，沿用原提示；
+            //  - 源在出帧但帧没送达：连接已好、CarLife 也在投，是链路/配置问题
+            //    （典型如 SPS/VideoConfig 卡住或重连后等不到新 IDR，submitH264 返回 false）。
+            val carlifePushing = CarLifeHijack.sourceActive
+            val noticeLines = if (carlifePushing) {
+                listOf("已连接但车机未收到画面", "请在车机重连或重启 CarLife+ 无线连接")
+            } else {
+                listOf("未劫持到手机车联画面", "请在手机 CarLife+ 进入「无线连接」")
+            }
             val pushed = videoSender?.isRunning == true &&
                 (videoSender?.pushNotice(noticeLines) ?: false)
             appendLog(
-                "STAGE: ⚠ ${ConnectStage.FIRST_FRAME.label}超时（${budget / 1000}s 内没收到任何视频帧）——" +
-                    "画面来自本机 CarLife+：确认它处于「无线连接」且引擎在推流（7240）；" +
-                    "会话本身已建立，不需要重连车机" +
-                    if (pushed) "；已向车机屏幕推送提示「未劫持到手机车联画面」" else "",
+                "STAGE: ⚠ ${ConnectStage.FIRST_FRAME.label}超时（${budget / 1000}s 内车机未收到本会话任何视频帧，" +
+                    "CarLife推流=$carlifePushing，累计送达=${CarLifeHijack.framesDelivered}）——" +
+                    (if (carlifePushing) {
+                        "CarLife 在推流但帧未送达车机（检查 SPS/VideoConfig 或重连车机）"
+                    } else {
+                        "画面来自本机 CarLife+：确认它处于「无线连接」且引擎在推流（7240）"
+                    }) +
+                    "；会话本身已建立，不需要重连车机" +
+                    if (pushed) "；已向车机屏幕推送提示" else "",
             )
             if (pushed) {
-                // 车机偶尔会丢掉首帧：每 5s 重推一次，最多 60s；CarLife 一旦出帧就停止。
+                // 车机偶尔会丢掉首帧：每 5s 重推一次，最多 60s；本会话一旦收到帧或会话结束即停。
                 var repeats = 0
                 while (videoSender?.isRunning == true &&
-                    !CarLifeHijack.isStreaming &&
+                    CarLifeHijack.framesDelivered <= base &&
                     !connectCancelled &&
                     repeats < 12
                 ) {
                     sleepQuietly(5_000)
-                    if (CarLifeHijack.isStreaming || connectCancelled) break
-                    videoSender?.pushNotice(noticeLines)
+                    if (CarLifeHijack.framesDelivered > base || connectCancelled) break
+                    val linesNow = if (CarLifeHijack.sourceActive) {
+                        listOf("已连接但车机未收到画面", "请在车机重连或重启 CarLife+ 无线连接")
+                    } else {
+                        listOf("未劫持到手机车联画面", "请在手机 CarLife+ 进入「无线连接」")
+                    }
+                    videoSender?.pushNotice(linesNow)
                     repeats++
                 }
             }

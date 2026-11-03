@@ -1154,8 +1154,11 @@ class MainActivity : AppCompatActivity() {
         val text =
             when {
                 !CarLifeHijack.isEnabled(this) -> "CarLife 劫持已在设置里关闭 —— 不会有车机画面"
-                CarLifeHijack.isAttached -> "车机画面来自 CarLife+（直通中）"
-                CarLifeHijack.isStreaming -> "已劫持 CarLife+ 画面 —— 点「启动连接」推到车机"
+                // 判定一律以「真实视频流」为准（用户明确要求）：帧真正写进车机通道才算在投，
+                // 不认 CarLife 进程/握手状态——否则会出现「显示已劫持、车机却在等视频」的误判。
+                SessionController.videoSender?.isVideoFlowing == true -> "车机画面来自 CarLife+（视频流正常）"
+                CarLifeHijack.isAttached -> "已接管 CarLife+，但暂无视频流送达车机"
+                CarLifeHijack.sourceActive -> "已劫持 CarLife+ 画面 —— 点「启动连接」推到车机"
                 CarLifeHijack.isActive -> "已连上 CarLife+，等待它开始推流"
                 else -> "等待你手动打开 CarLife+ 并点「无线连接」—— 点此重启守候"
             }

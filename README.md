@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.19-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.19-switchpool`，versionCode 10219）；主线包见
+> **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.20-switchpool`，versionCode 10220）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.14.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.19-switchpool.apk`（见 Releases 页；1.2.19 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.20-switchpool.apk`（见 Releases 页；1.2.20 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.19，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.19-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.20，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.20-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.19-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；在 1.2.18 修 ID7 黑屏的基础上，新增「CarLife 未劫持画面时向车机推送提示文字」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.20-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；在 1.2.19 增提示帧的基础上，修正「首帧闸门误用 CarLife 推流状态，导致 CarLife 在推但车机未收到帧时不弹提示」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -883,6 +883,25 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.20-switchpool —— 2026-11-03（`switch-pool` 分支 · 修正首帧闸门误判导致提示不弹）
+
+> 用户实测：CarPlay 已连、App 显示「已劫持」、车机却一直等视频、且从不提示「未劫持」。
+> 根因与修法见 [`docs/carlife-notice-frame.md`](docs/carlife-notice-frame.md)。
+
+- **修正首帧闸门判据**：`SessionController.startFirstFrameGate()` 原来用
+  `CarLifeHijack.isStreaming`（CarLife 单方面推流）判断「车机收到首帧」，但 `isStreaming`
+  只要 CarLife 把帧扔进劫持层就为 true，不代表帧进了车机通道。当 `submitH264` 因 SPS/VideoConfig
+  卡住或重连等不到新 IDR 返回 false 时，`framesDelivered` 始终为 0、车机永远等不到画面，
+  但 `isStreaming` 已为 true → 闸门提前 return、既不等待真实首帧也不弹提示。
+- **改用 `framesDelivered` 差值**：以本次会话起点为 baseline（`framesDelivered` 跨会话累加不归零），
+  只有「车机真收到本会话帧」才判定成功——与 `CarLifeHijack.startFirstFrameWatchdog` 同一思路。
+- **两种失败文案**：超时仍无送达时，按 CarLife 是否真在推流区分——
+  - 没推流：沿用「未劫持到手机车联画面 / 请在手机 CarLife+ 进入「无线连接」」；
+  - 在推流但车机未收到：改为「已连接但车机未收到画面 / 请在车机重连或重启 CarLife+ 无线连接」。
+- **日志增强**：超时日志带上 `CarLife推流=` 与 `累计送达=` 两项，便于一次判断是「源没画面」
+  还是「链路/配置卡住」。
+- 单测未新增（路径依赖真机 MediaCodec）；`assembleRelease` 通过。
 
 ### 1.2.19-switchpool —— 2026-11-03（`switch-pool` 分支 · CarLife 未劫持时向车机推送提示）
 

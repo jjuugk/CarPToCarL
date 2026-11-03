@@ -266,6 +266,15 @@ object CarLifeHijack {
     /** 已劫持并收到流（车机连接前就该为 true）。 */
     val isStreaming: Boolean get() = running.get() && client?.isRunning == true && hasVideo
 
+    /**
+     * 最近 10s 内源侧**真的出过视频帧**。判定一律以真实视频流为准（用户明确要求）：
+     * [hasVideo] 一旦置位只会在断开/重启路径复位，源中途停摆（来电、引擎不出帧）时
+     * 它仍挂着 true，会误导「未劫持/已劫持」的判断；本属性带新鲜度，不会。
+     */
+    val sourceActive: Boolean
+        get() = lastSourceFrameAt > 0 &&
+            android.os.SystemClock.uptimeMillis() - lastSourceFrameAt < 10_000
+
     /** 已成功写进车机通道的帧数（区分「握手成功」与「车机真在收画面」）。 */
     @Volatile
     var framesDelivered: Long = 0
@@ -298,10 +307,12 @@ object CarLifeHijack {
     val isActive: Boolean get() = running.get() && client?.isRunning == true
 
     /**
-     * 当前 CarLife **协商档位**分辨率（prewarm 阶段即可用于计算推流画布）。
+     * 当前 CarLife **引擎确认**的编码分辨率（65544 回显值），prewarm 阶段即可用于
+     * 计算推流画布。
      *
-     * 这是给**视频声明**用的基准：车机按自己画布建解码器，声明必须跟车机/协商值走。
-     * 触摸映射请用 [touchVideoSize]。
+     * 这是给**视频声明**用的基准：声明必须与引擎真实码流（SPS）一致，否则车机按错误
+     * 画布建解码器 → 拆链。引擎白名单外会降档（申请 1972×520 实编 1280×720），所以
+     * 这里取**确认值**而非申请值。触摸映射请用 [touchVideoSize]。
      */
     val videoSize: Pair<Int, Int>
         get() = client?.negotiatedSize ?: (1280 to 720)
@@ -563,13 +574,22 @@ object CarLifeHijack {
                 requestedFps = requestedFps,
                 connectType = connectType,
                 probeIds = probeIds,
-                // 回放 SETUP 阶段缓存的车机真实分辨率：首次 98311 就报对，不必二次重发。
-                // 未收到通告时退回 1280×720（引擎默认档位）。
-                initialWidth = if (requestedW > 0) requestedW else 1280,
-                initialHeight = if (requestedH > 0) requestedH else 720,
+                // 初始申请值始终用引擎默认档 1280×720，车机真实分辨率等 SETUP 后经
+                // setRequestedResolution 动态更新为「申请值」（引擎白名单外仍会降回 1280×720）。
+                // 绝不能把车机超宽画布（如 1972×520）直接当 initialWidth：那会让
+                // videoWidth（引擎确认值，视频声明基准）初始就是超宽值，VideoConfig 声明
+                // 与引擎真实码流错配 → 车机 10s 看门狗拆链（2026-11-03 别克大连屏实证）。
+                initialWidth = 1280,
+                initialHeight = 720,
             )
             if (hu.start()) {
                 client = hu
+                // SETUP 先于 client 创建的边界（requestedW/H 已缓存车机画布）：把它回放为
+                // 「申请值」，让引擎尝试按车机画布编码；确认值（videoWidth）仍由引擎回显，
+                // 不受影响。
+                if (requestedW > 0 && requestedH > 0) {
+                    hu.setRequestedResolution(requestedW, requestedH)
+                }
                 // 会话建立前缓存过 SPS：立刻用它校准触摸基准，别等下一帧关键帧。
                 spsPps?.let { hu.seedSps(it) }
                 // CarPlay 会话仍在、CarLife 换了一轮（引擎掉线重连 / 用户重开「无线连接」）：

@@ -15,7 +15,7 @@
 |---|---|
 | `video/NoticeFrameEncoder.kt`（新增） | 把文字渲染成单帧 H.264（SPS/PPS + 一个 IDR），AnnexB 格式 |
 | `video/VideoSender.kt` | 新增 `pushNotice(lines)`，编码后 `submitH264` 注入视频通道 |
-| `SessionController.kt` | `startFirstFrameGate()` 超时且 `!CarLifeHijack.isStreaming` 时推送提示，并周期重推 |
+| `SessionController.kt` | `startFirstFrameGate()` 超时且**车机本会话未收到任何帧**（`CarLifeHijack.framesDelivered` 相对本次会话起点无增长）时推送提示；按 CarLife 是否真在推流分两种文案，并周期重推 |
 
 ## 关键设计
 
@@ -32,7 +32,9 @@
   VideoConfig 的画布声明；提示帧按 VideoSender 的 `width`/`height`（即 /info 显示尺寸）编码，
   声明宽高自动一致，不会因提示帧尺寸错配导致黑屏。
 - **保活 + 接管**：提示帧被记成 `lastIdrNals`，空闲重发机制持续把它维持在车机屏上；
-  之后 CarLife 一旦出帧，`isStreaming` 变 true，其 IDR 自然覆盖提示（检测 SPS 变化重发 config）。
+  之后 CarLife 一旦把帧**真正送进车机通道**（`framesDelivered` 增长），其 IDR 自然覆盖提示
+  （检测 SPS 变化重发 config）。注意：判定「车机已收到画面」看的是 `framesDelivered`（车机通道侧
+  送达计数），**不是** `CarLifeHijack.isStreaming`——后者只是 CarLife 单方面推流，不代表帧进了车机。
 - **防丢帧重推**：首推后每 5s 重推一次（上限 60s），应对车机丢掉首帧；CarLife 接管或会话
   结束即停。
 - **失败兜底**：编码器不可用 / 编码异常时 `pushNotice` 返回 false，上层保留原有日志提示，
@@ -44,3 +46,20 @@
 - 该路径依赖真机 MediaCodec（Surface 编码器），**无 JVM 单测**；上车后看两点：
   1. CarLife+ 未进「无线连接」时，车机应显示「未劫持到手机车联画面」而非黑屏；
   2. 在 CarLife+ 里进入「无线连接」后，提示应在 1 秒内被真实画面覆盖。
+
+## 修正记录（2026-11-03 · 1.2.20）
+
+首版（1.2.19）首帧闸门用 `CarLifeHijack.isStreaming` 判断「车机收到首帧」，是错误判据。
+用户实测：CarPlay 已连、App 显示「已劫持」（isStreaming=true，CarLife 确实在推流），
+但车机一直等视频——根因是 `submitH264` 因 SPS/VideoConfig 卡住或重连等不到新 IDR 返回 false，
+帧没进车机通道，`framesDelivered` 始终为 0。旧闸门一看 isStreaming=true 就提前 return，
+既不等待真实首帧、也不弹提示。
+
+修法：闸门改以 `CarLifeHijack.framesDelivered` 相对**本次会话起点**的差值作为「车机收到首帧」判据
+（`framesDelivered` 跨会话累加不归零，必须用 baseline 差值，与 `CarLifeHijack.startFirstFrameWatchdog`
+同一思路）。超时仍无送达时按 CarLife 是否真在推流分两种文案：
+
+- 没推流：沿用「未劫持到手机车联画面 / 请在手机 CarLife+ 进入「无线连接」」；
+- 在推流但车机未收到：改为「已连接但车机未收到画面 / 请在车机重连或重启 CarLife+ 无线连接」。
+
+超时日志额外带 `CarLife推流=` 与 `累计送达=` 两项，便于一次区分「源没画面」还是「链路/配置卡住」。
