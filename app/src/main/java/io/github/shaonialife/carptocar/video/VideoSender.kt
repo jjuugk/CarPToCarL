@@ -147,6 +147,15 @@ class VideoSender(
     @Volatile
     private var awaitingKeyFrameAfterRestart = false
 
+    /**
+     * 开始「等 IDR」的时刻（uptimeMillis），配合 [WAIT_KEY_FRAME_TIMEOUT_MS] 做超时兜底。
+     *
+     * 三处置位（新会话 / 视频通道重连 / 源重启）都要一起更新，否则超时判断会用到上一轮的
+     * 旧时刻，表现为「刚置位就判定超时、P 帧直接放行」——比不等更糟（等了个寂寞）。
+     */
+    @Volatile
+    private var awaitingKeyFrameSince = 0L
+
     /** 源重启后被挡掉的非 IDR 帧数（诊断）。 */
     private var droppedBeforeRestartKey = 0L
 
@@ -235,8 +244,7 @@ class VideoSender(
                 frameCounter = 0L
                 lastIdrNals = null
                 // 新通道 = 接收端重建解密与解码状态：同样要等一个 IDR 再喂帧。
-                awaitingKeyFrameAfterRestart = true
-                droppedBeforeRestartKey = 0
+                beginAwaitingKeyFrame()
             }
             var attempt = 0
             while (running.get() && attempt < DATA_RECONNECT_ATTEMPTS) {
@@ -424,8 +432,13 @@ class VideoSender(
         cachedCsd = null
         sentSps = null
         configSent = false
-        awaitingKeyFrameAfterRestart = false
-        droppedBeforeRestartKey = 0
+        // **必须等 IDR**（2026-11-03 ID7 实测）：此前这里是 false，配合下面 attach() 后
+        // `seedCsd()` 预置的 cachedCsd，submitH264 会走「用缓存 csd 重发 VideoConfig」
+        // 分支把**当前这一帧 P 帧当成新流的首帧**发出去。车机解码器刚重建、一帧参考都没有，
+        // 收到 P 帧直接拆整轮会话：15 次断流里有 8 次是「首帧 NAL=1 → 0.1~0.2 秒被 reset」，
+        // 而 7 次「首帧 NAL=7,8,5」全部活过 7 秒，无一例外。
+        // 预置 csd 仍然有用：它让首个 IDR 一到就能立刻发 config，只是不许放行 P 帧。
+        beginAwaitingKeyFrame()
         log("VIDEO: 直通模式启动（外部 H.264，跳过重编码）${width}x$height")
         Thread({ passthroughKeepAliveLoop() }, "video-passthrough-ka").apply {
             isDaemon = true
@@ -526,8 +539,7 @@ class VideoSender(
     fun onSourceRestart(reason: String) {
         if (!running.get()) return
         configSent = false
-        awaitingKeyFrameAfterRestart = true
-        droppedBeforeRestartKey = 0
+        beginAwaitingKeyFrame()
         // 不在这里清 lastIdrNals：源重启到新源出首帧之间可能有几秒空窗，
         // 旧 IDR 还能继续喂保活，避免车机因「视频静默」拆掉整轮会话。
         // 一旦真的发出新 config，sendConfigFromNals 会立刻把它作废。
@@ -536,11 +548,29 @@ class VideoSender(
     }
 
     /**
+     * 进入「等下一个 IDR」状态：置位 + 记起始时刻 + 清零丢弃计数。
+     *
+     * 三处调用点（新会话 [startPassthrough] / 视频通道重连 [reconnectDataPort] /
+     * 源重启 [onSourceRestart]）共用，**不要各自赋值**——漏记时间戳会让超时兜底
+     * 拿上一轮的旧时刻比较，`submitH264` 会在刚置位的瞬间就判定「已超时」把 P 帧放行。
+     */
+    private fun beginAwaitingKeyFrame() {
+        awaitingKeyFrameSince = android.os.SystemClock.uptimeMillis()
+        awaitingKeyFrameAfterRestart = true
+        droppedBeforeRestartKey = 0
+    }
+
+    /**
      * 用上层缓存的 SPS/PPS（AnnexB，含起始码）预置 csd。
      *
-     * 用于「车机重新接上通道、但手上没有带 SPS 的关键帧」：此前只能干等引擎下一次
+     * 用于「车机重新接上通道、手上暂时没有带 SPS 的关键帧」：此前只能干等引擎下一次
      * 编码器重建（4s 看门狗）才发得出 VideoConfig，这段时间车机就是黑屏。
-     * 预置后第一帧（哪怕是 P 帧）就能把 config 发出去，最快一个 IDR 周期就有画面。
+     * 预置后，**首个 IDR 一到**就能立刻把 VideoConfig 发出去（IDR 常常不带 SPS/PPS），
+     * 不用再等下一个带 SPS 的关键帧。
+     *
+     * ⚠️ 预置 csd **不等于**可以先送 P 帧：新会话必须等 IDR（见 [beginAwaitingKeyFrame] 的
+     * 调用点）。2026-11-03 ID7 的 8 次秒断就是这个误解造成的——预置了 csd、
+     * 于是 P 帧把 config 带出去、自己也被当首帧发走，车机解码器直接 reset。
      *
      * 已有 csd 时不覆盖：真实码流里的 SPS 永远比缓存更可信。
      */
@@ -572,15 +602,26 @@ class VideoSender(
             val hasSps = nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
             val isIdr = nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 5 }
             if (awaitingKeyFrameAfterRestart) {
-                if (!isIdr) {
+                val waitedMs = android.os.SystemClock.uptimeMillis() - awaitingKeyFrameSince
+                if (!isIdr && waitedMs < WAIT_KEY_FRAME_TIMEOUT_MS) {
                     droppedBeforeRestartKey++
                     if (droppedBeforeRestartKey == 1L || droppedBeforeRestartKey % 30 == 0L) {
-                        log("VIDEO: 源重启后等新 IDR——已跳过 $droppedBeforeRestartKey 个非关键帧")
+                        log(
+                            "VIDEO: 等新 IDR——已跳过 $droppedBeforeRestartKey 个非关键帧" +
+                                "（已等 ${waitedMs}ms，上限 ${WAIT_KEY_FRAME_TIMEOUT_MS}ms）",
+                        )
                     }
                     return false
                 }
                 awaitingKeyFrameAfterRestart = false
-                log("VIDEO: 源重启后收到新 IDR——恢复送帧（重发 VideoConfig）")
+                if (isIdr) {
+                    log("VIDEO: 收到新 IDR——恢复送帧（重发 VideoConfig，跳过 ${droppedBeforeRestartKey} 帧）")
+                } else {
+                    log(
+                        "VIDEO: ⚠ 等 IDR 超时（${waitedMs}ms，已跳过 $droppedBeforeRestartKey 帧）" +
+                            "——放行当前 P 帧，避免源不出 IDR 时永久黑屏",
+                    )
+                }
             }
             // 会话中途 SPS 变了（用户在车联里改分辨率 / 引擎重建编码器）：
             // 车机手里的 avcC 已经不对，必须重发一份新的。
@@ -1112,6 +1153,17 @@ class VideoSender(
 
         /** 视频通道被重置后的重连尝试次数（接收端只等 8s，2s 超时 × 3 次刚好留余量）。 */
         private const val DATA_RECONNECT_ATTEMPTS = 3
+
+        /**
+         * 「等首个 IDR」的最长等待（ms）。
+         *
+         * 等 IDR 是为了不让车机拿新流的 P 帧去参考旧参考帧（那是 0.1 秒被拆的直接原因，
+         * 见 `docs/id7-blackscreen-diagnosis.md`）。但**不能无限等**——源若迟迟不出 IDR
+         * （引擎卡住、用户刚进 CarLife 还没开始编码），死等就是永久黑屏。CarLife 的
+         * GOP 实测约 2 秒一帧 I，3 秒还没等到说明源有问题，此时放行比死等好：
+         * 画面可能花一下，但至少链路还在，下一个 IDR 会自动修正。
+         */
+        private const val WAIT_KEY_FRAME_TIMEOUT_MS = 3_000L
 
         /** 两次重连之间的间隔。 */
         private const val DATA_RECONNECT_GAP_MS = 500L

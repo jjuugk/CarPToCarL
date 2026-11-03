@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.17-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.17-switchpool`，versionCode 10217）；主线包见
+> **[`CarPToCarL-1.2.18-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.18-switchpool`，versionCode 10218）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.14.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.17-switchpool.apk`（见 Releases 页；1.2.17 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.18-switchpool.apk`（见 Releases 页；1.2.18 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.17，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.17-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.18，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.18-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.17-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；新增**大众 ID（MEB ICAS3）**连接档——识别阶段补发我方 `0x1D01`，并按 CSV 补全 40+ 条消息命名；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.18-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；按 2026-11-03 大众 ID7 黑屏断流日志修三处：**新会话必须等 IDR**、**推流中车机邀请不再静默丢弃**、**音频 SETUP 被拒时补 `ct`/`sr` 重试**；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[switch-pool 分支正式包](https://github.com/jjuugk/CarPToCarL/releases)**（Releases 页里带 `-switchpool` 的包；见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -883,6 +883,32 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.18-switchpool —— 2026-11-03（`switch-pool` 分支 · 修 ID7 黑屏反复断流：等 IDR / 邀请重建 / 音频重试）
+
+> 依据大众 ID7（`VW4131` / MEB ICAS3 / Cinemo 组件）2026-11-03 的 7060 行实车日志，
+> 15 次会话被车机 reset 全部有据可查。完整证据链与判读见
+> [`docs/id7-blackscreen-diagnosis.md`](docs/id7-blackscreen-diagnosis.md)。
+
+- **新会话必须等 IDR**（本次最大的一块）：`startPassthrough()` 原来把
+  `awaitingKeyFrameAfterRestart` 设成 `false`，配合 `seedCsd()` 预置的 csd，
+  第一帧 P 帧会把 VideoConfig 带出去、自己也被当首帧发走；车机解码器刚重建、
+  没有参考帧，收到 P 帧直接拆整轮会话。日志里 **8 次「首帧 NAL=1」全部 0.1~0.2 秒被断**，
+  **7 次「首帧 NAL=7,8,5」全部活过 7 秒**，无一例外。现在新会话 / 通道重连 / 源重启
+  三处统一走 `beginAwaitingKeyFrame()`，P 帧一律挡下等 IDR；
+  另加 **3 秒超时兜底**——源迟迟不出 IDR 时放行当前帧，避免从「被车机拆」变成「自己死等」。
+- **推流中收到 ctrl 邀请不再静默丢弃**：原来 `onCtrlInvite()` 首行
+  `if (... || isStreaming()) return`，日志里一个字都没有。ID7 的邀请语义是「我要重建」，
+  不配合就在 18~20 秒后自己 reset 会话（15 次断流每一次前面都有一条邀请）。
+  现在：任何一条推流中的邀请都记日志（次数 + 距上次间隔），并**主动退役重连**
+  （15 秒防抖，防车机抖动时两侧反复拆）。
+- **音频 SETUP 被拒后补 `ct`/`sr` 重试**：ID7 三档全 `400 Bad Request`（各 2 秒，
+  是本次断流的触发源）。真 iPhone 的音频 SETUP 一定带 `ct`（压缩类型 1=PCM / 4=AAC-LC）
+  与 `sr`（采样率），我们从来没发。**第一次仍按原样发**（不动已跑通的车型），
+  只在被拒后补字段重试一次并单独记日志——下次日志两行就能判定这条路通不通。
+- 顺带把「音频协商」那行日志打全：以前只打 `tuning.detail`（写死 `spf=1024`），
+  PCM 档实际发的是 352，看着像「PCM 也用 1024」，排障时误导过。
+- 单测 383 例全绿（本次改动集中在时序 / 网络路径，无新增用例）。
 
 ### 1.2.17-switchpool —— 2026-11-03（`switch-pool` 分支 · 新增「大众 ID（MEB ICAS3）」连接档）
 
