@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.20-switchpool`，versionCode 10220，13.5 MB）；主线包见
-> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.16.apk`
+> **[`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.21-switchpool`，versionCode 10221，13.5 MB）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.17.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)（1.2.20 之前的历史包见 Releases 页）                    |
+| 本版固定包    | [`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)（1.2.21 之前的历史包见 Releases 页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.20，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.20-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.21，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.21-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.20-switchpool`（`switch-pool` 分支正式版，即「切换连接池」分支；在 1.2.19 增提示帧的基础上，修正「首帧闸门误用 CarLife 推流状态，导致 CarLife 在推但车机未收到帧时不弹提示」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.20-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20-switchpool/CarPToCarL-1.2.20-switchpool.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.21-switchpool`（`switch-pool` 分支正式版；参考 CarVeX 补**送帧闸门**（帧龄/背压可见，结构性堆积才跳 IDR），并把「车机没报 maxFPS 兜 30」改成保留 0——帧率从此按用户选定的规则走「档位声明优先，否则 60」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -883,6 +883,29 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.21-switchpool —— 2026-11-03（`switch-pool` 分支 · 送帧闸门 + 帧率兜底归零）
+
+> 参考 [iamr0s/carvex-carplay-research](https://github.com/iamr0s/carvex-carplay-research)
+> 的 `VideoDeliveryGate` / `VideoRatePolicy`。**动作没有照抄**：CarVeX 自己持有编码器，
+> 帧龄超 150ms 就丢帧并 `setParameters` 要一个 IDR；我们的编码器在 CarLife 引擎里，
+> 丢 P 帧会花屏到下一个 IDR、也没法请求 IDR（98316 帧率变更、码率配置实测都无效），
+> 所以只保留「观察」与「极端情况下跳 IDR」。
+
+- **送帧闸门**（`video/VideoDeliveryGate`）：CarLife 帧头 `[4..7]` 本来就是毫秒时间戳，
+  此前 `videoReader` 只读 `[0..3]` 的长度就把它丢了。现在用它算**排队延迟**：
+  `(now - ts) - 历史最小 offset`，绝对基准被基线消掉，所以时间戳是 `uptimeMillis`、
+  `currentTimeMillis` 还是别的毫秒都不影响。写入耗时另算背压：≥80ms 记慢写、
+  ≥400ms 记卡顿，每 5 秒打一行 `送帧统计 … 排队 p50/p95/max；写入 p95/max`。
+- **时间戳不老实就自动停用**：探测期 20 帧里取值少于 3 种、非单调超 5 次、
+  或算出 >30 秒的排队，一律判定「这字段不是时间戳」，退回只测写入耗时，**绝不动画面**。
+- **唯一的动作**：排队 ≥1500ms 且持续 ≥2s、当前帧非关键帧、距上次 >10s，
+  才 `beginAwaitingKeyFrame()` 跳到下一个 IDR（代价 ≤1 个 GOP）。抖动只记账。
+- **帧率兜底归零**（`AirPlayClient`）：那行 `?: 30` 改成保留 0。以前兜了 30 就等于替车机
+  表态，`DisplayTuning.targetFps` 再也分不清「车机要 30」和「车机没说话」，于是
+  「兜底只给声明了 `carMaxFpsFallback` 的档位（大屏）」这条规则永远走不到，
+  所有车机都被按 30 发。改完即之前定下的规则：**车机报了就 min(本地偏好, 车机值)，
+  没报走档位兜底，普通档位 60**。
 
 ### 1.2.20-switchpool —— 2026-11-03（`switch-pool` 分支 · 修正首帧闸门误判导致提示不弹）
 
