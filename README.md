@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.15-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.15-switchpool`，versionCode 10215）；主线包见
-> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.12.apk`
+> **[`CarPToCarL-1.2.16-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.16-switchpool`，versionCode 10216）；主线包见
+> [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.14.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | `CarPToCarL-1.2.15-switchpool.apk`（见 Releases 页；1.2.15 之前的历史包也在同页）                    |
+| 本版固定包    | `CarPToCarL-1.2.16-switchpool.apk`（见 Releases 页；1.2.16 之前的历史包也在同页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.15，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.15-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.16，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.16-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -883,6 +883,30 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.16-switchpool —— 2026-11-03（`switch-pool` 分支 · 同步「奥迪 MIB3H SW3874 固件」的链接方法调整）
+
+> **仅 `switch-pool` 分支**（主线同内容为 1.2.14）。把主线按固件逆向报告调整的 CarPlay
+> 链接方法同步过来：视频编码显式声明 Baseline、链路重传按对端声明取舍、补齐消息目录。
+> 18 条逐条对照见 [`docs/mib3-firmware-3874.md`](docs/mib3-firmware-3874.md)。
+
+- **视频编码器显式声明 Baseline profile**：车机 `carplay.json → screen.esogfx` 把解码
+  格式写死为 `VIDEO_H264_BP`，且 `cropping/scaling` 全关、只有 5 个 OMX 输入缓冲、
+  `badFramesThreshold: 4`——编出一帧它不认的 profile 就是黑屏，没有降级路径。我们过去
+  不声明、吃设备默认值（多数机型默认就是 Baseline，所以能跑），换到默认 Main/High 的
+  机型就会「连上了没画面」。现在先请求 `AVCProfileBaseline` + 按分辨率选 level
+  （≤480p→3.0、≤720p→3.1、1080p→4.0、1080p60→4.2），**编码器不接受就退回不声明的
+  老路径**，不会把原本能用的机型打死。
+- **链路重传次数 4 → 10，并真正采纳对端声明**：固件里车机在 BT 通道声明
+  `maxNumberOfRetransmissions: 30`、RTO 3000ms。我们此前只给自己 4 次——蓝牙侧偶发
+  丢一帧时 12 秒就自己拆链，而车机愿意等 90 秒。折中取 10 次（30 秒），并让
+  `Iap2LinkEngine` 按 LSP 语义**对本地与对端取较小值**（以前对端声明多少完全没用上）。
+- **补齐消息目录**：OOB（`0x00B0~0x00B4`，无线 CarPlay 的带外蓝牙配对）、
+  `0xEA02` RequestAppLaunch、`0xAA06` MFi 证书序号、location（`0xFFF0/FA/FB/FC`）、
+  communications 全套（`0x4155~0x4172`）、power（`0xAE00~0xAE03`）、
+  vehicleStatus（`0xA100/0xA101`）。以前这些帧在日志里只显示 `0x00B2`，看不出属于哪一族。
+
+> 没做的三件（以及为什么）写在文档 §3：不改链路协商 60s 上限、不改 GOP、不实现 OOB 应答。
 
 ### 1.2.15-switchpool —— 2026-11-02（`switch-pool` 分支 · 全代码自查修补）
 

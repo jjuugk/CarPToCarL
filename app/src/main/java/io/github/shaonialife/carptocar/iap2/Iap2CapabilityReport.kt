@@ -43,6 +43,8 @@ object Iap2CapabilityReport {
             in 0xAA00..0xAA0F -> Group.IDENT
             0x4300, 0x4301, 0x5702, 0x5703 -> Group.WIRELESS
             in 0x4E09..0x4E0F -> Group.WIRELESS
+            // 0x00B0~0x00B4 = OOBBTPairing（无线 CarPlay 的带外蓝牙配对，交换 link key）
+            in Iap2MessageIds.OOB_BT_PAIRING_BASE..0x00B4 -> Group.WIRELESS
             // 0x52xx = Route Guidance（0x5200 StartRouteGuidanceUpdates 是已确认的那个）
             in 0x5200..0x52FF -> Group.NAVIGATION
             in 0x5000..0x50FF -> Group.MEDIA

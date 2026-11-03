@@ -13,22 +13,22 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.15"
+val appVersionName = "1.2.16"
 
 /**
  * 分支标记：只有 `switch-pool` 分支（切换连接池）上非空，拼在 versionName 末尾
- * （`1.2.15-switchpool`）。
+ * （`1.2.16-switchpool`）。
  *
  * 目的只是让包在界面上/日志里一眼看出是哪个分支，**不动版本号**：
- * `versionCode` 仍由 [appVersionName] 推导（=10215）。
+ * `versionCode` 仍由 [appVersionName] 推导（=10216）。
  *
  * 本分支原名 `bieke`（别克），1.2.10 起改名为 `switch-pool`——它早已不只服务别克
  * （大众朗逸 Pro、宝马 iD9、别克大连屏、奥迪 MIB3 都走同一套建链），再叫「别克分支」
  * 会误导。
  *
  * 注意：1.2.10 起本分支已**领先 main**（新增奥迪 MIB3 3801 专版连接优化），
- * 两边不再保证「互相覆盖安装」——把 main 的 1.2.9 装到已装 1.2.10 的机器上
- * 会被系统以「版本更小」拒绝，需要 `adb install -r -d`（允许降级）或先卸载。
+ * 两边不再保证「互相覆盖安装」——把 main 的低版本装到已装本分支的机器上
+ * 会被系统以「版本更小」拒绝，且 release 包不接受 `-d` 降级，只能彻底卸载重装。
  */
 val appVersionSuffix = "-switchpool"
 

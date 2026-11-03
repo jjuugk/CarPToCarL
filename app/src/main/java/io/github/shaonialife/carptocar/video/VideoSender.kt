@@ -283,15 +283,10 @@ class VideoSender(
                 ).toInt().coerceAtMost(15_000_000)
             log("VIDEO: 启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps（端口已连通）")
 
-            val format =
-                MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                }
-            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val codec =
+                openEncoder(bitrate, requestBaseline = true)
+                    ?: openEncoder(bitrate, requestBaseline = false)
+                    ?: throw IllegalStateException("没有可用的 H.264 编码器")
             val surface = codec.createInputSurface()
             codec.start()
             encoder = codec
@@ -313,6 +308,79 @@ class VideoSender(
             false
         }
     }
+
+    /**
+     * 打开并配置 H.264 编码器；[requestBaseline] 为真时**显式声明 Baseline profile**。
+     *
+     * 为什么要声明：车机侧只解 Baseline。MIB3H（SW 3874 / `CL37_MIB3H_AU_AS_G4x_2302700PROD`）
+     * 的 `carplay.json → screen.esogfx` 把解码格式写死为 `VIDEO_H264_BP`，且
+     * `cropping/scaling` 全关、只有 5 个 OMX 输入缓冲、`badFramesThreshold: 4`——
+     * 编出一帧它不认的 profile 就是直接黑屏，没有降级路径。
+     * 我们过去不声明、吃设备默认值：荣耀/高通多数机型默认就是 Baseline，能跑；
+     * 但同一份 APK 换到默认 Main/High 的机型上就会「连上了没画面」，日志里还看不出来。
+     *
+     * 声明失败（编码器不接受 Baseline / 该 level）就返回 null，由调用方退回不声明的老路径——
+     * 这部分行为与改动前完全一致，不会因为一次声明把原本能用的机型打死。
+     */
+    private fun openEncoder(bitrate: Int, requestBaseline: Boolean): MediaCodec? =
+        runCatching {
+            val format =
+                MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    if (requestBaseline) {
+                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                        setInteger(MediaFormat.KEY_LEVEL, avcLevelFor(width, height, targetFps))
+                    }
+                }
+            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            try {
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (error: Exception) {
+                runCatching { codec.release() }
+                throw error
+            }
+            val detail =
+                if (requestBaseline) {
+                    "（显式 Baseline / Level ${avcLevelName(avcLevelFor(width, height, targetFps))}）"
+                } else {
+                    "（未声明 profile，吃设备默认）"
+                }
+            log("VIDEO: 编码器已配置 ${width}x$height@$targetFps $detail")
+            codec
+        }.getOrElse { error ->
+            if (requestBaseline) {
+                log("VIDEO: Baseline 声明未被接受（${error.message}）——退回默认 profile")
+            }
+            null
+        }
+
+    /** 按分辨率/帧率选 H.264 level：低了编码器会拒，高了车机解码器可能不认。 */
+    private fun avcLevelFor(width: Int, height: Int, fps: Int): Int {
+        val pixels = width.toLong() * height
+        return when {
+            pixels > 1280L * 720 ->
+                if (fps > 30) {
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                } else {
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                }
+            pixels > 800L * 480 -> MediaCodecInfo.CodecProfileLevel.AVCLevel31
+            else -> MediaCodecInfo.CodecProfileLevel.AVCLevel3
+        }
+    }
+
+    /** level 常量的可读写法（日志里 `0x200` 看不出是 3.1）。 */
+    private fun avcLevelName(level: Int): String =
+        when (level) {
+            MediaCodecInfo.CodecProfileLevel.AVCLevel3 -> "3.0"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel31 -> "3.1"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel4 -> "4.0"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel42 -> "4.2"
+            else -> "0x%X".format(level)
+        }
 
     fun stop() {
         running.set(false)

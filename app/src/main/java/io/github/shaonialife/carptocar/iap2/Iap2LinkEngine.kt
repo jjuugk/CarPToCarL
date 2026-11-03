@@ -26,7 +26,16 @@ private const val PHONE_DECLARED_MAX_OUTGOING = 0x7F
 class Iap2LinkEngine(
     private val maxOutgoing: Int = 4,
     private val retransmissionTimeoutMillis: Long = 4_000L,
-    private val maxRetransmissions: Int = 4,
+    /**
+     * 本地声明的重传次数上限（协商取双方较小值）。
+     *
+     * 取 10 而不是历史上的 4：MIB3H SW3874 固件在 BT 通道声明
+     * `maxNumberOfRetransmissions: 30`、RTO 3000ms（docs/mib3-firmware-3874.md）。
+     * 我们只给 4 次 = 12 秒就自己拆链，而车机愿意等 90 秒——蓝牙侧偶发一次丢帧
+     * （车机正在切窗口/协处理器忙）时，4 次很容易在车机还没反应过来时就放弃。
+     * 10 次（30 秒）既留出抗抖动的余量，也不会把整轮 60 秒预算耗光。
+     */
+    private val maxRetransmissions: Int = 10,
 ) {
     enum class State { IDLE, NEGOTIATING, NORMAL, DEAD }
 
@@ -222,6 +231,17 @@ class Iap2LinkEngine(
     private fun retransmissionDelayMillis(): Long =
         (peerRetransmissionTimeoutMillis ?: retransmissionTimeoutMillis)
             .coerceIn(MIN_RTO_MILLIS, MAX_RTO_MILLIS)
+
+    /**
+     * 实际生效的重传次数：本地声明值与对端声明值**取较小**（LSP 协商语义）。
+     *
+     * 以前只认本地固定值，对端声明多少完全没用上——车机声明 30 我们也只重传 4 次。
+     * 对端没声明（sync 没带或为 0）时仍用本地值，行为与改动前一致。
+     */
+    private fun effectiveMaxRetransmissions(): Int {
+        val peerLimit = peerSynchronization?.maxRetransmissions ?: 0
+        return if (peerLimit > 0) minOf(maxRetransmissions, peerLimit) else maxRetransmissions
+    }
 
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
     fun start(nowMillis: Long) {
@@ -720,7 +740,7 @@ class Iap2LinkEngine(
         val next = unacknowledged.minByOrNull { it.deadlineMillis } ?: return
         next.deadlineMillis = nowMillis + retransmissionDelayMillis()
         next.retransmissions += 1
-        if (next.retransmissions > maxRetransmissions) {
+        if (next.retransmissions > effectiveMaxRetransmissions()) {
             die("packet ${next.sequence} not acknowledged")
             return
         }

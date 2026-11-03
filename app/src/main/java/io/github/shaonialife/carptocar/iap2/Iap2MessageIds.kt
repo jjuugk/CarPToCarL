@@ -60,10 +60,36 @@ object Iap2MessageIds {
     // ---- 配件 bring-up 期间发来的订阅请求（接收并忽略即可）----
     const val START_NOW_PLAYING_UPDATES = 0x5000
     const val NOW_PLAYING_UPDATE = 0x5001
+    const val STOP_NOW_PLAYING_UPDATES = 0x5002
     const val START_ROUTE_GUIDANCE_UPDATES = 0x5200
     const val START_POWER_UPDATES = 0xAE00
     const val START_COMMUNICATIONS_UPDATES = 0x4157
     const val START_CALL_STATE_UPDATES = 0x4154
+    const val STOP_CALL_STATE_UPDATES = 0x4156
+    const val START_LIST_UPDATES = 0x4170
+    const val STOP_LIST_UPDATES = 0x4172
+
+    // ---- 车机（配件）侧的其余启用模块，见 docs/mib3-firmware-3874.md 第 5 节 ----
+    // 命名只求「日志里看得懂是哪一族的帧」，具体子类型用原始 ID 一并打印。
+
+    /** 带外蓝牙配对：无线 CarPlay 第二次连接时交换 BT link key（MIB3 已启用该模块）。 */
+    const val OOB_BT_PAIRING_BASE = 0x00B0
+
+    /** 配件请求手机启动 CarPlay 应用（MIB3：launchMethod=1，无弹窗直接启动）。 */
+    const val REQUEST_APP_LAUNCH = 0xEA02
+
+    /** MFi 证书序号（**仅控制会话版本 2** 使用，配件 → 手机）。 */
+    const val MFI_AUTH_SERIAL_NUMBER = 0xAA06
+
+    /** 定位：0xFFFA 订阅 / 0xFFFB 样本（车机每秒推一次 GPS）/ 0xFFFC 停止 / 0xFFF0 GPRMC 状态。 */
+    const val START_LOCATION_INFORMATION = 0xFFFA
+    const val LOCATION_INFORMATION = 0xFFFB
+    const val STOP_LOCATION_INFORMATION = 0xFFFC
+    const val LOCATION_GPRMC_STATUS = 0xFFF0
+
+    /** 车况（MIB3 本车未启用，dataGeneratorEnabled=false）。 */
+    const val START_VEHICLE_STATUS_UPDATES = 0xA100
+    const val VEHICLE_STATUS_UPDATE = 0xA101
 
     // ---- ExternalAccessory 会话（链路 2 号会话承载 EA 数据；触摸 HID 高概率载体）----
     const val EA_OPEN_SESSION = 0xEA00 // 手机 → 配件（奥迪可收清单明确支持）
@@ -91,10 +117,29 @@ object Iap2MessageIds {
             EA_SESSION_STATUS -> "EASessionStatus"
             START_NOW_PLAYING_UPDATES -> "StartNowPlayingUpdates"
             NOW_PLAYING_UPDATE -> "NowPlayingUpdate"
+            STOP_NOW_PLAYING_UPDATES -> "StopNowPlayingUpdates"
             START_ROUTE_GUIDANCE_UPDATES -> "StartRouteGuidanceUpdates"
             START_POWER_UPDATES -> "StartPowerUpdates"
             START_COMMUNICATIONS_UPDATES -> "StartCommunicationsUpdates"
             START_CALL_STATE_UPDATES -> "StartCallStateUpdates"
+            STOP_CALL_STATE_UPDATES -> "StopCallStateUpdates"
+            START_LIST_UPDATES -> "StartListUpdates"
+            STOP_LIST_UPDATES -> "StopListUpdates"
+            REQUEST_APP_LAUNCH -> "RequestAppLaunch"
+            MFI_AUTH_SERIAL_NUMBER -> "AccessoryAuthenticationSerialNumber"
+            START_LOCATION_INFORMATION -> "StartLocationInformation"
+            LOCATION_INFORMATION -> "LocationInformation"
+            STOP_LOCATION_INFORMATION -> "StopLocationInformation"
+            LOCATION_GPRMC_STATUS -> "LocationGPRMCStatus"
+            START_VEHICLE_STATUS_UPDATES -> "StartVehicleStatusUpdates"
+            VEHICLE_STATUS_UPDATE -> "VehicleStatusUpdate"
+            in OOB_BT_PAIRING_BASE..0x00B4 -> "OOBBTPairing(0x%02X)".format(messageId)
+            0x4155 -> "CallStateUpdate"
+            0x4158 -> "CommunicationsUpdate"
+            0x4159 -> "StopCommunicationsUpdates"
+            0x4171 -> "ListUpdate"
+            in 0x415B..0x415C -> "CallControl(0x%04X)".format(messageId)
+            in 0xAE00..0xAE03 -> "PowerUpdates(0x%04X)".format(messageId)
             else -> "0x%04X".format(messageId)
         }
 }
