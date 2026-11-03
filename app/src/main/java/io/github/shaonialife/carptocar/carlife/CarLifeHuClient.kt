@@ -256,6 +256,23 @@ class CarLifeHuClient(
     @Volatile
     private var reinitCount = 0
 
+    /**
+     * 我们向引擎**申请**的编码分辨率（98311 的 width/height 字段）。
+     *
+     * 与 [videoWidth]/[videoHeight]（引擎 65544 回显的确认值）分开存：车机连上后
+     * `setRequestedResolution` 会把申请值改成车机画布（如 1972×520），但引擎白名单
+     * 外会降档、回显值仍是 1280×720。若两者共用一个字段，[negotiatedSize]（视频声明
+     * 用）会在「申请超宽值后、引擎回显前」的窗口里短暂变成车机画布值，导致 VideoConfig
+     * 声明 1972×520 而码流实际 1280×720 —— 车机按错误画布建解码器，10s 看门狗拆链
+     * （2026-11-03 别克大连屏日志实证）。
+     */
+    @Volatile
+    private var requestedWidth = initialWidth.coerceAtLeast(320)
+
+    @Volatile
+    private var requestedHeight = initialHeight.coerceAtLeast(180)
+
+    /** 引擎 65544 回显的**确认编码值**（视频声明基准；初始 = 申请值，之后只由回显覆盖）。 */
     @Volatile
     private var videoWidth = initialWidth.coerceAtLeast(320)
 
@@ -286,7 +303,14 @@ class CarLifeHuClient(
 
     val isRunning: Boolean get() = running.get()
 
-    /** 协商出来的编码档位（98311 申请 / 65544 回包），视频声明用它。 */
+    /**
+     * 引擎 **65544 回显的确认编码档位**（视频声明基准）。
+     *
+     * 语义上等于「引擎真正会编码的分辨率」：申请值（[requestedWidth]/[requestedHeight]）
+     * 可能被引擎白名单降档（申请 1972×520 实编 1280×720），所以视频声明必须用**这个**
+     * 确认值，绝不能拿申请的车机画布值去声明——否则声明与码流错配，车机按错误画布建
+     * 解码器 → 拆链（2026-11-03 别克大连屏实证）。
+     */
     val negotiatedSize: Pair<Int, Int> get() = videoWidth to videoHeight
 
     /**
@@ -592,7 +616,7 @@ class CarLifeHuClient(
                     )
                     send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
                     Thread.sleep(1200)
-                    log("CARLIFE: 主动推送 98311 视频编码初始化 ${videoWidth}x$videoHeight@$videoFps")
+                    log("CARLIFE: 主动推送 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
                     send(
                         CarLifeProtocol.HU_VIDEO_ENC_INIT,
                         buildEncoderInfo(),
@@ -623,7 +647,7 @@ class CarLifeHuClient(
                 }
                 log(
                     "CARLIFE: 手机确认编码参数 ${videoWidth}x$videoHeight@$videoFps" +
-                        "（申请 ${requestedFps}fps），启动推流",
+                        "（申请 ${requestedWidth}x$requestedHeight@$requestedFps），启动推流",
                 )
                 send(CarLifeProtocol.VIDEO_ENC_START, ByteArray(0))
                 requestHigherFrameRate()
@@ -888,22 +912,24 @@ class CarLifeHuClient(
     }
 
     /**
-     * 车机连上后更新申请分辨率，并重新下发 98311 让引擎按新车机画布编码。
+     * 车机连上后更新**申请**分辨率，并重新下发 98311 让引擎按新车机画布编码。
      *
      * 时机：AirPlay SETUP 拿到车机真实分辨率（如奥迪 MIB3 的 1412×654）后调用。
      * 引擎内部有白名单/默认档位决策，非标准分辨率可能仍降回 1280×720——这是引擎
-     * 侧限制，不是本侧能强制的；但申请车机真实值至少能让引擎「尝试」按车机匹配，
-     * 且不再拿写死的 1920×1080 误导后续直通流声明（见 SessionController 直通分支）。
+     * 侧限制，不是本侧能强制的；但申请车机真实值至少能让引擎「尝试」按车机匹配。
+     *
+     * **只改申请值，不改确认值**：视频声明（[negotiatedSize]）必须跟引擎真实编码走，
+     * 不能被尚未经引擎确认的车机画布值污染（见 [requestedWidth] 字段注释）。
      *
      * 幂等：宽高未变时跳过（避免车机 1s 轮询重复触发重发 98311 打断推流）。
      */
     fun setRequestedResolution(width: Int, height: Int) {
         val w = width.coerceAtLeast(320)
         val h = height.coerceAtLeast(180)
-        if (w == videoWidth && h == videoHeight) return
-        log("CARLIFE: 车机分辨率更新 ${videoWidth}x$videoHeight → ${w}x$h，重发 98311")
-        videoWidth = w
-        videoHeight = h
+        if (w == requestedWidth && h == requestedHeight) return
+        log("CARLIFE: 车机分辨率申请更新 ${requestedWidth}x$requestedHeight → ${w}x$h，重发 98311")
+        requestedWidth = w
+        requestedHeight = h
         if (running.get()) resendEncInit()
     }
 
@@ -954,8 +980,8 @@ class CarLifeHuClient(
      */
     private fun buildEncoderInfo(): ByteArray =
         CarLifeProtocol.videoEncoderInfo(
-            videoWidth,
-            videoHeight,
+            requestedWidth,
+            requestedHeight,
             videoFps,
             needAdapterScreen = needAdapterScreen,
             saveArea = saveArea,

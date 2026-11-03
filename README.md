@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.15`（正式版；新增**MIB3 车机控制**面板——经 iAP2 EA 隧道调 viwi 总线，可读车况、可写车门/车窗/空调/灯光/座椅，接口未经实车验证；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.16`（正式版；从 `switch-pool` 分支同步**通用修复**——等 IDR 再喂帧、推流中车机邀请主动重建、音频 SETUP 400 回退重试、CarLife 未劫持提示帧、首帧闸门按「已送达帧」判定；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -821,6 +821,38 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.16 —— 2026-11-03（从 switch-pool 同步通用修复，**尚未发版**）
+
+> 只搬「与车型无关、主线和分支都会踩」的修复，`switch-pool` 的连接档位体系
+> （AUTO/通用/别克大屏/奥迪 MIB3/大众 ID MEB）、Wi-Fi Direct P2P 建链、别克 B233
+> 强制 32B MFi 挑战**没有**进主线——它们仍在分支上维护。
+
+- **等 IDR 再喂帧**（`VideoSender.beginAwaitingKeyFrame`）：新会话 / 视频通道重连 /
+  源重启三处统一置位，并记下起始时刻做超时兜底。此前 `startPassthrough` 里是
+  `false`，配合 `seedCsd()` 预置的 csd，会把当前这一帧 **P 帧当新流首帧**发出去；
+  车机解码器刚重建、没有任何参考帧，收到 P 帧直接拆整轮会话。ID7 实测 15 次断流里
+  8 次是「首帧 NAL=1 → 0.1~0.2 秒被 reset」，而 7 次「首帧 NAL=7,8,5」全部活过 7 秒。
+- **推流中收到车机邀请 → 记日志 + 主动重建**（`SessionController.onCtrlInviteWhileStreaming`）：
+  以前推流态直接 `return` 丢弃，日志里一个字都没有；ID7 实测车机发邀请的语义是
+  「我要重建会话」，不理它就在 18~20 秒后 reset 掉正在推流的会话（黑屏 → 重连 →
+  再被邀请 → 再被拆，死循环）。现在落一行日志并按 15 秒防抖主动退役重建。
+- **音频 SETUP 400 回退重试**（`AirPlayClient`）：被拒后按真 iPhone 的字段补
+  `ct`/`sr` 再发一次。只影响「严格实现」（ID7 三档全 400），已跑通的别克/奥迪/宝马
+  第一次就 200，走不到重试，零影响。
+- **CarLife 未劫持提示帧**（`video/NoticeFrameEncoder` + `VideoSender.pushNotice`）：
+  会话已建立但 CarLife 没推流时，把提示文字渲染成单帧 H.264 推到车机屏幕代替黑屏，
+  每 5 秒重推、最多 60 秒，CarLife 一出帧就停。详见
+  [`docs/carlife-notice-frame.md`](docs/carlife-notice-frame.md)。
+- **csd 格式探测**：这台荣耀机的编码器把 csd-0 输出成 AnnexB 而非 avcC，`parseAvcC`
+  硬解析时把起始码高字节读成 SPS 长度 → 负数长度 → `copyOfRange` 抛异常。现在先探测
+  格式两条路都支持，`readNal` 长度改 `Long` 并做越界校验，畸形数据返回 null 不抛。
+- **首帧闸门按「已送达帧」判定**：改用 `CarLifeHijack.framesDelivered` 相对本会话
+  起点的**差值**（该计数跨会话累加、从不归零），只有车机真收到帧才算 ready；
+  超时文案按 `CarLifeHijack.sourceActive` 区分「未劫持」与「已连接但车机未收到画面」。
+- **CarLife 分辨率申请/确认拆分**：`98311` 发的是申请值，`65544` 回来的是引擎确认值，
+  VideoConfig 声明改用确认值，修声明错配导致的 10 秒拆链。
+- **单测 345 例全绿**；release 13,520,741 B。
 
 ### 1.2.15 —— 2026-11-03（新增 MIB3 车机控制面板，**尚未发版**）
 

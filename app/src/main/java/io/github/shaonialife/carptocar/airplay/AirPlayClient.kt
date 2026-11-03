@@ -1728,6 +1728,21 @@ class AirPlayClient(
          */
         const val AUDIO_LATENCY_FALLBACK_MS = 250L
 
+        /**
+         * AirPlay RTP 音频的压缩类型（SETUP 的 `ct` 字段）。
+         *
+         * 取值对照 AirPlay RTP 音频规范（UxPlay / shairport 的 `ct` 枚举）：0=unknown、
+         * 1=PCM、2=ALAC、4=AAC-LC、8=AAC-ELD。我们只产出 PCM 与 AAC-LC 两种。
+         *
+         * 只在音频 SETUP 被拒后的重试版里发（见 [runAudioStream]）：老车机忽略这个字段，
+         * 但真 iPhone 一定带，严格实现可能因为它缺失直接 400。
+         */
+        private fun compressionTypeOf(codec: AudioCodec): Long =
+            when (codec) {
+                AudioCodec.PCM -> 1L
+                AudioCodec.AAC_LC -> 4L
+            }
+
         /** 车机音量 ≤ 这个值（dB）视为静音位（AirPlay 里 -144 约等于全静音）。 */
         private const val MUTE_THRESHOLD_DB = -100f
 
@@ -1854,12 +1869,6 @@ class AirPlayClient(
         // 同一台车机上不同 audioType 档位的可用性完全不同（见 AudioProfile 注释），
         // 单档失败就换下一档，而不是每次连接都盲试同一档。
         val negotiation = profile
-        log(
-            "AIRPLAY: 音频协商 → audioType=${profile.audioType} " +
-                "format=0x${profile.formatBit.toString(16)} ${profile.sampleRate}Hz " +
-                "latency=${profile.latencyMs}ms（档位=${profile.label}，" +
-                "封装=${tuning.detail}）",
-        )
         // 随机正 i64：BinaryPlist 按有符号整数编码，掩掉符号位避免负数
         val connectionId = (SecureRandom().nextLong() and Long.MAX_VALUE).coerceAtLeast(1L)
         // spf 取值：AAC 一帧 1024 采样；PCM 与发送端每包 352 帧保持一致
@@ -1867,7 +1876,19 @@ class AirPlayClient(
             tuning.spf?.let {
                 if (profile.codec == AudioCodec.AAC_LC) it.toLong() else AudioSender.SAMPLES_PER_PACKET.toLong()
             }
-        val body =
+        log(
+            "AIRPLAY: 音频协商 → audioType=${profile.audioType} " +
+                "format=0x${profile.formatBit.toString(16)} ${profile.sampleRate}Hz " +
+                "latency=${profile.latencyMs}ms（档位=${profile.label}，" +
+                "封装=${tuning.detail}，codec=${profile.codec.name}，" +
+                // 实际发出去的 spf：以前只打 tuning.detail（写死 1024），PCM 档其实发的是
+                // 352，日志里看着像"PCM 也用 1024"，排障时误导过。
+                "实际 spf=${spfValue ?: "不声明"}）",
+        )
+        // 请求体做两版（差别只在末尾的 ct/sr）。**默认发不带的那版**：
+        // 奥迪/别克/宝马这些已跑通的车机第一次就 200，永远走不到重试，
+        // 这次改动对它们零影响；ID7（Cinemo 组件）三档全 400 才需要第二版。
+        fun buildAudioBody(withCodecFields: Boolean): ByteArray =
             BinaryPlist.encode(
                 linkedMapOf(
                     "streams" to
@@ -1891,6 +1912,13 @@ class AirPlayClient(
                                 // 2026-10-20 Honda 实测：不声明 spf 时车机照样收包并按 44.1k
                                 // 实时消费，但喇叭无声——「按固定 SPF 排播」的实现需要这个值。
                                 spfValue?.let { put("spf", it) }
+                                // ct = 压缩类型、sr = 采样率：真 iPhone 的音频 SETUP 一定带这两个，
+                                // 我们此前一直没发（老车机忽略，严格的实现可能直接 400）。
+                                // 只在重试版里出现，避免改变已通过车机的首次请求。
+                                if (withCodecFields) {
+                                    put("ct", compressionTypeOf(negotiation.codec))
+                                    put("sr", negotiation.sampleRate.toLong())
+                                }
                             },
                         ),
                 ),
@@ -1898,22 +1926,54 @@ class AirPlayClient(
         val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
         lastAudioHost = host
         val startedAt = SystemClock.uptimeMillis()
-        val (statusLine, responseBody) =
-            try {
+        var statusLine: String
+        var responseBody: ByteArray
+        var usedCodecFields = false
+        try {
+            val first =
                 request(
                     "SETUP",
                     "rtsp://$host:${endpoint.airPlayPort}/",
-                    body,
+                    buildAudioBody(false),
                     // 8s：奥迪音频 SETUP 实测可能耗时 ~2.7s（车机侧资源仲裁）；异步读线程
                     // 保证等待期间 feedback 心跳照常发送，长等待不再触发车机看门狗
                     timeoutMillis = 8_000,
                     contentType = "application/x-apple-binary-plist",
                 )
-            } catch (error: IOException) {
-                log("AIRPLAY: 音频流协商失败 - ${error.message}")
-                return null
+            statusLine = first.first
+            responseBody = first.second
+            if (!statusLine.contains("200")) {
+                // 400 = 请求体被拒（不是"格式不匹配"）。先按真 iPhone 的字段补齐再发一次：
+                // ct（压缩类型）/ sr（采样率）是标准字段，缺了可能被严格实现直接否掉。
+                log(
+                    "AIRPLAY: 音频 SETUP 被拒 [$statusLine]——按真 iPhone 的写法补齐 " +
+                        "ct=${compressionTypeOf(negotiation.codec)} sr=${negotiation.sampleRate} 后重试一次",
+                )
+                val retryStartedAt = SystemClock.uptimeMillis()
+                val retry =
+                    request(
+                        "SETUP",
+                        "rtsp://$host:${endpoint.airPlayPort}/",
+                        buildAudioBody(true),
+                        timeoutMillis = 8_000,
+                        contentType = "application/x-apple-binary-plist",
+                    )
+                statusLine = retry.first
+                responseBody = retry.second
+                usedCodecFields = true
+                log(
+                    "AIRPLAY: 音频 SETUP 重试往返 ${SystemClock.uptimeMillis() - retryStartedAt}ms [$statusLine]" +
+                        (if (statusLine.contains("200")) "（补齐 ct/sr 后通过）" else "（补齐 ct/sr 仍被拒）"),
+                )
             }
-        log("AIRPLAY: 音频 SETUP 往返 ${SystemClock.uptimeMillis() - startedAt}ms [$statusLine]")
+        } catch (error: IOException) {
+            log("AIRPLAY: 音频流协商失败 - ${error.message}")
+            return null
+        }
+        log(
+            "AIRPLAY: 音频 SETUP 往返 ${SystemClock.uptimeMillis() - startedAt}ms [$statusLine]" +
+                (if (usedCodecFields) "（带 ct/sr 的重试版）" else ""),
+        )
         if (!statusLine.contains("200")) {
             log("AIRPLAY: 音频流协商应答 [$statusLine]")
             return null
