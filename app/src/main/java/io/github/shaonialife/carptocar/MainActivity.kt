@@ -47,6 +47,8 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
+import io.github.shaonialife.carptocar.mib3.Mib3ControlLink
+import io.github.shaonialife.carptocar.mib3.Mib3ControlPanel
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -166,6 +168,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 当前打开的「加入热点」确认弹窗：取消连接时联动关闭（触发流程中止）。 */
     private var wifiJoinDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /** MIB3 控制链路的首页监听（onDestroy 摘掉，避免单例持有 Activity）。 */
+    private var mib3LinkListener: (() -> Unit)? = null
 
     private val logListener: (String) -> Unit = { line ->
         runOnUiThread {
@@ -1069,6 +1074,8 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 显示设置（原「显示」面板迁移至首页，2026-10-24） ----
         bindDisplayCard()
+        // ---- MIB3 车机控制入口（面板在弹窗里，见 mib3/Mib3ControlPanel） ----
+        bindMib3Card()
 
         // 常亮+暗幕：界面开关已移除，行为固定为「默认开启」，由会话起停驱动
         // （ScreenDimmer 由 VirtualLauncher.attach 在会话启动时挂载）。
@@ -1544,6 +1551,37 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
+    }
+
+    /**
+     * 「MIB3 车机控制」入口：一张只显示状态的卡 + 一个打开面板的按钮。
+     *
+     * 卡片不列任何控制按钮——那些写操作要「允许写入 + 逐个确认」，平铺在首页迟早
+     * 被误触（ACL 里 `/door`、`/window` 都是真能动的）。真正的界面在
+     * [Mib3ControlPanel]。
+     */
+    private fun bindMib3Card() {
+        val note = findViewById<TextView>(R.id.mib3Note)
+        val button = findViewById<TextView>(R.id.btnMib3Control)
+        fun render() {
+            val status = Mib3ControlLink.status()
+            note.text =
+                when (status.phase) {
+                    Mib3ControlLink.Phase.READY -> "EA 隧道已建立 · 可读写（接口未实车验证）"
+                    Mib3ControlLink.Phase.WAITING_STATUS -> "已发 0xEA00 · 等车机回 0xEA03（写动作禁用）"
+                    Mib3ControlLink.Phase.NO_PROTOCOL -> "车机未声明 EA 协议 · 本机不支持车机控制"
+                    Mib3ControlLink.Phase.NO_SESSION -> "未连接车机 · 连接后从这里打开控制面板"
+                }
+        }
+        // 监听器存字段：Activity 销毁时要摘掉，单例里攥着一个 Activity 的 lambda 会泄漏
+        val listener: () -> Unit = { runOnUiThread { render() } }
+        mib3LinkListener?.let { Mib3ControlLink.removeListener(it) }
+        mib3LinkListener = listener
+        Mib3ControlLink.addListener(listener)
+        button.setOnClickListener {
+            Mib3ControlPanel.show(this) { line -> log(line) }
+        }
+        render()
     }
 
     private fun updateAudioTag() {
@@ -2731,6 +2769,8 @@ class MainActivity : AppCompatActivity() {
         // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
         runCatching { stopTargetScan() }
         targetPicker = null
+        mib3LinkListener?.let { Mib3ControlLink.removeListener(it) }
+        mib3LinkListener = null
         // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
         // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
         if (SessionController.logListener === logListener) SessionController.logListener = null

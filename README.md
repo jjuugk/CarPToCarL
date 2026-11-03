@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.14`（正式版；按奥迪 MIB3H SW3874 固件调整 CarPlay 链接方法——视频编码显式 Baseline、链路重传采纳对端声明；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.15`（正式版；新增**MIB3 车机控制**面板——经 iAP2 EA 隧道调 viwi 总线，可读车况、可写车门/车窗/空调/灯光/座椅，接口未经实车验证；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.14.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.14/CarPToCarL-1.2.14.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -821,6 +821,32 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.15 —— 2026-11-03（新增 MIB3 车机控制面板，**尚未发版**）
+
+> 首页多了一张「MIB3 车机控制」卡，点开是一个**只读 + 控制**两段式面板。链路是
+> iAP2 的 EA 隧道（`0xEA00` 建会话、`0xEA03` 状态、`0xEA04` 数据），车机那头接到
+> 内部 viwi 总线 `127.0.0.1:14751`。细节与「哪些是猜的」见
+> [`docs/mib3-viwi-control.md`](docs/mib3-viwi-control.md)。
+
+- **为什么不是 iAP2 加开关**：iAP2 里没有任何控制车辆的消息，`vehicleStatus`
+  （`0xA100`/`0xA101`）在 MIB3 上还是 `enabled:false` 且只有「车 → 手机」一个方向。
+  真正的入口是车机把 EAP 会话桥接到 viwi，该端口的 ACL 档位 `ext_devices` 对
+  `/hvac`、`/door`、`/window`、`/lighting`、`/seating` 等端点开放全 CRUD。
+- **只读区**：`/vehicleinformation`、`/drivingstate`、`/door`、`/window`、`/hvac`、
+  `/distance`、`/maintenance`、`/gearbox` 八条 GET。面板同时显示链路状态、车机声明的
+  EA 协议、`0xEA03` 原始回执、收发计数，以及最近 8 条原始响应。
+- **控制区**：车门锁/解锁、车窗升/降、空调开关、22 ℃ / 24 ℃、车内灯开关、
+  座椅加热 0/2 档，共 12 个动作。**默认禁用**——必须拨开「允许写入」，
+  且每次执行都弹确认框显示实际要发的 JSON；解锁与降窗标为危险动作。
+- **只在收到 `0xEA03` 后才允许写**：没有回执就发数据等于往没建起来的管道里灌字节，
+  排障时会被误判成「报文格式不对」。
+- **明说没验证**：`0xEA04` 的消息号、裸字节载荷、行式 JSON 封帧、字段名（`locked`
+  / `position` / `active` / `targetTemperature` / `heatingLevel`）全部是推断的，
+  集中在 `mib3/Mib3Viwi.kt` 与 `mib3/Mib3Endpoints.kt` 两处，实车抓包后改这两处即可。
+- **顺带**：`Iap2SenderSession` 的 `send`/`sendFireAndForget` 加 `@Synchronized`——
+  现在有第二条线程（面板）会往同一条 CSM 流里写，不加锁会把帧写花。
+- 单测 345 例全绿（新增 13 例覆盖封帧、转义、切行、字段提取、端点清单约束）。
 
 ### 1.2.14 —— 2026-11-03（正式版 · 按奥迪 MIB3H SW3874 固件对齐协议参数）
 

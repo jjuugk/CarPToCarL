@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.bt
 import android.content.Context
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.mib3.Mib3ControlLink
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 
@@ -35,15 +36,22 @@ internal fun Iap2LinkChannel.runSenderSession(
             context.applicationContext,
             nowPlayingProvider,
         )
-    val endpoint = session.run(timeoutMillis)
-    onEndpoint(endpoint)
-    // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
-    onSessionReady(session)
-    session.pumpIncomingForever()
-    // 链路断开（保活泵退出）：通知主控释放「会话处理中」——否则车机拆链后立刻回连
-    // 带来的新端点会被**僵尸轮次**堵门：车机 15s 看门狗 + 我方 WiFi 加入长等待的
-    // 窗口错配，让新端点只能干等到用户放弃（上游 0.1.14 奥迪 3315 真机定谳）。
-    onLinkClosed()
+    // EA 隧道（MIB3 车机控制）在 bring-up 期间就挂上：0xEA00 是在 run() 里发的，
+    // 0xEA03 可能在 run() 还没返回时到达，晚挂会漏掉第一条状态。
+    Mib3ControlLink.attach(session) { line -> log(line) }
+    try {
+        val endpoint = session.run(timeoutMillis)
+        onEndpoint(endpoint)
+        // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
+        onSessionReady(session)
+        session.pumpIncomingForever()
+    } finally {
+        Mib3ControlLink.detach()
+        // 链路断开（保活泵退出 / run 抛错）：通知主控释放「会话处理中」——否则车机拆链
+        // 后立刻回连带来的新端点会被**僵尸轮次**堵门：车机 15s 看门狗 + 我方 WiFi 加入
+        // 长等待的窗口错配，让新端点只能干等到用户放弃（上游 0.1.14 奥迪 3315 真机定谳）。
+        onLinkClosed()
+    }
 }
 
 /**

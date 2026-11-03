@@ -96,6 +96,42 @@ class Iap2SenderSession(
 
     private val random = SecureRandom()
 
+    // ---- ExternalAccessory（EA）隧道 ----
+    // 奥迪 MIB3 把 EA 会话桥接到车机内部 viwi 总线（127.0.0.1:14751），整车控制
+    // （车门/车窗/空调/灯光…）都从这个入口走。详见 docs/mib3-viwi-control.md。
+
+    /** 车机在 0x1D01 里声明的 EA 协议（protocolId to name），bring-up 后填充。 */
+    @Volatile
+    var eaProtocols: List<Pair<Int, String>> = emptyList()
+        private set
+
+    /** 承载数据的 EA 协议号（优先 `com.audi.cpp.eadata0`）；null = 车机没声明可用协议。 */
+    @Volatile
+    var eaDataProtocolId: Int? = null
+        private set
+
+    /** 最近一次 0xEA03 的原始 body（null = 车机一次都没回会话状态）。 */
+    @Volatile
+    var eaStatusRaw: ByteArray? = null
+        private set
+
+    /** EA 隧道双向字节计数（只用于界面上判断「有没有真的通」）。 */
+    @Volatile
+    var eaTxBytes: Int = 0
+        private set
+
+    @Volatile
+    var eaRxBytes: Int = 0
+        private set
+
+    /** 收到 0xEA03（会话状态）时回调，原始 body 交给上层解读。 */
+    @Volatile
+    var onEaStatus: ((ByteArray) -> Unit)? = null
+
+    /** 收到 0xEA04（隧道数据）时回调，参数是裸字节（viwi 报文）。 */
+    @Volatile
+    var onEaData: ((ByteArray) -> Unit)? = null
+
     /** 0x5703 解析结果（保活期间车机重发 0x5702 时需重新应答）。 */
     @Volatile
     private var wifi: WifiConfiguration? = null
@@ -286,7 +322,8 @@ class Iap2SenderSession(
 
         // EA 协议解析（启动时机见下方 MFi 完成后——2026-10-11 DiPlay 实测：
         // 认证前发 0xEA00 会让测试台状态机停摆，不再回 0xAA01；奥迪对此不敏感）
-        val eaProtocols = parseEaProtocols(identification)
+        val declaredEaProtocols = parseEaProtocols(identification)
+        eaProtocols = declaredEaProtocols
 
         // ---- MFi（跳过校验：0xAA05 自报成功）----
         val identityText = identityText(identification)
@@ -329,7 +366,7 @@ class Iap2SenderSession(
         // ---- EA 会话启动（MFi 认证完成后）----
         // 奥迪 0x1D01 声明 de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1
         // 三个 EA 协议；触摸 HID 相关数据经 EA 会话。认证前发送会噎死 DiPlay（见上）。
-        for ((protocolId, name) in eaProtocols) {
+        for ((protocolId, name) in declaredEaProtocols) {
             sendFireAndForget(
                 Iap2MessageIds.EA_OPEN_SESSION,
                 // param 1 = EA 协议名（UTF-8 字符串）。发成协议号时车机不回 0xEA03
@@ -337,6 +374,16 @@ class Iap2SenderSession(
                 Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
             )
             log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
+        }
+        // 数据走哪条 EA 协议：优先 `...eadata0`（奥迪 viwi 数据口），退而取第一条。
+        // 只要车机声明了任一协议就记下来——能不能真通由 0xEA03 与首个往返决定。
+        eaDataProtocolId =
+            declaredEaProtocols.firstOrNull { it.second.endsWith("eadata0") }?.first
+                ?: declaredEaProtocols.firstOrNull()?.first
+        if (eaDataProtocolId != null) {
+            log("EA: 数据通道协议 = ${declaredEaProtocols.first { it.first == eaDataProtocolId }.second}（0xEA04 承载）")
+        } else {
+            log("EA: 车机未声明任何 EA 协议——MIB3 车机控制不可用")
         }
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
@@ -599,6 +646,17 @@ class Iap2SenderSession(
             if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
                 handleLateStartSession(frame)
             }
+            // EA 隧道：0xEA03 是会话状态、0xEA04 是隧道数据。**必须排在下面的重复限流
+            // 之前**——viwi 一旦进入长轮询，数据帧会连续到达，跟着限流走等于每 100 条
+            // 才放行一条（车机控制面板会看到「发了没回」）。
+            if (frame.messageId == Iap2MessageIds.EA_SESSION_STATUS) {
+                handleEaStatus(frame)
+            }
+            if (frame.messageId == Iap2MessageIds.EA_SESSION_DATA) {
+                handleEaData(frame)
+                // 数据帧内容由上层记日志（可能是二进制），这里不再打 keep-alive 行。
+                continue
+            }
             // 0x5000 NowPlaying 订阅：蓝牙链路（测试台）在这里订阅，回一次 0x5001。
             // 真车（MIB3）的 NowPlaying 订阅走 WiFi 隧道（VirtualIap2Link），此处
             // provider 为 null 时静默忽略，不影响链路。
@@ -623,9 +681,53 @@ class Iap2SenderSession(
         log("SESSION 保活结束（链路断开）")
     }
 
+    // ---- EA（ExternalAccessory）隧道：MIB3 viwi 车机控制的唯一通道 ----
+
+    private fun handleEaStatus(frame: Iap2Csm.Frame) {
+        eaStatusRaw = frame.body
+        val hex = frame.body.joinToString(" ") { "%02x".format(it) }
+        log("iap2 rx=0xea03 EASessionStatus bytes=${frame.body.size} [$hex]")
+        runCatching { onEaStatus?.invoke(frame.body) }
+            .onFailure { log("EA: 会话状态回调异常 ${it.message}") }
+    }
+
+    private fun handleEaData(frame: Iap2Csm.Frame) {
+        eaRxBytes += frame.body.size
+        val sink = onEaData
+        if (sink == null) {
+            log("iap2 rx=0xea04 EA 数据 ${frame.body.size}B（无消费者，丢弃）")
+            return
+        }
+        runCatching { sink(frame.body) }
+            .onFailure { log("EA: 数据处理异常 ${it.message}") }
+    }
+
+    /**
+     * 通过 EA 隧道发一段裸字节（viwi 请求报文）。
+     *
+     * 返回 false 只有两种原因：车机没声明可用的 EA 协议，或链路在写的时候断了。
+     * **载荷形态是推断的**（整段裸字节塞进 body，不加 CSM 参数包装）——见
+     * [Iap2MessageIds.EA_SESSION_DATA] 的注释，首次实车按日志校正。
+     */
+    fun sendEaData(payload: ByteArray): Boolean {
+        if (payload.isEmpty()) return false
+        if (eaDataProtocolId == null) {
+            log("EA: 车机未声明 EA 协议，无法发送（${payload.size}B）")
+            return false
+        }
+        return runCatching {
+            send(Iap2MessageIds.EA_SESSION_DATA, payload)
+            eaTxBytes += payload.size
+            log("EA: tx ${payload.size}B（累计 $eaTxBytes/$eaRxBytes）")
+            true
+        }.getOrElse { error ->
+            log("EA: 发送失败 ${error.message}")
+            false
+        }
+    }
+
     /** 设备状态问候是否已发过（幂等；[sendDeviceStateGreetings] 的 force 可再发一轮）。 */
     private var greetingsSent = false
-
     /**
      * 设备状态问候：0x4E0D 无线会话标识 / 0x4E0A 语言 / 0x4E09 设备名 /
      * 0x4E0B 设备时间 / 0x4E0C 设备 UUID。
@@ -1038,6 +1140,7 @@ class Iap2SenderSession(
         }
     }
 
+    @Synchronized
     private fun send(
         messageId: Int,
         vararg body: ByteArray,
@@ -1063,6 +1166,7 @@ class Iap2SenderSession(
     }
 
     /** [send] 的发后不管变体：链路不因对端不 ACK 此消息而重传/死亡（见 0x4E0E）。 */
+    @Synchronized
     private fun sendFireAndForget(
         messageId: Int,
         body: ByteArray,
