@@ -146,6 +146,13 @@ class Iap2SenderSession(
     @Volatile
     private var wifi: WifiConfiguration? = null
 
+    /** 0xEA03 的最近一次原始体（null = 还没等到）。催问 0xEA00 前查它。 */
+    @Volatile
+    private var eaStatusRaw: ByteArray? = null
+
+    /** 0xEA00 的催问是否已经排过（每轮会话只排一次）。 */
+    private var eaRetryScheduled = false
+
     /** 0x4301 原始体是否已记录（每轮会话一次，避免周期补发刷屏）。 */
     private var startSessionRawLogged = false
 
@@ -278,6 +285,15 @@ class Iap2SenderSession(
     private companion object {
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
+
+        /**
+         * 0xEA00 没回执时的催问延迟。
+         *
+         * 取 8 秒：奥迪 MIB3 的 AirPlay 音频/视频流 SETUP 在 BT 连上后 4~10 秒才完成，
+         * 而 C8-4580（CL3D）固件报告 §5.7 证实车机把 EA 会话桥接进内部 VIWI TCP——
+         * 那条桥要等 CarPlay 栈起来才认会话。太早催等于再发一次同样的东西。
+         */
+        const val EA_RETRY_DELAY_MILLIS = 8_000L
 
         /**
          * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
@@ -521,6 +537,9 @@ class Iap2SenderSession(
             )
             log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
         }
+        // 0xEA00 是发后不管：车机把 EA 会话桥进内部 VIWI TCP（C8-4580 报告 §5.7），
+        // 那条桥要等它的 CarPlay 栈起来才认会话——8 秒还没等到 0xEA03 就再催一轮。
+        scheduleEaSessionRetry(eaProtocols)
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
         // xcertplay 在订阅后发 StartHID；DiPlay 删掉了这一步（订阅完直接等 0x5702）。
@@ -1663,8 +1682,21 @@ class Iap2SenderSession(
         // 完整会话录制：原始报文（含 0x1D01 能力清单这类大包）进 session_trace.log，
         // 与 main_debug.log 的摘要行按时间戳对齐，用于事后离线分析拆链/超时。
         frames.forEach { SessionTrace.csm(SessionTrace.Dir.RX, "bt", it.messageId, it.body) }
+        // 0xEA03（EA 会话状态）是 0xEA00 的唯一回执，催问逻辑靠它判断「车机认了没」。
+        // 必须在帧进入 expect/暂存区之前记账——否则它会以「非目标帧」的身份躺在
+        // pendingFrames 里，催问线程永远看不到。
+        frames.forEach { frame ->
+            if (frame.messageId == Iap2MessageIds.EA_SESSION_STATUS) noteEaStatus(frame)
+        }
         frames.forEachIndexed { index, frame -> if (index > 0) receivedFrames += frame }
         return frames.first()
+    }
+
+    /** 记账 0xEA03：只存原始体与一行日志，解析留给需要它的层（车控面板在主线）。 */
+    private fun noteEaStatus(frame: Iap2Csm.Frame) {
+        eaStatusRaw = frame.body
+        val hex = frame.body.joinToString(" ") { "%02x".format(it) }
+        log("iap2 rx=0xea03 EASessionStatus bytes=${frame.body.size} [$hex]")
     }
 
     // ---- 解析 ----
@@ -1812,22 +1844,47 @@ class Iap2SenderSession(
      * 子参数 0 = 协议号（u8）、1 = 协议名。对照 DiPlay 同款构造（u8(0,index)+string(1,name)+u8(2,0)）。
      */
     private fun parseEaProtocols(frame: Iap2Csm.Frame): List<Pair<Int, String>> {
-        val out = ArrayList<Pair<Int, String>>()
-        val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
-        for (groupId in intArrayOf(10, 11, 12)) {
-            val value = params[groupId]?.value ?: continue
-            val sub = Iap2Csm.parseParams(value).associateBy { it.id }
-            val protocolId =
-                sub[0]
-                    ?.value
-                    ?.firstOrNull()
-                    ?.toInt()
-                    ?.and(0xFF) ?: continue
-            val name = sub[1]?.value?.asStringOrEmpty() ?: "?"
-            out += protocolId to name
-            log("iap2 0x1d01 EA 组件[$groupId] protocol=$protocolId name=$name")
+        // 解析细节（含「参数号可重复出现」这个坑）见 [Iap2Ea.parseProtocols]。
+        val protocols = Iap2Ea.parseProtocols(frame.body)
+        protocols.forEach { (paramId, protocolId, name) ->
+            log("iap2 0x1d01 EA 组件[$paramId] protocol=$protocolId name=$name")
         }
-        return out
+        return protocols.map { it.second to it.third }
+    }
+
+    /**
+     * 0xEA00 只催一轮。
+     *
+     * 0xEA00 是**发后不管**（车机不 ACK 它，只用 0xEA03 回执），所以「没回」既可能是
+     * 丢包，也可能是车机当时还没准备好。奥迪 MIB3 的实际情况是：0xEA00 在 bring-up
+     * 第 4 秒就发出去了，而它自己的 CarPlay 栈要到 WiFi/AirPlay 会话建立之后才认这个
+     * EA 会话。所以这里等 [EA_RETRY_DELAY_MILLIS] 再催一轮——那时 AirPlay 多半已建立。
+     *
+     * 只催一次：这条通路上多刷没有意义（车机要么回 0xEA03，要么就是不支持）。
+     */
+    private fun scheduleEaSessionRetry(protocols: List<Pair<Int, String>>) {
+        if (protocols.isEmpty() || eaRetryScheduled) return
+        eaRetryScheduled = true
+        Thread(
+            {
+                try {
+                    Thread.sleep(EA_RETRY_DELAY_MILLIS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                if (eaStatusRaw != null) return@Thread
+                runCatching {
+                    log("EA: ${EA_RETRY_DELAY_MILLIS / 1000} 秒内没等到 0xEA03——再催一轮 0xEA00（${protocols.size} 个协议）")
+                    for ((protocolId, name) in protocols) {
+                        sendFireAndForget(
+                            Iap2MessageIds.EA_OPEN_SESSION,
+                            Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
+                        )
+                    }
+                }.onFailure { log("EA: 催问 0xEA00 失败 ${it.message}") }
+            },
+            "ea-session-retry",
+        ).apply { isDaemon = true }.start()
     }
 
     /**
