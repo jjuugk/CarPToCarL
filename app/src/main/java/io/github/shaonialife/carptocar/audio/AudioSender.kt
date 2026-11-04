@@ -79,6 +79,21 @@ class AudioSender(
         /** 同步包发送间隔（规范：每秒一个）。 */
         const val SYNC_INTERVAL_MILLIS = 1_000L
 
+        /** 静音保活的检查节拍。 */
+        private const val KEEPALIVE_TICK_MILLIS = 100L
+
+        /**
+         * 多久没有真实 PCM 就开始补静音帧。
+         *
+         * 取 300ms 而不是 0：正常音乐播放时 7~23ms 一帧，压根不会触发；而「暂停/切歌/
+         * 导航播报间隙」这种短暂停顿也不至于插静音。真正要救的是「连接后长时间没人
+         * 放音乐」这种一分钟级的空转。
+         */
+        private const val IDLE_FILL_AFTER_MILLIS = 300L
+
+        /** 单拍最多补几帧（≈[KEEPALIVE_TICK_MILLIS]/帧长，留一点追赶余量，避免卡顿后猛灌）。 */
+        private const val MAX_KEEPALIVE_FRAMES_PER_TICK = 12
+
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
 
@@ -396,6 +411,7 @@ class AudioSender(
                     "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声）",
             )
             startSyncLoop()
+            startSilenceKeepAlive()
             true
         } catch (error: Exception) {
             log("AUDIO: 直通启动失败 - ${error.message}")
@@ -406,6 +422,85 @@ class AudioSender(
 
     /** 直通模式下的帧对齐累积缓冲（把任意大小的注入 PCM 切成固定帧长）。 */
     private val passthroughBuffer = java.io.ByteArrayOutputStream()
+
+    /** 最近一次收到**真实** PCM 的时刻（uptimeMillis）；静音保活据此判断要不要补帧。 */
+    @Volatile
+    private var lastRealFeedAt = 0L
+
+    private var keepAliveThread: Thread? = null
+
+    /**
+     * 静音保活：音频流建立后**不能长时间一个包都不发**。
+     *
+     * 2026-11-04 奥迪 MIB3 实车（`docs/audi-mib3-ea-tunnel-20261104.md`）：音频流 SETUP
+     * 完成后先是 65 秒完全没有 PCM（车机上没人放音乐），第一段音乐（08:27:39，44.1k
+     * 立体声、电平 99%）原样编码发出去了，车机一声不响；而同样的音频在重连后的会话里
+     * （流一建立 0.4 秒就有包）立刻正常。差别只有「流建立后先静默了多久」。
+     *
+     * 真 iPhone 的音频流是**连续**的：没声音也一直送静音帧。接收端据此维持解码/播放管线
+     * 与 RTP↔NTP 时钟；停一分钟再突然来音频，管线早已被判空闲，包照收不放。
+     *
+     * 所以这里在「超过 [IDLE_FILL_AFTER_MILLIS] 没有任何真实 PCM」时按实时速率补静音帧：
+     * 作用只是维持管线与时钟，用户听不到任何声音（AAC 静音帧十几字节，开销可忽略）。
+     * 真实 PCM 一到就立刻停补，避免在音乐中间插入静音帧。
+     */
+    private fun startSilenceKeepAlive() {
+        if (keepAliveThread != null) return
+        lastRealFeedAt = android.os.SystemClock.uptimeMillis()
+        val frameBytes = framePcmBytes
+        val frameMillis = 1000.0 * samplesPerPacket / sampleRate
+        val silence = ByteArray(frameBytes)
+        val thread =
+            Thread(
+                {
+                    var nextFillAt = 0L
+                    var announced = false
+                    while (running.get()) {
+                        try {
+                            Thread.sleep(KEEPALIVE_TICK_MILLIS)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
+                        if (!running.get()) break
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - lastRealFeedAt < IDLE_FILL_AFTER_MILLIS) {
+                            nextFillAt = 0L
+                            continue
+                        }
+                        if (nextFillAt == 0L) {
+                            nextFillAt = now
+                            if (!announced) {
+                                announced = true
+                                log(
+                                    "AUDIO: 无 PCM 超过 ${IDLE_FILL_AFTER_MILLIS}ms——开始补静音帧保活" +
+                                        "（避免车机把音频流判空闲，之后第一段音乐被丢）",
+                                )
+                            }
+                        }
+                        var guard = 0
+                        while (running.get() &&
+                            nextFillAt <= now &&
+                            guard < MAX_KEEPALIVE_FRAMES_PER_TICK
+                        ) {
+                            if (android.os.SystemClock.uptimeMillis() - lastRealFeedAt <
+                                IDLE_FILL_AFTER_MILLIS
+                            ) {
+                                break // 真实 PCM 回来了，本拍不再补
+                            }
+                            dispatchPcm(silence)
+                            nextFillAt += frameMillis.toLong().coerceAtLeast(1L)
+                            guard++
+                        }
+                        // 落后太多就不追了：补的静音没必要和历史对齐，重新从当前时刻起算
+                        if (nextFillAt < now) nextFillAt = now
+                    }
+                },
+                "audio-silence-keepalive",
+            )
+        thread.isDaemon = true
+        keepAliveThread = thread
+        thread.start()
+    }
 
     /**
      * 直通模式下由外部注入一段 PCM（16bit 交织）。
@@ -436,6 +531,9 @@ class AudioSender(
     ) {
         if (!running.get() || record != null) return // 采集模式在跑时不接受注入
         if (size <= 0) return
+        // 真实 PCM 到场：静音保活立刻让位（这一行必须在 alignPcm 之前，
+        // 否则重采样失败时空转判定会误以为「一直没声音」）
+        lastRealFeedAt = android.os.SystemClock.uptimeMillis()
         val resampled = alignPcm(srcPcm, size, srcRate, srcChannels) ?: return
         // 累积到固定帧长，凑满一帧才发（PCM 通路逐包、AAC 通路逐帧）
         val frameBytes = framePcmBytes
@@ -554,6 +652,8 @@ class AudioSender(
         runCatching { syncSocket?.close() }
         syncSocket = null
         syncThread = null
+        keepAliveThread?.interrupt()
+        keepAliveThread = null
         thread = null
         passthroughBuffer.reset()
         restorePhoneMedia()
@@ -804,6 +904,7 @@ class AudioSender(
     }
 
     /** 封包 + 发送一包（同步更新 seq/ts/nonce 游标）。返回 false 表示链路已断。 */
+    @Synchronized
     private fun sendPayload(payload: ByteArray): Boolean {
         val wire = sealPacket(payload, sequence, timestamp, nonceCounter, markerPending)
         markerPending = false

@@ -80,6 +80,14 @@ object Mib3ControlLink {
     /** id → (label, path)，用于把回来的行配回是哪条请求。 */
     private val pending = HashMap<Int, Pair<String, String>>()
 
+    /**
+     * 「有人想拉只读，但 EA 会话还没起来」的待办标记。
+     *
+     * 只在 [Phase.READY]（收到 0xEA03）时才真正发 0xEA04，所以这里要把用户的意图存住，
+     * 等 0xEA03 一到立刻补一轮；否则面板开早一点就得手动再点一次「刷新」。
+     */
+    private var pendingRefreshOnReady = false
+
     /** path → 最近一次响应摘要（显示在只读区那一行上）。 */
     private val pathSamples = HashMap<String, String>()
 
@@ -124,6 +132,7 @@ object Mib3ControlLink {
             pathStates.clear()
             recentLines.clear()
             rxBuffer = ByteArray(0)
+            pendingRefreshOnReady = false
         }
         // 回调挂在会话上：保活线程收到 0xEA03/0xEA04 就转进来
         session.onEaStatus = { raw ->
@@ -133,7 +142,8 @@ object Mib3ControlLink {
         session.onEaData = { bytes -> onEaBytes(bytes) }
         log(
             "MIB3: 控制链路已接上（EA 协议=" +
-                session.eaProtocols.joinToString { "${it.second}" }.ifEmpty { "无" } + "）",
+                session.eaProtocols.joinToString { "${it.second}" }
+                    .ifEmpty { "待 0x1D01 解析（此刻身份还没到）" } + "）",
         )
         notifyChange()
     }
@@ -213,7 +223,18 @@ object Mib3ControlLink {
     /**
      * 拉一轮只读数据（8 条 GET）。
      *
-     * 返回 false = 链路还不可用（[status] 里能看出原因）。
+     * **必须等 0xEA03**：0xEA04（EA 数据）是隧道建立之后才合法的载荷。2026-11-04 奥迪
+     * MIB3 实车实测（`docs/audi-mib3-ea-tunnel-20261104.md`）：EA 会话没建起来就写 0xEA04，
+     * 车机从那一个包起**再也不 ACK**（ACK 停在 seq=114，第一个 0xEA04 是 115），
+     * 约 40 秒后被我们的重传看门狗判 `packet 115 not acknowledged` 整条 iAP2 链路拆掉——
+     * 面板本来就读不到数据，还顺手把「车机歌名/媒体键/控制隧道」一起带走，且**不会自愈**
+     * （CarPlay 会话在，出站重连被 [BtSessionGate] 静音闸门挡住）。三轮会话全部 115，
+     * 完全可复现。所以这里宁可晚发，也绝不抢跑。
+     *
+     * 抢跑的诉求（「早点把隧道激活」）用另一条路满足：调用方要的这轮会被记成待办，
+     * 0xEA03 一到立刻自动补发（[samplesFromStatus]）。
+     *
+     * 返回 false = 链路还不可用（[status] 里能看出原因，面板据此提示）。
      */
     fun refreshReadOnly(): Boolean {
         val current = synchronized(lock) { session }
@@ -221,8 +242,16 @@ object Mib3ControlLink {
             log?.invoke("MIB3: 未连接车机，无法拉取只读数据")
             return false
         }
-        // 即使还没 0xEA03 也允许发只读 GET：读不会改变车辆状态，而早点把请求送上
-        // 去有助于让车机把隧道激活（真机首次连接时它可能只是还没回执）。
+        val phase = status().phase
+        if (phase != Phase.READY) {
+            synchronized(lock) { pendingRefreshOnReady = true }
+            log?.invoke(
+                "MIB3: ${phase.label}——本轮不发只读 GET（EA 会话未建立就写 0xEA04，" +
+                    "车机会停止 ACK 并把整条 iAP2 链路拖死）；0xEA03 到达后自动补发",
+            )
+            notifyChange()
+            return false
+        }
         var sent = 0
         Mib3Endpoints.READ_ONLY.forEach { (label, path) ->
             val id = send(current, "GET", path, null) ?: return@forEach
@@ -333,6 +362,23 @@ object Mib3ControlLink {
         log?.invoke(
             "MIB3: 0xEA03 会话状态 ${raw.size}B [" + raw.joinToString(" ") { "%02x".format(it) } + "]",
         )
+        // EA 会话刚建立：把之前被挡下的那轮只读请求补上。
+        // 不能在 BT 收包线程里直接发（发送路径与接收共用同一条链路，容易自锁），
+        // 交给一条一次性后台线程。
+        val resume =
+            synchronized(lock) {
+                val pending = pendingRefreshOnReady
+                pendingRefreshOnReady = false
+                pending
+            }
+        if (!resume) return
+        Thread(
+            {
+                log?.invoke("MIB3: 0xEA03 已到——补发被挡下的那轮只读 GET")
+                refreshReadOnly()
+            },
+            "mib3-refresh-on-ready",
+        ).apply { isDaemon = true }.start()
     }
 
     private fun notifyChange() {

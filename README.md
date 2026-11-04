@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk)**
-> —— 主线固定直链（当前 1.2.17，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk)**
+> —— 主线固定直链（当前 1.2.18，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.17，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.17.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.18，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.18.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.17`（正式版；参考 CarVeX 补**送帧闸门**——用 CarLife 帧头时间戳算排队延迟、写入耗时测背压，只有结构性堆积才跳 IDR；帧率改为取「车机声明」与「本机能力」的较小值；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.17.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.17/CarPToCarL-1.2.17.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.18`（正式版；奥迪 MIB3 实车修**车机控制把 iAP2 链路写死**——0xEA03 之前不再往 EA 隧道写 0xEA04，EA 协议按「参数号可重复」解析（0xEA00 现在三个协议都发），控制链路中途掉线会单独补连；另加**音频静音保活**，修「首连导航有声、音乐无声」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,32 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.18 —— 2026-11-04（奥迪 MIB3：EA 隧道不再写死链路 + 音频静音保活，正式版）
+
+> 样本 `CarPToCarL-log-20261104-083034.txt`（1.2.17，`Audi_MMI_8349` / `AUDI 4260` /
+> `DELPHI`）。分析与证据链见 [docs/audi-mib3-ea-tunnel-20261104.md](docs/audi-mib3-ea-tunnel-20261104.md)。
+
+- **车机控制读不到数据 → 是它把整条 iAP2 链路写死的**：面板在 0xEA03（EA 会话状态）
+  还没到时就发了 8 条 0xEA04（viwi GET）。三轮会话全部在**同一个序号**上出事——
+  车机 `ack=114` 之后**再也不 ACK**，33~37 秒后我方重传看门狗判
+  `packet 115 not acknowledged` 拆链。现在只读拉取必须先 `Phase.READY`（收到 0xEA03），
+  没就绪只记日志并挂待办，0xEA03 一到自动补发那轮。
+- **EA 协议清单解析**：车机用**同一个参数号 10 重复三次**声明
+  `de.audi.mmiconnectdatatransfer` / `com.audi.cpp.eadata0` / `com.audi.cpp.eadata1`，
+  旧代码 `associateBy { it.id }` 只留最后一个，于是 0xEA00 只发给了 `eadata1`
+  （设计上数据该走 `eadata0`）。改为按出现顺序全收（`iap2/Iap2Ea.parseProtocols`，可单测）。
+- **0xEA00 催问**：它是发后不管，8 秒内没等到 0xEA03 再催一轮（一次为限）——
+  车机可能要到自车 CarPlay 栈起来（AirPlay 流 SETUP 之后）才认 EA 会话。
+- **控制链路掉线自愈**：CarPlay 在跑时不再无条件静音出站。掉线那一台会被登记，
+  出站循环只对它补连（最长 180 秒），连上即清；`detachCurrentSession()` 主动拆的
+  不补。修掉「画面声音都在、控制数据永久失联、只能手动断开重连」。
+- **音频静音保活**：音频流建立后超过 300ms 没有真实 PCM，就按实时速率补 AAC 静音帧，
+  真实 PCM 一到立刻停补。首连时音频流空转 65 秒、之后第一段音乐被车机整段丢弃
+  （重连后 0.4 秒就有包则立刻正常），差别只有「空转时长」。空闲开销约 43 包/秒、
+  每包十几字节。
+- 单测 **359 例全绿**（新增 4 例：EA 参数号可重复解析、旧 map 语义留档、空体、
+  重复声明去重）。
 
 ### 1.2.17 —— 2026-11-03（送帧闸门：帧龄/背压可见 + 帧率取较小值，正式版）
 
