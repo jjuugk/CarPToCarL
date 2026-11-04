@@ -79,6 +79,15 @@ object CarLifeHijack {
     private const val KEY_ORDERED_INIT = "carlife_ordered_init"
 
     /**
+     * 会话稳定后的二次初始化（默认开）。
+     *
+     * 首条 98311 往往早于引擎创建编码器，引擎只把它记成「申请值」、实际仍按默认档编
+     * （65544 会原样回申请值，看着像成功，SPS 却还是 1280x720）。首帧之后补一次
+     * 98386→98311，引擎在已有编码器上重建，尺寸才真的变。关掉即回到「只发一次」。
+     */
+    private const val KEY_SETTLE_REINIT = "carlife_settle_reinit"
+
+    /**
      * 一次性迁移标记 v1（历史）：曾把劫持对老安装强制开启一次。
      *
      * 2026-10-24 方向变更后被 v2 取代：v2 把被 v1 强开的劫持一次性关回去，
@@ -130,6 +139,10 @@ object CarLifeHijack {
     /** 首轮初始化是否先等 98386 确认（偏好 `carlife_ordered_init`，默认开）。 */
     @Volatile
     private var orderedInit = true
+
+    /** 首帧之后是否补一次编码初始化（偏好 `carlife_settle_reinit`，默认开）。 */
+    @Volatile
+    private var settleReinit = true
 
     /** 帧率变更命令的候选 id（可由偏好覆盖）。 */
     private var probeIds: IntArray = CarLifeProtocol.FRAME_RATE_PROBE_IDS
@@ -467,6 +480,9 @@ object CarLifeHijack {
         orderedInit = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_ORDERED_INIT, true)
+        settleReinit = context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SETTLE_REINIT, true)
         probeIds = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_PROBE_IDS, null)
@@ -652,6 +668,7 @@ object CarLifeHijack {
                 probeIds = probeIds,
                 connectTypeProbe = connectTypeProbe,
                 orderedInit = orderedInit,
+                settleReinit = settleReinit,
                 onProbeResult = { line ->
                     logSink?.invoke("CARLIFE: [探测] $line")
                     appContext
