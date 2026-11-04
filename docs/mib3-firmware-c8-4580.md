@@ -17,8 +17,8 @@
 `CIAP2EAPProtocolViwi` 桥接进车机内部 VIWI TCP，是 AirPlay 信令与车控数据的承载
 管道**。这与 2026-11-04 上午主线（1.2.18）用 Audi_MMI_8349 实车日志修出的问题
 完全互相印证：EA 协议清单用「参数号 10/11/12 重复出现」声明，旧解析只留最后一个，
-0xEA00 只发一个协议，车机一个 0xEA03 都不回。本分支（switch-pool）此前没有那批
-修复，本轮照搬移植（三协议解析 + 0xEA00 八秒催问）。
+0xEA00 只发一个协议，车机一个 0xEA03 都不回。这批修复**原产自主线 1.2.18**，
+switch-pool 1.2.22 是照搬移植（三协议解析 + 0xEA00 八秒催问）。
 
 ## 1. 逐条对照
 
@@ -38,7 +38,7 @@
 | 12 | **pair-setup 防爆破**：`Pair-setup server throttling for %d second(s)`，多次失败后直接禁用（§6.6） | 配对失败退避 3s/10s/30s，不硬刷 | 一致——**不要**加重试密度 |
 | 13 | FairPlay：`ekey/eiv`、`AirPlayEncryptionType`、N 秒密钥轮换（§6.6） | 加密路径在 `AirPlayClient.cipher`（pair-verify 派生） | 一致（授权体系部分与本报告无关） |
 | 14 | 反馈通道：接收端每 5 秒 `AirPlayReceiverStats`，`R-FPS/Latency/Ahead/A Buff/A Lost`（§6.7） | 我们每 1 秒 POST /feedback 心跳（比它的统计更密），收应答解析 bplist | 一致 |
-| 15 | 屏幕流带控制操作码：`kAirPlayScreenOpCode_ForceKeyFrame`（车机可要关键帧）、`SetCornerMask` 圆角遮罩（§7.1） | 我们不解屏幕流下行操作码；无法主动要 IDR（编码器在 CarLife 引擎里，98316/码率实测无效） | **不做**（与 3874 报告同结论；`VideoDeliveryGate` 已用「排队超标跳下一个 IDR」替代） |
+| 15 | 屏幕流带控制操作码：`kAirPlayScreenOpCode_ForceKeyFrame`（车机可要关键帧）、`SetCornerMask` 圆角遮罩（§7.1） | `/command type=forceKeyFrame` 已响应（`VideoSender.requestKeyFrame()`，1.2.17 起）；屏幕流内 opcode 与 `SetCornerMask` 不解 | 部分一致：`/command` 路径够用；仅流内 opcode 那条路留观 |
 | 16 | 音频：PCM/AAC-LC/AAC-ELD/Opus，`AUDIO_AUDIOLATENCY_*` 按场景分常量；报告**未给具体值**（§7.2） | 从 `/info audioLatencies` 动态取，不写死 | 一致 |
 | 17 | **SETUP→RECORD 之间车机要做解码器初始化，超时应放宽到秒级**（§7.3） | RTSP 事务超时秒级； Timing/事件通道独立端口 | 一致 |
 | 18 | iAP2 Link 层帧格式（SOF FF5A + 长度 + 控制 + 序号 + CRC-16-CCITT）与滑动窗口参数（§5.2） | `Iap2LinkEngine` 同构；RTO 采纳对端 SYN 声明 | 一致 |
@@ -69,9 +69,11 @@
 
 - **没新增连接档位**（见上）。「增加链接配置」的正确粒度是把这个家族**已有的**
   档位标注清楚 + 补齐它真正缺的 EA 修复，而不是加一个行为完全相同的新条目。
-- **没实现屏幕流下行操作码**（forceKeyFrame/cornerMask）：编码器在 CarLife 引擎里，
-  要 IDR 要不到（98316 帧率变更、码率配置实测无效）；`VideoDeliveryGate` 的
-  「排队 ≥1500ms 持续 ≥2s 跳下一个 IDR」已经覆盖同一需求。
+- **没实现屏幕流内的控制操作码**（`kAirPlayScreenOpCode_*`）：车机通过
+  `/command type=forceKeyFrame` 要关键帧时**已经会响应**（`SessionController` →
+  `VideoSender.requestKeyFrame()`）；漏的是「只在屏幕流里塞 opcode、不走 /command」
+  这条路径，以及 `SetCornerMask` 圆角遮罩。遮罩对 CarLife 固定矩形整屏没有意义，
+  操作码则要等实车日志证明车机确实只走流内路径再补。
 - **没实现 OOB BT 配对**（`CIAP2OOBBTPairing`，0x00B0~0x00B4）：与 3874 报告同
   结论——无线链路不依赖它也建得起来（3801/3874/4260 实车都通了）。
 - **没动 USB 有线 / Power 模块 / mDNS 浏览**：我们只做无线，发现阶段走蓝牙 SDP +
@@ -105,3 +107,31 @@
 
 若最后一行显示「通用参数」但车确实是奥迪，把 0x1D01 身份原文补进
 `ReceiverProfile.variantOf` 的判据，或下拉框选「奥迪 MIB3（强制专版）」。
+
+## 6. 对主线（main）的协议覆盖评估（2026-11-04）
+
+问题：这份报告里对端（车机）声明/要求的能力，主线还缺哪些？
+
+**先厘清方向**：报告里的 EA 修复本来就产自主线 1.2.18（实车 `Audi_MMI_8349` 日志），
+switch-pool 1.2.22 是从主线**移植过去**的。所以「主线缺不缺」要按报告逐条看，
+而不是看两个分支谁多了几行。
+
+| 报告条目 | 主线现状 | 结论 |
+|---|---|---|
+| §5.3 HID 组（触摸屏/电话/按键/旋钮/方向键） | 触摸 `input/TouchReports`（描述符驱动，单指 5B / 双指 12B）；媒体键 `input/ConsumerKeys`（按 Consumer 页 0x0C 判定）。**旋钮（`KNOB_UUID_HEX` 已定义但没映射）、DPad、电话键只落到「其他 HID 报告 … hex=」日志**，不产生输入 | **唯一有代码缺口的条目**。C8（双触摸屏 MMI touch）不带旋钮，暂不臆造映射；同族老 MIB3（带 MMI 旋钮）若用户反馈「旋钮转不动」再按实车报文补 |
+| §5.7 「EA 隧道承载 AirPlay 信令」的**另一条拓扑** | 只做直连：0x4301 拿端点 → 直连车机 AirPlay HTTP。EA 隧道目前仅用于 viwi 车控（`VirtualIap2Link`） | 3801/3874/4260 实车全部直连成功，暂不需要。若遇到「只给隧道不给 HTTP 端口」的车机，这是唯一能走通的路 |
+| §7.1 `forceKeyFrame` | 已实现：`/command type=forceKeyFrame` → `VideoSender.requestKeyFrame()`（VideoSender:719） | **比旧文档写的更完整**，此前「不做」的记述已过时（见 §3 更正） |
+| §7.1 `SetCornerMask` / `ViewArea` | 不消费屏幕流下行操作码 | 不适用：CarLife 画面是固定矩形整屏，没有圆角/多窗口概念 |
+| §7.2 Aux In（车机麦克风上行） | 未实现 AirPlay 上行音频 | 不适用：CarLife 语音走车机自己的蓝牙/引擎链路，不经我们的 AirPlay 上行 |
+| §7.2 RTP 冗余与重传 | SETUP 明写 `supportsRTPPacketRedundancy=false`，也不发冗余包 | 一致：诉求与实际能力对齐，车机不会期待冗余包 |
+| §5.3 Power（0xAE00~0xAE03） | 只定义了消息号，不发起 | 不适用：供电协商是 USB 有线场景，本项目只做无线 |
+| §5.5 「后续消息只允许出在已声明组内」 | `Iap2CapabilityReport` 把 0x1D01 参 6/参 7 解析成三层日志，但**出站不做硬门禁** | 故意不加：硬裁剪会打断已跑通的车机。保持「先观察日志、确认某台车机确实拒收再裁剪」 |
+| §5.6 `iap2WirelessCarPlayCountryAdaption`（部分市场禁 5GHz/无线 CarPlay） | 未处理 | 中国区无线 CarPlay 可用，3801/3874/4260 实车已验证，不涉及 |
+| §6.6 pair-setup 防爆破 | 失败退避 3s/10s/30s，不硬刷 | 一致，**不要**加密重试 |
+| §8.2 输入延迟协商 | SETUP 带 `inputLatencyMicros/outputLatencyMicros` | 一致 |
+
+**结论**：对端协议在主线上没有「必须马上补」的缺口。唯一实质缺项是
+「旋钮/方向键/电话键 HID 输入映射」，它属于**输入映射**而非协议解析——报文已经能
+收到、能打日志，缺的是「转成什么 Android 按键」。这件事在拿到实车报文样本前动手
+只会瞎猜（旋钮是相对量还是绝对量、DPad 用不用 Hat Switch 语义都不确定），
+所以留到有样本再做。
