@@ -97,11 +97,13 @@ class CarLifeHuClient(
      */
     private val requestedFps: Int = 20,
     /**
-     * 98386 特征配置里的 CONNECT_TYPE。默认 5 = Wi-Fi 局域网。
+     * 98386 特征配置里的 CONNECT_TYPE **初始值**。默认 5 = Wi-Fi 局域网。
      *
      * 引擎会按连接类型选编码档位（实测 5 恒定 20fps），改这个值可以试出更高档位。
+     * 开启 [connectTypeProbe] 后它会被轮换逻辑覆盖，所以这里必须是构造期快照
+     * （类体内的 [connectType] 才是运行期可变的当前值）。
      */
-    private val connectType: Int = 5,
+    initialConnectType: Int = 5,
     /**
      * 帧率变更命令的探测 id 列表。
      *
@@ -137,6 +139,19 @@ class CarLifeHuClient(
     private val saveArea: IntArray? = null,
     /** 98311 的 `drawUIOutsideSafeArea`（字段 8）。 */
     private val drawUIOutsideSafeArea: Boolean = false,
+    /**
+     * 开启 CONNECT_TYPE 探测：当引擎回显的确认尺寸 ≠ 我们申请的尺寸（即被降档）时，
+     * 自动换下一个 CONNECT_TYPE（重发 98386 + 98311）再试，直到命中或试完 1~8。
+     *
+     * 为什么用「一次会话内自动轮换」而不是「每次连接手动换一个」：用户没法为了一次
+     * 实验反复上下车。而这类降档场景（奥迪 1412×654 → 1280×720）本来就没画面，
+     * 轮换期间黑一下不损失任何体验；反过来只要某轮确认值等于申请值，立刻停手。
+     *
+     * **正常车机不受影响**：第一轮就满足「确认 = 申请」，探测当场结束。
+     */
+    private val connectTypeProbe: Boolean = false,
+    /** 探测结论（每轮一行 + 最后一行汇总），供上层写盘/打日志。 */
+    private val onProbeResult: (String) -> Unit = {},
 ) {
 
     private val running = AtomicBoolean(false)
@@ -294,6 +309,25 @@ class CarLifeHuClient(
     @Volatile
     private var videoFps = requestedFps.coerceIn(15, 60)
 
+    /** 98386 当前生效的 CONNECT_TYPE：默认取构造值，探测开启时会被轮换改掉。 */
+    @Volatile
+    private var connectType = initialConnectType.coerceIn(1, 8)
+
+    // ---- CONNECT_TYPE 探测状态 ----
+
+    /** 剩余待试的 CONNECT_TYPE（首元素永远是「当前值」，由 [probeCandidates] 生成）。 */
+    private var probeQueue: IntArray = IntArray(0)
+
+    /** 每轮结果：`CONNECT_TYPE → 确认尺寸字符串`（LinkedHashMap 保持试的顺序）。 */
+    private val probeResults = LinkedHashMap<Int, String>()
+
+    /** 探测已结束（命中 / 试完 / 会话结束）。结束后不再轮换。 */
+    @Volatile
+    private var probeFinished = true
+
+    /** 已排了一次轮换任务，防止 65544 连来时排多条（会把 connectType 连跳几个）。 */
+    private val probePending = AtomicBoolean(false)
+
     /** 已记录过的未知音频包类型（避免刷屏）。 */
     private val audioUnknownTypes = HashSet<Int>()
 
@@ -389,6 +423,17 @@ class CarLifeHuClient(
         touchOut = sockets[CarLifeProtocol.PORT_TOUCH]?.getOutputStream()
         running.set(true)
         lastFrameAt = android.os.SystemClock.uptimeMillis()
+        // CONNECT_TYPE 探测：只在开启时复位成「待探测」，否则保持已完成态（不会被触发）。
+        probeResults.clear()
+        probeQueue = if (connectTypeProbe) probeCandidates(connectType) else IntArray(0)
+        probeFinished = !connectTypeProbe
+        probePending.set(false)
+        if (connectTypeProbe) {
+            log(
+                "CARLIFE: [探测] 已开启——若引擎降档就自动轮换 CONNECT_TYPE（" +
+                    probeQueue.joinToString(",") + "）",
+            )
+        }
         if (touchOut != null) startTouchWorker()
 
         startReader("carlife-cmd") { cmdReader(cmd.getInputStream()) }
@@ -618,7 +663,14 @@ class CarLifeHuClient(
 
             CarLifeProtocol.MD_INFO -> {
                 log("CARLIFE: 收到手机设备信息（${payload.size}B）")
-                send(CarLifeProtocol.HU_INFO, CarLifeProtocol.deviceInfo("${videoWidth}x$videoHeight"))
+                // display 报**车机画布**（requested），不是引擎回显值（video）。
+                // 用 video 的坏处：引擎一旦把 1412×654 降档成 1280×720，回显值就变成 720p，
+                // 我们再把 720p 当「车机屏幕尺寸」告诉引擎，等于给它一个自我确认的错前提
+                // （而且这条 HU_INFO 比 AirPlay /info 更早到，首轮尤其关键）。
+                send(
+                    CarLifeProtocol.HU_INFO,
+                    CarLifeProtocol.deviceInfo("${requestedWidth}x$requestedHeight"),
+                )
                 // 关键：车机必须主动推进，不能等手机下发鉴权
                 Thread {
                     Thread.sleep(1200)
@@ -661,6 +713,7 @@ class CarLifeHuClient(
                 )
                 send(CarLifeProtocol.VIDEO_ENC_START, ByteArray(0))
                 requestHigherFrameRate()
+                onEncoderConfirmed()
             }
 
             CarLifeProtocol.MD_VIDEO_FRAME_RATE_DONE -> {
@@ -721,6 +774,113 @@ class CarLifeHuClient(
                 }
             }
         }
+    }
+
+    // ---- CONNECT_TYPE 探测 ----
+
+    /**
+     * 收到 65544（引擎确认编码参数）后调用。
+     *
+     * 判据只用一件事：**确认值 == 申请值**。相等说明这一档没被降档，探测到此为止；
+     * 不等就换下一个 CONNECT_TYPE 重问。不依赖车机画布、不依赖外部时序，自洽。
+     */
+    private fun onEncoderConfirmed() {
+        if (!connectTypeProbe || probeFinished) return
+        if (probeQueue.isEmpty()) probeQueue = probeCandidates(connectType)
+        val confirmed = "${videoWidth}x$videoHeight"
+        probeResults[connectType] = confirmed
+        if (confirmed == "${requestedWidth}x$requestedHeight") {
+            finishProbe("命中")
+            return
+        }
+        scheduleNextProbe()
+    }
+
+    /**
+     * 排一次「换 CONNECT_TYPE 再问一遍」的任务。
+     *
+     * 等待时间必须大于 [ENCODER_INIT_DEDUPE_MS]（5s）：探测要重发 98311，而重发会被
+     * 自己的去重窗挡掉——这也是为什么这里用 [forceEncoderInit] 而不是 [sendEncoderInit]。
+     */
+    private fun scheduleNextProbe() {
+        if (!probePending.compareAndSet(false, true)) return
+        Thread {
+            try {
+                Thread.sleep(PROBE_SETTLE_MS)
+                if (!running.get() || probeFinished) return@Thread
+                val next = nextProbeType()
+                if (next == null) {
+                    finishProbe("全部试完")
+                    return@Thread
+                }
+                connectType = next
+                log("CARLIFE: [探测] 换 CONNECT_TYPE=$next 重问（已试 ${probeResults.size} 档）")
+                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+                // 等引擎消化特征配置再问尺寸：实测 98386 → 65570 约 0.7s，留足余量。
+                Thread.sleep(PROBE_AFTER_FEATURE_MS)
+                if (!running.get() || probeFinished) return@Thread
+                // **必须在 forceEncoderInit 之前放开 pending**：65544 可能几十毫秒就回来，
+                // 那时 onEncoderConfirmed 要立刻排下一轮；如果 pending 还压着，探测链就断在
+                // 这一档上（表现为「日志只试了 2 档就停」）。
+                probePending.set(false)
+                forceEncoderInit()
+                // 兜底：引擎某些档位干脆不回 65544，那就没人来驱动下一步了。
+                Thread.sleep(PROBE_REPLY_TIMEOUT_MS)
+                if (!running.get() || probeFinished) return@Thread
+                if (!probeResults.containsKey(next)) {
+                    probeResults[next] = "无回包"
+                    finishProbe("引擎无回包")
+                }
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (error: Exception) {
+                log("CARLIFE: [探测] 轮换失败 - ${error.message}")
+            } finally {
+                probePending.set(false)
+            }
+        }.apply {
+            isDaemon = true
+            name = "carlife-ct-probe"
+        }.start()
+    }
+
+    /** 取下一个还没试过的档位；试完返回 null。 */
+    private fun nextProbeType(): Int? =
+        probeQueue.firstOrNull { !probeResults.containsKey(it) }
+
+    /**
+     * 结束探测并交结论。
+     *
+     * 「全部试完」时把 CONNECT_TYPE 复位成默认 5——否则会话会停在最后一个试验档（8）上，
+     * 而那是个没人验证过的值。
+     */
+    private fun finishProbe(reason: String) {
+        if (probeFinished) return
+        probeFinished = true
+        val tried = probeQueue.joinToString(", ") { type ->
+            "$type→${probeResults[type] ?: "未试"}"
+        }
+        val verdict = if (reason == "命中") {
+            "命中 CONNECT_TYPE=$connectType（确认 ${videoWidth}x$videoHeight）"
+        } else {
+            "没有任何一档能给出 ${requestedWidth}x$requestedHeight}"
+        }
+        onProbeResult("$verdict｜$reason｜$tried")
+        if (reason != "命中" && connectType != PROBE_DEFAULT_TYPE) {
+            connectType = PROBE_DEFAULT_TYPE
+            runCatching {
+                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+            }
+            log("CARLIFE: [探测] 已复位 CONNECT_TYPE=$connectType")
+        }
+    }
+
+    /** 绕开 [sendEncoderInit] 的 5s 去重窗——探测必须能立刻重问。 */
+    @Synchronized
+    private fun forceEncoderInit() {
+        lastEncInitSig = null
+        lastEncInitAt = 0L
+        sendEncoderInit()
     }
 
     /**
@@ -1483,6 +1643,37 @@ class CarLifeHuClient(
          * 自己的去重拦住、引擎永远不重建编码器。
          */
         private const val ENCODER_INIT_DEDUPE_MS = 5_000L
+
+        /** CONNECT_TYPE 探测：换档前等多久（必须 > 去重窗，且给本轮推流一点稳定时间）。 */
+        private const val PROBE_SETTLE_MS = 6_000L
+
+        /** 探测：发完 98386 等多久再发 98311（实测 65570 约 0.7s 回，留余量）。 */
+        private const val PROBE_AFTER_FEATURE_MS = 1_500L
+
+        /**
+         * 探测：重发 98311 后等多久还没 65544 就算这一档「无回包」。
+         *
+         * 必须有这道兜底——某些 CONNECT_TYPE 引擎直接不理，没人回包就没人驱动下一档，
+         * 探测会永久卡死在中途（画面一直黑着，还不知道卡在哪一档）。
+         */
+        private const val PROBE_REPLY_TIMEOUT_MS = 8_000L
+
+        /** 探测失败后复位的档位（= `CarLifeProtocol.CONNECT_TYPE_WIFI`）。 */
+        private const val PROBE_DEFAULT_TYPE = 5
+
+        /**
+         * 探测顺序：当前档打头，其余 1..8 依次跟上。
+         *
+         * 打头放当前值是为了先记录「基线」——不然日志里只有后面的失败档，
+         * 看不出原本那一档到底给了什么尺寸。
+         */
+        internal fun probeCandidates(current: Int): IntArray {
+            val start = current.coerceIn(1, 8)
+            val out = ArrayList<Int>(8)
+            out += start
+            for (type in 1..8) if (type != start) out += type
+            return out.toIntArray()
+        }
 
         /**
          * 连续重发时的最大间隔（毫秒）。

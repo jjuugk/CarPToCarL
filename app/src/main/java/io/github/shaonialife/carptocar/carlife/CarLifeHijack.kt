@@ -58,6 +58,17 @@ object CarLifeHijack {
     private const val DEFAULT_CONNECT_TYPE = 5
 
     /**
+     * CONNECT_TYPE 探测开关（默认开）。
+     *
+     * 只影响「引擎把申请尺寸降档」的场景：首轮确认值等于申请值时探测当场结束，
+     * 正常车机完全无感。降档时才会轮换 1~8 去撞档位表，一轮会话内跑完。
+     */
+    private const val KEY_CONNECT_TYPE_PROBE = "carlife_connect_type_probe"
+
+    /** 上次探测结论（一行汇总），便于事后查看而不必翻日志。 */
+    private const val KEY_CONNECT_TYPE_PROBE_RESULT = "carlife_connect_type_probe_result"
+
+    /**
      * 一次性迁移标记 v1（历史）：曾把劫持对老安装强制开启一次。
      *
      * 2026-10-24 方向变更后被 v2 取代：v2 把被 v1 强开的劫持一次性关回去，
@@ -101,6 +112,10 @@ object CarLifeHijack {
     /** 98386 里的 CONNECT_TYPE（默认 5=WiFi，可在偏好 carlife_connect_type 里改）。 */
     @Volatile
     private var connectType = 5
+
+    /** 是否启用 CONNECT_TYPE 探测（偏好 `carlife_connect_type_probe`，默认开）。 */
+    @Volatile
+    private var connectTypeProbe = true
 
     /** 帧率变更命令的候选 id（可由偏好覆盖）。 */
     private var probeIds: IntArray = CarLifeProtocol.FRAME_RATE_PROBE_IDS
@@ -427,6 +442,14 @@ object CarLifeHijack {
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_CONNECT_TYPE, DEFAULT_CONNECT_TYPE)
             .coerceIn(1, 8)
+        connectTypeProbe = context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CONNECT_TYPE_PROBE, true)
+        if (connectTypeProbe) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_CONNECT_TYPE_PROBE_RESULT, null)
+                ?.let { log("CARLIFE: 上次 CONNECT_TYPE 探测结论：$it") }
+        }
         probeIds = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_PROBE_IDS, null)
@@ -608,8 +631,17 @@ object CarLifeHijack {
                 audioExpected = { MediaSessionsState.nowPlaying?.playing == true },
                 onMediaInfo = { info -> onMediaInfo(info) },
                 requestedFps = requestedFps,
-                connectType = connectType,
+                initialConnectType = connectType,
                 probeIds = probeIds,
+                connectTypeProbe = connectTypeProbe,
+                onProbeResult = { line ->
+                    logSink?.invoke("CARLIFE: [探测] $line")
+                    appContext
+                        ?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        ?.edit()
+                        ?.putString(KEY_CONNECT_TYPE_PROBE_RESULT, line)
+                        ?.apply()
+                },
                 // 首轮申请值 = **上次车机画布**（无缓存则引擎默认 1280×720）。
                 // 引擎只在建编码器之前认这个值，早报才能让它按车机画布编码；等 AirPlay
                 // `/info` 到了再改（setRequestedResolution）已经晚了，引擎只回一个确认值、
