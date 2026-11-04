@@ -140,6 +140,37 @@ internal object CarLifeProtocol {
         ): Int = base or (pointerIndex shl POINTER_INDEX_SHIFT)
     }
 
+    // ---- 车机 GPS（0x18010，HU → MD）----
+    //
+    // 命令号与载荷来自官方车机端 SDK：
+    //   `CommonParams.MSG_CMD_CAR_GPS = 0x00018010`
+    //   `CTranRecvPackageProcess::sendCmdCarGPS` → `CarlifeCarGps` protobuf
+    //   `CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeCarGpsProto.proto`
+    //
+    // 方向是**车机 → 手机**：车把自己的定位喂给 CarLife+，手机端地图在
+    // 「车机定位优先」时直接用它。这正是我们要的通道——车机 GPS 比车内手机强。
+    //
+    // **25 个字段里前 24 个是 required**：少一个 protobuf 解析就整条丢弃，所以
+    // 未知项必须显式补 0，不能省略（[carGps] 已按 proto 顺序全量写出）。
+    const val HU_CAR_GPS = 98320 // 0x00018010
+
+    // ---- 车机硬键（0x68008，HU → MD，控制通道）----
+    //
+    // `CommonParams.MSG_TOUCH_CAR_HARD_KEY_CODE = 0x00068008`，
+    // 载荷 `CarlifeCarHardKeyCode{ keycode = 1 }`。
+    // 键值表同在 CommonParams：`KEYCODE_VR_START = 0x21`、`KEYCODE_VR_STOP = 0x22`。
+    // 车机按下方向盘语音键时发 0x21，手机端 CarLife+ 用它自己的麦克风起语音识别
+    // （所以**不需要**我们回传车机麦克风音频）。
+    const val TOUCH_CAR_HARD_KEY_CODE = 425992 // 0x00068008
+
+    object HardKey {
+        /** 起语音识别（小度）。 */
+        const val VR_START = 0x21
+
+        /** 停语音识别。 */
+        const val VR_STOP = 0x22
+    }
+
     const val HEARTBEAT = 131074
 
     /** CONNECT_TYPE：5 = Wi-Fi 局域网 */
@@ -202,17 +233,24 @@ internal object CarLifeProtocol {
 
     // ---- protobuf 手写编码 ----
 
-    fun pbVarint(field: Int, value: Int): ByteArray {
-        val head = byteArrayOf(((field shl 3) or 0).toByte())
-        return head + varintBytes(value.toLong())
-    }
+    fun pbVarint(field: Int, value: Int): ByteArray = tagBytes(field, 0) + varintBytes(value.toLong())
 
     fun pbString(field: Int, value: String): ByteArray = pbBytes(field, value.toByteArray(Charsets.UTF_8))
 
-    fun pbBytes(field: Int, value: ByteArray): ByteArray {
-        val head = byteArrayOf(((field shl 3) or 2).toByte())
-        return head + varintBytes(value.size.toLong()) + value
-    }
+    fun pbBytes(field: Int, value: ByteArray): ByteArray = tagBytes(field, 2) + varintBytes(value.size.toLong()) + value
+
+    /**
+     * protobuf 的 tag 本身也是 varint：字段号 ≥ 16 时（tag ≥ 0x80）必须写两个字节。
+     *
+     * 踩过的坑（2026-11-04）：这里原本是 `byteArrayOf(((field shl 3) or wire).toByte())`，
+     * 字段 16 会写成单字节 `0x80`——对端读到的 tag 低 7 位是 0、且没有结束位，于是继续
+     * 读下一个字节当高位，整条消息从第 16 个字段起全部错位（车机 GPS 的 pdop 之后全丢）。
+     * 之前的消息字段号都 ≤ 15，所以这个 bug 一直没暴露。
+     */
+    private fun tagBytes(
+        field: Int,
+        wire: Int,
+    ): ByteArray = varintBytes((field.toLong() shl 3) or wire.toLong())
 
     private fun varintBytes(input: Long): ByteArray {
         var value = input
@@ -349,6 +387,71 @@ internal object CarLifeProtocol {
         }
         return out
     }
+
+    /** 车机硬键：`CarlifeCarHardKeyCode{ keycode = 1 }`（键值见 [HardKey]）。 */
+    fun carHardKeyCode(keycode: Int): ByteArray = pbVarint(1, keycode)
+
+    /**
+     * 车机 GPS：`CarlifeCarGps`（25 字段，前 24 个 required）。
+     *
+     * 单位换算来自官方 C 结构体 `S_CAR_GPS` 的注释（`CCarLifeLibWrapper.h`）：
+     * 纬度/经度 1/1,000,000 度；高度 0.1 米；速度 0.01 km/h；航向 0.1 度；
+     * hdop/pdop/vdop 0.1；三轴速度 0.01 m/s。
+     *
+     * **required 字段一个都不能省**——手机端是强类型 protobuf，缺字段会抛解析异常并
+     * 丢掉整条消息。未知项（信号质量 dBHz、定位误差）显式补 0 而不是省略。
+     *
+     * @param fix 定位快照（经纬度必填）
+     * @param nowMillis 时间戳（字段 25，u64，毫秒）
+     */
+    fun carGps(
+        fix: CarGpsFix,
+        nowMillis: Long,
+    ): ByteArray {
+        val lat = Math.round(fix.latitude * 1_000_000.0).toInt()
+        val lon = Math.round(fix.longitude * 1_000_000.0).toInt()
+        val height = Math.round((fix.altitudeMeters ?: 0.0) * 10.0).toInt()
+        val speed = Math.round((fix.speedKmh ?: 0.0) * 100.0).toInt().coerceAtLeast(0)
+        val heading = Math.round((fix.headingDeg ?: 0.0) * 10.0).toInt().coerceAtLeast(0)
+        // 三轴速度：由地速 + 航向分解（0.01 m/s）。航向未知时只给北向=地速，东向=0。
+        val speedMps = (fix.speedKmh ?: 0.0) / 3.6
+        val rad = Math.toRadians(fix.headingDeg ?: 0.0)
+        val north = Math.round(speedMps * Math.cos(rad) * 100.0).toInt()
+        val east = Math.round(speedMps * Math.sin(rad) * 100.0).toInt()
+
+        var out = pbVarint(1, 1) // antennaState：1 = 天线正常（车机只在这条通道有数据时才发）
+        out += pbVarint(2, 0) // signalQuality：车机未给 dBHz，界面信号格用，补 0
+        out += pbVarint(3, lat)
+        out += pbVarint(4, lon)
+        out += pbVarint(5, height)
+        out += pbVarint(6, speed)
+        out += pbVarint(7, heading)
+        out += pbVarint(8, fix.utcYear)
+        out += pbVarint(9, fix.utcMonth)
+        out += pbVarint(10, fix.utcDay)
+        out += pbVarint(11, fix.utcHour)
+        out += pbVarint(12, fix.utcMinute)
+        out += pbVarint(13, fix.utcSecond)
+        out += pbVarint(14, fix.fixQuality)
+        out += pbVarint(15, Math.round((fix.hdop ?: 0.0) * 10.0).toInt())
+        out += pbVarint(16, Math.round((fix.pdop ?: 0.0) * 10.0).toInt())
+        out += pbVarint(17, Math.round((fix.vdop ?: 0.0) * 10.0).toInt())
+        out += pbVarint(18, fix.satellitesUsed)
+        out += pbVarint(19, fix.satellitesVisible)
+        out += pbVarint(20, 0) // horPosError：未提供
+        out += pbVarint(21, 0) // vertPosError：未提供
+        out += pbVarint(22, north)
+        out += pbVarint(23, east)
+        out += pbVarint(24, 0) // vertSpeed
+        out += pbVarint64(25, nowMillis)
+        return out
+    }
+
+    /** uint64 / 大数 varint（时间戳超过 Int 范围）。 */
+    fun pbVarint64(
+        field: Int,
+        value: Long,
+    ): ByteArray = tagBytes(field, 0) + varintBytes(value)
 
     /**
      * 单点触控负载 `CarlifeTouchSinglePoint{x=1, y=2}`（proto 里只有这两个字段）。
@@ -599,4 +702,34 @@ data class CarLifeMediaInfo(
     val playlistNum: Int,
     val songId: String,
     val mode: Int,
+)
+
+/**
+ * 一条「车机 GPS」快照（[CarLifeProtocol.HU_CAR_GPS] 的输入）。
+ *
+ * 与 `iap2/NmeaLocation.kt` 的 `NmeaFix` 分开：这边是 CarLife 协议的单位约定
+ * （度 / 0.1 米 / 0.01 km/h / 0.1 度），那边是 NMEA 的原始语义（ddmm.mmmm、
+ * 节、UTC 时分秒）。转换放在两边各自最清楚的位置，避免协议层被迫认识 NMEA。
+ */
+data class CarGpsFix(
+    /** 十进制度；南纬为负。 */
+    val latitude: Double,
+    /** 十进制度；西经为负。 */
+    val longitude: Double,
+    val altitudeMeters: Double?,
+    val speedKmh: Double?,
+    val headingDeg: Double?,
+    /** NMEA fix quality：0=无效、1=GPS、2=DGPS、4=RTK…（0 时上层不该发）。 */
+    val fixQuality: Int,
+    val satellitesUsed: Int,
+    val satellitesVisible: Int,
+    val hdop: Double?,
+    val pdop: Double?,
+    val vdop: Double?,
+    val utcYear: Int,
+    val utcMonth: Int,
+    val utcDay: Int,
+    val utcHour: Int,
+    val utcMinute: Int,
+    val utcSecond: Int,
 )

@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk)**
-> —— 主线固定直链（当前 1.2.20，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk)**
+> —— 主线固定直链（当前 1.2.21，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.20，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.20.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.21，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.21.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.20`（正式版；修 1.2.19 实车暴露的两条**重连死路**：① mDNS 未发现时兜底只取「第一条默认路由」的网关，而这台车机排第一的是 IPv6 链路本地 `fe80::1086:…`，于是 8 次重连全打空——改为收集**全部**默认网关并按 IPv4 优先排序（`10.174.189.1` 才是通的）；② 手动断开后只隔 1.2 秒就重连，车机固件 `mediaDisconnectTimeout=15000` 还没把设备判成「已移除」，它只重开旧 iAP2 会话——给热点凭据、**但不启动 AirPlay**（7000 不开、`_airplay._tcp` 不广播、0x4301 不回），现在加 18 秒冷却；另修 Android 12+ 上 `wifiManager.connectionInfo` 对应用专属网络报 `<unknown ssid>`，导致「已连着车机热点」被误判成没连、白等 15 秒；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.21`（正式版；为 **CarLife** 加两条车机能力：① **方向盘语音键**——CarPlay 侧 `0x6802` HID Consumer `0xCF`（Voice Command）经 `ConsumerKeys` 映射后不再注入系统，而是转成 CarLife 控制通道 `0x68008` `KEYCODE_VR_START=0x21`，CarLife+ 用**手机自己的麦克风**起小度；② **车机 GPS 转发**——iAP2 `0xFFFB LocationInformation` 里的 NMEA（`$GPGGA/$GPRMC/$GPGSA`，按 `$` 切分可多句、NUL 补齐）解析后转成 CarLife `0x18010 CarlifeCarGps`（25 字段前 24 个 required），车内手机定位差时用车的坐标；**设置里新增「使用车机 GPS」开关**（默认开，关掉一个字节都不发）；车机只发无经纬度的 `$PASCD` 时自动不发并在日志写明；顺带修 `pbVarint` 字段号 ≥16 时 tag 只写一个字节导致整条消息错位的 bug；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,55 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.21 —— 2026-11-04（CarLife 语音键 + 车机 GPS 转发，正式版）
+
+**一、方向盘语音键接进 CarLife**
+
+车机的语音键在 CarPlay 里走 HID：`0x6802 AccessoryHIDReport` → Consumer 页 `0xCF`
+（Voice Command）。以前它被当成「无对应 Android 键」直接忽略——本机没有 Siri，
+按下去什么都不会发生。
+
+现在 `ConsumerKeys.keyCodeFor(0xCF)` 返回 `KEYCODE_VOICE_ASSIST` 作为统一标识，
+`SessionController` 拦下它，转成 CarLife 车机硬键：
+
+```
+0x68008 MSG_TOUCH_CAR_HARD_KEY_CODE  +  CarlifeCarHardKeyCode{ keycode = 0x21 }
+```
+
+`0x21 = KEYCODE_VR_START`（官方车机 SDK `CommonParams`），CarLife+ 收到后用**手机自己的
+麦克风**起语音识别——所以不需要回传车机麦克风音频，只是一条控制命令。
+
+**二、车机 GPS 转给 CarLife**
+
+1. `VirtualIap2Link` 新增 `0xFFFB LocationInformation` 分支：报文体是
+   `[len][id=0][ASCII]`，按 `$` 切分（一条报文可能有多句）、NUL 补齐；
+2. `iap2/NmeaLocation.kt` 解析 `$GPGGA`（经纬度/海拔/星数/HDOP/UTC）、`$GPRMC`
+   （速度节→km/h、航向、日期）、`$GPGSA`（PDOP/VDOP，按**倒数三个字段**取，容忍省略的卫星槽）；
+   `$PASCD` 是 Apple 私有语句（实测 43B：`$PASCD,1583.410,C,D,0,1,0.00,0.000`），公开资料
+   没有字段表，**只识别、不猜坐标**；
+3. 合并器 `NmeaAssembler` 把分条到达的句子拼成一份快照；GGA 报「无定位」时立刻作废坐标，
+   不拿上一秒的旧位置冒充；
+4. `CarLifeProtocol.carGps()` 按官方 `CarlifeCarGpsProto.proto` 写满 25 个字段
+   （单位：经纬度 1e-6 度、高度 0.1m、速度 0.01km/h、航向 0.1 度、三轴速度 0.01m/s），
+   `CarLifeHuClient.sendCarGps()` 900ms 节流下发。
+
+**只在有经纬度且 fix 有效时发**：车机在地库/隧道里会持续推无坐标样本，发给引擎会让
+地图飘到 (0,0)。
+
+**三、「使用车机 GPS」开关**
+
+显示卡里新增开关（偏好 `carlife_car_gps`，**默认开**）。关掉后一个字节都不发，
+CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本。
+
+**四、顺手修的 bug**
+
+`CarLifeProtocol.pbVarint/pbVarint64/pbBytes` 的 tag 用的是单字节 `toByte()`，
+字段号 ≥ 16 时（tag ≥ 0x80）写出来缺少续位字节，对端会把下一个字节当高位——
+整条消息从第 16 个字段起全部错位。之前所有消息字段号都 ≤ 15，所以一直没暴露；
+车机 GPS 的 `pdop`(16) 正是第一个踩到的。已改成 tag 也按 varint 编码。
+
+单测 **410 例 0 失败**（新增 18 例：`NmeaLocationTest` 12 例、`CarLifeCarGpsTest` 6 例）。
 
 ### 1.2.20 —— 2026-11-04（4580 重连：网关兜底漏 IPv4 + 手动断开后不给车机冷却，正式版）
 

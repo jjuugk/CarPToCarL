@@ -37,6 +37,7 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
+import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.TouchRouter
@@ -1446,6 +1447,26 @@ class MainActivity : AppCompatActivity() {
             snack(
                 if (checked) "本地 CarLife 劫持已开启（下次连接起效）" else "本地 CarLife 劫持已关闭",
             )
+        }
+
+        // 「使用车机 GPS」（默认开）：只控制要不要把车机 0xFFFB 定位转成 CarLife 0x18010。
+        // 关掉即回到「完全用手机定位」，随时可来回切（下一条定位就按新值走）。
+        val gpsSwitch = findViewById<SwitchCompat>(R.id.switchCarGps)
+        val gpsNote = findViewById<TextView>(R.id.carGpsNote)
+        gpsSwitch.isChecked = CarGpsOption.enabled
+        if (!CarGpsOption.enabled) {
+            gpsNote.text = "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
+        }
+        gpsSwitch.setOnCheckedChangeListener { _, checked ->
+            CarGpsOption.save(ctx, checked)
+            gpsNote.text =
+                if (checked) {
+                    "车机有定位时把它的坐标转给 CarLife，车内手机信号差时更准；" +
+                        "车机只发无坐标样本时自动不发。"
+                } else {
+                    "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
+                }
+            snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
         }
 
         // 流分辨率缩放（30%–160%，步进 5；下次连接起效）

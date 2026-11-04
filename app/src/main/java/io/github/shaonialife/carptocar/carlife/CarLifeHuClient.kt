@@ -199,6 +199,12 @@ class CarLifeHuClient(
     /** 命令帧写锁：心跳线程、握手线程与视频看门狗会并发下发，必须串行写同一条 socket。 */
     private val writeLock = Any()
 
+    /** 车机 GPS 上次下发时刻（节流用；NMEA 本来就 ~1Hz，不必更密）。 */
+    private var lastCarGpsAt = 0L
+
+    /** 车机 GPS 已下发条数（首几条与周期性日志用）。 */
+    private var carGpsSent = 0
+
     @Volatile
     private var versionMatched = false
 
@@ -1194,6 +1200,67 @@ class CarLifeHuClient(
     }
 
     /**
+     * 把车机 GPS 下发给 CarLife+（0x18010 `CarlifeCarGps`）。
+     *
+     * 通道方向是**车机 → 手机**：我们冒充车机，把 AirPlay 侧 0xFFFB 收到的车机定位
+     * 原样转给 CarLife 引擎，手机端地图在「车机定位优先」时就会用车的坐标——车内
+     * 手机 GPS 差（贴膜/仪表台下）时这是唯一能改善导航定位的办法。
+     *
+     * 三条保守约束：
+     *  - 只在命令通道活着时发（[send] 自带判空，未握手前直接 false）；
+     *  - 900ms 节流：NMEA 是 1Hz，重复发只会让引擎反复重建 Location 对象；
+     *  - 由调用方保证 `fixQuality > 0`（无 fix 的样本发给引擎会让地图飘到 0,0）。
+     */
+    fun sendCarGps(
+        fix: CarGpsFix,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (!running.get()) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastCarGpsAt < CAR_GPS_MIN_INTERVAL_MS) return false
+        val ok = send(CarLifeProtocol.HU_CAR_GPS, CarLifeProtocol.carGps(fix, nowMillis))
+        if (!ok) return false
+        lastCarGpsAt = now
+        carGpsSent++
+        if (carGpsSent <= 3 || carGpsSent % 30 == 0) {
+            log(
+                "CARLIFE: 车机 GPS 已下发 #$carGpsSent " +
+                    "%.6f,%.6f 海拔=%.1fm 速度=%.1fkm/h 航向=%.0f° fix=%d 星=%d/%d".format(
+                        fix.latitude,
+                        fix.longitude,
+                        fix.altitudeMeters ?: 0.0,
+                        fix.speedKmh ?: 0.0,
+                        fix.headingDeg ?: 0.0,
+                        fix.fixQuality,
+                        fix.satellitesUsed,
+                        fix.satellitesVisible,
+                    ),
+            )
+        }
+        return true
+    }
+
+    /**
+     * 下车机硬键（0x68008）。目前只用于语音键：车机按下方向盘语音键 → 我们发
+     * `HardKey.VR_START`，CarLife+ 用**手机自己的麦克风**起语音识别。
+     */
+    fun sendHardKeyCode(keycode: Int): Boolean {
+        if (!running.get()) return false
+        val ok = send(CarLifeProtocol.TOUCH_CAR_HARD_KEY_CODE, CarLifeProtocol.carHardKeyCode(keycode))
+        log(
+            "CARLIFE: 车机硬键 0x%02X %s".format(
+                keycode,
+                when (keycode) {
+                    CarLifeProtocol.HardKey.VR_START -> "（语音识别开始）→ CarLife+ 应起小度"
+                    CarLifeProtocol.HardKey.VR_STOP -> "（语音识别结束）"
+                    else -> ""
+                },
+            ) + if (ok) "" else " —— 命令通道不可用，未送达",
+        )
+        return ok
+    }
+
+    /**
      * 只重发 98311 编码初始化（**不碰** 98386）。
      *
      * 引擎收到 98311 会重建编码器并回 65544，我们的 65544 处理里会顺带补 98313
@@ -1786,6 +1853,9 @@ class CarLifeHuClient(
          * 自己的去重拦住、引擎永远不重建编码器。
          */
         private const val ENCODER_INIT_DEDUPE_MS = 5_000L
+
+        /** 车机 GPS 最小下发间隔：NMEA 是 1Hz，900ms 既不漏样本也不重复。 */
+        private const val CAR_GPS_MIN_INTERVAL_MS = 900L
 
         /** 有序初始化：最多等版本匹配这么久（MD_INFO 通常比版本匹配早到约 100ms）。 */
         private const val ORDERED_VERSION_WAIT_MS = 3_000L

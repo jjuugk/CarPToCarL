@@ -17,12 +17,16 @@ import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
+import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
+import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.iap2.NmeaAssembler
+import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.TouchReports
@@ -436,6 +440,88 @@ object SessionController {
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    }
+
+    /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
+    private val carNmea = NmeaAssembler()
+
+    /** 无定位样本的日志计数（车机 1Hz 推，别刷屏）。 */
+    private var carGpsNoFixFrames = 0
+
+    /**
+     * CarLife 控制命令（GPS / 语音键）走独立单线程，队列只留 2 条、满了丢最旧的。
+     *
+     * 为什么不能在收帧线程直接 `send`：那是一笔**本地 socket 写**，一旦 CarLife 引擎
+     * 卡住，写会阻塞 iAP2 收帧线程——而 iAP2 控制通道靠「及时回 ACK」续命（漏 ACK
+     * 车机 10 秒就关通道）。GPS 每秒一条、语音键一次，都是可丢弃/可延迟的数据，
+     * 绝不能让它有能力卡住链路。
+     */
+    private val carLifeCommandSender =
+        java.util.concurrent.ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+            java.util.concurrent.ArrayBlockingQueue(2),
+            { runnable -> Thread(runnable, "carlife-cmd").apply { isDaemon = true } },
+            java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy(),
+        )
+
+    /**
+     * 车机定位 → CarLife（0x18010 `CarlifeCarGps`）。
+     *
+     * 开关见 [CarGpsOption]（设置里「使用车机 GPS」，默认开）。关掉后**一个字节都不发**，
+     * CarLife 继续用手机自己的定位——这是默认行为，也是开关要能回去的状态。
+     *
+     * 只有 [NmeaLocation.Fix.hasPosition] 为真才发：车机在地库/隧道里会持续推一条
+     * 没有经纬度的样本（奥迪就是 `$PASCD,…,C,D,0,…`，fix=0）。把这种样本发给引擎
+     * 会让地图飘到 (0,0)，比不给更糟。
+     */
+    private fun onCarLocation(sentences: List<String>) {
+        if (!CarGpsOption.enabled) return
+        for (sentence in sentences) carNmea.feed(sentence)
+        val merged = carNmea.snapshot() ?: return
+        if (!merged.hasPosition) {
+            carGpsNoFixFrames++
+            if (carGpsNoFixFrames <= 3 || carGpsNoFixFrames % 60 == 0) {
+                appendLog(
+                    "GPS: 车机定位样本无经纬度（${merged.source}，fix=${merged.fixQuality}）" +
+                        "——本次不发 0x18010，CarLife 继续用手机定位" +
+                        if (merged.source == "PASCD") {
+                            "（该车机只发 Apple 私有 \$PASCD，实测形态不含坐标）"
+                        } else {
+                            ""
+                        },
+                )
+            }
+            return
+        }
+        val carFix = toCarGpsFix(merged)
+        carLifeCommandSender.execute { CarLifeHijack.sendCarGps(carFix) }
+    }
+
+    /** NMEA 快照 → CarLife 的单位约定；UTC 日期缺失时用当前 UTC 补（CarLife 只用来标记时刻）。 */
+    private fun toCarGpsFix(fix: NmeaLocation.Fix): CarGpsFix {
+        val now = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC)
+        return CarGpsFix(
+            latitude = fix.latitude ?: 0.0,
+            longitude = fix.longitude ?: 0.0,
+            altitudeMeters = fix.altitudeMeters,
+            speedKmh = fix.speedKmh,
+            headingDeg = fix.headingDeg,
+            fixQuality = fix.fixQuality,
+            satellitesUsed = fix.satellitesUsed,
+            satellitesVisible = maxOf(fix.satellitesVisible, fix.satellitesUsed),
+            hdop = fix.hdop,
+            pdop = fix.pdop,
+            vdop = fix.vdop,
+            utcYear = if (fix.utcYear > 0) fix.utcYear else now.year,
+            utcMonth = if (fix.utcMonth > 0) fix.utcMonth else now.monthValue,
+            utcDay = if (fix.utcDay > 0) fix.utcDay else now.dayOfMonth,
+            utcHour = if (fix.utcYear > 0 || fix.utcHour > 0) fix.utcHour else now.hour,
+            utcMinute = if (fix.utcYear > 0 || fix.utcMinute > 0) fix.utcMinute else now.minute,
+            utcSecond = if (fix.utcYear > 0 || fix.utcSecond > 0) fix.utcSecond else now.second,
+        )
     }
 
     /**
@@ -3223,9 +3309,31 @@ object SessionController {
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
                             created.onMediaKey = { keyCode ->
-                                dispatchMediaKey(keyCode)
-                                appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
+                                // 语音键（HID Consumer 0xCF「Voice Command」）在 CarPlay 里
+                                // 是「叫 Siri」。本机没有 Siri，画面又是 CarLife，所以转成
+                                // CarLife 的 0x68008 KEYCODE_VR_START —— CarLife+ 用自己的
+                                // 麦克风起语音识别，不需要我们回传车机麦克风。
+                                if (keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
+                                    // 同样不占用 iAP2 收帧线程（本地 socket 写可能阻塞）
+                                    carLifeCommandSender.execute {
+                                        val ok = CarLifeHijack.sendVoiceKey()
+                                        appendLog(
+                                            "EVENT: 车机语音键（iAP2 0x6802 0xCF）→ CarLife 硬键 " +
+                                                "0x68008 keycode=0x21 " +
+                                                if (ok) "已送达（CarLife+ 应起语音）" else "未送达（CarLife 未接管）",
+                                        )
+                                    }
+                                } else {
+                                    dispatchMediaKey(keyCode)
+                                    appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
+                                }
                             }
+                            // 车机定位（0xFFFB）→ CarLife 0x18010。只在开关打开且
+                            // 车机真的给了经纬度时才发（见 onCarLocation）。
+                            created.onLocationSamples = { sentences -> onCarLocation(sentences) }
+                            // 新一轮会话：清掉上一轮的定位，别把停车前的位置当成本次定位。
+                            carNmea.reset()
+                            carGpsNoFixFrames = 0
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }

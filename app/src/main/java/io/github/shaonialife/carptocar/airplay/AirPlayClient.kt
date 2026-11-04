@@ -1472,6 +1472,15 @@ class AirPlayClient(
     var onMediaKey: ((Int) -> Unit)? = null
 
     /**
+     * 车机定位回调（iAP2 `0xFFFB LocationInformation`，~1Hz）。
+     *
+     * 通路：隧道 iAP2 控制会话 → 0xFFFB → [VirtualIap2Link] 抽出 NMEA 句子 →
+     * 本回调。由 SessionController 注入，转成 CarLife 的 0x18010 发给 CarLife+。
+     * null = 只记日志、不转发。
+     */
+    var onLocationSamples: ((List<String>) -> Unit)? = null
+
+    /**
      * 「正在播放」信息提供者（歌名/歌手/专辑/播放状态），供虚拟 iAP2 链路的 0x5001
      * NowPlayingUpdate 使用。由 SessionController 在会话建立时注入（数据源 = CarLife
      * 内置播放器经 0x10035 推来的歌名）。null = 始终发空态。
@@ -1501,6 +1510,7 @@ class AirPlayClient(
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
+                    it.onLocationSamples = { sentences -> onLocationSamples?.invoke(sentences) }
                     it.begin()
                     iapLink = it
                 }
