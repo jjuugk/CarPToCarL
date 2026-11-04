@@ -69,6 +69,16 @@ object CarLifeHijack {
     private const val KEY_CONNECT_TYPE_PROBE_RESULT = "carlife_connect_type_probe_result"
 
     /**
+     * 首轮初始化顺序（默认开）：**98386 确认之后**才发第一条 98311。
+     *
+     * 2026-11-04 实证：唯一拿到 1412×654 的那次会话（13:18:53），第一条 98311 是在
+     * 引擎确认 98386 之后 0.45s 才发的；另外三次（11:20 / 13:09 / 13:35）都是热更新
+     * 路径的 98311 抢在 98386 之前 300ms 发出，引擎当场按白名单定档 1280×720。
+     * 关掉这个开关即回到「先 98311 再 98386」的老顺序，用于对照实验。
+     */
+    private const val KEY_ORDERED_INIT = "carlife_ordered_init"
+
+    /**
      * 一次性迁移标记 v1（历史）：曾把劫持对老安装强制开启一次。
      *
      * 2026-10-24 方向变更后被 v2 取代：v2 把被 v1 强开的劫持一次性关回去，
@@ -113,9 +123,13 @@ object CarLifeHijack {
     @Volatile
     private var connectType = 5
 
-    /** 是否启用 CONNECT_TYPE 探测（偏好 `carlife_connect_type_probe`，默认开）。 */
+    /** 是否启用 CONNECT_TYPE 探测（偏好 `carlife_connect_type_probe`，默认关）。 */
     @Volatile
-    private var connectTypeProbe = true
+    private var connectTypeProbe = false
+
+    /** 首轮初始化是否先等 98386 确认（偏好 `carlife_ordered_init`，默认开）。 */
+    @Volatile
+    private var orderedInit = true
 
     /** 帧率变更命令的候选 id（可由偏好覆盖）。 */
     private var probeIds: IntArray = CarLifeProtocol.FRAME_RATE_PROBE_IDS
@@ -444,12 +458,15 @@ object CarLifeHijack {
             .coerceIn(1, 8)
         connectTypeProbe = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_CONNECT_TYPE_PROBE, true)
+            .getBoolean(KEY_CONNECT_TYPE_PROBE, false)
         if (connectTypeProbe) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(KEY_CONNECT_TYPE_PROBE_RESULT, null)
                 ?.let { log("CARLIFE: 上次 CONNECT_TYPE 探测结论：$it") }
         }
+        orderedInit = context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ORDERED_INIT, true)
         probeIds = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_PROBE_IDS, null)
@@ -634,6 +651,7 @@ object CarLifeHijack {
                 initialConnectType = connectType,
                 probeIds = probeIds,
                 connectTypeProbe = connectTypeProbe,
+                orderedInit = orderedInit,
                 onProbeResult = { line ->
                     logSink?.invoke("CARLIFE: [探测] $line")
                     appContext
