@@ -21,6 +21,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
+import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
@@ -465,6 +466,28 @@ object SessionController {
             java.util.concurrent.ArrayBlockingQueue(2),
             { runnable -> Thread(runnable, "carlife-cmd").apply { isDaemon = true } },
             java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy(),
+        )
+
+    /**
+     * 车机语音键 → CarLife 硬键（0x68008）的状态机（1.2.22）。
+     *
+     * 实测这台车的语音键走 AirPlay 事件通道 `requestSiri`（siriAction=2 按下 / 3 松开），
+     * 不是 iAP2 `0x6802` 的 HID `0xCF`；两条通路都收进同一个 [VoiceKeyRouter]，
+     * 由它做边沿触发和「长按才补 VR_STOP」的收尾判定。这里只负责把动作搬去
+     * [carLifeCommandSender]，不占 iAP2 收帧线程。
+     */
+    private val voiceKey =
+        VoiceKeyRouter(
+            send = { keycode ->
+                carLifeCommandSender.execute {
+                    val ok = CarLifeHijack.sendVoiceKey(keycode)
+                    appendLog(
+                        "CARLIFE: 车机语音键 0x%02X → 0x68008 ".format(keycode) +
+                            if (ok) "已送达" else "未送达（CarLife 未接管）",
+                    )
+                }
+            },
+            log = ::appendLog,
         )
 
     /**
@@ -3309,31 +3332,29 @@ object SessionController {
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
                             created.onMediaKey = { keyCode ->
-                                // 语音键（HID Consumer 0xCF「Voice Command」）在 CarPlay 里
-                                // 是「叫 Siri」。本机没有 Siri，画面又是 CarLife，所以转成
-                                // CarLife 的 0x68008 KEYCODE_VR_START —— CarLife+ 用自己的
-                                // 麦克风起语音识别，不需要我们回传车机麦克风。
                                 if (keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
-                                    // 同样不占用 iAP2 收帧线程（本地 socket 写可能阻塞）
-                                    carLifeCommandSender.execute {
-                                        val ok = CarLifeHijack.sendVoiceKey()
-                                        appendLog(
-                                            "EVENT: 车机语音键（iAP2 0x6802 0xCF）→ CarLife 硬键 " +
-                                                "0x68008 keycode=0x21 " +
-                                                if (ok) "已送达（CarLife+ 应起语音）" else "未送达（CarLife 未接管）",
-                                        )
-                                    }
+                                    // 少数车机确实把 Voice Command 放在 HID 0x6802 的
+                                    // Consumer 0xCF 上；留作兜底，和 requestSiri 共用一个状态机。
+                                    voiceKey.onHidDown("iAP2 0x6802 0xCF")
                                 } else {
                                     dispatchMediaKey(keyCode)
                                     appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
                                 }
                             }
+                            // 0x6802 是状态式报告：松手时给空集合，语音键长按靠这个补 VR_STOP。
+                            created.onHidKeysReleased = { usages ->
+                                if (usages.any { ConsumerKeys.keyCodeFor(it) == KeyEvent.KEYCODE_VOICE_ASSIST }) {
+                                    voiceKey.onHidUp("iAP2 0x6802 0xCF")
+                                }
+                            }
                             // 车机定位（0xFFFB）→ CarLife 0x18010。只在开关打开且
                             // 车机真的给了经纬度时才发（见 onCarLocation）。
                             created.onLocationSamples = { sentences -> onCarLocation(sentences) }
-                            // 新一轮会话：清掉上一轮的定位，别把停车前的位置当成本次定位。
+                            // 新一轮会话：清掉上一轮的定位，别把停车前的位置当成本次定位；
+                            // 语音键的按下状态也别跨会话带过来。
                             carNmea.reset()
                             carGpsNoFixFrames = 0
+                            voiceKey.reset()
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
@@ -3585,7 +3606,13 @@ object SessionController {
                                             }
                                         if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
-                                            if (keyCode != 0) {
+                                            lastConsumerUsage = consumerUsage
+                                            if (keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
+                                                // 1.2.21 漏了这条通路：事件通道 hidSendReport
+                                                // 直接调 dispatchMediaKey，语音键会被当成系统键
+                                                // 注入而不是转给 CarLife。和 requestSiri 统一收口。
+                                                voiceKey.onHidDown("hidSendReport 0xCF")
+                                            } else if (keyCode != 0) {
                                                 dispatchMediaKey(keyCode)
                                                 appendLog(
                                                     "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
@@ -3603,6 +3630,12 @@ object SessionController {
                                             // Consumer 设备的「无按键」/释放报文（值为 0 或下标越界）：
                                             // 静默计数，避免释放事件刷屏
                                             consumerReleaseCount++
+                                            if (lastConsumerUsage?.let(ConsumerKeys::keyCodeFor) ==
+                                                KeyEvent.KEYCODE_VOICE_ASSIST
+                                            ) {
+                                                voiceKey.onHidUp("hidSendReport 0xCF")
+                                            }
+                                            lastConsumerUsage = null
                                         } else if (contacts != null) {
                                             // 限频只压 MOVE（拖拽时每秒上百条）；
                                             // **抬起永远记录**——排查手势卡死时最需要看的就是
@@ -3655,6 +3688,23 @@ object SessionController {
                                             iapEventMessageCount++
                                             client.onIapEventBytes(data)
                                         }
+                                    }
+
+                                    "requestSiri" -> {
+                                        // 方向盘的语音键（2026-11-03 08:52 手机日志实测）：
+                                        // 车机在事件通道发 type=requestSiri，params.siriAction =
+                                        // 1 Prewarm（预热）/ 2 ButtonDown / 3 ButtonUp
+                                        // —— 来自 Apple AirPlayCommon.h 的 AirPlaySiriAction。
+                                        // 它**不走** 0x6802 HID 0xCF，所以 1.2.21 那条语音键
+                                        // 链路在这台车上是死代码；这里才是真正的入口。
+                                        val params = command["params"] as? Map<*, *>
+                                        val raw = params?.get("siriAction")
+                                        val action =
+                                            when (raw) {
+                                                is Number -> raw.toInt()
+                                                else -> raw?.toString()?.trim()?.toIntOrNull()
+                                            }
+                                        voiceKey.onSiriAction(action)
                                     }
 
                                     "forceKeyFrame" -> {
@@ -4244,6 +4294,15 @@ object SessionController {
     /** 车机媒体键「释放」报文计数（值为 0 的 1 字节报告，静默丢弃，仅计数备查）。 */
     @Volatile
     private var consumerReleaseCount = 0
+
+    /**
+     * `hidSendReport` 通路最近一次按下的 Consumer usage（1.2.22）。
+     *
+     * 释放报文只有一个 0x00，不带 usage；语音键的 VR_STOP 收尾要靠它判断
+     * 「刚才松开的是不是语音键」，否则松开「下一首」也会把语音识别掐掉。
+     */
+    @Volatile
+    private var lastConsumerUsage: Int? = null
 
     @Volatile
     private var iapEventMessageCount = 0

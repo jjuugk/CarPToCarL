@@ -380,15 +380,15 @@ object CarLifeHijack {
     fun sendCarGps(fix: CarGpsFix): Boolean = client?.sendCarGps(fix) ?: false
 
     /**
-     * 车机语音键 → CarLife 硬键（0x68008 `KEYCODE_VR_START`）。
+     * 车机语音键 → CarLife 硬键（0x68008）。
      *
-     * CarLife+ 收到后用它**自己的麦克风**起语音识别，不需要我们回传车机麦克风，
-     * 所以这里只是一条控制命令，不牵扯音频通道。
+     * [keycode] 取 [CarLifeProtocol.HardKey.VR_START]（起识别）或
+     * [CarLifeProtocol.HardKey.VR_STOP]（长按松手时收尾）。CarLife+ 收到后用它
+     * **自己的麦克风**起语音识别，不需要我们回传车机麦克风，所以这里只是一条控制命令，
+     * 不牵扯音频通道。
      */
-    fun sendVoiceKey(): Boolean =
-        client?.sendHardKeyCode(
-            CarLifeProtocol.HardKey.VR_START,
-        ) ?: false
+    fun sendVoiceKey(keycode: Int = CarLifeProtocol.HardKey.VR_START): Boolean =
+        client?.sendHardKeyCode(keycode) ?: false
 
     /**
      * 当前 CarLife **引擎确认**的编码分辨率（65544 回显值），prewarm 阶段即可用于

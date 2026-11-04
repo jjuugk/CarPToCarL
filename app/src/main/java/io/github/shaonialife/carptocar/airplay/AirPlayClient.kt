@@ -1472,6 +1472,14 @@ class AirPlayClient(
     var onMediaKey: ((Int) -> Unit)? = null
 
     /**
+     * 车机 HID 报告「全松开」时本次释放的 usage 集合（1.2.22）。
+     *
+     * 由 [VirtualIap2Link] 在状态式报告的下跳沿给出，SessionController 据此判断是否
+     * 需要给语音键补 `KEYCODE_VR_STOP`（仅长按时）。
+     */
+    var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
+
+    /**
      * 车机定位回调（iAP2 `0xFFFB LocationInformation`，~1Hz）。
      *
      * 通路：隧道 iAP2 控制会话 → 0xFFFB → [VirtualIap2Link] 抽出 NMEA 句子 →
@@ -1510,6 +1518,7 @@ class AirPlayClient(
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
+                    it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }
                     it.onLocationSamples = { sentences -> onLocationSamples?.invoke(sentences) }
                     it.begin()
                     iapLink = it

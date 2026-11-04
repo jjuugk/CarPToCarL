@@ -810,8 +810,12 @@ class VirtualIap2Link(
     private fun fireHidKeysLocked(usages: List<Int>) {
         val now = nowMillis()
         if (usages.isEmpty()) {
+            val released = lastHidUsages
             lastHidUsages = emptySet()
             hidHoldStartedAtMs = 0L
+            // 真松手才回调（按住期间的重复报告不会走到这里）。只对「刚才有按键」
+            // 的那一次给事件，避免车机空闲时持续推 0x00 把上层刷爆。
+            if (released.isNotEmpty()) onHidKeysReleased?.invoke(released)
             return
         }
         val fresh = usages.filter { it !in lastHidUsages }
@@ -936,6 +940,14 @@ class VirtualIap2Link(
      * 只有 iAP2 链路真正建立后才会来（见 [eventLinkArmed]）。
      */
     var onMediaKey: ((Int) -> Unit)? = null
+
+    /**
+     * 引擎回调：HID 报告从「有按键」变成「全松开」时，本次释放的 usage 集合。
+     *
+     * 1.2.22 新增，给语音键长按 PTT 的 `KEYCODE_VR_STOP` 收尾用。这是状态式报告的
+     * **边沿**：按住时 ~10Hz 连推同一个 usage，只有真正松开才会给空集合，不会刷屏。
+     */
+    var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
 
     /**
      * 引擎回调：车机定位样本（0xFFFB LocationInformation）里的 NMEA 句子。

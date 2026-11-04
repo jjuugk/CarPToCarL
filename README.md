@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk)**
-> —— 主线固定直链（当前 1.2.21，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk)**
+> —— 主线固定直链（当前 1.2.22，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.21，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.21.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.22，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.22.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.21`（正式版；为 **CarLife** 加两条车机能力：① **方向盘语音键**——CarPlay 侧 `0x6802` HID Consumer `0xCF`（Voice Command）经 `ConsumerKeys` 映射后不再注入系统，而是转成 CarLife 控制通道 `0x68008` `KEYCODE_VR_START=0x21`，CarLife+ 用**手机自己的麦克风**起小度；② **车机 GPS 转发**——iAP2 `0xFFFB LocationInformation` 里的 NMEA（`$GPGGA/$GPRMC/$GPGSA`，按 `$` 切分可多句、NUL 补齐）解析后转成 CarLife `0x18010 CarlifeCarGps`（25 字段前 24 个 required），车内手机定位差时用车的坐标；**设置里新增「使用车机 GPS」开关**（默认开，关掉一个字节都不发）；车机只发无经纬度的 `$PASCD` 时自动不发并在日志写明；顺带修 `pbVarint` 字段号 ≥16 时 tag 只写一个字节导致整条消息错位的 bug；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.21.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21/CarPToCarL-1.2.21.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.22`（正式版；**修语音键**：回看车上日志发现语音键根本不走 `0x6802` HID `0xCF`，而是 AirPlay 事件通道 `requestSiri`（`siriAction` 1=Prewarm / 2=ButtonDown / 3=ButtonUp，取自 Apple `AirPlayCommon.h`），1.2.21 那条链路在这些车上是死代码；现在两条通路统一进 `VoiceKeyRouter`，按下发 `0x68008 KEYCODE_VR_START=0x21`，**长按 ≥1.5s 松手才补 `KEYCODE_VR_STOP=0x22`**（短按交给 CarLife+ 自己结束，避免松手就把刚起来的识别掐掉）；同时补上 `hidSendReport` 通路漏掉的语音键转发；1.2.21 的**车机 GPS 转发 + 「使用车机 GPS」开关**不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,53 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.22 —— 2026-11-04（语音键改走 requestSiri + 长按收尾，正式版）
+
+**一、1.2.21 的语音键在这些车上一次都没触发**
+
+把手机上的日志翻出来对了一遍：`CarPToCarL-log-20261103-085250.txt` 08:52:12~42
+连着 9 条 `EVENT: 命令 type=requestSiri params={siriAction=…}`，而 **没有任何一条
+`0x6802` 报文明细、没有任何 `0xCF`**；`/info` 里下发的 Consumer HID 描述符
+（46B 的 Array 版 / 35B 的位图版）列出的 usage 只有
+`0xB0/0xB1/0xB3/0xB4/0xB5/0xB6/0xB9/0xBC/0xCD`，**没有 Voice Command**。
+
+也就是说：这台车的方向盘语音键走的是 **AirPlay 事件通道 `requestSiri`**，不是 iAP2
+HID。1.2.21 里那条 `0x6802 0xCF → 0x68008 0x21` 是死代码（别的车型可能真的用 0xCF，
+故保留作兜底）。另外事件通道 `hidSendReport` 那条路直接调 `dispatchMediaKey`，
+即使真来了 0xCF 也只会注入系统键而不是转给 CarLife —— 这处也一并补上。
+
+**二、`siriAction` 的取值不是猜的**
+
+Apple `AirPlayCommon.h` 的 `AirPlaySiriAction`：
+`0=NotApplicable / 1=Prewarm / 2=ButtonDown / 3=ButtonUp`。日志形态正好对上：
+只有第一次按键前有 `1`，之后每次按下 `2`、松开 `3`；实测按住时长
+0.89s / 2.15s / 3.69s / 3.87s。
+
+**三、收尾（VR_STOP）怎么补**
+
+新增 `carlife/VoiceKeyRouter.kt`，把 `requestSiri` 与两条 HID 通路收进同一个状态机：
+
+| 事件 | 动作 |
+| --- | --- |
+| `siriAction=1` Prewarm | 只记日志，不触发 CarLife |
+| `siriAction=2` / HID 0xCF 按下 | `0x68008 KEYCODE_VR_START=0x21`（边沿触发，按住连推不重发） |
+| `siriAction=3` / HID 释放，按住 < 1.5s | **不发 VR_STOP**，交给 CarLife+ 自己按静音/超时结束 |
+| `siriAction=3` / HID 释放，按住 ≥ 1.5s | 补 `0x68008 KEYCODE_VR_STOP=0x22`（PTT 收尾） |
+| 15s 内没等到释放 | 状态作废，不猜、不补发 |
+
+为什么不是「松手就 STOP」：`ButtonUp` 只是物理按键状态，CarPlay 里用户常按住语音键
+等提示音、松手后才开口说话；这时立刻发 `VR_STOP` 会把刚起来的识别掐掉。阈值 1.5s
+把「等提示音就松手」（实测 0.89s）和「按住说一句话」（实测 2.15~3.87s）分开。
+详见 [docs/carlife-voice-siri-20261104.md](docs/carlife-voice-siri-20261104.md)。
+
+**四、线程与校验**
+
+- 起/停命令仍走 `carlife-cmd` 单线程，不占 iAP2 收帧线程（ACK 不能被本地 socket 写卡住）。
+- `VirtualIap2Link` 在 HID 状态式报告的**下跳沿**新增 `onHidKeysReleased`，
+  只对「刚才确实有按键」的那一次回调，空闲时车机持续推 0x00 不会刷屏。
+- 单测 **422 例 0 失败**（新增 12 例 `VoiceKeyRouterTest`，含把实测日志的
+  1/2/3/2/3/2/3/2/3 序列重放一遍，断言 4 次 START + 3 次 STOP）。
 
 ### 1.2.21 —— 2026-11-04（CarLife 语音键 + 车机 GPS 转发，正式版）
 
