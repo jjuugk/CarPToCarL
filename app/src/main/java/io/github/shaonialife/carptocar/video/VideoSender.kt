@@ -52,12 +52,23 @@ class VideoSender(
      */
     private val keepAliveWithStats: Boolean = false,
     /**
+     * **车机画布**（`/info displays[0].widthPixels×heightPixels`），VideoConfig 头声明的契约值。
+     *
+     * 真车（Audi/DELPHI、BMW/Cinemo 同款行为）按这个声明的尺寸建解码器与 surface，
+     * 与车机实际画布不符就解不出画面——会话、触摸、心跳全正常，日志一个错都没有。
+     * 所以它优先于任何「码流侧」的尺寸（引擎码流、SPS）。
+     *
+     * 不能省：直通模式下码流尺寸由 CarLife 引擎决定，引擎白名单会降档
+     * （申请 1412×654 实编 1280×720，2026-11-04 奥迪 3810 实测），
+     * 此时若照码流声明，车机拿到的是 720p 画布（≠ 1412×654）→ 整屏黑。
+     */
+    private val canvasSize: (() -> Pair<Int, Int>)? = null,
+    /**
      * 直通模式下**实时**取「引擎实际编码分辨率」的回调（返回 98311 上报的宽高）。
      *
-     * 为什么需要它：会话建立时 CarLife 客户端往往还没握手完成，构造值只能是默认
-     * 1280×720；而 AirPlay SETUP 拿到车机真实分辨率（如 1412×654）后，98311 会改报
-     * 真实值、引擎据此重建编码器。VideoConfig 头声明的画布**必须与码流一致**，否则
-     * 真车按错误画布建解码器 → 黑屏（2026-10-25 实测）。
+     * 只在**没有画布信息**时兜底（`canvasSize` 为空/0）。含义是「码流实际多少」，
+     * 用来跟随引擎中途重建编码器；它不是画布契约——把它当声明值用，就会在
+     * 「画布 ≠ 码流」的车机上黑屏（2026-11-04 奥迪 3810 实测）。
      * 每次发 config 都现取，就永远跟得上。
      */
     private val liveSize: (() -> Pair<Int, Int>)? = null,
@@ -70,6 +81,10 @@ class VideoSender(
     /** 正在重连数据口：保活线程据此跳过写入，避免抢在 socket 置空窗口期抛错自杀。 */
     @Volatile
     private var reconnecting = false
+
+    /** 「画布 ≠ 码流」的提示每轮会话只打一次（config 会随每个 IDR 重发，否则刷屏）。 */
+    @Volatile
+    private var canvasMismatchLogged = false
 
     /**
      * 视频数据口的**唯一写锁**。
@@ -893,32 +908,38 @@ class VideoSender(
         // （Audi/DELPHI）按声明画布建解码器后解不出画面（概率性黑屏，2026-10-19 实测）。
         //
         // 取值优先级：
-        //  **以车机画布（[liveSize] / 构造值）为准，SPS 仅作诊断**。
+        //  **车机画布（[canvasSize]）> 引擎码流（[liveSize]）> 构造值 > SPS**，SPS 仅作诊断。
         //
         //  2026-10-25 曾改成「SPS 优先」（理由：声明应等于码流真实尺寸，否则拉伸），
         //  真机复测出问题已回滚。原因：车机是**按 1412×654 建解码器与 surface** 的，
         //  声明改成 SPS 的 1920×1080 后，车机侧画布/纹理对不上 → 画面异常。
         //  结论：这条链路里「车机画布」才是契约，不能让码流尺寸反过来改写声明。
+        //
+        //  2026-11-04 奥迪 3810（1412×654 画布）黑屏复盘：直通模式把优先级做成
+        //  「引擎码流优先」，引擎白名单把 1412×654@60 降档成 1280×720@20，于是
+        //  声明变成 720p ≠ 画布 → 车机建了 720p 解码器 → 整屏黑；而会话、送帧、
+        //  写入耗时全部正常，测试台（WinPlay/DiPlay 不校验这几个头字段）照样有画面。
+        val canvas = canvasSize?.invoke()
         val live = liveSize?.invoke()
         val parsed = parseSpsDimensions(sps)
         val spsSane = parsed != null &&
             parsed.first in 320..4096 && parsed.second in 180..2304
-        val cfgWidth = when {
-            live != null && live.first > 0 -> live.first
-            width > 0 -> width
-            else -> parsed?.first ?: width
-        }
-        val cfgHeight = when {
-            live != null && live.second > 0 -> live.second
-            height > 0 -> height
-            else -> parsed?.second ?: height
-        }
+        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, parsed)
         if (parsed != null && (parsed.first != cfgWidth || parsed.second != cfgHeight)) {
             log(
                 "VIDEO: SPS 解析 ${parsed.first}x${parsed.second}" +
                     "（${if (spsSane) "宏块对齐值，仅诊断" else "不合理已忽略"}），" +
                     "VideoConfig 声明 ${cfgWidth}x$cfgHeight" +
                     "\n  ↳ SPS ${sps.size}B=" + sps.joinToString(" ") { "%02x".format(it) },
+            )
+        }
+        val streamSize = live?.takeIf { it.first > 0 && it.second > 0 } ?: (width to height)
+        if (!canvasMismatchLogged && (streamSize.first != cfgWidth || streamSize.second != cfgHeight)) {
+            canvasMismatchLogged = true
+            log(
+                "VIDEO: ⚠ 声明的画布 ${cfgWidth}x$cfgHeight 与码流 ${streamSize.first}x${streamSize.second} 不一致" +
+                    "——车机按画布建解码器，画面由车机侧缩放；若仍黑屏，说明这台车要求码流尺寸本身等于画布" +
+                    "（需让 CarLife 引擎按 ${cfgWidth}x$cfgHeight 编码）",
             )
         }
         val avcc = ByteArrayOutputStream(8 + sps.size + pps.size)
@@ -1309,6 +1330,29 @@ class VideoSender(
                 writeLittleEndianFloat(header, 124, body.size.toFloat())
             }
             return if (body.isEmpty()) header else header + body
+        }
+
+        /**
+         * 决定 VideoConfig 头里声明的画布尺寸（纯函数，便于单测）。
+         *
+         * 优先级：车机画布 → 引擎码流 → 构造值 → SPS 解析值。
+         *
+         * 前两级的先后顺序是这个函数的全部意义：真车按声明建解码器，画布是契约；
+         * 引擎码流只是「实际编出来多少」，它比画布小的时候（白名单降档）如果拿它
+         * 去声明，车机就会拿着一个比屏幕小的画布去建解码器 → 黑屏。
+         */
+        internal fun resolveConfigSize(
+            canvas: Pair<Int, Int>?,
+            live: Pair<Int, Int>?,
+            fallbackWidth: Int,
+            fallbackHeight: Int,
+            sps: Pair<Int, Int>?,
+        ): Pair<Int, Int> {
+            canvas?.let { if (it.first > 0 && it.second > 0) return it }
+            live?.let { if (it.first > 0 && it.second > 0) return it }
+            if (fallbackWidth > 0 && fallbackHeight > 0) return fallbackWidth to fallbackHeight
+            sps?.let { if (it.first > 0 && it.second > 0) return it }
+            return fallbackWidth to fallbackHeight
         }
 
         /**
