@@ -151,6 +151,17 @@ class VirtualIap2Link(
     private var mfiChallengeSentAtMs = 0L
     private var mfiFinished = false
 
+    /**
+     * iAP2 控制会话是否真正就绪：链路进入 NORMAL **且** MFi 挑战已应答完。
+     *
+     * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 判定链（固件 `CDeviceDetection`
+     * → `CCarPlayTestController`）要等 `required IAP2 information` 齐了才激活
+     * CarPlay；在那之前收到的 RECORD 会被当成「会话还没起来」。
+     * 屏幕激活必须排在这之后（见 `SessionController` 的 MIB3 二次激活）。
+     */
+    val controlSessionReady: Boolean
+        get() = synchronized(lock) { engine.state == Iap2LinkEngine.State.NORMAL && mfiFinished }
+
     init {
         engine.onEaData = { bytes -> handleEaData(bytes) }
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }

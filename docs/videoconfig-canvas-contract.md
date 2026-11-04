@@ -70,3 +70,33 @@ VIDEO: ⚠ 声明的画布 1412x654 与码流 1280x720 不一致 …      ← �
 ⚠️ 因此「只把声明改成 1412×654、码流仍是 1280×720」并不安全：声明与 SPS 打架时，
 接收端会按声明建解码器/校验头部（固件里对「invalid header frame」有专门的 flush+重发
 workaround）。**正确目标是声明 = SPS = 车机窗口 = 1412×654**，光改声明不算修好。
+
+
+## 2026-11-04 15:00 修正：`params[1]` 是**解码**尺寸，视口在 40/44
+
+上面那套「声明车机画布」只对了一半。4580 的头里有**两组**尺寸，含义不同：
+
+| 偏移 | 字段 | 含义 | 应填 |
+|---|---|---|---|
+| 16 | `params[1]` | 解码器尺寸 | **码流尺寸**（= SPS，本例 1280×720） |
+| 32/36 | `params[3]` | 视口原点 x/y | 0 / 0 |
+| 40/44 | `params[4]` | 视口宽高 | **车机画布**（1412×654） |
+
+依据两条，互相独立：
+
+1. 另一实现（AMCar 1.0.11）的 4580 补丁里写着
+   `4580's parser reads x/y at 32/36 and width/height at 40/44.
+   Encoded dimensions and display view dimensions are separate.`，
+   并且它是「视频尺寸跟随 SPS、视口填 `/info` 画布」；
+2. 本机固件 `opt_ivi_C3.img.swup` 的判定链字符串（`CDeviceDetection` /
+   `CCarPlayTestController`）证实车机侧确实把「解码出来的画面」与「贴到哪块矩形」分开处理。
+
+所以 11:08 那次黑屏的**直接原因不是「声明了 720p」**，而是「30 年以来只写了 16，
+32..48 全是 0」——车机没有视口可用。把 16 改成 1412×654 只会让它与 SPS 打架
+（13:48 实测：65544 原样回 1412×656，SPS 仍是 1280×720，首个 IDR 被判 invalid header）。
+
+实现：`VideoSender.viewAreaSize` → `buildVideoConfigHeader(..., viewArea)` 写 32/36/40/44。
+开关 `videoconfig_canvas_mode`：
+
+- `stream`（默认）：16 = 码流尺寸，40/44 = 车机画布 —— 分离声明；
+- `car`：16 = 车机画布，不写视口 —— 旧行为，留作对照。

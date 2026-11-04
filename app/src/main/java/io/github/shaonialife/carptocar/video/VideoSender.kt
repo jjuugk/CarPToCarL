@@ -72,6 +72,20 @@ class VideoSender(
      * 每次发 config 都现取，就永远跟得上。
      */
     private val liveSize: (() -> Pair<Int, Int>)? = null,
+    /**
+     * **显示视口**（VideoConfig 头 `params[3]` / `params[4]`，偏移 32/36 与 40/44）。
+     *
+     * 和 `params[1]` 的编码尺寸是**两个不同字段**，4580（AUDI 3810 / DELPHI MIB3）
+     * 的解析器分开读：32/36 是视口左上角 x/y，40/44 是视口宽高。它决定「解出来的
+     * 画面贴在屏幕哪块矩形上」，而不是解码器开多大。
+     *
+     * 所以「码流只能 1280×720、画布是 1412×654」的正确解法不是把编码尺寸改成
+     * 画布值（那样与 SPS 打架，13:48 实测被判 invalid header），而是：
+     * 编码尺寸照实报 1280×720，视口报 1412×654，由车机自己缩放。
+     *
+     * 传 null = 不写这几个字段（旧行为，保持向后兼容）。
+     */
+    private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -960,11 +974,13 @@ class VideoSender(
         // 头部必须与 catplay `ScreenFrame::config` 一致，否则部分车机（Audi/DELPHI 实测：
         // 连接与触摸都正常、车机屏全黑）会把后续加密帧按明文 NAL 解析 → 解码失败：
         //  - small_param[1] |= ScreenFlag::Encrypted(0x04)：声明「视频帧是加密的」
-        //  - params[1] = (width, height) 两个 f32 LE：车机据此建立解码器画布
+        //  - params[1] = (width, height) 两个 f32 LE：解码器尺寸（= 码流尺寸）
+        //  - params[3] = (x, y) / params[4] = (width, height)：显示视口
         //  - params[0] 归零（catplay 的 config 不带 PTS；只有 VideoFrame 才写 params[0]）
         // 旧实现三项都没写——DiPlay/WinPlay 只读 body、不校验头，所以测试台一直正常，
         // 真车（Audi 4851）却黑屏（2026-10-19 用户日志）。
-        val header = buildVideoConfigHeader(body.size, cfgWidth, cfgHeight)
+        val viewArea = viewAreaSize?.invoke()?.takeIf { it.first > 0 && it.second > 0 }
+        val header = buildVideoConfigHeader(body.size, cfgWidth, cfgHeight, viewArea)
         synchronized(writeLock) {
             // config 帧是明文，但同样不能插在别的帧中间（否则接收端按半帧解析）。
             output.write(header)
@@ -975,8 +991,9 @@ class VideoSender(
         log(
             "VIDEO: ✓ VideoConfig 已发送 avcC=${body.size}B（SPS ${sps.size}B/PPS ${pps.size}B，" +
                 "profile=${sps[1].toInt() and 0xFF} level=${sps[3].toInt() and 0xFF} " +
-                "flags=0x%02x ${cfgWidth}x$cfgHeight）".format(header[6].toInt() and 0xFF) +
-                "\n  ↳ 头部前 24 字节=" + header.take(24).joinToString(" ") { "%02x".format(it) },
+                "flags=0x%02x 解码=${cfgWidth}x$cfgHeight 视口=${viewArea ?: "未声明"}）"
+                    .format(header[6].toInt() and 0xFF) +
+                "\n  ↳ 头部前 48 字节=" + header.take(48).joinToString(" ") { "%02x".format(it) },
         )
     }
 
@@ -1281,6 +1298,12 @@ class VideoSender(
         /** VideoConfig 头部 `params[1]` 的偏移：8 + 1×8，两个 f32 LE = 宽、高。 */
         private const val CONFIG_WIDTH_HEIGHT_OFFSET = 16
 
+        /** `params[3]` 的偏移（8 + 3×8）：视口左上角 x、y，两个 f32 LE。 */
+        internal const val VIEW_AREA_ORIGIN_OFFSET = 32
+
+        /** `params[4]` 的偏移（8 + 4×8）：视口宽、高，两个 f32 LE。4580 按这里缩放画面。 */
+        internal const val VIEW_AREA_SIZE_OFFSET = 40
+
         /** 屏幕流 keepAlive 间隔（catplay `DEFAULT_KEEP_ALIVE` = 1s）。 */
         private const val KEEPALIVE_INTERVAL_MS = 1_000L
 
@@ -1358,16 +1381,22 @@ class VideoSender(
         /**
          * VideoConfig 帧头（catplay `ScreenFrame::config` 逐字节对齐）：
          *  - `small_param[1]`（偏移 6）置 Encrypted(0x04) —— 声明后续视频帧是密封的
-         *  - `params[1]`（偏移 16）= 宽、高两个 f32 LE —— 车机据此建解码器画布
+         *  - `params[1]`（偏移 16）= 宽、高两个 f32 LE —— **解码器**尺寸（= 码流尺寸）
+         *  - `params[3]`/`params[4]`（偏移 32/40）= 视口 x,y / 宽,高 —— **显示**尺寸
          *  - `params[0]`（偏移 8..16）保持 0 —— config 不带 PTS
          *
          * 拆成纯函数是为了单测：真车（Audi 4851）缺这两项时**会话不断、触摸正常、屏全黑**，
          * 日志里看不出任何错误，极难排查。
+         *
+         * **编码尺寸与显示尺寸必须分开**：4580 的解析器在 32/36 读视口原点、40/44 读
+         * 视口宽高；把编码尺寸直接写成画布值会与 SPS 打架（13:48 实测被判 invalid
+         * header）。正确形态是「解码 1280×720 + 视口 1412×654」，缩放交给车机。
          */
         internal fun buildVideoConfigHeader(
             bodySize: Int,
             width: Int,
             height: Int,
+            viewArea: Pair<Int, Int>? = null,
         ): ByteArray {
             val header = ByteArray(HEADER_LEN)
             header[0] = (bodySize and 0xFF).toByte()
@@ -1381,6 +1410,14 @@ class VideoSender(
                 header[CONFIG_WIDTH_HEIGHT_OFFSET + index] = ((widthBits ushr (8 * index)) and 0xFF).toByte()
                 val heightBits = height.toFloat().toRawBits()
                 header[CONFIG_WIDTH_HEIGHT_OFFSET + 4 + index] = ((heightBits ushr (8 * index)) and 0xFF).toByte()
+            }
+            if (viewArea != null) {
+                // 4580 的解析器在 32/36 读视口 x/y、40/44 读视口宽高：
+                // 编码尺寸（params[1]）与显示尺寸（params[4]）是分开的两个概念。
+                writeLittleEndianFloat(header, VIEW_AREA_ORIGIN_OFFSET, 0f)
+                writeLittleEndianFloat(header, VIEW_AREA_ORIGIN_OFFSET + 4, 0f)
+                writeLittleEndianFloat(header, VIEW_AREA_SIZE_OFFSET, viewArea.first.toFloat())
+                writeLittleEndianFloat(header, VIEW_AREA_SIZE_OFFSET + 4, viewArea.second.toFloat())
             }
             return header
         }

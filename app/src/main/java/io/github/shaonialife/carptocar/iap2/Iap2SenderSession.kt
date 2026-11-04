@@ -1437,6 +1437,37 @@ class Iap2SenderSession(
                     "security=${fromSession.securityType} psk=${if (fromSession.passphrase.isEmpty()) "(空)" else "***"}",
             )
         }
+        // param 6 / 8：连接相关但此前整体未读。
+        // SDKVersion 只为把「对方是哪一代实现」写进日志；
+        // mutualAuth 必须单独一行：它=1 时失败点会落在 AirPlay 认证段，
+        // 而表面症状是「端点全对、就是连不上」，不点名会查很久。
+        val sdkVersion = CarPlayStartSessionParams.sdkVersion(params[6]?.value)
+        val mutualAuth = CarPlayStartSessionParams.mutualAuth(params[8]?.value)
+        if (mutualAuth) {
+            log(
+                "iap2 0x4301 ★ param8 mutualAuth=1——车机要求双向认证。" +
+                    "本实现只做单向（0xAA00~0xAA03 由配件证明自己），" +
+                    "若随后卡在 AirPlay 认证段，先怀疑这一条而不是报文格式",
+            )
+        } else if (params[8] != null) {
+            log("iap2 0x4301 param8 mutualAuth=0——单向认证即可")
+        }
+        // param 4：只有 64 hex 才是静态公钥。4580 给的是 UUID，旧实现会把它
+        // 一路传到配对校验里，然后在 hexToBytes 抛异常后静默变成 null ——
+        // 「端点全对、配对就是过不去」就是这么来的。这里先判形态再点名。
+        val param4Raw = CarPlayStartSessionParams.param4Text(params[4]?.value)
+        val publicKey = CarPlayStartSessionParams.publicKey(params[4]?.value)
+        if (param4Raw != null && publicKey == null) {
+            val kind =
+                when {
+                    CarPlayStartSessionParams.UUID_PATTERN.matches(param4Raw) -> "UUID"
+                    else -> "${param4Raw.length} 字符"
+                }
+            log(
+                "iap2 0x4301 param4 = $kind（不是 64 hex 公钥）——不当静态公钥用，" +
+                    "配对走 pair-setup 完整流程：${param4Raw.take(40)}",
+            )
+        }
         return CarPlayEndpoint(
             ssid = ap?.ssid ?: "",
             passphrase = ap?.passphrase ?: "",
@@ -1444,7 +1475,7 @@ class Iap2SenderSession(
             securityType = ap?.securityType ?: 0,
             airPlayPort = params[2]?.value?.asU32() ?: 0,
             deviceIdentifier = params[3]?.value?.asStringOrEmpty(),
-            publicKey = params[4]?.value?.asStringOrEmpty(),
+            publicKey = publicKey,
             sourceVersion = params[5]?.value?.asStringOrEmpty(),
             ipAddresses = addresses,
         )
