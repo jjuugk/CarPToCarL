@@ -310,9 +310,11 @@ object CarLifeHijack {
      * 当前 CarLife **引擎确认**的编码分辨率（65544 回显值），prewarm 阶段即可用于
      * 计算推流画布。
      *
-     * 这是给**视频声明**用的基准：声明必须与引擎真实码流（SPS）一致，否则车机按错误
-     * 画布建解码器 → 拆链。引擎白名单外会降档（申请 1972×520 实编 1280×720），所以
-     * 这里取**确认值**而非申请值。触摸映射请用 [touchVideoSize]。
+     * 这是「码流有多大」，**不是 VideoConfig 声明的依据**：真车按车机画布（`/info`
+     * `displays[0]`）建解码器，声明跟码流走时，引擎一旦白名单降档（申请 1412×654
+     * 实编 1280×720）车机就会拿 720p 画布去解 1412×654 的屏 → 整屏黑
+     * （2026-11-04 奥迪 3810 实测）。声明请用 [SessionController] 传给 VideoSender 的
+     * `canvasSize`，这里只作为没有画布信息时的兜底。触摸映射请用 [touchVideoSize]。
      */
     val videoSize: Pair<Int, Int>
         get() = client?.negotiatedSize ?: (1280 to 720)

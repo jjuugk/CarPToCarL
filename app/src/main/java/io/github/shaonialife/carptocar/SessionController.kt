@@ -3768,9 +3768,11 @@ object SessionController {
                                         (420f * minOf(streamW, streamH) / 540f)
                                             .toInt()
                                             .coerceIn(120, 1680)
-                                    // 直通模式下码流分辨率由 CarLife 决定（默认 1280×720）：
-                                    // VideoConfig 里声明的流尺寸必须与 H.264 SPS 一致，否则车机
-                                    // 按 SETUP 画布建解码器后会解不出画面。非直通路径沿用缩放值。
+                                    // 直通模式下码流分辨率由 CarLife 决定（默认 1280×720，引擎
+                                    // 白名单还会把非标尺寸降档）：这里的构造值只是**兜底**，
+                                    // VideoConfig 真正声明的是车机画布（见 canvasSize），
+                                    // 不能用码流尺寸反过来改写声明——那会让车机按比屏幕小的
+                                    // 画布建解码器，整屏黑（2026-11-04 奥迪 3810 实测）。
                                     val hijackMode = context != null && CarLifeHijack.isEnabled(context)
                                     val streamOutW: Int
                                     val streamOutH: Int
@@ -3824,10 +3826,22 @@ object SessionController {
                                             targetFps = sessionTargetFps,
                                             log = { line -> appendLog(line) },
                                             keepAliveWithStats = setup.keepAliveSendStatsAsBody,
-                                            // 直通模式：VideoConfig 声明实时跟随 98311 上报值。
-                                            // 此刻 CarLife 客户端可能还没握手完成（构造值只是
-                                            // 默认 1280×720），等引擎按车机真实分辨率重建编码器后，
-                                            // 这里每次发 config 都会取到最新值，声明永远与码流一致。
+                                            // VideoConfig 头声明的画布 = 车机 /info 通告的画布。
+                                            // 真车按它建解码器与 surface，与画布不符就黑屏
+                                            // （2026-11-04 奥迪 3810：画布 1412×654、直通码流
+                                            // 被引擎降档成 1280×720，照码流声明 → 整屏黑）。
+                                            canvasSize =
+                                                if (setup.displayFromCar &&
+                                                    setup.displayWidth > 0 &&
+                                                    setup.displayHeight > 0
+                                                ) {
+                                                    { setup.displayWidth to setup.displayHeight }
+                                                } else {
+                                                    null
+                                                },
+                                            // 直通模式：码流实际尺寸（98311 上报值），**仅作兜底**——
+                                            // 没有画布信息时才用它；有画布时不能用，否则画布会被
+                                            // 码流带偏（同理见 canvasSize 注释）。
                                             liveSize =
                                                 if (hijackMode) {
                                                     { CarLifeHijack.videoSize }
