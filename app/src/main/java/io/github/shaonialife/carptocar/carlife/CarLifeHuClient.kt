@@ -152,6 +152,21 @@ class CarLifeHuClient(
     private val connectTypeProbe: Boolean = false,
     /** 探测结论（每轮一行 + 最后一行汇总），供上层写盘/打日志。 */
     private val onProbeResult: (String) -> Unit = {},
+    /**
+     * 首轮初始化顺序：**先 98386、等引擎确认，再发第一条 98311**。
+     *
+     * 2026-11-04 日志实证这是「能不能拿到 1412×654」的唯一分水岭：
+     * - 13:18:52.8 引擎先接受 98386（DISABLE_RESOLUTION_OPTION=1 分辨率直通），
+     *   1.2s 后第一条 98311 才带 1412×654 → **引擎原样接受 1412x654@60**，
+     *   码流真实分辨率 1412x654，出帧正常；
+     * - 13:09 / 11:20 / 13:35 三次会话，第一条 98311 都抢在 98386 **之前**
+     *   （热更新路径 300ms 就发）→ 引擎当场按白名单定档 1280×720，
+     *   之后不管再补几次 98386 + 98311，65544 一律回 1280×720（会话内已定档）。
+     *
+     * 也就是说：`DISABLE_RESOLUTION_OPTION` 必须**赶在引擎第一次建编码器之前**生效，
+     * 否则就是个摆设。这条开关默认开着，出问题可在偏好 `carlife_ordered_init` 关掉复原。
+     */
+    private val orderedInit: Boolean = true,
 ) {
 
     private val running = AtomicBoolean(false)
@@ -313,6 +328,19 @@ class CarLifeHuClient(
     @Volatile
     private var connectType = initialConnectType.coerceIn(1, 8)
 
+    /**
+     * 本次会话的首条 98311 是否已经发出（[orderedInit] 的闸门）。
+     *
+     * 未发出之前，[setRequestedResolution] **只更新申请值、不立刻重发**——否则那条
+     * 300ms 抢跑的热更新会赶在 98386 确认前把引擎的档位定死（见 [orderedInit] 注释）。
+     */
+    @Volatile
+    private var firstInitSent = false
+
+    /** 引擎是否已确认 98386（MD_FEATURE_CONFIG_DONE）。有序初始化要等它。 */
+    @Volatile
+    private var featureConfigAcked = false
+
     // ---- CONNECT_TYPE 探测状态 ----
 
     /** 剩余待试的 CONNECT_TYPE（首元素永远是「当前值」，由 [probeCandidates] 生成）。 */
@@ -423,6 +451,9 @@ class CarLifeHuClient(
         touchOut = sockets[CarLifeProtocol.PORT_TOUCH]?.getOutputStream()
         running.set(true)
         lastFrameAt = android.os.SystemClock.uptimeMillis()
+        // 首轮有序初始化的闸门：每条新会话都要从「98386 还没确认、首条 98311 还没发」开始。
+        firstInitSent = false
+        featureConfigAcked = false
         // CONNECT_TYPE 探测：只在开启时复位成「待探测」，否则保持已完成态（不会被触发）。
         probeResults.clear()
         probeQueue = if (connectTypeProbe) probeCandidates(connectType) else IntArray(0)
@@ -673,6 +704,41 @@ class CarLifeHuClient(
                 )
                 // 关键：车机必须主动推进，不能等手机下发鉴权
                 Thread {
+                    if (orderedInit) {
+                        // 有条序：等版本匹配 → 98386 → 等确认 → 首条 98311。
+                        // 每一步都可能因为会话结束而放弃，所以处处检查 running。
+                        var waited = 0
+                        while (!versionMatched && running.get() && waited < ORDERED_VERSION_WAIT_MS) {
+                            Thread.sleep(50)
+                            waited += 50
+                        }
+                        if (!running.get()) return@Thread
+                        pushFeatureConfig(logIt = true)
+                        var ackWaited = 0
+                        while (!featureConfigAcked && running.get() && ackWaited < ORDERED_ACK_WAIT_MS) {
+                            Thread.sleep(50)
+                            ackWaited += 50
+                        }
+                        if (!running.get()) return@Thread
+                        if (!featureConfigAcked) {
+                            log(
+                                "CARLIFE: 98386 在 ${ORDERED_ACK_WAIT_MS}ms 内未确认——" +
+                                    "照常发首轮 98311（引擎可能仍按白名单定档）",
+                            )
+                        } else {
+                            log("CARLIFE: 98386 已确认 ${ackWaited}ms —— 现在发首轮 98311（分辨率为直通档）")
+                        }
+                        if (firstInitSent) {
+                            // 视频通道看门狗在冷启动期常常先一步重连并下发（它自己也是
+                            // 98386→98311 的顺序），这里就别再补一发——重复的 98311
+                            // 会把引擎确认帧率打到 20fps（实测 4/4）。
+                            log("CARLIFE: 首条 98311 已由看门狗路径发出——本次不重复下发")
+                            return@Thread
+                        }
+                        log("CARLIFE: 主动推送首轮 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
+                        sendEncoderInit(force = true)
+                        return@Thread
+                    }
                     Thread.sleep(1200)
                     log(
                         "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
@@ -721,6 +787,7 @@ class CarLifeHuClient(
             }
 
             CarLifeProtocol.MD_FEATURE_CONFIG_DONE -> {
+                featureConfigAcked = true
                 log("CARLIFE: 引擎已接受特征配置（CONNECT_TYPE=$connectType）")
             }
 
@@ -815,7 +882,7 @@ class CarLifeHuClient(
                 }
                 connectType = next
                 log("CARLIFE: [探测] 换 CONNECT_TYPE=$next 重问（已试 ${probeResults.size} 档）")
-                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+                pushFeatureConfig()
                 // 等引擎消化特征配置再问尺寸：实测 98386 → 65570 约 0.7s，留足余量。
                 Thread.sleep(PROBE_AFTER_FEATURE_MS)
                 if (!running.get() || probeFinished) return@Thread
@@ -863,7 +930,7 @@ class CarLifeHuClient(
         val verdict = if (reason == "命中") {
             "命中 CONNECT_TYPE=$connectType（确认 ${videoWidth}x$videoHeight）"
         } else {
-            "没有任何一档能给出 ${requestedWidth}x$requestedHeight}"
+            "没有任何一档能给出 ${requestedWidth}x$requestedHeight"
         }
         onProbeResult("$verdict｜$reason｜$tried")
         if (reason != "命中" && connectType != PROBE_DEFAULT_TYPE) {
@@ -878,9 +945,7 @@ class CarLifeHuClient(
     /** 绕开 [sendEncoderInit] 的 5s 去重窗——探测必须能立刻重问。 */
     @Synchronized
     private fun forceEncoderInit() {
-        lastEncInitSig = null
-        lastEncInitAt = 0L
-        sendEncoderInit()
+        sendEncoderInit(force = true)
     }
 
     /**
@@ -1097,10 +1162,18 @@ class CarLifeHuClient(
         val w = width.coerceAtLeast(320)
         val h = height.coerceAtLeast(180)
         if (w == requestedWidth && h == requestedHeight) return
-        log("CARLIFE: 车机分辨率申请更新 ${requestedWidth}x$requestedHeight → ${w}x$h，重发 98311")
+        log("CARLIFE: 车机分辨率申请更新 ${requestedWidth}x$requestedHeight → ${w}x$h")
         requestedWidth = w
         requestedHeight = h
-        if (running.get()) resendEncInit()
+        if (!running.get()) return
+        if (shouldDeferHotResend(orderedInit, firstInitSent)) {
+            // 这条热更新以前会在 300ms 内抢跑（车机 /info 一到就触发），从而**赶在 98386
+            // 确认之前**把引擎的档位定死成 1280×720。有序模式下只改申请值，
+            // 由握手线程在 98386 确认后带着新值发首条 98311。
+            log("CARLIFE: 首条 98311 尚未发出——本次申请随它一起下发（不抢先定档）")
+            return
+        }
+        resendEncInit()
     }
 
     /**
@@ -1121,13 +1194,32 @@ class CarLifeHuClient(
         }.apply { isDaemon = true }.start()
     }
 
+    /**
+     * 下发 98386 特征配置（唯一出口）。
+     *
+     * 集中一处是为了顺手重置 [featureConfigAcked]：有序初始化靠这个标志判断「引擎到底
+     * 收没收到 DISABLE_RESOLUTION_OPTION」，忘了重置就会把上一轮的确认当成这一轮的，
+     * 于是 98311 照样抢跑，整条改动白做。
+     */
+    private fun pushFeatureConfig(logIt: Boolean = false) {
+        featureConfigAcked = false
+        if (logIt) {
+            log(
+                "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
+                    "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
+                    "DISABLE_RESOLUTION_OPTION=1 分辨率直通，MEDIA_LYRIC_SUPPORT=1 歌词）",
+            )
+        }
+        send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+    }
+
     /** 重发 98386 特征配置 + 98311 编码初始化，让引擎重建编码器（异步，避免阻塞看门狗）。 */
     private fun restartEncoding() {
         Thread {
             try {
                 Thread.sleep(300)
                 if (!running.get()) return@Thread
-                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+                pushFeatureConfig()
                 Thread.sleep(600)
                 if (!running.get()) return@Thread
                 sendEncoderInit()
@@ -1149,16 +1241,18 @@ class CarLifeHuClient(
      * （间隔 ≥ [NO_FRAME_REINIT_MS] = 10s）和视频口重连后的 [restartEncoding]。
      */
     @Synchronized
-    private fun sendEncoderInit() {
+    private fun sendEncoderInit(force: Boolean = false) {
         val sig = "${requestedWidth}x${requestedHeight}@$videoFps"
         val now = android.os.SystemClock.uptimeMillis()
-        if (sig == lastEncInitSig && now - lastEncInitAt < ENCODER_INIT_DEDUPE_MS) {
+        if (!force && sig == lastEncInitSig && now - lastEncInitAt < ENCODER_INIT_DEDUPE_MS) {
             log("CARLIFE: 98311 跳过重复下发（$sig 刚发过）——重复会让引擎确认值降到 20fps")
             return
         }
         lastEncInitSig = sig
         lastEncInitAt = now
         send(CarLifeProtocol.HU_VIDEO_ENC_INIT, buildEncoderInfo())
+        // 首条一旦发出，引擎的档位就定了；此后分辨率热更新可以直接重发（见 setRequestedResolution）。
+        firstInitSent = true
     }
 
     /**
@@ -1644,6 +1738,17 @@ class CarLifeHuClient(
          */
         private const val ENCODER_INIT_DEDUPE_MS = 5_000L
 
+        /** 有序初始化：最多等版本匹配这么久（MD_INFO 通常比版本匹配早到约 100ms）。 */
+        private const val ORDERED_VERSION_WAIT_MS = 3_000L
+
+        /**
+         * 有序初始化：发完 98386 最多等多久确认。
+         *
+         * 实测确认回包 550~750ms（11:20 / 13:09 / 13:18 / 13:35 四次 0.55~0.73s），
+         * 留 2s 足够；超时就照常发 98311——宁可定档失败，也不能让握手卡死在这儿。
+         */
+        private const val ORDERED_ACK_WAIT_MS = 2_000L
+
         /** CONNECT_TYPE 探测：换档前等多久（必须 > 去重窗，且给本轮推流一点稳定时间）。 */
         private const val PROBE_SETTLE_MS = 6_000L
 
@@ -1674,6 +1779,18 @@ class CarLifeHuClient(
             for (type in 1..8) if (type != start) out += type
             return out.toIntArray()
         }
+
+        /**
+         * 分辨率热更新要不要「让位」给首轮有序初始化。
+         *
+         * 为 true 时只更新申请值、不立刻重发 98311——那条 300ms 抢跑的热更新会赶在
+         * 98386 确认前把引擎档位定死（13:09 / 11:20 / 13:35 三次会话都是这么丢的
+         * 1412×654）。纯函数，便于单测把这条规则钉住。
+         */
+        internal fun shouldDeferHotResend(
+            orderedInit: Boolean,
+            firstInitSent: Boolean,
+        ): Boolean = orderedInit && !firstInitSent
 
         /**
          * 连续重发时的最大间隔（毫秒）。
