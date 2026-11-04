@@ -227,9 +227,15 @@ AirPlay 侧建流失败的样子（`libairplay`）：
 "enhancedSiri": false
 ```
 
-> `viewAreas=true` 这一点和之前几轮改的 VideoConfig 视口字段是同一件事：
-> 车机声明支持 viewArea，手机就会按“解码尺寸 + 视口”分离的方式送流；
-> 只要车机侧 HMI 报告的画布和实际显示层对不上，画面就是黑的或错位，而不会报错。
+> ⚠️ 别把这里的 `viewAreas=true` 和 CarLife `VideoConfig` 的视口字段混为一谈：
+> 前者是 **AirPlay `/info` 能力位**（手机据此送 viewArea 内容描述），后者是 **CarLife 帧头**。
+> 两者不同协议、不同数据通路。本机 195 个 ELF 里没有 CarLife 协议栈，所以固件并不能证明
+> 「4580 会读 CarLife 头 40/44 当视口」；该偏移目前只有 AMCar 1.0.11 补丁一条旁证。
+> 详见 `docs/videoconfig-canvas-contract.md` 末节的可行性复核。
+>
+> 固件能确定的是：HMI 的显示矩形写死为 `carPlayDeviceG35Layout` 1412×654 @(128,66)，
+> 且 `directDecoding=true` / `timestamps=false`；码流比例与之不符时会走渲染层的
+> keep-aspect-ratio 兜底，并受 `badFramesThreshold=4` 约束。
 
 ## 6. 配置实值速查（本车）
 
