@@ -604,6 +604,15 @@ object SessionController {
     private const val AUDIO_PROFILE_PROBE_MS = 20_000L
 
     /**
+     * RECORD 之后等 iAP2 控制会话就绪的上限（ms）。
+     *
+     * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 要等 `required IAP2 information` 齐了
+     * 才激活 CarPlay；在那之前收到的 RECORD 它不认，表现为「会话全绿、屏幕全黑」。
+     * 正常车机走到 RECORD 时链路早已 NORMAL，这条分支根本不会进。
+     */
+    private const val MIB3_REACTIVATE_WAIT_MS = 2_500L
+
+    /**
      * 通话结束后多久重建音频流（ms）。
      * 车机从「通话」切回「媒体」自身有 1~3 秒的资源仲裁过渡，立刻重建会和它抢音频通路，
      * 取 2.5 秒让车机先把通话通路收干净。
@@ -3823,6 +3832,17 @@ object SessionController {
                                         )
                                     }
                                     appendLog("VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}")
+                                    // 车机画布（/info 通告值）：既是「声明画布」模式的 params[1]，
+                                    // 也是「分离声明」模式的视口（params[3]/params[4]）。
+                                    val carCanvas: Pair<Int, Int>? =
+                                        if (setup.displayFromCar &&
+                                            setup.displayWidth > 0 &&
+                                            setup.displayHeight > 0
+                                        ) {
+                                            setup.displayWidth to setup.displayHeight
+                                        } else {
+                                            null
+                                        }
                                     videoSender =
                                         VideoSender(
                                             host = host,
@@ -3839,16 +3859,19 @@ object SessionController {
                                             // 被引擎降档成 1280×720，照码流声明 → 整屏黑）。
                                             canvasSize =
                                                 if (VideoCanvasMode.declareStream) {
-                                                    // 实验模式：声明码流尺寸（= SPS），让车机自己缩放。
-                                                    // 见 VideoCanvasMode 注释——引擎不肯按车机画布编码时，
-                                                    // 「画布≠码流」永远解不出画面，这条路是零成本的替代。
+                                                    // 分离声明模式：params[1] 交给码流尺寸（见下方 liveSize），
+                                                    // 画布改由 viewAreaSize 走 40/44 那两个字段。
                                                     null
-                                                } else if (
-                                                    setup.displayFromCar &&
-                                                    setup.displayWidth > 0 &&
-                                                    setup.displayHeight > 0
-                                                ) {
-                                                    { setup.displayWidth to setup.displayHeight }
+                                                } else {
+                                                    carCanvas?.let { size -> { size } }
+                                                },
+                                            // 视口（params[3] 原点 / params[4] 宽高）= 车机画布。
+                                            // 4580 的解析器把「解码尺寸」和「贴图尺寸」分开读，
+                                            // 所以码流只能 720p 时，正确做法是让视口仍是 1412×654
+                                            // 由车机缩放，而不是把解码尺寸改成画布值（会与 SPS 打架）。
+                                            viewAreaSize =
+                                                if (VideoCanvasMode.declareStream) {
+                                                    carCanvas?.let { size -> { size } }
                                                 } else {
                                                     null
                                                 },
@@ -3891,6 +3914,29 @@ object SessionController {
                                 //   屏幕 SETUP → 连数据端口 → RECORD → 起编码器（出帧）→ 音频 SETUP
                                 // 音频 SETUP 失败只丢声音，视频会话保持。
                                 client.record()
+                                // 4580（AUDI 3810 / DELPHI MIB3）：车机 HMI 要等 iAP2 控制会话
+                                // （链路 NORMAL + MFi 应答）就绪才激活 CarPlay——固件
+                                // `CCarPlayTestController` 在那之前一直是
+                                // "Waiting for required IAP2 information"，此时收到的 RECORD 它不认，
+                                // 现场就是「会话全绿、码流在送、屏幕全黑」。
+                                //
+                                // 正常车机走到这里链路早已 NORMAL → 整段跳过，行为零变化。
+                                if (!client.controlSessionReady) {
+                                    appendLog("MIB3: RECORD 时 iAP2 控制会话尚未就绪——等它就绪后补一次激活")
+                                    if (client.awaitControlSession(MIB3_REACTIVATE_WAIT_MS)) {
+                                        appendLog("MIB3: 控制会话已就绪 → 重新声明主屏资源并补发 RECORD")
+                                        client.assertModes()
+                                        client.record()
+                                        setup.hidDeviceUuids.forEach { uuid ->
+                                            client.sendHidSetInputMode(uuid, mode = 0)
+                                        }
+                                    } else {
+                                        appendLog(
+                                            "MIB3: ${MIB3_REACTIVATE_WAIT_MS}ms 内控制会话仍未就绪" +
+                                                "——保留首次激活，不重复（重复 RECORD 会被车机当噪声）",
+                                        )
+                                    }
+                                }
                                 // RECORD 成功 = 会话活着。此刻丢弃报文缓冲：用户要的是
                                 // 「连不上」的现场，正常连接不需要快照（省空间也省导出体积）。
                                 SessionTrace.markLinked()

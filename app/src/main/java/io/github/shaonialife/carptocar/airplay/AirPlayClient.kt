@@ -1511,6 +1511,38 @@ class AirPlayClient(
         obtainIapLink().onCarBytes(data)
     }
 
+    /**
+     * iAP2 控制会话是否已就绪（链路 NORMAL **且** MFi 应答完成）。
+     *
+     * 未建链路时返回 false——不在这里 `obtainIapLink()`，否则一个只读判断会把
+     * 链路提前创建出来，改变 `armMib3` 的布防时机。
+     */
+    val controlSessionReady: Boolean
+        get() = iapLink?.controlSessionReady == true
+
+    /**
+     * 等 iAP2 控制会话就绪，最多 [timeoutMs]。
+     *
+     * 4580 的 HMI 要等 `required IAP2 information` 齐了才激活 CarPlay，在那之前
+     * 发出去的 RECORD 它不认（固件 `CCarPlayTestController` 的
+     * "Waiting for required IAP2 information"）。所以屏幕激活要能排到就绪之后。
+     *
+     * 返回 false 不代表出错，只代表「没等到」——调用方据此保持已发的激活，不重发。
+     */
+    fun awaitControlSession(timeoutMs: Long = 4_000): Boolean {
+        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (controlSessionReady) return true
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return controlSessionReady
+    }
+
     /** 歌名变化时主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。 */
     fun pushNowPlaying() {
         obtainIapLink().pushNowPlaying()

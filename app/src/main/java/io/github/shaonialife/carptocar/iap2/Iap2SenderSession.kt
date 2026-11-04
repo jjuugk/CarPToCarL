@@ -1795,6 +1795,22 @@ class Iap2SenderSession(
         } else if (params[8] != null) {
             log("iap2 0x4301 param8 mutualAuth=0——单向认证即可")
         }
+        // param 4：只有 64 hex 才是静态公钥。4580 给的是 UUID，旧实现会把它
+        // 一路传到配对校验里，然后在 hexToBytes 抛异常后静默变成 null ——
+        // 「端点全对、配对就是过不去」就是这么来的。这里先判形态再点名。
+        val param4Raw = CarPlayStartSessionParams.param4Text(params[4]?.value)
+        val publicKey = CarPlayStartSessionParams.publicKey(params[4]?.value)
+        if (param4Raw != null && publicKey == null) {
+            val kind =
+                when {
+                    CarPlayStartSessionParams.UUID_PATTERN.matches(param4Raw) -> "UUID"
+                    else -> "${param4Raw.length} 字符"
+                }
+            log(
+                "iap2 0x4301 param4 = $kind（不是 64 hex 公钥）——不当静态公钥用，" +
+                    "配对走 pair-setup 完整流程：${param4Raw.take(40)}",
+            )
+        }
         return CarPlayEndpoint(
             ssid = ap?.ssid ?: "",
             passphrase = ap?.passphrase ?: "",
@@ -1802,7 +1818,7 @@ class Iap2SenderSession(
             securityType = ap?.securityType ?: 0,
             airPlayPort = params[2]?.value?.asU32() ?: 0,
             deviceIdentifier = params[3]?.value?.asStringOrEmpty(),
-            publicKey = params[4]?.value?.asStringOrEmpty(),
+            publicKey = publicKey,
             sourceVersion = params[5]?.value?.asStringOrEmpty(),
             ipAddresses = addresses,
             mutualAuthRequired = mutualAuth,

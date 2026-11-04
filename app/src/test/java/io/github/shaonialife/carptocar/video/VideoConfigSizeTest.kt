@@ -77,4 +77,37 @@ class VideoConfigSizeTest {
         // small_param[1] = Encrypted：不声明的话车机按明文 NAL 解，同样黑屏。
         assertEquals(0x04, header[6].toInt() and 0xFF)
     }
+
+    @Test
+    fun viewAreaIsWrittenSeparatelyFromDecoderSize() {
+        // 4580：解码尺寸与显示视口是两个字段。码流只能 720p 时，
+        // params[1] 报 1280x720、params[4] 报车机画布 1412x654。
+        val header =
+            VideoSender.buildVideoConfigHeader(
+                bodySize = 33,
+                width = 1280,
+                height = 720,
+                viewArea = 1412 to 654,
+            )
+        val decoder = ByteBuffer.wrap(header, 16, 8).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(1280f, decoder.float, 0.001f)
+        assertEquals(720f, decoder.float, 0.001f)
+
+        val origin = ByteBuffer.wrap(header, 32, 8).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0f, origin.float, 0.001f)
+        assertEquals(0f, origin.float, 0.001f)
+
+        val viewport = ByteBuffer.wrap(header, 40, 8).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(1412f, viewport.float, 0.001f)
+        assertEquals(654f, viewport.float, 0.001f)
+    }
+
+    @Test
+    fun viewAreaIsAllZeroWhenNotRequested() {
+        // 不传视口时保持旧行为：32..48 全 0，老车机一个字节都没变。
+        val header = VideoSender.buildVideoConfigHeader(bodySize = 33, width = 1280, height = 720)
+        for (offset in 32 until 48) {
+            assertEquals("offset $offset 应为 0", 0, header[offset].toInt())
+        }
+    }
 }

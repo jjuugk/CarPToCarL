@@ -72,4 +72,39 @@ class CarPlayStartSessionParamsTest {
         assertFalse(CarPlayStartSessionParams.mutualAuth(null))
         assertFalse(CarPlayStartSessionParams.mutualAuth(ByteArray(0)))
     }
+
+    @Test
+    fun publicKeyAcceptsOnlySixtyFourHex() {
+        val key = "ab".repeat(32)
+        assertEquals(key, CarPlayStartSessionParams.publicKey(key.toByteArray()))
+        // 大写也算：车机侧不统一
+        assertEquals("AB".repeat(32), CarPlayStartSessionParams.publicKey("AB".repeat(32).toByteArray()))
+    }
+
+    @Test
+    fun publicKeyTakesLeadingSixtyFourHexWhenTrailingText() {
+        // 有些接收端在公钥后面又拼了别的文本：整串严格等长会把这些判成「无公钥」，
+        // 从能配上退化成配不上。
+        val key = "a".repeat(64)
+        assertEquals(key, CarPlayStartSessionParams.publicKey((key + "publickeyhex").toByteArray()))
+    }
+
+    @Test
+    fun publicKeyRejectsUuidFrom4580() {
+        // 4580 的 param 4 是 UUID（36 字符带连字符）。旧实现原样返回，
+        // 下游 hexToBytes 会在 '-' 上抛异常后静默变 null —— 配对看起来「毫无理由地」失败。
+        val uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        assertNull(CarPlayStartSessionParams.publicKey(uuid.toByteArray()))
+        assertTrue(CarPlayStartSessionParams.UUID_PATTERN.matches(uuid))
+        assertEquals(uuid, CarPlayStartSessionParams.param4Text(uuid.toByteArray()))
+    }
+
+    @Test
+    fun publicKeyRejectsTruncatedOrNonHex() {
+        assertNull(CarPlayStartSessionParams.publicKey("ab".repeat(31).toByteArray()))
+        // 长度够但含非 hex 字符：前 64 位里有 'z'
+        assertNull(CarPlayStartSessionParams.publicKey(("z" + "a".repeat(63)).toByteArray()))
+        assertNull(CarPlayStartSessionParams.publicKey(null))
+        assertNull(CarPlayStartSessionParams.publicKey(ByteArray(0)))
+    }
 }

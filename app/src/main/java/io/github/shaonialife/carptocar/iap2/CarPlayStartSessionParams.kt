@@ -39,6 +39,37 @@ internal object CarPlayStartSessionParams {
         return mac.joinToString(":") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    /**
+     * param 4：接收端静态公钥。**只认前 64 位十六进制**，其余一律当没有。
+     *
+     * 4580（AUDI 3810 / DELPHI MIB3）这一位给的是 **UUID**（`xxxxxxxx-xxxx-...`，
+     * 36 字符带连字符）。旧实现原样返回，下游 `hexToBytes` 会在连字符上抛
+     * `NumberFormatException` 后静默返回 null —— 表面是「端点全对、配对就是过不去」，
+     * 日志里看不出任何异常。这里显式判形态。
+     *
+     * 为什么取「前 64 位」而不是「整串必须 64 位」：实测有接收端在公钥后面又拼了
+     * 别的文本（测试台 mock 就是这种形态），整串严格等于 64 位会把这些全都判成「无公钥」，
+     * 反而从能配上退化成配不上。
+     */
+    fun publicKey(raw: ByteArray?): String? {
+        val text = param4Text(raw) ?: return null
+        if (text.length < PUBLIC_KEY_HEX_LEN) return null
+        return text.take(PUBLIC_KEY_HEX_LEN).takeIf { PUBLIC_KEY_PATTERN.matches(it) }
+    }
+
+    /** param 4 的原文（判形态用；不是公钥时也要能在日志里看见它是什么）。 */
+    fun param4Text(raw: ByteArray?): String? =
+        raw?.toString(Charsets.UTF_8)?.trim('\u0000', ' ')?.filter { it.code in 0x20..0x7E }?.takeIf { it.isNotEmpty() }
+
+    /** 一个 UUID 字面量（4580 的 param 4 是这种）。 */
+    internal val UUID_PATTERN = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+    /** Ed25519 静态公钥的十六进制形态。 */
+    internal val PUBLIC_KEY_PATTERN = Regex("^[0-9a-fA-F]+$")
+
+    /** Ed25519 公钥的十六进制长度（32 字节）。 */
+    internal const val PUBLIC_KEY_HEX_LEN = 64
+
     /** param 6：SDKVersion。缺失返回 null（不是错误，老车机没有这一项）。 */
     fun sdkVersion(raw: ByteArray?): String? {
         val text =
