@@ -187,6 +187,24 @@ object CarLifeHijack {
     @Volatile
     private var requestedH = 0
 
+    /**
+     * 首轮 `98311` 要报的编码分辨率 = **上次连过的车机画布**（[CarCanvasMemory]）。
+     *
+     * 引擎只在创建编码器之前认 98311 的宽高，而 CarLife+ 端口一开我们就得握手
+     * （此时还没连车机、拿不到 `/info` 画布），首轮必然早于画布到达。所以只能用
+     * 「上次的画布」抢在引擎建编码器之前把值报对：同一台车第二次起就按画布编码。
+     * 无缓存时保持引擎默认 1280×720。
+     */
+    @Volatile
+    private var initialCanvasW = CarCanvasMemory.DEFAULT.first
+
+    @Volatile
+    private var initialCanvasH = CarCanvasMemory.DEFAULT.second
+
+    /** prewarm 时拿到的应用上下文，用于落盘「车机画布」（见 [setRequestedResolution]）。 */
+    @Volatile
+    private var appContext: android.content.Context? = null
+
     /** 触摸按下状态（HID 只给 down 布尔，需要自己合成 DOWN/MOVE/UP）。 */
     @Volatile
     private var touchPressed = false
@@ -374,6 +392,22 @@ object CarLifeHijack {
         if (running.get()) return true
         running.set(true)
         logSink = log
+        appContext = context.applicationContext
+        // 上次连过的车机画布：首轮 98311 就按它申请，引擎才有可能在建编码器时就用对尺寸
+        // （详见 CarCanvasMemory 的说明）。没有缓存 = 首次连这台车，只能先用默认 1280×720。
+        val cachedCanvas = CarCanvasMemory.last(context)
+        initialCanvasW = cachedCanvas?.first ?: CarCanvasMemory.DEFAULT.first
+        initialCanvasH = cachedCanvas?.second ?: CarCanvasMemory.DEFAULT.second
+        log(
+            if (cachedCanvas != null) {
+                "CARLIFE: 上次车机画布 ${cachedCanvas.first}×${cachedCanvas.second}（缓存）" +
+                    "——首轮 98311 就按它申请，引擎建编码器即对齐"
+            } else {
+                "CARLIFE: 无车机画布缓存，首轮 98311 用默认 " +
+                    "${CarCanvasMemory.DEFAULT.first}×${CarCanvasMemory.DEFAULT.second}" +
+                    "（首次连某台车只能如此，第二次起自动对齐）"
+            },
+        )
         touchPressed = false
         touchCount = 0
         gestureMoves = 0
@@ -576,13 +610,13 @@ object CarLifeHijack {
                 requestedFps = requestedFps,
                 connectType = connectType,
                 probeIds = probeIds,
-                // 初始申请值始终用引擎默认档 1280×720，车机真实分辨率等 SETUP 后经
-                // setRequestedResolution 动态更新为「申请值」（引擎白名单外仍会降回 1280×720）。
-                // 绝不能把车机超宽画布（如 1972×520）直接当 initialWidth：那会让
-                // videoWidth（引擎确认值，视频声明基准）初始就是超宽值，VideoConfig 声明
-                // 与引擎真实码流错配 → 车机 10s 看门狗拆链（2026-11-03 别克大连屏实证）。
-                initialWidth = 1280,
-                initialHeight = 720,
+                // 首轮申请值 = **上次车机画布**（无缓存则引擎默认 1280×720）。
+                // 引擎只在建编码器之前认这个值，早报才能让它按车机画布编码；等 AirPlay
+                // `/info` 到了再改（setRequestedResolution）已经晚了，引擎只回一个确认值、
+                // 码流尺寸不动（2026-11-04 奥迪 3810：申请 1412×654 实编 1280×720 → 整屏黑）。
+                // 之后拿到的真实画布仍由 setRequestedResolution 覆盖并落盘。
+                initialWidth = initialCanvasW,
+                initialHeight = initialCanvasH,
             )
             if (hu.start()) {
                 client = hu
@@ -893,6 +927,10 @@ object CarLifeHijack {
      * 里 client 才创建），此前的实现 `client?.setRequestedResolution(...)` 在 client 为 null
      * 时把分辨率直接丢了，导致 98311 永远报默认 1280×720、画面被拉伸（2026-10-25 实测）。
      * 现在缓存下来，client 创建时作为 initialWidth/Height 传入。
+     *
+     * **同时落盘**（[CarCanvasMemory]）：下次开机 CarLife 端口先开、`/info` 后到，
+     * 只有记住上次画布才能让引擎在**建编码器之前**就用对尺寸——这条链路晚一步就救不回来。
+     * 只记车机真正通告过的画布：调用方只在 `displayFromCar == true` 时调本方法。
      */
     fun setRequestedResolution(
         width: Int,
@@ -900,6 +938,9 @@ object CarLifeHijack {
     ) {
         requestedW = width
         requestedH = height
+        if (CarCanvasMemory.remember(appContext, width, height)) {
+            logSink?.invoke("CARLIFE: 已记住车机画布 ${width}×${height}（下次开机首轮 98311 就按它申请）")
+        }
         client?.setRequestedResolution(width, height)
     }
 

@@ -3753,10 +3753,15 @@ object SessionController {
                                     CarLifeHijack.setViewSize(setup.displayWidth, setup.displayHeight)
                                     // 同时把车机真实分辨率转给 CarLife 引擎（98311 width/height），
                                     // 让引擎按车机画布编码——取代此前写死的 1920×1080 白申请。
-                                    CarLifeHijack.setRequestedResolution(
-                                        setup.displayWidth,
-                                        setup.displayHeight,
-                                    )
+                                    // 只转「车机真正通告过」的画布：displayFromCar=false 是手机
+                                    // 横屏兜底的假画布，转过去会让引擎按手机尺寸编码，还会被
+                                    // CarCanvasMemory 当成车机画布记下来，越记越偏。
+                                    if (setup.displayFromCar) {
+                                        CarLifeHijack.setRequestedResolution(
+                                            setup.displayWidth,
+                                            setup.displayHeight,
+                                        )
+                                    }
                                     pendingVideoW = streamW
                                     pendingVideoH = streamH
                                     // dock 屏密度随画布短边等比（设计基准 1160×540@420dpi，

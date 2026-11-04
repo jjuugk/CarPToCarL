@@ -114,12 +114,14 @@ class CarLifeHuClient(
     /**
      * 向 CarLife 引擎申请的**初始**编码分辨率（98311 的 width/height 字段）。
      *
-     * 这是车机（HU）告诉手机引擎「我的屏幕多大」的唯一通道。默认 1280×720 与引擎
-     * 实际输出档位对齐（引擎白名单外/非标准分辨率会 `reset2Default` 降回 720p，
-     * 逆向 `VideoResolution.getResolution` 实证）——此前写死 1920×1080 白申请，
-     * 引擎照样回 720p，还让部分车机按错误画布建解码器解不出画面（概率性黑屏根因）。
+     * 这是车机（HU）告诉手机引擎「我的屏幕多大」的唯一通道，而且引擎**只在创建编码器
+     * 之前才认**：编码器起来后再改申请值，引擎只回一个确认值、实际编码尺寸不动
+     * （2026-11-04 奥迪 3810：申请 1412×654@60，回 1280×720@20，重发多少次都是 720p）。
      *
-     * 车机连上后（AirPlay SETUP 通告真实分辨率）由 [setRequestedResolution] 动态更新。
+     * 默认 1280×720 是引擎白名单内的通用档（非标尺寸会 `reset2Default` 降回 720p，
+     * 逆向 `VideoResolution.getResolution` 实证）。真实车机画布由
+     * [io.github.shaonialife.carptocar.carlife.CarLifeHijack] 从「上次连过的车机」缓存里
+     * 取来传进来——因为 CarLife 端口先开、AirPlay `/info` 后到，等知道了画布再申请已经晚了。
      */
     private val initialWidth: Int = 1280,
     private val initialHeight: Int = 720,
@@ -265,12 +267,10 @@ class CarLifeHuClient(
     /**
      * 我们向引擎**申请**的编码分辨率（98311 的 width/height 字段）。
      *
-     * 与 [videoWidth]/[videoHeight]（引擎 65544 回显的确认值）分开存：车机连上后
-     * `setRequestedResolution` 会把申请值改成车机画布（如 1972×520），但引擎白名单
-     * 外会降档、回显值仍是 1280×720。若两者共用一个字段，[negotiatedSize]（视频声明
-     * 用）会在「申请超宽值后、引擎回显前」的窗口里短暂变成车机画布值，导致 VideoConfig
-     * 声明 1972×520 而码流实际 1280×720 —— 车机按错误画布建解码器，10s 看门狗拆链
-     * （2026-11-03 别克大连屏日志实证）。
+     * 与 [videoWidth]/[videoHeight]（引擎 65544 回显的确认值）分开存：申请值是「想要多少」，
+     * 回显值是「引擎说它给多少」，两者在降档时不等（申请 1972×520 实编 1280×720）。
+     * 分开存还有个诊断价值：日志里 `申请 … / 确认 …` 一眼看出引擎是否降档，从而判断
+     * 车机黑屏是「画布不对」还是「码流不对」。
      */
     @Volatile
     private var requestedWidth = initialWidth.coerceAtLeast(320)
@@ -278,7 +278,7 @@ class CarLifeHuClient(
     @Volatile
     private var requestedHeight = initialHeight.coerceAtLeast(180)
 
-    /** 引擎 65544 回显的**确认编码值**（视频声明基准；初始 = 申请值，之后只由回显覆盖）。 */
+    /** 引擎 65544 回显的**确认编码值**（初始 = 申请值，之后只由回显覆盖）。 */
     @Volatile
     private var videoWidth = initialWidth.coerceAtLeast(320)
 
@@ -310,12 +310,13 @@ class CarLifeHuClient(
     val isRunning: Boolean get() = running.get()
 
     /**
-     * 引擎 **65544 回显的确认编码档位**（视频声明基准）。
+     * 引擎 **65544 回显的确认编码档位**。
      *
-     * 语义上等于「引擎真正会编码的分辨率」：申请值（[requestedWidth]/[requestedHeight]）
-     * 可能被引擎白名单降档（申请 1972×520 实编 1280×720），所以视频声明必须用**这个**
-     * 确认值，绝不能拿申请的车机画布值去声明——否则声明与码流错配，车机按错误画布建
-     * 解码器 → 拆链（2026-11-03 别克大连屏实证）。
+     * 语义是「引擎说它会给多少」，但**不等于码流真实尺寸**：引擎会把非白名单申请降档
+     * （申请 1972×520 回 1280×720），也可能沿用上一轮编码器而回一个已过时的值
+     * （2026-11-04 奥迪 3810：回 1280×720，SPS 却是 1412×654）。所以它只作诊断与
+     * 兜底用——VideoConfig 声明的画布以**车机画布**为准（`VideoSender.canvasSize`），
+     * 码流真实尺寸以 SPS 为准（[videoSize]）。
      */
     val negotiatedSize: Pair<Int, Int> get() = videoWidth to videoHeight
 
