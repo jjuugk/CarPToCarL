@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)**
-> —— `switch-pool` 分支（切换连接池）正式包（`1.2.21-switchpool`，versionCode 10221，13.5 MB）；主线包见
+> **[`CarPToCarL-1.2.22-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22-switchpool/CarPToCarL-1.2.22-switchpool.apk)**
+> —— `switch-pool` 分支（切换连接池）正式包（`1.2.22-switchpool`，versionCode 10222，13.5 MB）；主线包见
 > [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) 里的 `CarPToCarL-1.2.17.apk`
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)（1.2.21 之前的历史包见 Releases 页）                    |
+| 本版固定包    | [`CarPToCarL-1.2.22-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22-switchpool/CarPToCarL-1.2.22-switchpool.apk)（1.2.22 之前的历史包见 Releases 页）                    |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.21，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.21-switchpool.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.22，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.22-switchpool.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.21-switchpool`（`switch-pool` 分支正式版；参考 CarVeX 补**送帧闸门**（帧龄/背压可见，结构性堆积才跳 IDR），并把「车机没报 maxFPS 兜 30」改成保留 0——帧率从此按用户选定的规则走「档位声明优先，否则 60」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.21-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.21-switchpool/CarPToCarL-1.2.21-switchpool.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.22-switchpool`（`switch-pool` 分支正式版；移植主线 **EA 会话修复**（0x1D01 协议清单按「参数号可重复」解析，0xEA00 八秒未确认自动补催），并把奥迪 MIB3 档位标注扩到 3801/3874/C8-4580 全家族；依据 C8-4580 固件逆向报告逐条核对（见 docs/mib3-firmware-c8-4580.md）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.22-switchpool.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22-switchpool/CarPToCarL-1.2.22-switchpool.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -883,6 +883,26 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.22-switchpool —— 2026-11-04（`switch-pool` 分支 · 移植主线 EA 会话修复 + C8-4580 固件报告核对）
+
+> 依据《奥迪 MIB3（C8-4580）车机 CarPlay 协议逆向分析报告》逐条核对现有实现：
+> 20 条事实 19 条与现行为一致，唯一新证据是 §5.7（EA 会话）——与 1.2.18 主线在
+> 实车 `Audi_MMI_8349` 上抓到的现象互相印证，故把主线两件 EA 修复原样移植过来。
+> 逐条对照见 [docs/mib3-firmware-c8-4580.md](docs/mib3-firmware-c8-4580.md)。
+
+- **EA 协议清单解析**：车机可用**同一个参数号（10/11/12）重复声明**多个协议
+  （`de.audi.mmiconnectdatatransfer` / `com.audi.cpp.eadata0` / `com.audi.cpp.eadata1`），
+  旧代码 `associateBy { it.id }` 只留最后一个，0xEA00 就只发给了 `eadata1`。
+  改为按出现顺序全收（`iap2/Iap2Ea.parseProtocols`，抽成可单测的纯函数，
+  旧 map 语义留档有单测）。
+- **0xEA00 催问**：它是发后不管，8 秒内没等到 0xEA03 再催一轮（一次为限）——
+  车机可能要等自车 CarPlay 栈起来（AirPlay 流 SETUP 之后）才认 EA 会话。
+- **档位文案**：奥迪 MIB3 档位说明从「覆盖 3801/3874」扩成「覆盖 3801/3874/C8-4580
+  全家族」，行为标志零改动（`ConnectionProfileTest` 「默认档不许改变其它车机」原样全绿）。
+- 单测 **397 例全绿**（新增 4 例：EA 参数号可重复解析、旧 map 语义留档、空体、
+  重复声明去重）。
+- **对默认连接零影响**：非奥迪车机走的默认档路径本轮未触碰。
 
 ### 1.2.21-switchpool —— 2026-11-03（`switch-pool` 分支 · 送帧闸门 + 帧率兜底归零）
 
