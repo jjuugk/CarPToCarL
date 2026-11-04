@@ -53,6 +53,7 @@ import io.github.shaonialife.carptocar.util.ConnectStage
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.util.SysShell
+import io.github.shaonialife.carptocar.video.VideoCanvasMode
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -3821,6 +3822,7 @@ object SessionController {
                                             streamOutH,
                                         )
                                     }
+                                    appendLog("VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}")
                                     videoSender =
                                         VideoSender(
                                             host = host,
@@ -3836,7 +3838,13 @@ object SessionController {
                                             // （2026-11-04 奥迪 3810：画布 1412×654、直通码流
                                             // 被引擎降档成 1280×720，照码流声明 → 整屏黑）。
                                             canvasSize =
-                                                if (setup.displayFromCar &&
+                                                if (VideoCanvasMode.declareStream) {
+                                                    // 实验模式：声明码流尺寸（= SPS），让车机自己缩放。
+                                                    // 见 VideoCanvasMode 注释——引擎不肯按车机画布编码时，
+                                                    // 「画布≠码流」永远解不出画面，这条路是零成本的替代。
+                                                    null
+                                                } else if (
+                                                    setup.displayFromCar &&
                                                     setup.displayWidth > 0 &&
                                                     setup.displayHeight > 0
                                                 ) {

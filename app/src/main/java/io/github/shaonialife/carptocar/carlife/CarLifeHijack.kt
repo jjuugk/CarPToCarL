@@ -140,9 +140,14 @@ object CarLifeHijack {
     @Volatile
     private var orderedInit = true
 
-    /** 首帧之后是否补一次编码初始化（偏好 `carlife_settle_reinit`，默认开）。 */
+    /**
+     * 首帧之后是否补一次编码初始化（偏好 `carlife_settle_reinit`，默认关）。
+     *
+     * 13:53 实测：补的那条 98311 被引擎 1ms 内原样回显（1412x656@20），**没有重建**——
+     * 引擎有活编码器时同样不认这个尺寸。留着只为复盘，默认关，别让它白掉几帧。
+     */
     @Volatile
-    private var settleReinit = true
+    private var settleReinit = false
 
     /** 帧率变更命令的候选 id（可由偏好覆盖）。 */
     private var probeIds: IntArray = CarLifeProtocol.FRAME_RATE_PROBE_IDS
@@ -482,7 +487,7 @@ object CarLifeHijack {
             .getBoolean(KEY_ORDERED_INIT, true)
         settleReinit = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SETTLE_REINIT, true)
+            .getBoolean(KEY_SETTLE_REINIT, false)
         probeIds = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_PROBE_IDS, null)
