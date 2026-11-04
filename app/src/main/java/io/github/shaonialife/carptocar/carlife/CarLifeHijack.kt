@@ -939,7 +939,11 @@ object CarLifeHijack {
         requestedW = width
         requestedH = height
         if (CarCanvasMemory.remember(appContext, width, height)) {
-            logSink?.invoke("CARLIFE: 已记住车机画布 ${width}×${height}（下次开机首轮 98311 就按它申请）")
+            logSink?.invoke(
+                "CARLIFE: 已记住车机画布 ${width}×${height}（下次开机首轮 98311 就按它申请）" +
+                    "——引擎只在建编码器前认这个值：想让当前这轮也生效，" +
+                    "请强制停止 CarLife+ 后重开、再连一次",
+            )
         }
         client?.setRequestedResolution(width, height)
     }
