@@ -188,8 +188,10 @@ object Iap2Csm {
  * 来表达多个 EA 协议，而参数号并不是唯一键。奥迪 MIB3 一次声明三个
  * （de.audi.mmiconnectdatatransfer / com.audi.cpp.eadata0 / com.audi.cpp.eadata1），
  * 旧实现用 `associateBy { it.id }` 只留下最后一个，于是只对 eadata1 发了 0xEA00，
- * 车机一个 0xEA03 都不回、面板永远「等待 0xEA03 会话状态」
- * （2026-11-04 实车日志逐字节核对，见 `docs/audi-mib3-ea-tunnel-20261104.md`）。
+ * 车机一个 0xEA03 都不回、EA 隧道永远建不起来
+ * （2026-11-04 实车日志逐字节核对，见 `docs/audi-mib3-ea-tunnel-20261104.md`；
+ * C8-4580（CL3D）固件报告 §5.7 从车机侧证实：EA 会话正是 AirPlay/车控数据的
+ * 承载管道，少发一个协议就少一条隧道，见 `docs/mib3-firmware-c8-4580.md`）。
  */
 object Iap2Ea {
     /** EA 协议参数号：车机把这几个号各当作一个「EA 协议槽」，可以重复出现。 */

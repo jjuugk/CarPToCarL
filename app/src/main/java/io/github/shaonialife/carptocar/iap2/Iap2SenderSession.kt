@@ -1351,6 +1351,16 @@ class Iap2SenderSession(
         // 完整会话录制：原始报文（含 0x1D01 能力清单这类大包）进 session_trace.log，
         // 与 main_debug.log 的摘要行按时间戳对齐，用于事后离线分析拆链/超时。
         frames.forEach { SessionTrace.csm(SessionTrace.Dir.RX, "bt", it.messageId, it.body) }
+        // 0xEA03（EA 会话状态）是 0xEA00 的唯一回执，催问线程靠 [eaStatusRaw] 判断
+        // 「车机认了没」。必须在帧进入 expect/暂存区之前记账——否则当它是以「非目标帧」
+        // 的身份到达时，只会躺在 [receivedFrames] 里，等主循环下一次派发才被看到；
+        // 若那段等待跨过 8 秒，催问线程就会冤枉地补发一轮 0xEA00。
+        //
+        // 这里只记账不打印：日志与上层回调仍由派发路径上的 handleEaStatus 统一负责，
+        // 避免同一帧打两行。
+        frames.forEach { frame ->
+            if (frame.messageId == Iap2MessageIds.EA_SESSION_STATUS) eaStatusRaw = frame.body
+        }
         frames.forEachIndexed { index, frame -> if (index > 0) receivedFrames += frame }
         return frames.first()
     }
