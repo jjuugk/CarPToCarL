@@ -195,6 +195,8 @@ class Iap2BluetoothServer(
 
     /** 主动结束当前 BT 控制会话（不影响监听）。用于 AirPlay 配对前复现控制通道退役状态。 */
     fun detachCurrentSession() {
+        // 断链之前先把 EA 会话收干净：车机侧没被显式停掉的 EAP/VIWI 会话会挡住下一次连接
+        senderSession?.closeEaSessions("主动断开控制会话")
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()

@@ -46,6 +46,17 @@ class Iap2LinkChannel(
     var peerFrameCount: Int = 0
         private set
 
+    /**
+     * 最近一次收到对端控制帧的时刻（与 [nowMillis] 同一时钟）；0 = 一帧都没收到过。
+     *
+     * 用途：断开前发 0xEA01（StopEASession）之前判断「这条链路还活着吗」。
+     * 奥迪 MIB3 那次拆链（`packet 115 not acknowledged`）里 socket 还是通的、
+     * 心跳照发，但车机从某个序号起**再也没回过任何帧**——这种链路往下写 0xEA01
+     * 只会多一条没人处理的帧，不如干脆不发、直接断。
+     */
+    @Volatile
+    private var lastPeerFrameAt: Long = 0L
+
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
@@ -58,6 +69,7 @@ class Iap2LinkChannel(
         }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             peerFrameCount++
+            lastPeerFrameAt = nowMillis()
             // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
             if (rxFrameLogs < FRAME_LOG_LIMIT) {
                 rxFrameLogs++
@@ -94,6 +106,12 @@ class Iap2LinkChannel(
 
     /** 对端协商的最大控制载荷（已扣除帧头与校验和），协商前为 null。 */
     fun peerMaxControlPayload(): Int? = synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
+
+    /** 距上一次收到对端控制帧过去多少毫秒；-1 = 这轮还一帧都没收到过。 */
+    fun millisSinceLastPeerFrame(): Long {
+        val at = lastPeerFrameAt
+        return if (at == 0L) -1L else nowMillis() - at
+    }
 
     /** 排入一个完整控制载荷；链路已死返回 false。窗口满时内部积压，由 ACK 驱动发出。 */
     fun sendControl(

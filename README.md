@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk)**
-> —— 主线固定直链（当前 1.2.18，13.5 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk)**
+> —— 主线固定直链（当前 1.2.19，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.18，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.18.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.19，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.19.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.18`（正式版；奥迪 MIB3 实车修**车机控制把 iAP2 链路写死**——0xEA03 之前不再往 EA 隧道写 0xEA04，EA 协议按「参数号可重复」解析（0xEA00 现在三个协议都发），控制链路中途掉线会单独补连；另加**音频静音保活**，修「首连导航有声、音乐无声」；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.18.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.18/CarPToCarL-1.2.18.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.19`（正式版；针对「4580 只有第一次能连、断开后卡 WiFi / 卡 AirPlay」改三处：断开前发 **0xEA01 StopEASession** 让车机立刻清掉 EA 会话（不必等它 15s 超时）；**重连间隔下限从 3s 抬到 16s**（跨过固件 `mediaDisconnectTimeout=15000`，否则每次都把车机的「设备移除」计时器续上，它永远停在 `keepIAP2Session=1` 不重建会话）；WiFi **先复用系统已连的车机热点**，不再每轮发 specifier 弹确认框；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,28 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.19 —— 2026-11-04（4580 重连：EA 会话显式收尾 + 跨过车机的 15 秒移除计时，正式版）
+
+> 现场：`4580`（C8/MIB3H，固件 `CL3D_MIB3H_AU_AS_G4x_2502501PROD`）**只有第一次能连**，
+> 断开后一直卡在加入热点或 AirPlay 配对。固件依据见
+> [docs/mib3-firmware-c8-4580.md](docs/mib3-firmware-c8-4580.md) 与
+> [docs/mib3-carplay-display-contract.md](docs/mib3-carplay-display-contract.md)。
+
+- **断开前先发 0xEA01（StopEASession）**：车机对 EA 会话有泄漏保护（固件原文
+  `EAP session for eapSessionIdentifier: %d already exist` /
+  `Failed to start EAP session, another session is already running`）——没被显式停掉的
+  会话会挡住下一次连接，而它自己的清理要等 15 秒超时。三个「不发」的条件都保留了：
+  车机没声明过 EA 协议 / 链路已关 / 对端超过 5 秒没回过帧（停摆的链路写了也没人处理）。
+- **重连间隔下限 3s → 16s，退避阶梯 16/20/30s**：车机 `mediaDisconnectTimeout=15000ms`，
+  蓝牙断开后要等满 15 秒才把设备判成「已移除」。3 秒就重连会把那个计时器一次次续上，
+  车机于是永远停在 `keepIAP2Session=1` + `IAP2 session already running. Waiting for
+  required IAP2 information.` 这条分支，既不重建会话也不重新协商 WiFi/CarPlay 状态——
+  正是「只有冷启动第一次能连」。被动兜底轮数 3 → 2（否则切一次被动要等 48 秒）。
+- **WiFi 先复用、后发 specifier**：断线重连时手机绝大多数时候还在车机热点上，直接
+  `bindProcessToNetwork` 即可；再发一次 `WifiNetworkSpecifier` 就弹一次系统确认框，
+  车上没人点屏，等到超时整轮失败。复用前用 `WifiManager.connectionInfo.ssid` 校验，
+  读不到 SSID（`<unknown ssid>`）时**不猜**，老老实实走原路径。
 
 ### 1.2.18 —— 2026-11-04（奥迪 MIB3：EA 隧道不再写死链路 + 音频静音保活，正式版）
 

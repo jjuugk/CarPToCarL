@@ -493,6 +493,51 @@ class WifiCarPlayConnector(
         return network
     }
 
+    /**
+     * 系统当前是不是已经连在 [ssid] 这条热点上。
+     *
+     * 三种来源都算：用户手动在系统 WLAN 里连过、[registerSuggestion] 登记的建议网络被
+     * 系统自动关联、上一轮的应用专属网络还没被系统拆掉。
+     *
+     * 读不到 SSID 时一律返回 false——Android 11+ 没给定位/附近设备权限时
+     * `connectionInfo.ssid` 是 `<unknown ssid>`，这时**不能**猜，猜错会把进程网络绑到
+     * 家里的 WiFi 上（AirPlay 必然连不上，而且其它应用瞬间断网）。
+     */
+    fun isAssociatedTo(ssid: String): Boolean {
+        val manager = wifiManager ?: return false
+        val info =
+            @Suppress("DEPRECATION")
+            runCatching { manager.connectionInfo }.getOrNull() ?: return false
+        @Suppress("DEPRECATION")
+        if (info.networkId < 0) return false
+        val current = info.ssid ?: return false
+        val plain = current.removePrefix("\"").removeSuffix("\"")
+        if (plain.isEmpty() || plain == UNKNOWN_SSID) return false
+        return plain == ssid
+    }
+
+    /**
+     * 目标热点已经在系统里连着时，**直接把它绑到本进程**——不发 specifier、不弹确认框。
+     *
+     * 为什么优先于 [joinCarPlayNetwork]：specifier 每发一次，系统就要用户在一个确认框上
+     * 点「连接」；车上没人点屏，等到超时（我们 15s / 车机更早）就整轮失败，表现成
+     * 「重连时卡在加入热点」。而断线重连的绝大多数场景里，手机本来就还在车机热点上——
+     * 系统这张关联表还在，缺的只是 `bindProcessToNetwork`。
+     *
+     * 不做校验就绑会绑错网，所以先过 [isAssociatedTo]。
+     *
+     * @return 绑定成功返回网络；未连在该 SSID 上 / 等待超时返回 null（调用方走 specifier）
+     */
+    fun adoptIfAlreadyConnected(
+        ssid: String,
+        timeoutMillis: Long,
+        isCancelled: () -> Boolean = { false },
+    ): Network? {
+        if (!isAssociatedTo(ssid)) return null
+        log("WiFi: 系统已连在 \"$ssid\" 上——直接复用，不再发 specifier（不弹确认框）")
+        return bindCurrentWifiBlocking(timeoutMillis, isCancelled)
+    }
+
     fun release() {
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }
@@ -500,5 +545,10 @@ class WifiCarPlayConnector(
         if (boundNetwork.getAndSet(null) != null) {
             connectivityManager.bindProcessToNetwork(null)
         }
+    }
+
+    private companion object {
+        /** 没权限读 SSID 时系统给的占位值。 */
+        const val UNKNOWN_SSID = "<unknown ssid>"
     }
 }

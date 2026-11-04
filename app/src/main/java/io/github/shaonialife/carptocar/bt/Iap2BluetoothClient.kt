@@ -51,18 +51,30 @@ class Iap2BluetoothClient(
 
         private const val SESSION_TIMEOUT_MILLIS = 90_000L
 
-        /** 主动连 …caff 的基础间隔（退避的第 0 档）。 */
-        private const val RETRY_DELAY_MILLIS = 3_000L
+        /**
+         * 一轮连接结束后，到下一次尝试的**最小间隔**。
+         *
+         * **必须比车机的 `mediaDisconnectTimeout`（15000ms）长**——这是 4580 固件里
+         * `Smartphone_Integrator` 的定值：蓝牙断开后，车机要等满 15 秒才把设备判成
+         * 「已移除」。我们 3 秒就重连，等于每一次都把那个计时器续上，于是车机永远停在
+         * ```
+         * [CDeviceDetection] isDeviceActiveApp=%u, keepIAP2Session=%d
+         * [CDeviceDetection] IAP2 session already running. Waiting for required IAP2 information.
+         * ```
+         * 这条分支（固件原文）：它既不重建会话，也不会重新协商 CarPlay/WiFi 状态——
+         * 现场表现就是「断开后一直卡 WiFi / 卡 AirPlay」，只有冷启动的第一次能连。
+         * 取 16 秒 = 15s + 1s 余量。
+         */
+        private const val RETRY_DELAY_MILLIS = 16_000L
 
         /**
-         * 连续失败（含「连上即被关」）时的退避阶梯：3s → 10s → 20s，之后固定 20s。
+         * 连续失败（含「连上即被关」）时的退避阶梯：16s → 20s → 30s，之后固定 30s。
          *
-         * 为什么不再固定 3 秒：2026-10-28 大众日志里 52 轮、约 300 次连接尝试，全部
-         * 「连入 0.5 秒后车机 socket 关闭」——这台车机只在自己愿意时发起（日志 B 段就是
-         * 它主动连进来的）。密集探测既无用、又不断打断车机侧的节奏；本机的 …cafe 监听
-         * 一直在跑，车机想连随时能连，所以放长间隔不会错过什么。
+         * 起点就从 16 秒开始（见 [RETRY_DELAY_MILLIS]），别再退回秒级：密集探测既
+         * 无用、又会不断把车机的「设备移除」计时器续上。本机的 …cafe 监听一直在跑，
+         * 车机想连随时能连，放长间隔不会错过什么。
          */
-        private val RETRY_BACKOFF_MILLIS = longArrayOf(3_000L, 10_000L, 20_000L)
+        private val RETRY_BACKOFF_MILLIS = longArrayOf(16_000L, 20_000L, 30_000L)
 
         /** 会话存活不足这个时长就当作「无效轮」（车机连上就关），计入退避。 */
         private const val SESSION_USEFUL_MILLIS = 3_000L
@@ -72,7 +84,7 @@ class Iap2BluetoothClient(
 
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
 
-        /** 目标连不上多少轮后放开限制（3s/轮 → 约 6s 后回退，旧行为要等 40s+）。 */
+        /** 目标连不上多少轮后放开限制（16s/轮 → 约 32s 后回退，避免一个死目标堵死整轮）。 */
         private const val TARGET_FALLBACK_ROUNDS = 2
 
         /** 「蓝牙已连接→已断开」日志节流（车机可能反复自动重连，避免刷屏）。 */
@@ -86,9 +98,11 @@ class Iap2BluetoothClient(
 
         /**
          * 连续多少轮「主动方向在 SDP 层就失败」后切被动等车机连入。
-         * 3 轮 × 3s ≈ 9 秒——够试两三次「先直连、再断配置文件重试」，又不至于让用户干等。
+         * 2 轮 × 16s ≈ 32 秒——SDP 里没有 …caff 说明车机没开无线窗口，主动侧再试
+         * 也没用；而单轮间隔已经被 [RETRY_DELAY_MILLIS] 拉到 16 秒，轮数必须跟着降，
+         * 否则光是切到被动就要干等 48 秒。
          */
-        private const val PASSIVE_FALLBACK_ROUNDS = 3
+        private const val PASSIVE_FALLBACK_ROUNDS = 2
 
         /** 被动等待窗口（对照参考实现的 60s/120s 等待窗，取短的一档）。 */
         private const val PASSIVE_WAIT_MILLIS = 60_000L
@@ -369,7 +383,7 @@ class Iap2BluetoothClient(
                 }
             if (candidates.isEmpty()) {
                 log("BT-C: 没有已配对的蓝牙设备——请先在系统设置里与车机完成蓝牙配对")
-                sleepQuietly(RETRY_DELAY_MILLIS * 3)
+                sleepQuietly(RETRY_DELAY_MILLIS)
                 continue
             }
             var connected: BluetoothSocket? = null
@@ -477,7 +491,7 @@ class Iap2BluetoothClient(
                             ) {
                                 "——车机 SDP 里没有无线 CarPlay 的 iAP2 服务（未开无线 CarPlay / 该车型仅支持有线）"
                             } else {
-                                "——车机未就绪或不在无线配对窗口，3 秒后重试…"
+                                "——车机未就绪或不在无线配对窗口，${RETRY_DELAY_MILLIS / 1000} 秒后重试…"
                             }
                         log("BT-C: 连接 $name 失败（$reason）$hint")
                     }
@@ -714,6 +728,9 @@ class Iap2BluetoothClient(
     fun detachCurrentSession() {
         // 主动拆的不要被当成「掉线」去补连（否则会立刻把刚退役的控制会话又建回来）
         manualTeardown = true
+        // 断链**之前**先告诉车机「EA 会话结束」。车机侧没被显式停掉的 EAP/VIWI 会话
+        // 会挡住下一次连接，而它自己的清理要等 mediaDisconnectTimeout(15s) 才成立。
+        senderSession?.closeEaSessions("主动断开控制会话")
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()
@@ -727,6 +744,8 @@ class Iap2BluetoothClient(
         // 递增世代：即便有线程卡在 connect()，事后也会因世代不符自杀，不会在下次启动时复活
         generation.incrementAndGet()
         BtSessionGate.clearLinkLost()
+        // 同 detachCurrentSession：先把 EA 会话收干净，再关 socket
+        senderSession?.closeEaSessions("停止控制链路")
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
         activeChannel?.let { runCatching { it.close() } }
         thread?.interrupt()

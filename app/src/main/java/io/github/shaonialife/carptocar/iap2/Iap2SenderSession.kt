@@ -260,6 +260,15 @@ class Iap2SenderSession(
         const val EA_RETRY_DELAY_MILLIS = 8_000L
 
         /**
+         * 发 0xEA01 之前允许「对端多久没回过帧」。
+         *
+         * 超过这个时长说明车机已经停摆（奥迪那次 `packet 115 not acknowledged`：socket
+         * 还通、心跳照发，但车机从 115 之后一帧都没回过）。这种情况下再写 0xEA01
+         * 只是多一条没人处理的帧，还会占满发送窗口，直接断更干净。
+         */
+        const val EA_CLOSE_PEER_IDLE_MILLIS = 5_000L
+
+        /**
          * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
          * 只在「车机没给声明清单」时才会用满窗口——从 10s 收到 3s：真车整个
          * bring-up 只有几十秒预算，且实测应答都在毫秒级。
@@ -771,6 +780,62 @@ class Iap2SenderSession(
             log("EA: 发送失败 ${error.message}")
             false
         }
+    }
+
+    /**
+     * 主动结束 EA 会话（0xEA01 StopEASession）——**断开控制链路前必须发**。
+     *
+     * 为什么：车机侧（MIB3 `Smartphone_Integrator`）对 EA 会话有泄漏保护，固件原文——
+     * ```
+     * [CIAP2EAPProtocolViwi] EAP session for eapSessionIdentifier: %d already exist
+     * [CIAP2EAPProtocolKeepAlive] Failed to start EAP session, another session is already running
+     * ```
+     * 会话没被显式停掉时，残留的 EAP/VIWI 会话会挡住下一次连接；而车机自己的
+     * 「设备已移除」判定要等 `mediaDisconnectTimeout=15000ms` 才成立。发一条 0xEA01
+     * 能让它立刻把这条路清掉，不必依赖超时。
+     *
+     * 三个「不要发」的条件，都是避免往一个已经死掉的链路里塞帧：
+     *  - 车机从没声明过 EA 协议（发了它也不认识）；
+     *  - 链路已经关；
+     *  - 对端超过 [EA_CLOSE_PEER_IDLE_MILLIS] 没回过任何帧（停摆了，见该常量注释）。
+     *
+     * 用**发后不管**（与 0xEA00 同语义）：链路已经慢下来时用等 ACK 的 [send] 会把
+     * 收尾拖到重传看门狗超时之后，用户看到的是「点了断开要转十几秒」。
+     *
+     * @return 实际发出的条数（0 = 什么都没发，原因已写日志）
+     */
+    fun closeEaSessions(reason: String): Int {
+        val protocols = eaProtocols
+        if (protocols.isEmpty()) {
+            log("EA: 车机没声明过 EA 协议——不发 0xEA01（$reason）")
+            return 0
+        }
+        if (!channel.isAlive) {
+            log("EA: 链路已关，0xEA01 发不出去（$reason）")
+            return 0
+        }
+        val idle = channel.millisSinceLastPeerFrame()
+        if (idle < 0 || idle > EA_CLOSE_PEER_IDLE_MILLIS) {
+            val how = if (idle < 0) "一帧都没回过" else "已 ${idle / 1000} 秒没回帧"
+            log("EA: 对端$how——跳过 0xEA01（写了也没人处理，$reason）")
+            return 0
+        }
+        var sent = 0
+        for ((protocolId, name) in protocols) {
+            val ok =
+                runCatching {
+                    sendFireAndForget(
+                        Iap2MessageIds.EA_CLOSE_SESSION,
+                        Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
+                    )
+                }.onFailure { log("EA: 发 0xEA01（$name）失败——${it.message}") }
+                    .isSuccess
+            if (ok) sent++
+        }
+        if (sent > 0) {
+            log("EA: 已发 $sent 条 0xEA01 结束 EA 会话（$reason）——车机不必再等会话超时")
+        }
+        return sent
     }
 
     /** 设备状态问候是否已发过（幂等；[sendDeviceStateGreetings] 的 force 可再发一轮）。 */

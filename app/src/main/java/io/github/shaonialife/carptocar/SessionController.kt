@@ -173,6 +173,14 @@ object SessionController {
     private const val SUGGESTION_JOIN_WAIT_MS = 8_000L
 
     /**
+     * 「系统已连在该热点上，直接绑进程」的等待上限。
+     *
+     * 只是 `bindProcessToNetwork`，正常情况下毫秒级返回；留 5 秒是为了覆盖系统刚完成
+     * 关联、网络还没上报的那一瞬。超时就退回 specifier 路径，不影响原有流程。
+     */
+    private const val WIFI_REUSE_BIND_WAIT_MS = 5_000L
+
+    /**
      * 同 SSID 入网请求的去重窗口（毫秒）。
      *
      * 0x5703 与 0x4301 两条路都会触发入网，且**在同一个瞬间**各发一次（2026-11-02
@@ -1512,7 +1520,7 @@ object SessionController {
             phaseHint = "已加入车机热点"
             // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
             ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
-            appendLog(">>> WiFi 已加入车机热点（应用专属网络），ctrl 广播已重新注册，等待车机 ctrl 邀请")
+            appendLog(">>> WiFi 已就位（车机热点），ctrl 广播已重新注册，等待车机 ctrl 邀请")
         } else {
             // 取消态也必须留痕：旧实现用 `if (!connectCancelled)` 把失败日志挡掉，
             // 于是「车机 27s 超时掐断 BT → 本轮加入被静默取消」在日志里完全消失，
@@ -1574,21 +1582,31 @@ object SessionController {
             }
 
             is WifiJoinGate.Decision.Run -> {
-                appendLog(
-                    ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
-                )
+                // **先试复用**：断线重连时手机绝大多数时候还在车机热点上（系统那张关联表
+                // 没丢，或上一轮的专属网络还没被拆）。再发一次 specifier 就要弹一次系统
+                // 确认框，而车上没人点屏——等到超时整轮就失败了，现场表现正是「卡在加入热点」。
+                // 复用只是 bindProcessToNetwork，不发请求、不弹框。
+                val adopted =
+                    connector.adoptIfAlreadyConnected(wifi.ssid, WIFI_REUSE_BIND_WAIT_MS) { connectCancelled }
                 val result =
-                    try {
-                        connector.joinCarPlayNetwork(
-                            ssid = wifi.ssid,
-                            passphrase = wifi.passphrase,
-                            securityType = wifi.securityType,
-                            timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
-                            isCancelled = { connectCancelled },
+                    if (adopted != null) {
+                        WifiCarPlayConnector.JoinResult.Joined(adopted)
+                    } else {
+                        appendLog(
+                            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
                         )
-                    } catch (error: Exception) {
-                        appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
-                        WifiCarPlayConnector.JoinResult.Unavailable
+                        try {
+                            connector.joinCarPlayNetwork(
+                                ssid = wifi.ssid,
+                                passphrase = wifi.passphrase,
+                                securityType = wifi.securityType,
+                                timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                                isCancelled = { connectCancelled },
+                            )
+                        } catch (error: Exception) {
+                            appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
+                            WifiCarPlayConnector.JoinResult.Unavailable
+                        }
                     }
                 wifiJoinGate.finish(
                     decision.ticket,
