@@ -167,6 +167,18 @@ class CarLifeHuClient(
      * 否则就是个摆设。这条开关默认开着，出问题可在偏好 `carlife_ordered_init` 关掉复原。
      */
     private val orderedInit: Boolean = true,
+    /**
+     * 会话稳定后的「二次初始化」（默认开）。
+     *
+     * 2026-11-04 13:48 实测：有序初始化让 65544 **原样回了 1412x656@60**，可 SPS 仍是
+     * `1280x720`——因为那条 98311 到得比引擎建编码器还早，引擎只把参数记成了「申请值」，
+     * 真正编出来的还是它自己的默认档。而 13:18 那次（引擎已经在跑、编码器存在）发同样
+     * 一条 98311，SPS 就真的变成 1412x654 了。
+     *
+     * 所以这里在首帧之后补一次：等会话稳定 → 98386 → 等确认 → 98311 强制重发，
+     * 让引擎在「已有编码器」的状态下重建一次。只做一次，避免把引擎打进反复重建。
+     */
+    private val settleReinit: Boolean = true,
 ) {
 
     private val running = AtomicBoolean(false)
@@ -341,6 +353,9 @@ class CarLifeHuClient(
     @Volatile
     private var featureConfigAcked = false
 
+    /** 二次初始化是否已经排过（每条会话只做一次）。 */
+    private val settleReinitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
     // ---- CONNECT_TYPE 探测状态 ----
 
     /** 剩余待试的 CONNECT_TYPE（首元素永远是「当前值」，由 [probeCandidates] 生成）。 */
@@ -454,6 +469,7 @@ class CarLifeHuClient(
         // 首轮有序初始化的闸门：每条新会话都要从「98386 还没确认、首条 98311 还没发」开始。
         firstInitSent = false
         featureConfigAcked = false
+        settleReinitStarted.set(false)
         // CONNECT_TYPE 探测：只在开启时复位成「待探测」，否则保持已完成态（不会被触发）。
         probeResults.clear()
         probeQueue = if (connectTypeProbe) probeCandidates(connectType) else IntArray(0)
@@ -780,6 +796,7 @@ class CarLifeHuClient(
                 send(CarLifeProtocol.VIDEO_ENC_START, ByteArray(0))
                 requestHigherFrameRate()
                 onEncoderConfirmed()
+                scheduleSettleReinit()
             }
 
             CarLifeProtocol.MD_VIDEO_FRAME_RATE_DONE -> {
@@ -1211,6 +1228,38 @@ class CarLifeHuClient(
             )
         }
         send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+    }
+
+    /**
+     * 首帧之后补一次编码初始化（见 [settleReinit]）。
+     *
+     * 只排一次；引擎若已按申请尺寸编码，这一步等价于一次无痛重建（帧不断）。
+     */
+    private fun scheduleSettleReinit() {
+        if (!settleReinit || !settleReinitStarted.compareAndSet(false, true)) return
+        Thread {
+            try {
+                Thread.sleep(SETTLE_REINIT_DELAY_MS)
+                if (!running.get()) return@Thread
+                log(
+                    "CARLIFE: 会话稳定——二次初始化（首条 98311 可能早于编码器创建，" +
+                        "引擎只记参数不重建；这次让它在已有编码器上重建）",
+                )
+                pushFeatureConfig()
+                var waited = 0
+                while (!featureConfigAcked && running.get() && waited < ORDERED_ACK_WAIT_MS) {
+                    Thread.sleep(50)
+                    waited += 50
+                }
+                if (!running.get()) return@Thread
+                log("CARLIFE: 二次初始化下发 98311 ${requestedWidth}x$requestedHeight@$videoFps（等引擎回 65544）")
+                sendEncoderInit(force = true)
+            } catch (_: InterruptedException) {
+            }
+        }.apply {
+            isDaemon = true
+            name = "carlife-settle-reinit"
+        }.start()
     }
 
     /** 重发 98386 特征配置 + 98311 编码初始化，让引擎重建编码器（异步，避免阻塞看门狗）。 */
@@ -1748,6 +1797,14 @@ class CarLifeHuClient(
          * 留 2s 足够；超时就照常发 98311——宁可定档失败，也不能让握手卡死在这儿。
          */
         private const val ORDERED_ACK_WAIT_MS = 2_000L
+
+        /**
+         * 收到 65544 后等多久做二次初始化。
+         *
+         * 必须等「引擎真的在出帧」之后再重建：13:48 那次首帧在 65544 之后 0.26s 才到，
+         * 2.5s 足够引擎把编码器建好、码流跑起来。
+         */
+        private const val SETTLE_REINIT_DELAY_MS = 2_500L
 
         /** CONNECT_TYPE 探测：换档前等多久（必须 > 去重窗，且给本轮推流一点稳定时间）。 */
         private const val PROBE_SETTLE_MS = 6_000L
