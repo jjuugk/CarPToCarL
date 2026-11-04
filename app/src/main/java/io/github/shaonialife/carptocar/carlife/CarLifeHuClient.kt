@@ -264,6 +264,12 @@ class CarLifeHuClient(
     @Volatile
     private var reinitCount = 0
 
+    /** 最近一次**真正发出**的 98311 尺寸签名（`宽x高@帧率`），配合 [sendEncoderInit] 去重。 */
+    private var lastEncInitSig: String? = null
+
+    /** 最近一次发出 98311 的时刻（[android.os.SystemClock.uptimeMillis]）。 */
+    private var lastEncInitAt = 0L
+
     /**
      * 我们向引擎**申请**的编码分辨率（98311 的 width/height 字段）。
      *
@@ -624,10 +630,7 @@ class CarLifeHuClient(
                     send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
                     Thread.sleep(1200)
                     log("CARLIFE: 主动推送 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
-                    send(
-                        CarLifeProtocol.HU_VIDEO_ENC_INIT,
-                        buildEncoderInfo(),
-                    )
+                    sendEncoderInit()
                 }.apply { isDaemon = true }.start()
             }
 
@@ -709,10 +712,7 @@ class CarLifeHuClient(
             }
 
             CarLifeProtocol.VIDEO_ENC_DONE -> {
-                send(
-                    CarLifeProtocol.HU_VIDEO_ENC_INIT,
-                    buildEncoderInfo(),
-                )
+                sendEncoderInit()
             }
 
             else -> {
@@ -955,10 +955,7 @@ class CarLifeHuClient(
             try {
                 Thread.sleep(300)
                 if (!running.get()) return@Thread
-                send(
-                    CarLifeProtocol.HU_VIDEO_ENC_INIT,
-                    buildEncoderInfo(),
-                )
+                sendEncoderInit()
             } catch (_: InterruptedException) {
             }
         }.apply { isDaemon = true }.start()
@@ -973,13 +970,35 @@ class CarLifeHuClient(
                 send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
                 Thread.sleep(600)
                 if (!running.get()) return@Thread
-                send(
-                    CarLifeProtocol.HU_VIDEO_ENC_INIT,
-                    buildEncoderInfo(),
-                )
+                sendEncoderInit()
             } catch (_: InterruptedException) {
             }
         }.apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 发送 98311 视频编码初始化，**同一组 (宽,高,帧率) 在 [ENCODER_INIT_DEDUPE_MS] 内只发一次**。
+     *
+     * 为什么必须去重：引擎收到**尺寸未变的重复 98311** 时，会把 65544 的确认值降成
+     * 1280×720@20（2026-11-04 实测 4/4：08:26、11:20、13:09 三次会话都是「首条回
+     * 60fps、紧随其后的第二条回 20fps」）。而握手期天然有两条路径各发一次——
+     * AirPlay SETUP 的 [setRequestedResolution]（此刻引擎还热着，几十毫秒内就发出）
+     * 与 MD_INFO 的延迟推送（握手后 2.4s）。两条都发，第二条必然把帧率打下来。
+     *
+     * 用时间窗而不是纯签名判重，是为了不拦住真正需要重建的两处：无帧看门狗
+     * （间隔 ≥ [NO_FRAME_REINIT_MS] = 10s）和视频口重连后的 [restartEncoding]。
+     */
+    @Synchronized
+    private fun sendEncoderInit() {
+        val sig = "${requestedWidth}x${requestedHeight}@$videoFps"
+        val now = android.os.SystemClock.uptimeMillis()
+        if (sig == lastEncInitSig && now - lastEncInitAt < ENCODER_INIT_DEDUPE_MS) {
+            log("CARLIFE: 98311 跳过重复下发（$sig 刚发过）——重复会让引擎确认值降到 20fps")
+            return
+        }
+        lastEncInitSig = sig
+        lastEncInitAt = now
+        send(CarLifeProtocol.HU_VIDEO_ENC_INIT, buildEncoderInfo())
     }
 
     /**
@@ -1455,6 +1474,15 @@ class CarLifeHuClient(
 
         /** 视频通道连上但多久不出帧就重发编码初始化。 */
         private const val NO_FRAME_REINIT_MS = 10_000L
+
+        /**
+         * 98311 去重时间窗（毫秒）。
+         *
+         * 取 5s：要盖住握手期「SETUP 抢先发一条 + MD_INFO 延迟 2.4s 再发一条」这段
+         * 天然重复；同时必须小于 [NO_FRAME_REINIT_MS]（10s），否则无帧看门狗会被
+         * 自己的去重拦住、引擎永远不重建编码器。
+         */
+        private const val ENCODER_INIT_DEDUPE_MS = 5_000L
 
         /**
          * 连续重发时的最大间隔（毫秒）。
