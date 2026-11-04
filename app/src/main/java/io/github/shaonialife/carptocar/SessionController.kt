@@ -1280,6 +1280,11 @@ object SessionController {
         val hadProjection = CarPlayService.mediaProjection != null
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
+        // 记下这一刀的时刻：车机固件 `mediaDisconnectTimeout=15000ms`，设备没被判
+        // 「已移除」之前它只重开旧会话、不启动 AirPlay。出站循环据此强制冷却
+        // （见 BtSessionGate.REACTIVATE_COOLDOWN_MILLIS）——否则用户断开后立刻
+        // 再点「启动连接」，就会稳稳落在「给热点凭据但不开 7000 端口」的那条路上。
+        BtSessionGate.noteManualStop()
         // 用户终态同样作废排队中的自动重试——它醒来第一件事就是检查 sessionWanted，
         // 但先让令牌变一次，日志就能明确写出「用户已断开，本次重试作废」
         synchronized(connectRetryLock) {
@@ -2723,11 +2728,19 @@ object SessionController {
                 // 兜底：热点场景车机 IP = 网关（Audi 实测 .1，但取网关更通用）。
                 // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
                 // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
-                val gateway = wifiConnector?.gatewayAddress()
-                if (gateway != null && EndpointHosts.candidates(listOf(gateway)).isNotEmpty()) {
-                    appendLog(">>> [$source] mDNS 未发现，兜底使用网关地址 $gateway:7000（车机热点网关=车机）")
+                //
+                // **必须收全部默认网关，不能只取一条**：2026-11-04 奥迪 4910 实测
+                // 默认路由里排第一的是 IPv6 链路本地 fe80::1086:…，只取首条就等于
+                // 把唯一验证过的 IPv4 10.174.189.1 丢掉——那一轮 8 次重连全超时。
+                // EndpointHosts 会按 IPv4 → 全局 IPv6 → 链路本地重排。
+                val gateways = EndpointHosts.candidates(wifiConnector?.gatewayAddresses().orEmpty())
+                if (gateways.isNotEmpty()) {
+                    appendLog(
+                        ">>> [$source] mDNS 未发现，兜底使用网关地址 ${gateways.joinToString(" / ")}:7000" +
+                            "（车机热点网关=车机，${gateways.size} 个候选按 IPv4 优先）",
+                    )
                     return effective.copy(
-                        ipAddresses = listOf(gateway) + effective.ipAddresses,
+                        ipAddresses = gateways + effective.ipAddresses,
                         airPlayPort = if (needPort) 7000 else effective.airPlayPort,
                     )
                 }

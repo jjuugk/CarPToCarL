@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
 import android.net.wifi.WifiNetworkSuggestion
@@ -77,22 +78,38 @@ class WifiCarPlayConnector(
     var onNetworkLost: ((ssid: String) -> Unit)? = null
 
     /**
-     * 当前绑定网络的网关地址（车机热点场景 = 车机 IP）。
+     * 当前绑定网络的**全部**默认网关（车机热点场景 = 车机 IP），**IPv4 排在最前**。
+     *
      * mDNS 发现失败时的兜底路径。
+     *
+     * 为什么不能只取一条（2026-11-04 奥迪 4910 / MIB3 4580 实车）：
+     * 原来写的是 `routes.firstOrNull { isDefaultRoute }`，而这台车机的默认路由里
+     * 排第一的是 **IPv6 链路本地** `fe80::1086:3aff:fe8d:9239`，于是 mDNS 未发现时
+     * 连续 8 次重连全打在这个地址上（每次 2s 超时，`failed to connect … after 2000ms`）；
+     * 而同一份日志里 mDNS 解析出的 `10.174.189.1:7000` 才是通的——唯一的实证路径
+     * 就这么被丢掉了。热点场景网关就是车机本身，把 IPv4 那条一起收进来几乎零成本。
+     *
+     * IPv4 优先的理由同 [EndpointHosts]：安卓上最稳，也是真车唯一验证过的路径。
      */
-    fun gatewayAddress(): String? {
-        val network = boundNetwork.get() ?: return null
-        return try {
-            connectivityManager
-                .getLinkProperties(network)
-                ?.routes
-                ?.firstOrNull { it.isDefaultRoute }
-                ?.gateway
-                ?.hostAddress
-        } catch (_: Exception) {
-            null
-        }
+    fun gatewayAddresses(): List<String> {
+        val network = boundNetwork.get() ?: return emptyList()
+        val gateways =
+            try {
+                connectivityManager
+                    .getLinkProperties(network)
+                    ?.routes
+                    .orEmpty()
+                    .filter { it.isDefaultRoute }
+                    .mapNotNull { it.gateway?.hostAddress?.substringBefore('%') }
+                    .distinct()
+            } catch (_: Exception) {
+                return emptyList()
+            }
+        return gateways.filter { it.contains('.') } + gateways.filter { !it.contains('.') }
     }
+
+    /** [gatewayAddresses] 的首选（IPv4 优先）。 */
+    fun gatewayAddress(): String? = gatewayAddresses().firstOrNull()
 
     /**
      * 本机在当前绑定网络上的 IPv4 地址（如 10.174.189.57）。
@@ -504,16 +521,38 @@ class WifiCarPlayConnector(
      * 家里的 WiFi 上（AirPlay 必然连不上，而且其它应用瞬间断网）。
      */
     fun isAssociatedTo(ssid: String): Boolean {
+        // 主路径：ConnectivityManager 逐条网络的 transportInfo。
+        //
+        // `wifiManager.connectionInfo` 单独用会漏：Android 12+ 上它对**应用专属网络**
+        // （WifiNetworkSpecifier 建出来的那条）常常报 `<unknown ssid>` 或 netId=-1，
+        // 于是「手机其实还挂在车机热点上」被误判成没连——白白再发一次 specifier、
+        // 再等 15 秒系统确认框（2026-11-04 奥迪 4910 第二段实录：16:22:37 判成没连，
+        // 16:22:52 超时 15s，之后才靠建议网络兜回来）。
+        val viaConnectivity =
+            runCatching {
+                connectivityManager.allNetworks.any { network ->
+                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@any false
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@any false
+                    val info = caps.transportInfo as? WifiInfo ?: return@any false
+                    plainSsid(info.ssid) == ssid
+                }
+            }.getOrDefault(false)
+        if (viaConnectivity) return true
+
+        // 备用：老路径。部分机型 transportInfo 不填 SSID，但 connectionInfo 有。
         val manager = wifiManager ?: return false
         val info =
             @Suppress("DEPRECATION")
             runCatching { manager.connectionInfo }.getOrNull() ?: return false
         @Suppress("DEPRECATION")
         if (info.networkId < 0) return false
-        val current = info.ssid ?: return false
-        val plain = current.removePrefix("\"").removeSuffix("\"")
-        if (plain.isEmpty() || plain == UNKNOWN_SSID) return false
-        return plain == ssid
+        return plainSsid(info.ssid) == ssid
+    }
+
+    /** 去掉系统给的双引号，把「读不到」的占位值统一成 null。 */
+    private fun plainSsid(raw: String?): String? {
+        val plain = raw?.removePrefix("\"")?.removeSuffix("\"") ?: return null
+        return if (plain.isEmpty() || plain == UNKNOWN_SSID) null else plain
     }
 
     /**

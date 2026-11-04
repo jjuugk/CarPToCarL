@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk)**
-> —— 主线固定直链（当前 1.2.19，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk)**
+> —— 主线固定直链（当前 1.2.20，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.19，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.19.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.20，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.20.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.19`（正式版；针对「4580 只有第一次能连、断开后卡 WiFi / 卡 AirPlay」改三处：断开前发 **0xEA01 StopEASession** 让车机立刻清掉 EA 会话（不必等它 15s 超时）；**重连间隔下限从 3s 抬到 16s**（跨过固件 `mediaDisconnectTimeout=15000`，否则每次都把车机的「设备移除」计时器续上，它永远停在 `keepIAP2Session=1` 不重建会话）；WiFi **先复用系统已连的车机热点**，不再每轮发 specifier 弹确认框；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.19.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.19/CarPToCarL-1.2.19.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.20`（正式版；修 1.2.19 实车暴露的两条**重连死路**：① mDNS 未发现时兜底只取「第一条默认路由」的网关，而这台车机排第一的是 IPv6 链路本地 `fe80::1086:…`，于是 8 次重连全打空——改为收集**全部**默认网关并按 IPv4 优先排序（`10.174.189.1` 才是通的）；② 手动断开后只隔 1.2 秒就重连，车机固件 `mediaDisconnectTimeout=15000` 还没把设备判成「已移除」，它只重开旧 iAP2 会话——给热点凭据、**但不启动 AirPlay**（7000 不开、`_airplay._tcp` 不广播、0x4301 不回），现在加 18 秒冷却；另修 Android 12+ 上 `wifiManager.connectionInfo` 对应用专属网络报 `<unknown ssid>`，导致「已连着车机热点」被误判成没连、白等 15 秒；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.20.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.20/CarPToCarL-1.2.20.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,41 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.20 —— 2026-11-04（4580 重连：网关兜底漏 IPv4 + 手动断开后不给车机冷却，正式版）
+
+1.2.19 上车后仍复现「断开就再也连不上」。1.2.19 实车日志（OPPO PLG110 / Android 17 /
+奥迪 4910 `CL3D_MIB3H_AU_AS_G4x_2300200PROD`）把链路掐成两段，各自有明确结论：
+
+- **前一段（16:21:12 车机主动连入）**：iAP2、WiFi、AirPlay 全通，10 秒建起会话。1.2.18 的
+  EA 修复也生效了——三轮 0xEA00 都没换来 0xEA03，但链路一直活到用户手动断开，
+  再没出现 `packet N not acknowledged` 拆链。
+- **后一段（16:22:33 我们主动连入）**：车机给了 iAP2 身份、给了 0x5703 热点凭据，
+  但 **48 秒里 `_airplay._tcp` 一次都没广播、0x4301 一次都没回**，最后只能拿网关兜底，
+  8 次重连全部 `after 2000ms` 超时。
+
+三处改动：
+
+- **`WifiCarPlayConnector.gatewayAddresses()`**：原来 `gatewayAddress()` 只取
+  `routes.firstOrNull { isDefaultRoute }`，而这台车机排第一的默认路由是 **IPv6 链路本地**
+  `fe80::1086:3aff:fe8d:9239`，于是兜底全程打在这个从来验证不通的地址上；同轮 mDNS 给出的
+  `10.174.189.1:7000` 才是通的，被整条丢掉。改为收集**全部**默认网关、IPv4 排最前
+  （排序复用 `EndpointHosts`，新增 1 例单测留档）。
+- **手动断开后 18 秒冷却**（`BtSessionGate.REACTIVATE_COOLDOWN_MILLIS`）：固件
+  `mediaDisconnectTimeout = 15000ms`，设备没被判「已移除」之前 `keepIAP2Session=1`，
+  车机只走
+  `IAP2 session already running. Waiting for required IAP2 information.`
+  这条分支——接受 RFCOMM、走完身份交换、下发热点凭据，**但不启动 CarPlay projection**。
+  那一轮正是 `16:22:32.519` 手动断开、`16:22:33.696`（1.2 秒）就重连。现在出站循环在冷却窗口内
+  先等够再拨，日志写明还差几秒。
+- **`isAssociatedTo()` 补 ConnectivityManager 路径**：Android 12+ 上
+  `wifiManager.connectionInfo` 对应用专属网络（`WifiNetworkSpecifier` 建的）常报
+  `<unknown ssid>` 或 `netId=-1`，「手机其实还挂在车机热点上」被误判成没连，于是白发一次
+  specifier、白等 15 秒确认框（16:22:37 判成没连 → 16:22:52 超时才靠建议网络兜回来）。
+
+单测 **392 例 0 失败**（新增 1 例：网关兜底里 IPv4 必须排在链路本地 IPv6 前面）。**待上车验证**：断开后立刻重连，应看到
+`BT-C: 距上次手动断开只有 N 秒——…先等 N 秒再发起`，且随后一轮能连上投影；
+若仍失败，看日志里兜底地址是否已经变成 `10.174.189.1`，以及车机侧 7000 端口到底开没开。
 
 ### 1.2.19 —— 2026-11-04（4580 重连：EA 会话显式收尾 + 跨过车机的 15 秒移除计时，正式版）
 

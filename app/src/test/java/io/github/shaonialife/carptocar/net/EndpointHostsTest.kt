@@ -35,6 +35,22 @@ class EndpointHostsTest {
         assertEquals(listOf("10.174.189.1", "2001:db8::5", "fe80::1%wlan0"), ordered)
     }
 
+    /**
+     * 2026-11-04 奥迪 4910（MIB3 4580）实车：`LinkProperties.routes` 里第一条默认路由
+     * 是 IPv6 链路本地 `fe80::1086:3aff:fe8d:9239`，旧代码只取这一条就当成车机地址，
+     * 8 次重连全打在它身上（每次 2s 超时）；同轮 mDNS 给出的 `10.174.189.1:7000`
+     * 其实通。兜底必须把 IPv4 那条一起收进来并排到最前。
+     */
+    @Test
+    fun gatewayFallbackKeepsIpv4AheadOfLinkLocal() {
+        val ordered =
+            EndpointHosts.candidates(
+                listOf("fe80::1086:3aff:fe8d:9239", "10.174.189.1"),
+            )
+        assertEquals(listOf("10.174.189.1", "fe80::1086:3aff:fe8d:9239"), ordered)
+        assertEquals("10.174.189.1", ordered.first())
+    }
+
     @Test
     fun duplicateScopedAndUnscopedAddressesCollapse() {
         val ordered = EndpointHosts.candidates(listOf("fe80::1", "fe80::1%wlan0", "FE80::1%3"))

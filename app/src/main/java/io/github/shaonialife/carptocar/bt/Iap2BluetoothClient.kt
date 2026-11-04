@@ -338,6 +338,27 @@ class Iap2BluetoothClient(
         /** 连续「没有有效会话」的轮数，用于 [RETRY_BACKOFF_MILLIS] 退避（连上即断也算）。 */
         var failStreak = 0
         while (running && generation.get() == myGeneration) {
+            // 用户刚手动断开 → 先等车机「忘掉」上一轮，别急着拨。
+            //
+            // 2026-11-04 奥迪 4910（MIB3 4580）实录：16:22:32.519 手动断开，
+            // 16:22:33.696（1.2 秒后）重连。车机照常给了 iAP2 身份、0x5703 热点凭据，
+            // 但 **48 秒里一次 `_airplay._tcp` 都没广播、0x4301 也没回**——因为固件里
+            // `mediaDisconnectTimeout = 15000ms`，设备没被判「已移除」之前它只走
+            // `keepIAP2Session = 1` 分支：重开旧会话，不启动 projection。
+            // 结果是我们拿网关兜底、8 次重连全超时（fe80::1086:…:7000 after 2000ms）。
+            //
+            // 等够 [BtSessionGate.REACTIVATE_COOLDOWN_MILLIS] 再拨，这一次才是「新建会话」。
+            val cooldownLeft = BtSessionGate.REACTIVATE_COOLDOWN_MILLIS - BtSessionGate.sinceManualStop()
+            if (cooldownLeft > 0) {
+                log(
+                    "BT-C: 距上次手动断开只有 ${BtSessionGate.sinceManualStop() / 1000} 秒——" +
+                        "车机要 ${BtSessionGate.REACTIVATE_COOLDOWN_MILLIS / 1000} 秒才认为设备已移除" +
+                        "（固件 mediaDisconnectTimeout=15s），先等 ${(cooldownLeft + 999) / 1000} 秒再发起" +
+                        "（早了它只重开旧会话：给热点凭据，但不启动 AirPlay）",
+                )
+                sleepQuietly(cooldownLeft + 200)
+                continue
+            }
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
             //  - sessionActive：CarPlay 会话已建立（已拿到端点）——与其它接收端的连接尝试全部暂停
@@ -829,6 +850,43 @@ object BtSessionGate {
 
     /** 单条控制链路的恢复窗口：超时后不再拨（CarPlay 本身不受影响）。 */
     const val LINK_RECOVERY_WINDOW_MILLIS = 180_000L
+
+    /**
+     * 用户手动断开的时刻（uptimeMillis，0 = 本次进程还没手动断过）。
+     *
+     * 为什么要记（2026-11-04 奥迪 4910 / MIB3 4580 实车）：车机固件里
+     * `mediaDisconnectTimeout = 15000ms`——蓝牙断开后要满 15 秒，它才把设备判成
+     * 「已移除」。在那之前 `keepIAP2Session = 1`，车机只走
+     * `IAP2 session already running. Waiting for required IAP2 information.` 这条分支：
+     * **接受 RFCOMM、走完 iAP2 身份交换、下发 0x5703 热点凭据，但不启动 CarPlay
+     * projection**——7000 端口不开、`_airplay._tcp` 不广播、0x4301 不回。
+     *
+     * 那一轮实录：16:22:32.519 手动断开 → 16:22:33.696（**1.2 秒**）重连 → 车机给了
+     * 热点和凭据 → 之后 48 秒里 mDNS 一直是「未发现」，只能拿网关兜底，8 次重连全超时。
+     * 而前一轮（车机主动连入、它自己启动的 projection）10 秒就连上了。
+     *
+     * 所以：手动断开后要给车机留足 [REACTIVATE_COOLDOWN_MILLIS] 再发起。
+     */
+    @Volatile
+    var manualStopAt: Long = 0L
+
+    /**
+     * 手动断开后的重新发起冷却：**必须 > 车机的 mediaDisconnectTimeout（15s）**。
+     * 取 18 秒留 3 秒余量。改小就等于把车机的移除计时器一次次续上，永远停在旧会话上。
+     */
+    const val REACTIVATE_COOLDOWN_MILLIS = 18_000L
+
+    /** 记一次「用户手动断开」。 */
+    fun noteManualStop() {
+        manualStopAt = android.os.SystemClock.uptimeMillis()
+    }
+
+    /** 距上次手动断开多少毫秒；本次进程没手动断过返回 [Long.MAX_VALUE]。 */
+    fun sinceManualStop(): Long {
+        val at = manualStopAt
+        if (at == 0L) return Long.MAX_VALUE
+        return android.os.SystemClock.uptimeMillis() - at
+    }
 
     /** 记一次「控制链路掉线」，交给出站循环单独重连。 */
     fun noteLinkLost(address: String?) {
