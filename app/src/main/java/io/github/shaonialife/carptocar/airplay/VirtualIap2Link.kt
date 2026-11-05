@@ -67,6 +67,17 @@ class VirtualIap2Link(
      */
     private val callStateProvider: (() -> Int)? = null,
 ) {
+    /**
+     * MFi 认证真正完成（收到 0xaa03 签名，或全部档位无应答跳过）时的回调。
+     *
+     * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 要等 `required IAP2 information` 齐了
+     * 才激活 CarPlay；而 MFi 挑战（尤其隧道里车机不回应、只能靠「无应答跳过」）
+     * 常比 RECORD 的补激活窗口（5s）晚 4~9 秒。上层（SessionController）用它来在
+     * MFi **真正完成后**补发一次 RECORD，而不是在 RECORD 那一刻死等窗口。
+     */
+    @Volatile
+    var onMfiFinished: (() -> Unit)? = null
+
     private val lock = Any()
     private val engine = Iap2LinkEngine()
     private val parser = Iap2Csm.Parser()
@@ -473,6 +484,7 @@ class VirtualIap2Link(
             mib3AuthStage = 4
             sendCsmLocked(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
             sendMib3BurstLocked()
+            onMfiFinished?.invoke()
             return
         }
         mfiCurrentLength = mfiOrder[mfiPosition]
@@ -651,6 +663,7 @@ class VirtualIap2Link(
                 if (mib3) {
                     mib3AuthStage = 4
                     sendMib3BurstLocked()
+                    onMfiFinished?.invoke()
                 } else {
                     log("IAPLINK: 隧道 MFi 完成——等待对端订阅（随后其标记隧道就绪）")
                 }

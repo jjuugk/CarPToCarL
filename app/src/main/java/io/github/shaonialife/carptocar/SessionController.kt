@@ -4301,8 +4301,21 @@ object SessionController {
                                     } else {
                                         appendLog(
                                             "MIB3: ${reactivate.reactivateWaitMs}ms 内控制会话仍未就绪" +
-                                                "——保留首次激活，不重复（重复 RECORD 会被车机当噪声）",
+                                                "——挂 MFi 完成回调，就绪后补发一次 RECORD",
                                         )
+                                        // 治本：MFi 挑战（尤其隧道里车机不回应、只能靠
+                                        // 「无应答跳过」）常比这个窗口晚 4~9 秒。与其在
+                                        // RECORD 那一刻死等，不如等 MFi 真正完成（收到
+                                        // 0xaa03 签名）再补发一次 RECORD——那时车机的
+                                        // `required IAP2 information` 才刚齐，RECORD 才会被认。
+                                        client.onMfiFinished = {
+                                            appendLog("MIB3: MFi 完成回调 → 补发 RECORD 激活")
+                                            client.assertModes()
+                                            client.record()
+                                            setup.hidDeviceUuids.forEach { uuid ->
+                                                client.sendHidSetInputMode(uuid, mode = 0)
+                                            }
+                                        }
                                     }
                                 }
                                 // RECORD 成功 = 会话活着。此刻丢弃报文缓冲：用户要的是

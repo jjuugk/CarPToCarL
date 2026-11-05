@@ -1550,6 +1550,15 @@ class AirPlayClient(
      */
     var callStateSource: (() -> Int)? = null
 
+    /**
+     * MFi 认证真正完成时的回调（收到 0xaa03 签名，或全部档位无应答跳过）。
+     *
+     * 由 SessionController 注入：4580（AUDI 3810 / DELPHI MIB3）的 HMI 要等
+     * `required IAP2 information` 齐了才认 RECORD，而 MFi 挑战常比 RECORD 的
+     * 补激活窗口晚 4~9 秒。上层据此在 MFi 完成后补发一次 RECORD。
+     */
+    var onMfiFinished: (() -> Unit)? = null
+
     /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
     private fun obtainIapLink(): VirtualIap2Link =
         iapLink ?: synchronized(this) {
@@ -1566,6 +1575,7 @@ class AirPlayClient(
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }
                     it.onLocationSamples = { sentences -> onLocationSamples?.invoke(sentences) }
+                    it.onMfiFinished = { onMfiFinished?.invoke() }
                     it.begin()
                     iapLink = it
                 }
