@@ -8,6 +8,7 @@ import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
+import io.github.shaonialife.carptocar.iap2.Iap2LinkPacket
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.net.EndpointHosts
@@ -1194,6 +1195,10 @@ class AirPlayClient(
         private var writeCounter = 0L
         private var writeFailureLogged = false
 
+        /** 「一次写出里含多帧」只在首轮记一行：常态是否合并，一眼能看出来。 */
+        @Volatile
+        private var splitLogged = false
+
         /**
          * 手机→接收端方向（隧道）写入：DiPlay 的隧道链路引擎**只从 TCP socket 读**
          * （AirPlayIapTunnelStream 的 inbound=IapTunnel/TCP，outbound=事件通道），
@@ -1204,6 +1209,25 @@ class AirPlayClient(
          */
         fun writeIapBytes(bytes: ByteArray): Boolean {
             if (socket.isClosed || !socket.isConnected || bytes.isEmpty()) return false
+            // **一帧一个传输单元**：链路引擎的输出缓冲里常常连着好几帧（SYN 标记 + 应答 +
+            // 数据帧），合成一个包写出去会让按「一次传输一个 iAP2 包」解析的接收端错位，
+            // 表现为投屏中途随机卡死（依据见 [Iap2LinkPacket.splitFrames]）。
+            // 切不开时 splitFrames 原样返回一个元素，行为与旧实现一致。
+            val frames = Iap2LinkPacket.splitFrames(bytes)
+            if (frames.size <= 1) return writeIapPackage(bytes)
+            if (!splitLogged) {
+                splitLogged = true
+                log("$logPrefix: 输出缓冲含 ${frames.size} 帧 → 已按帧拆成 ${frames.size} 个传输单元")
+            }
+            for (frame in frames) {
+                if (!writeIapPackage(frame)) return false
+            }
+            return true
+        }
+
+        /** 把一段链路字节封成**一个** comm 包写出（[writeIapBytes] 的单包实现）。 */
+        private fun writeIapPackage(bytes: ByteArray): Boolean {
+            if (socket.isClosed || !socket.isConnected) return false
             return try {
                 val size = TUNNEL_PACKAGE_HEADER_BYTES + bytes.size
                 val plain = ByteArray(size)
