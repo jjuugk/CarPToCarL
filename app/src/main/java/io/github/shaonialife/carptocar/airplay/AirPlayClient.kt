@@ -655,6 +655,7 @@ class AirPlayClient(
                         "Content-Length: ${body.size}\r\n" +
                         "CSeq: $eventCseq\r\n\r\n"
                 val plaintext = head.toByteArray(Charsets.US_ASCII) + body
+                io.github.shaonialife.carptocar.util.RtspDump.tx("$method $path", head, body)
                 SessionTrace.rtsp(
                     SessionTrace.Dir.TX,
                     "airplay-event",
@@ -2946,6 +2947,7 @@ class AirPlayClient(
                         "Content-Length: ${body.size}\r\n" +
                         "\r\n"
                 val plaintext = head.toByteArray(Charsets.US_ASCII) + body
+                io.github.shaonialife.carptocar.util.RtspDump.tx("$method $path", head, body)
                 val encryption = cipher
                 SessionTrace.rtsp(
                     SessionTrace.Dir.TX,
@@ -3080,6 +3082,7 @@ class AirPlayClient(
         body: ByteArray,
         head: String,
     ) {
+        io.github.shaonialife.carptocar.util.RtspDump.rx(statusLine, head, body)
         val message = RtspMessage(statusLine, body, head)
         message.cseq?.let { responseHeads[it] = head }
         val queue = message.cseq?.let { pendingResponses[it] }
