@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import io.github.shaonialife.carptocar.auto.HeadUnitAuto
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
@@ -278,6 +279,9 @@ class Iap2BluetoothClient(
     /** 「蓝牙已连接→已断开」日志节流时间戳。 */
     private var lastProfileLogAt = 0L
 
+    /** 「按档位保留 HFP/A2DP」只打一次（每轮 start 重置）。 */
+    private val profileKeptLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
     val isRunning: Boolean get() = running
 
     fun hasPermission(): Boolean =
@@ -288,6 +292,13 @@ class Iap2BluetoothClient(
         if (running) return true
         if (!hasPermission()) {
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
+            return false
+        }
+        // switch-pool-auto：BMW 档位只做被动监听（车机自己连 …cafe）。调用方通常
+        // 已经跳过 start()；这里再兜一次，避免目标识别晚到/被重新读取时又起出站线程。
+        val auto = HeadUnitAuto.current()
+        if (!auto.outboundIap2) {
+            log("BT-C: 自动档位=${auto.family.label}——不主动拨号，仅保留 …cafe 被动监听")
             return false
         }
         val adapter =
@@ -303,6 +314,7 @@ class Iap2BluetoothClient(
         // 每轮启动重置 SDP 结论与跳过日志（新配对/换固件后重新探测）
         iap2ServiceCache.clear()
         skippedNoService.clear()
+        profileKeptLogged.set(false)
         BtSessionGate.targetSoftFallback = false
         running = true
         val myGeneration = generation.incrementAndGet()
@@ -337,7 +349,22 @@ class Iap2BluetoothClient(
         var passiveFailRounds = 0
         /** 连续「没有有效会话」的轮数，用于 [RETRY_BACKOFF_MILLIS] 退避（连上即断也算）。 */
         var failStreak = 0
+        /** 「BMW 档位已切被动」日志只打一次（识别可能在本线程启动后到达）。 */
+        var passiveLogged = false
         while (running && generation.get() == myGeneration) {
+            // switch-pool-auto：本轮识别成 BMW/MGU 后，立即停止一切主动拨号。
+            // 车机本来就会主动连入 …cafe；继续出站既抢它的建链时机，也可能把已在线
+            // 的 HFP/A2DP 拖进重连循环（hypercar bmw_id85 的 allowOutboundIap2=false）。
+            val auto = HeadUnitAuto.current()
+            if (!auto.outboundIap2) {
+                if (!passiveLogged) {
+                    passiveLogged = true
+                    log("BT-C: 自动档位=${auto.family.label}——停止主动拨号，仅等车机连入 …cafe")
+                }
+                sleepQuietly(2_000)
+                continue
+            }
+            passiveLogged = false
             // 用户刚手动断开 → 先等车机「忘掉」上一轮，别急着拨。
             //
             // 2026-11-04 奥迪 4910（MIB3 4580）实录：16:22:32.519 手动断开，
@@ -446,11 +473,15 @@ class Iap2BluetoothClient(
                     // 此时才断开配置文件重试一次——耳机类设备永远不会被我们断掉音频。
                     var probe = tryConnect(device)
                     if (probe == null && !looksLikePersonalAudio(device)) {
-                        val dropped = BtProfiles.disconnect(context, device)
-                        if (dropped.isNotEmpty()) {
-                            log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
+                        if (HeadUnitAuto.current().dropAudioProfiles) {
+                            val dropped = BtProfiles.disconnect(context, device)
+                            if (dropped.isNotEmpty()) {
+                                log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
+                            }
+                            probe = tryConnect(device)
+                        } else if (profileKeptLogged.compareAndSet(false, true)) {
+                            log("BT-C: 保留 $name 的 HFP/A2DP（自动档位=${HeadUnitAuto.current().family.label}）——不断音频配置，直接等车机主动连入")
                         }
-                        probe = tryConnect(device)
                     }
                     if (probe == null) {
                         iap2ServiceCache[device.address] = false
@@ -473,7 +504,7 @@ class Iap2BluetoothClient(
                 // 需要「保持连接」的车机第一次就能成，奥迪那类需要「仅配对」的车机
                 // 会在第一次失败后走到下面的断开重试。
                 var socket = tryConnect(device)
-                if (socket == null) {
+                if (socket == null && HeadUnitAuto.current().dropAudioProfiles) {
                     // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
                     // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
                     // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
@@ -491,6 +522,10 @@ class Iap2BluetoothClient(
                         }
                     }
                     socket = tryConnect(device)
+                } else if (socket == null && profileKeptLogged.compareAndSet(false, true)) {
+                    // BMW/MGU：车机在 HFP/A2DP 在线时照样会主动连入 iAP2；断配置文件
+                    // 会把 ACL 一起拽掉，车机反复重连反而更不容易发起 CarPlay。
+                    log("BT-C: 保留 $name 的 HFP/A2DP（自动档位=${HeadUnitAuto.current().family.label}）——不断音频配置，等车机主动连入或下一轮重试")
                 }
                 if (socket != null) {
                     log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")

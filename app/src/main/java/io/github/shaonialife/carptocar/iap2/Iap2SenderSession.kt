@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.iap2
 
+import io.github.shaonialife.carptocar.auto.HeadUnitAuto
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.io.IOException
@@ -649,10 +650,31 @@ class Iap2SenderSession(
                         )
                     } else {
                         // 一点线索都没有（车机也没承诺会发 0x4301），继续等只会空转。
-                        throw IOException(
-                            "未拿到车机热点凭据：本轮 0x5702/0x4301 都没给出 AP 信息，" +
-                                "且车机没有声明会发 0x4301（请先在车机上重新选择本机）",
-                        )
+                        if (HeadUnitAuto.current().stayAliveWithoutEndpoint) {
+                            // BMW 档案 A（只有 iPod/BMW Apps）：没有 0x5702/0x5703，也不声明
+                            // 0x4301。真 iPhone 在这里不会拆链——拆了反而让车机认为手机掉线；
+                            // 保持 iAP2 链路，等用户在 iDrive 里切回 CarPlay 档案（B）后重连。
+                            log(
+                                "BMW: 本轮没有 0x5703/0x4301（可能是档案 A：仅 iPod/BMW Apps）——" +
+                                    "不拆链、不猜端点，保持监听等车机切回 CarPlay 档案",
+                            )
+                            CarPlayEndpoint(
+                                ssid = "",
+                                passphrase = "",
+                                channel = 0,
+                                securityType = 0,
+                                airPlayPort = 0,
+                                deviceIdentifier = null,
+                                publicKey = null,
+                                sourceVersion = null,
+                                ipAddresses = emptyList(),
+                            )
+                        } else {
+                            throw IOException(
+                                "未拿到车机热点凭据：本轮 0x5702/0x4301 都没给出 AP 信息，" +
+                                    "且车机没有声明会发 0x4301（请先在车机上重新选择本机）",
+                            )
+                        }
                     }
                 } else {
                     CarPlayEndpoint(
@@ -744,6 +766,22 @@ class Iap2SenderSession(
             if (frame.messageId == Iap2MessageIds.EA_SESSION_DATA) {
                 handleEaData(frame)
                 // 数据帧内容由上层记日志（可能是二进制），这里不再打 keep-alive 行。
+                continue
+            }
+            // BMW 私有消息 0x4C00..0x4C07：hypercar 实车日志里这套是**唯一可能携带**
+            // 热点/凭据的私有通道（清单里没有 0x57xx/0x43xx 时尤其要看）。这里原样
+            // dump 前 512 字节，不尝试解析、不影响任何现有分支。
+            if (HeadUnitAuto.current().family == HeadUnitAuto.Family.BMW &&
+                frame.messageId in 0x4C00..0x4C07
+            ) {
+                val shown = frame.body.take(512)
+                log(
+                    "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} BMW 私有消息" +
+                        "（可能是凭据载体）bytes=${frame.body.size} [" +
+                        shown.joinToString(" ") { "%02x".format(it.toInt() and 0xFF) } +
+                        (if (frame.body.size > shown.size) " …" else "") +
+                        "]",
+                )
                 continue
             }
             // 0x5000 NowPlaying 订阅：蓝牙链路（测试台）在这里订阅，回一次 0x5001。
@@ -1625,6 +1663,24 @@ class Iap2SenderSession(
         protocols.forEach { (paramId, protocolId, name) ->
             log("iap2 0x1d01 EA 组件[$paramId] protocol=$protocolId name=$name")
         }
+        // BMW MGU-55 会声明 7 个 EA 协议且协议号可能全是 10——必须按「协议号 + 名称」
+        // 逐条保留（Iap2Ea.parseProtocols 已按这个键去重，不能只按 id 去重）。
+        // 其中 `com.bmw.carplay` 是车机侧 CarPlay 频道；A/B 档案由车机决定，我们只记录。
+        if (HeadUnitAuto.current().family == HeadUnitAuto.Family.BMW) {
+            val carPlayChannel = protocols.firstOrNull { it.third == "com.bmw.carplay" }
+            if (carPlayChannel != null) {
+                log(
+                    "BMW: 声明 EA 协议 com.bmw.carplay（protocol=${carPlayChannel.second}）" +
+                        "——本轮是 CarPlay 档案（B），频道由车机决定",
+                )
+            } else {
+                log(
+                    "BMW: 未声明 com.bmw.carplay（只声明 " +
+                        protocols.joinToString { it.third }.ifEmpty { "无" } +
+                        "）——本轮可能是档案 A（仅 iPod/BMW Apps）；不主动拆链，等车机重选",
+                )
+            }
+        }
         return protocols.map { it.second to it.third }
     }
 
@@ -1633,7 +1689,23 @@ class Iap2SenderSession(
         val name = params[0]?.value?.asStringOrEmpty()
         val model = params[1]?.value?.asStringOrEmpty()
         val manufacturer = params[2]?.value?.asStringOrEmpty()
-        log("iap2 rx=0x1d01 车机身份 name=$name model=$model manufacturer=$manufacturer")
+        // 参 4 = firmwareVersion，如 `CL37_MIB3H_AU_AS_G4x_2302700PROD`。自动档位靠它
+        // 判代际（CL35/CL37/CL39/CL3D）；参 5 是硬件版本，不参与识别。
+        val firmware = params[4]?.value?.asStringOrEmpty()
+        log("iap2 rx=0x1d01 车机身份 name=$name model=$model manufacturer=$manufacturer firmware=${firmware ?: "?"}")
+        // switch-pool-auto：0x1D01 在 WiFi 入网之前到达，这里识别出的等待窗口能赶上本轮连接。
+        // 识别只改参数、不改协议；未识别时回到主线常量（HeadUnitAuto.DEFAULT）。
+        val auto =
+            io.github.shaonialife.carptocar.auto.HeadUnitAuto.observe(
+                context,
+                io.github.shaonialife.carptocar.auto.HeadUnitAuto.Signals(
+                    name = name,
+                    model = model,
+                    manufacturer = manufacturer,
+                    firmware = firmware,
+                ),
+            )
+        log("AUTO: 车机档位=${auto.family.label}（${auto.reason}）——${auto.describe()}")
         // 参 6/7 = 车机声明「它会发送/它可接收」的消息 ID 清单。
         // 参 7（它可接收）直接告诉我们它是否认可 0x4300 —— 真车排查的关键证据。
         val sends = params[6]?.value?.asU16List()

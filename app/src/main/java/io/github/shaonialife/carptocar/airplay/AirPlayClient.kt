@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.airplay
 
 import android.content.Context
 import android.os.SystemClock
+import io.github.shaonialife.carptocar.auto.HeadUnitAuto
 import io.github.shaonialife.carptocar.audio.AudioCodec
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioSender
@@ -718,7 +719,11 @@ class AirPlayClient(
                             "resources" to
                                 listOf(
                                     linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
+                                    linkedMapOf<String, Any?>(
+                                        "resourceID" to 2L,
+                                        "entity" to if (videoOnlyMode) 2L else 1L,
+                                        "permanentEntity" to if (videoOnlyMode) 2L else 1L,
+                                    ),
                                 ),
                         ),
                 ),
@@ -731,7 +736,9 @@ class AirPlayClient(
                     body,
                     contentType = "application/x-apple-binary-plist",
                 )
-            log("AIRPLAY: modesChanged（声明持有主屏/主音频资源）[$statusLine]")
+            log(
+                "AIRPLAY: modesChanged（主屏=手机，主音频=${if (videoOnlyMode) "车机（仅视频档）" else "手机"}）[$statusLine]",
+            )
             statusLine.contains("200")
         } catch (error: IOException) {
             log("AIRPLAY: modesChanged 失败 - ${error.message}")
@@ -828,6 +835,20 @@ class AirPlayClient(
         var infoRoot: Map<*, *>? = null
         val infoMap = loadInfoWithDiagnostics()
         infoRoot = infoMap
+        // switch-pool-auto：iAP2 0x1D01 是主信号；/info 的 model/sourceVersion 只作补刀。
+        // HeadUnitAuto 内部会拒绝弱信号降级（不会把已识别的 CL3D 冲成「通用」）。
+        infoMap?.let { info ->
+            val before = HeadUnitAuto.current()
+            val after =
+                HeadUnitAuto.observeInfo(
+                    context,
+                    model = info["model"]?.toString(),
+                    sourceVersion = info["sourceVersion"]?.toString(),
+                )
+            if (after.family != before.family) {
+                log("AUTO: /info 补刀 → 车机档位=${after.family.label}（${after.reason}）")
+            }
+        }
         // 候选屏全表。旧实现写死 `displays[0]`——多屏车机（大连屏/仪表）若先声明副屏，
         // 画面就被推到那块屏上，比例与触摸坐标全错，而日志里看不出选错了。
         // 选择规则与「只在车机声明 type 时才排序」的兼容性说明见 CarDisplayGeometry。
@@ -1565,6 +1586,16 @@ class AirPlayClient(
         get() = iapLink?.controlSessionReady == true
 
     /**
+     * switch-pool-auto「仅视频」档：主音频交还车机，modesChanged 不声明持有主音频，
+     * 且跳过音频 SETUP。默认 false = 与主线逐字节一致。
+     *
+     * 由 [io.github.shaonialife.carptocar.auto.HeadUnitAuto] 的档位在会话建立时写入；
+     * 正常识别出的车机都不会打开它，保留给「音频 SETUP 反复拖垮会话」的兼容场景。
+     */
+    @Volatile
+    var videoOnlyMode: Boolean = false
+
+    /**
      * 等 iAP2 控制会话就绪，最多 [timeoutMs]。
      *
      * 4580 的 HMI 要等 `required IAP2 information` 齐了才激活 CarPlay，在那之前
@@ -1942,6 +1973,10 @@ class AirPlayClient(
         profile: AudioProfile,
         tuning: AudioTuning = AudioTuning.RAW_SPF,
     ): AudioStreamInfo? {
+        if (videoOnlyMode) {
+            log("AIRPLAY: 仅视频档——跳过音频 SETUP（主音频交还车机）")
+            return null
+        }
         // 档位由调用方按「车机 /info 声明的候选 + 本车机历史记忆」选定后传进来：
         // 同一台车机上不同 audioType 档位的可用性完全不同（见 AudioProfile 注释），
         // 单档失败就换下一档，而不是每次连接都盲试同一档。

@@ -77,9 +77,21 @@ class CarPlayCtrlAdvertiser(
     var inviteCount: Int = 0
         private set
 
-    /** 新一轮连接开始时清零（避免把上一轮的邀请当成本轮信号）。 */
+    /**
+     * 最近一次 ctrl 邀请的对端 IPv4（车机在热点网段上的地址）。
+     *
+     * BMW MGU 实测：0x1D01 里声明「不发 0x4301」，等 0x4301 是死等；而邀请一旦到达，
+     * TCP 对端地址就是车机的 AirPlay 控制面地址（端口 7000）。仅记录 IPv4——
+     * 本机 ctrl 监听是 IPv4，IPv6 链路本地地址对后续 socket 连接无意义。
+     */
+    @Volatile
+    var lastInvitePeerIp: String? = null
+        private set
+
+    /** 新一轮连接开始时清零（避免把上一轮的邀请/对端地址当成本轮信号）。 */
     fun resetInviteCount() {
         inviteCount = 0
+        lastInvitePeerIp = null
     }
 
     /**
@@ -290,7 +302,9 @@ class CarPlayCtrlAdvertiser(
                         }?.substringAfter(':')
                         ?.trim()
                 inviteCount++
-                log("$TAG: ✓ 车机 ctrl 邀请（第 $inviteCount 次，receiver=${receiverId ?: "?"}）——AirPlay 窗口已开启")
+                // 记录邀请方 IPv4：BMW/MGU 不发 0x4301 时这就是唯一可信的 AirPlay 主机。
+                if (peer.contains('.')) lastInvitePeerIp = peer
+                log("$TAG: ✓ 车机 ctrl 邀请（第 $inviteCount 次，receiver=${receiverId ?: "?"}，peer=$peer）——AirPlay 窗口已开启")
                 // 回调里可能再走一轮连接（会话失败后的恢复入口），异常不能打死应答
                 runCatching { onInvite?.invoke(receiverId) }
                     ?.onFailure { log("$TAG: 邀请回调异常 - ${it.message ?: it.javaClass.simpleName}") }

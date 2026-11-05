@@ -11,6 +11,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
+import io.github.shaonialife.carptocar.auto.HeadUnitAuto
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
@@ -107,20 +108,21 @@ object SessionController {
     /** 加入确认弹窗的应答等待上限（无人应答按中止处理）。 */
     private const val JOIN_DIALOG_TIMEOUT_S = 90L
 
-    /**
-     * 空端点（车机声明会发 0x4301 但窗口内未到）的等待上限。
+    /*
+     * 连接窗口的**唯一真源**是 `auto/HeadUnitAuto`（switch-pool-auto）。
      *
-     * 奥迪 MMI 9310 实测 0x4301 晚到 2 分 35 秒——保活窗口必须显著长于它；
-     * 超时拆链让 BT 重连循环接管（与旧「8s 拆链」的区别只在窗口长度）。
+     * 入网 / ctrl 邀请 / 等 0x4301 / 绑网 / RECORD 后重激活这五个窗口不再以常量形式
+     * 出现在本文件：它们随车机代际变化（CL35 约 19s 拆链、CL39 不发邀请、CL3D 确认框
+     * 要 5~10s），由 `HeadUnitAuto.current()` 给出。**默认档位（未识别车机）与 1.2.24
+     * 的常量逐字段一致**，由 `HeadUnitAutoTest` 锁定——想改默认行为必须同时改那条测试。
+     *
+     * 历史依据（保留在此，便于解释默认值是怎么来的）：
+     * - 0x4301：奥迪 MMI 9310 实测晚到 2 分 35 秒 → 5 分钟窗口；
+     * - 入网 specifier：BMW iD9（IDC23）交出 0x4301 后约 27 秒拆蓝牙链 → 15 秒窗口
+     *   既能在车机放弃前重试，又不会叠出下一轮请求；
+     * - 绑网：手动加入热点要等关联+DHCP，实测 10s+ → 15 秒（旧值 5s 会提前 116ms 误判）。
+     * - ctrl 邀请：catplay 以邀请为触发点，实测在 ctrl 重注册后 ~1.0~1.3s 到达 → 4 秒。
      */
-    private const val PENDING_START_SESSION_WAIT_MS = 5 * 60_000L
-
-    /**
-     * 等车机 ctrl 邀请的上限（事件驱动，收到即走）。
-     * catplay 以邀请为连接触发点；实测邀请在 ctrl 重注册后 ~1.0-1.3s 到达。
-     * 车机不发邀请时（旧机型）由「已发现 _airplay._tcp」提前放行，最坏也只等这么久。
-     */
-    private const val CTRL_INVITE_WAIT_MS = 4_000L
 
     /** 端点不完整时等 mDNS 缓存命中：绑网时已开始发现，通常几百毫秒内命中。 */
     private const val ENDPOINT_RESOLVE_WAIT_MS = 3_000L
@@ -145,12 +147,10 @@ object SessionController {
      */
     private const val CAR_WIFI_BIND_WAIT_MS = 45_000L
 
-    /**
-     * `requestNetwork(WIFI)` 等 onAvailable 的上限（秒）。
-     * 用户正在系统设置里手动加入热点时，回调要等关联+DHCP 完成才来，实测可达 10s+。
-     * 旧值 5s 会在成功前 116ms 误判失败并放弃整轮会话（见 bindCarWifiAndRegister）。
+    /*
+     * `requestNetwork(WIFI)` 等 onAvailable 的上限见 `HeadUnitAuto.current().bindWaitSeconds`
+     * （默认 15s）。旧值 5s 会在成功前 116ms 误判失败并放弃整轮会话。
      */
-    private const val WIFI_BIND_WAIT_S = 15L
 
     /**
      * 热点被动断开后自动重绑的最小间隔（毫秒）。
@@ -161,15 +161,15 @@ object SessionController {
      */
     private const val WIFI_REBIND_MIN_INTERVAL_MS = 15_000L
 
-    /**
-     * 等应用专属网络（`WifiNetworkSpecifier`）确认框的上限。
+    /*
+     * 等应用专属网络（`WifiNetworkSpecifier`）确认框的上限见
+     * `HeadUnitAuto.current().specifierJoinTimeoutMs`（默认 15s）。
      *
      * **必须与车机的等待窗口对齐**：BMW iD9（IDC23）实测在交出 0x4301 后约 27 秒
      * 就拆蓝牙链（2026-10-29，连续 6 轮 25~28s）。旧值 120s 意味着每轮都要白等到
      * 车机先放弃，期间还会叠上下一轮的新请求（旧线程仍在 latch 上转），表现成
      * 「连上就闪退 + 后续越连越连不上」。15s 留出车机窗口内再试一次的余地。
      */
-    private const val SPECIFIER_JOIN_TIMEOUT_MS = 15_000L
 
     /**
      * 建议网络（[registerSuggestion]）生效后，等系统自动关联车机热点的上限。
@@ -710,14 +710,14 @@ object SessionController {
      */
     private const val AUDIO_PROFILE_PROBE_MS = 20_000L
 
-    /**
-     * RECORD 之后等 iAP2 控制会话就绪的上限（ms）。
+    /*
+     * RECORD 之后等 iAP2 控制会话就绪的上限见 `HeadUnitAuto.current().reactivateWaitMs`
+     * （默认 2.5s；CL3D 4580 档位 5s）。
      *
      * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 要等 `required IAP2 information` 齐了
      * 才激活 CarPlay；在那之前收到的 RECORD 它不认，表现为「会话全绿、屏幕全黑」。
      * 正常车机走到 RECORD 时链路早已 NORMAL，这条分支根本不会进。
      */
-    private const val MIB3_REACTIVATE_WAIT_MS = 2_500L
 
     /**
      * 通话结束后多久重建音频流（ms）。
@@ -765,7 +765,7 @@ object SessionController {
     private val pendingWatchGeneration = AtomicInteger(0)
 
     /**
-     * 一次「启动连接」内的等待预算起点（[PENDING_START_SESSION_WAIT_MS] 从这次点击算起）。
+     * 一次「启动连接」内的等待预算起点（`HeadUnitAuto.current().pendingStartWaitMs` 从这次点击算起）。
      *
      * 不能每轮会话重置：车机反复断链重连时，旧实现每轮重新计 5 分钟，等于**永不超时**，
      * 用户看到的「最多等 5 分钟」是假的，连接会一直原地打转。
@@ -1029,7 +1029,10 @@ object SessionController {
             onCtrlInviteWhileStreaming(receiverId)
             return
         }
-        val endpoint = lastGoodEndpoint
+        // BMW/MGU：车机**不发** 0x4301 时，整条链路只有邀请这一个信号。旧实现在这里
+        // 直接 return，等于「BMW 首次连接永远走不下去」——邀请是对端 IP 的唯一来源，
+        // 没有 lastGoodEndpoint 就用它合成一个（见 [inviteEndpointOrNull]）。
+        val endpoint = lastGoodEndpoint ?: inviteEndpointOrNull("ctrl 邀请")
         if (endpoint == null) {
             appendLog("CTRL: 车机邀请到达（receiver=${receiverId ?: "?"}）——但还没有热点端点，等它下发 0x4301/0x5703")
             return
@@ -1062,6 +1065,55 @@ object SessionController {
             if (connectCancelled || !sessionWanted || isStreaming()) return@run
             onCarPlayEndpoint(endpoint, "车机 ctrl 邀请触发")
         }
+    }
+
+    /**
+     * 用**本轮 ctrl 邀请**的对端地址合成端点（BMW / MGU 专用，其它车机返回 null）。
+     *
+     * 为什么需要：BMW 无线 CarPlay 有两个档案，档案 B 才给 CarPlay 凭据，而 MGU 实测
+     * **不发 0x4301**——蓝牙里拿不到 SSID/密码/端口（hypercar 的 `bmw_id85` 档案同样
+     * 只有 `invitePeer` 这一条路）。此时能确定的只有两件事：车机刚在 Wi-Fi 上连过我们
+     * 的 ctrl 端口（所以有邀请），以及它的 TCP 对端地址；AirPlay 控制面固定在 7000。
+     *
+     * 三个前提缺一不可，缺哪个都返回 null 并留一行日志（绝不猜）：
+     *  1. 档位要求「本轮激活」（`requireAirplayActivation`，非 BMW 直接 null，行为零变化）；
+     *  2. 已经收到过邀请，且对端是 IPv4（IPv6 链路本地地址对后续 socket 无意义）；
+     *  3. 手机当前确实连着某个 WiFi——否则那个私网地址根本没有路由，连了也白连。
+     *
+     * SSID 取手机自己当前关联的那个（[WifiCarPlayConnector.currentSsid]）。端点带 SSID
+     * 只是为了让后续流程走「已连在该热点上 → adoptIfAlreadyConnected 直接绑定」的快路径，
+     * 不需要密码、不会弹确认框。
+     */
+    private fun inviteEndpointOrNull(source: String): Iap2SenderSession.CarPlayEndpoint? {
+        val auto = HeadUnitAuto.current()
+        if (!auto.requireAirplayActivation) return null
+        val ip = ctrlAdvertiser?.lastInvitePeerIp ?: return null
+        val ssid = wifiConnector?.currentSsid()
+        if (ssid.isNullOrEmpty()) {
+            appendLog(
+                "BMW: 已收到邀请（peer=$ip）但手机不在任何 WiFi 上——到不了该地址，" +
+                    "先等车机下发 0x4301，或手动连上车机热点后重新连接",
+            )
+            return null
+        }
+        val psk = lastWifiPsk.orEmpty()
+        // 没有密码时不冒充 WPA2：安全类型留 0，让 adopt 快路径接管（手机已在网上）。
+        val security = if (psk.isEmpty()) 0 else (lastCarWifi?.securityType ?: 0)
+        appendLog(
+            ">>> [$source] BMW: 没有 0x4301，用邀请方地址 $ip:${auto.inviteFallbackPort} 合成端点" +
+                "（手机已在 \"$ssid\" 上，直接绑定该网络）",
+        )
+        return Iap2SenderSession.CarPlayEndpoint(
+            ssid = ssid,
+            passphrase = psk,
+            channel = lastCarWifi?.channel ?: 0,
+            securityType = security,
+            airPlayPort = auto.inviteFallbackPort,
+            deviceIdentifier = null,
+            publicKey = null,
+            sourceVersion = null,
+            ipAddresses = listOf(ip),
+        )
     }
 
     /**
@@ -1339,6 +1391,15 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // switch-pool-auto：按「上一轮记住的这台车」先摆好等待窗口；目标一换立刻回通用参数。
+        // 0x1D01 到达后会再校正一次（入网在该报文之后，所以仍赶得上本轮）。
+        val autoContext = appContext ?: context.applicationContext
+        val autoTarget = TargetDevicePrefs.get(autoContext)
+        HeadUnitAuto.beginAttempt(autoContext, autoTarget?.address, autoTarget?.name)
+        appendLog(
+            "AUTO: 本轮车机档位=${HeadUnitAuto.describe()}" +
+                (autoTarget?.name?.let { " · 目标「$it」" } ?: ""),
+        )
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
@@ -1372,7 +1433,15 @@ object SessionController {
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
         // 真车路径：手机主动连车机（SDP …caff 配件服务）
         // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-        bluetoothClient?.start()
+        // switch-pool-auto：BMW/MGU 档位只做被动监听——车机会主动连入 …cafe，
+        // 主动拨号既没必要，也会和车机抢同一时刻的空口（hypercar bmw_id85 =
+        // allowOutboundIap2=false）。识别晚到时 connectLoop 内还有第二道闸。
+        val autoPolicy = HeadUnitAuto.current()
+        if (autoPolicy.outboundIap2) {
+            bluetoothClient?.start()
+        } else {
+            appendLog("BT-C: 自动档位=${autoPolicy.family.label}——只监听 …cafe，不主动拨号")
+        }
         bluetoothServer?.start()
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
@@ -1667,6 +1736,8 @@ object SessionController {
         wifi: Iap2SenderSession.WifiConfiguration,
         force: Boolean,
     ): WifiCarPlayConnector.JoinResult {
+        // switch-pool-auto：入网窗口随车机代际调整（CL35 约 19s 拆链 → 12s；CL3D 确认框慢 → 25s）。
+        val joinTimeoutMs = HeadUnitAuto.current().specifierJoinTimeoutMs
         val wired = connector.currentNetwork
         if (boundCarSsid == wifi.ssid && wired != null) {
             appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
@@ -1687,7 +1758,7 @@ object SessionController {
                     "WIFI: \"${wifi.ssid}\" 已有一次入网请求在跑——等它的结果，" +
                         "不重复请求（再发一次会把在跑的那次 release 掉）",
                 )
-                val ok = decision.ticket.await(SPECIFIER_JOIN_TIMEOUT_MS + 5_000L)
+                val ok = decision.ticket.await(joinTimeoutMs + 5_000L)
                 val network = connector.currentNetwork
                 if (ok == true && network != null) {
                     appendLog("WIFI: 等到的结果是「已加入」——直接复用那条网络（$network）")
@@ -1716,7 +1787,7 @@ object SessionController {
                                 ssid = wifi.ssid,
                                 passphrase = wifi.passphrase,
                                 securityType = wifi.securityType,
-                                timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                                timeoutMillis = joinTimeoutMs,
                                 isCancelled = { connectCancelled },
                             )
                         } catch (error: Exception) {
@@ -2008,7 +2079,7 @@ object SessionController {
      * 绑定动作用 [wifiBindLock] 串行化：auto-join 线程与端点交接线程都可能触发，
      * 并发调用 bindCurrentWifi 会互相 release（解绑瞬间 mDNS 广播直接失效）。
      *
-     * 等待窗口 [WIFI_BIND_WAIT_S] 必须够长：`requestNetwork(WIFI)` 的 onAvailable
+     * 等待窗口（`HeadUnitAuto.current().bindWaitSeconds`，默认 15s）必须够长：`requestNetwork(WIFI)` 的 onAvailable
      * 在「手机还没连上任何 WiFi、用户正在系统设置里手动加入热点」时，要等到真正
      * 关联+DCHP 完成才回调。旧值 5s 在奥迪实测中是致命竞态——20:02:09.352 判定
      * 「不在热点」放弃整轮会话，20:02:09.467（**116ms 后**）onAvailable 就到了并
@@ -2017,6 +2088,8 @@ object SessionController {
      * @return 进程网络是否绑定成功
      */
     private fun bindCarWifiAndRegister(ssid: String): Boolean {
+        // switch-pool-auto：绑网窗口随档位调整；未识别时与主线常量一致（15s）。
+        val bindWaitSeconds = HeadUnitAuto.current().bindWaitSeconds
         var bound = false
         synchronized(wifiBindLock) {
             // 另一个路径已经绑定同一热点：别再走一遍 release+requestNetwork
@@ -2029,7 +2102,7 @@ object SessionController {
                     latch.countDown()
                 }
                 // 分片等待：期间用户取消要能立刻退出，不必等满窗口
-                val deadline = android.os.SystemClock.uptimeMillis() + WIFI_BIND_WAIT_S * 1_000
+                val deadline = android.os.SystemClock.uptimeMillis() + bindWaitSeconds * 1_000
                 while (!connectCancelled &&
                     bound.not() &&
                     android.os.SystemClock.uptimeMillis() < deadline
@@ -2047,7 +2120,7 @@ object SessionController {
         } else if (!connectCancelled) {
             phaseHint = "手机不在车机热点——请到 WLAN 设置加入 $ssid"
             appendLog(
-                ">>> 等待 ${WIFI_BIND_WAIT_S}s 仍未绑定到 \"$ssid\"——" +
+                ">>> 等待 ${bindWaitSeconds}s 仍未绑定到 \"$ssid\"——" +
                     "请在 系统设置>WLAN 手动加入该热点后重新连接",
             )
         }
@@ -2139,7 +2212,7 @@ object SessionController {
      * 1. 每 5s 轮询当前 WiFi——用户手动连上车机热点后弹窗确认，确认即以该 SSID 合成
      *    端点重走 [onCarPlayEndpoint]（无端口 → mDNS/网关兜底）；
      * 2. 晚到 0x4301 触发新一轮交接（sessionStarting 重新置位）时让位退出；
-     * 3. 超过 [PENDING_START_SESSION_WAIT_MS] 无进展：记日志并拆掉保活链路，让 BT
+     * 3. 超过档位给的等待预算（`HeadUnitAuto.current().pendingStartWaitMs`，默认 5 分钟）无进展：记日志并拆掉保活链路，让 BT
      *    重连循环接管（与旧「8s 拆链」的区别只在窗口长度）。
      *
      * 为什么需要第 1 条：GM/Cinemo 这类车机（凯迪拉克 CT5/A2LL 实测）的 0x4301 以
@@ -2151,6 +2224,10 @@ object SessionController {
         endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
     ) {
+        // switch-pool-auto：CL39/CL3D 的 0x4301 实测可晚到 6 分钟，窗口随档位放大；
+        // 未识别时仍是主线的 5 分钟。
+        val auto = HeadUnitAuto.current()
+        val waitMs = auto.pendingStartWaitMs
         // 代际：新观察者一起，前面所有观察者作废（每次断链重连都会新起一个）。
         val generation = pendingWatchGeneration.incrementAndGet()
         Bg.run("pending-start-session-watch") {
@@ -2160,17 +2237,17 @@ object SessionController {
             }
             // 英雄卡副标题同步：否则界面一直显示默认的「蓝牙 iAP2 握手 → …」，
             // 用户看到的是「一直在握手」，实际早已连上、在等车机下发凭据。
-            phaseHint = "已连上车机，正在等它下发热点信息（最多 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟）· 请保持 Wi-Fi 开启"
+            phaseHint = "已连上车机，正在等它下发热点信息（最多 ${waitMs / 60_000} 分钟）· 请保持 Wi-Fi 开启"
             appendLog(
                 ">>> [$source] 进入保活等待：车机声明会发 0x4301 但窗口内未到。" +
-                    "蓝牙链路保持（最多 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟，从点「启动连接」算起），" +
+                    "蓝牙链路保持（最多 ${waitMs / 60_000} 分钟，从点「启动连接」算起），" +
                     "期间请保持手机 Wi-Fi 开启；车机多数要看到手机进入它自己的网络后才会下发凭据",
             )
             var promptedSsid: String? = null
             // 预算从**用户点击**算起：车机反复断链重连时不能每轮重新计 5 分钟（否则永不超时）。
             if (pendingWaitBudgetStartedAt == 0L) pendingWaitBudgetStartedAt = android.os.SystemClock.uptimeMillis()
             val watchStartedAt = pendingWaitBudgetStartedAt
-            val deadline = watchStartedAt + PENDING_START_SESSION_WAIT_MS
+            val deadline = watchStartedAt + waitMs
             var tick = 0
             while (!connectCancelled && android.os.SystemClock.uptimeMillis() < deadline) {
                 Thread.sleep(5_000)
@@ -2185,7 +2262,7 @@ object SessionController {
                     val waited = (android.os.SystemClock.uptimeMillis() - watchStartedAt) / 1_000
                     appendLog(
                         ">>> [$source] 仍在等 0x4301（已等 ${waited}s · 上限 " +
-                            "${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟）· Wi-Fi=" +
+                            "${waitMs / 60_000} 分钟）· Wi-Fi=" +
                             when {
                                 !wifiEnabled -> "已关闭（请打开——车机看不到手机就不会下发凭据）"
                                 currentSsid.isNullOrEmpty() -> "已开但未连接任何网络"
@@ -2216,16 +2293,27 @@ object SessionController {
             }
             if (!connectCancelled && !sessionStarting.get() && pendingWatchGeneration.get() == generation) {
                 pendingWaitGaveUp = true
-                phaseHint = "车机未下发热点信息（0x4301），本轮已停止重试"
-                appendLog(
-                    ">>> [$source] 空端点等待 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟超时——" +
-                        "车机始终未下发 0x4301（0x4300 各种报文体都试过了，见上方「0x4300 报文体形态」与" +
-                        "「⚠ 零反馈」两行）。先拆掉保活链路停止空转；确认车机开了无线 CarPlay 后再点" +
-                        "「启动连接」，并把日志发出来",
-                )
-                detachActiveBtSessions()
-                // 等待预算耗尽 = 这一轮确定连不上：把内存里的报文快照落盘（独立文件）
-                SessionTrace.sessionEnd("等待 0x4301 超时（车机未下发热点信息），本轮放弃")
+                if (auto.stayAliveWithoutEndpoint) {
+                    // BMW 档案 A（仅 iPod/BMW Apps）根本没有 CarPlay 凭据。hypercar 的
+                    // 结论是**不要因档案 A 拆链**：拆了车机会认为手机掉线，反而更难切回 B。
+                    phaseHint = "车机未开启 CarPlay（可能是档案 A）——保持蓝牙，等车机重选"
+                    appendLog(
+                        ">>> [$source] ${waitMs / 60_000} 分钟未收到 0x4301/邀请——" +
+                            "BMW 档位不拆链（档案 A 常见）：保持 …cafe 监听，请在 iDrive 里把本机选成 CarPlay 手机；" +
+                            "车机切回档案 B 后会重新下发凭据",
+                    )
+                } else {
+                    phaseHint = "车机未下发热点信息（0x4301），本轮已停止重试"
+                    appendLog(
+                        ">>> [$source] 空端点等待 ${waitMs / 60_000} 分钟超时——" +
+                            "车机始终未下发 0x4301（0x4300 各种报文体都试过了，见上方「0x4300 报文体形态」与" +
+                            "「⚠ 零反馈」两行）。先拆掉保活链路停止空转；确认车机开了无线 CarPlay 后再点" +
+                            "「启动连接」，并把日志发出来",
+                    )
+                    detachActiveBtSessions()
+                    // 等待预算耗尽 = 这一轮确定连不上：把内存里的报文快照落盘（独立文件）
+                    SessionTrace.sessionEnd("等待 0x4301 超时（车机未下发热点信息），本轮放弃")
+                }
             }
         }
     }
@@ -2287,6 +2375,81 @@ object SessionController {
         return false
     }
 
+    /**
+     * BMW/MGU 的「本轮激活」等待：只认 ctrl 邀请或完整 0x4301。
+     *
+     * 为什么不能沿用 [awaitCtrlInvite]：它把「mDNS 发现 `_airplay._tcp`」也当放行信号，
+     * 而 hypercar bmw_id85 的 `requireAirplayActivation=true` 明确要求**本轮**的邀请
+     * 或 iAP2 端点——端口开着、记得过这台车的网络都不算车机已授权。否则手机可能
+     * 先连上一个还没开 CarPlay 窗口的 7000，白等一轮再被车机拆掉。
+     *
+     * 等待期间保持 ctrl 广播存活（每 10s 强制重播一次），并同时观察晚到的 0x4301
+     * （[onLateEndpoint] 在会话交接期间会暂存到 [pendingEndpointUpdate]）。
+     *
+     * @return true = 收到本轮邀请或完整 0x4301；false = 窗口耗尽（调用方不得用
+     *         网关/mDNS 猜测端点，应保持蓝牙监听等车机下一次邀请）
+     */
+    private fun awaitAirplayActivation(
+        ssid: String,
+        waitMs: Long,
+    ): Boolean {
+        val startedAt = android.os.SystemClock.uptimeMillis()
+        val deadline = startedAt + waitMs
+        var lastLogAt = startedAt
+        var lastAnnounceAt = startedAt
+        appendLog(
+            "BMW: 等本轮 ctrl 邀请或 0x4301 激活（最多 ${waitMs / 60_000} 分钟）——" +
+                "开放端口/记住的网络不算激活，期间保持蓝牙监听与 ctrl 广播",
+        )
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (connectCancelled) return false
+            val invites = ctrlAdvertiser?.inviteCount ?: 0
+            if (invites > 0) {
+                appendLog(
+                    "BMW: ✓ 收到本轮 ctrl 邀请（第 $invites 次，peer=${ctrlAdvertiser?.lastInvitePeerIp ?: "?"}）" +
+                        "——用邀请方地址作为 AirPlay 端点",
+                )
+                return true
+            }
+            val late = pendingEndpointUpdate
+            if (late != null &&
+                EndpointHosts.hasUsable(late.ipAddresses) &&
+                late.airPlayPort > 0
+            ) {
+                appendLog(
+                    "BMW: ✓ 收到本轮 0x4301 端点（${late.ipAddresses.firstOrNull()}:${late.airPlayPort}）" +
+                        "——按车机给的地址配对",
+                )
+                return true
+            }
+            val now = android.os.SystemClock.uptimeMillis()
+            // 车机可能漏掉首次 Bonjour 公告：等 10s 还没有邀请就强制重播一次。
+            // 没有 SSID 时不重播——广播会注册到错误网络，反而让车机更难看到。
+            if (now - lastAnnounceAt >= 10_000 && ssid.isNotBlank()) {
+                lastAnnounceAt = now
+                appendLog("BMW: 仍未收到邀请——强制重新公告 ctrl 广播一次")
+                ctrlAdvertiser?.ensureForNetwork(ssid, force = true, network = wifiConnector?.currentNetwork)
+            }
+            if (now - lastLogAt >= 10_000) {
+                lastLogAt = now
+                appendLog(
+                    "BMW: 仍在等本轮激活（已等 ${(now - startedAt) / 1_000}s · 上限 " +
+                        "${waitMs / 60_000} 分钟）——车机可能还没在 iDrive 里选中本机 CarPlay",
+                )
+            }
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        appendLog(
+            "BMW: ${waitMs / 60_000} 分钟内未收到本轮邀请/0x4301——不猜端点、不拆蓝牙链路；" +
+                "保持监听，等车机下一次邀请或晚到 0x4301 再重走交接",
+        )
+        return false
+    }
+
     // ---- 以下方法体自 MainActivity 原样迁入（会话逻辑不依赖 Activity）----
 
     /**
@@ -2304,6 +2467,11 @@ object SessionController {
         sharedSecret: ByteArray?,
         host: String?,
     ): Boolean {
+        if (client.videoOnlyMode) {
+            // switch-pool-auto：仅视频档下主音频归车机，绝不协商/重建音频流。
+            appendLog("AUDIO: 自动档位为「仅视频」——跳过音频通道（主音频交还车机）")
+            return false
+        }
         if (sharedSecret == null) {
             // 明文会话（et=NONE）没有共享密钥可派生 DataStream 输出密钥：
             // 推出去的 RTP 车机无法解密。宁可不推，也不要制造「有包无声」的假象。
@@ -2424,6 +2592,7 @@ object SessionController {
     @Synchronized
     fun rebuildAudioChannel(reason: String): Boolean {
         val client = currentClient ?: return false
+        if (client.videoOnlyMode) return false
         val secret = currentSharedSecret ?: return false
         val host = currentAudioHost ?: return false
         val profile = activeAudioProfile ?: return false
@@ -2503,6 +2672,10 @@ object SessionController {
     ): Boolean {
         if (audioInCallMode == inCall) return true
         val client = currentClient ?: return false
+        if (client.videoOnlyMode) {
+            appendLog("AUDIO: 自动档位为「仅视频」——不切换音频场景（$reason）")
+            return false
+        }
         val secret = currentSharedSecret ?: return false
         val host = currentAudioHost ?: return false
         val context = appContext?.applicationContext ?: return false
@@ -2820,6 +2993,36 @@ object SessionController {
         endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
     ): Iap2SenderSession.CarPlayEndpoint {
+        val auto = HeadUnitAuto.current()
+        // BMW/MGU：车机不发 0x4301 时，ctrl 邀请的 TCP 对端就是它在热点网段上的地址，
+        // AirPlay 控制面固定在 7000（hypercar bmw_id85 / MGU-55 实测）。邀请端点比
+        // mDNS 更权威，直接采用并跳过 mDNS 查询——车机可能根本不广播 `_airplay._tcp`。
+        val inviteIp = ctrlAdvertiser?.lastInvitePeerIp
+        val endpointComplete =
+            endpoint.airPlayPort > 0 && EndpointHosts.hasUsable(endpoint.ipAddresses)
+        // 端点本身就是邀请合成的那个（[inviteEndpointOrNull]）：邀请地址是本轮实测的对端，
+        // 比 mDNS 缓存权威。继续往下走会被 mergeBrowserEndpoint 把 mDNS 地址**排到最前**，
+        // 上一轮别的车机残留的缓存地址就可能顶掉它（连错主机 → 整轮超时）。
+        if (auto.requireAirplayActivation &&
+            inviteIp != null &&
+            endpointComplete &&
+            endpoint.ipAddresses.any {
+                EndpointHosts.stripScope(it) == EndpointHosts.stripScope(inviteIp)
+            }
+        ) {
+            appendLog(">>> [$source] BMW: 端点已由本轮邀请确定（$inviteIp:${endpoint.airPlayPort}）——跳过 mDNS 合并")
+            return endpoint
+        }
+        if (auto.requireAirplayActivation && !endpointComplete && inviteIp != null) {
+            appendLog(
+                ">>> [$source] BMW: 没有 0x4301——用 ctrl 邀请方地址 $inviteIp:${auto.inviteFallbackPort} " +
+                    "作为 AirPlay 端点（跳过 mDNS）",
+            )
+            return endpoint.copy(
+                ipAddresses = listOf(inviteIp) + endpoint.ipAddresses,
+                airPlayPort = auto.inviteFallbackPort,
+            )
+        }
         var effective = endpoint
         val cached = endpointBrowser?.awaitEndpoint(0)
         if (cached != null) {
@@ -2836,6 +3039,15 @@ object SessionController {
         // 网段过滤（防误连同网 macOS 接收器）由 browser 的 accept 统一做。
         val info =
             endpointBrowser?.awaitEndpoint(ENDPOINT_RESOLVE_WAIT_MS) ?: run {
+                if (auto.requireAirplayActivation) {
+                    // 激活门槛：没有本轮邀请/0x4301 时，网关 7000「开着」不代表车机已授权。
+                    // 直接返回不完整端点，让配对循环等车机下一次邀请；绝不猜网关。
+                    appendLog(
+                        ">>> [$source] BMW: mDNS 未发现且本轮没有邀请端点——不做网关兜底" +
+                            "（开放端口/记住的网络不算激活）",
+                    )
+                    return effective
+                }
                 // 兜底：热点场景车机 IP = 网关（Audi 实测 .1，但取网关更通用）。
                 // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
                 // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
@@ -3275,6 +3487,8 @@ object SessionController {
                 endpoint.airPlayPort > 0 && EndpointHosts.hasUsable(endpoint.ipAddresses)
             Bg.run("airplay-pairing") {
                 try {
+                    // switch-pool-auto：本轮参数在配对线程起步时固化一次（同轮日志/等待窗口一致）。
+                    val auto = HeadUnitAuto.current()
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
@@ -3282,11 +3496,19 @@ object SessionController {
                     }
                     if (endpointSelfContained) {
                         appendLog("AIRPLAY: 0x4301 端点完整（${endpoint.ipAddresses.firstOrNull()}:${endpoint.airPlayPort}）——直接配对，不等 ctrl 邀请")
+                    } else if (auto.requireAirplayActivation) {
+                        // BMW/MGU：本轮邀请或 0x4301 才叫激活。等不到就交还主控——保持
+                        // 蓝牙监听与 ctrl 广播，晚到的 0x4301 会经 onLateEndpoint 重走本流程。
+                        if (!awaitAirplayActivation(endpoint.ssid, auto.pendingStartWaitMs)) {
+                            appendLog("AIRPLAY: BMW 档位未拿到本轮激活信号——本轮不建立 AirPlay（不猜端口）")
+                            sessionStarting.set(false)
+                            return@run
+                        }
                     } else {
                         // 等 ctrl 邀请（catplay CarPlayCtrlServer：邀请=车机已发现手机且
                         // AirPlay 窗口已开，收到即刻连接）。此前是「固定睡 1.6s 赌它已到」，
                         // 快的时候白等、慢的时候不够；改为事件驱动。
-                        awaitCtrlInvite(endpoint.ssid, CTRL_INVITE_WAIT_MS)
+                        awaitCtrlInvite(endpoint.ssid, auto.ctrlInviteWaitMs)
                     }
                     // 端点解析放在邀请之后：车机的 `_airplay._tcp` 常在受邀后才上线，
                     // 且这一步最长 3s——必须在后台线程做，不能占住网络回调线程。
@@ -3331,6 +3553,9 @@ object SessionController {
                                 )
                             },
                         ).also { created ->
+                            // switch-pool-auto：仅视频档不声明主音频、跳过音频 SETUP。
+                            // 当前没有任何自动档位打开它（保留给音频反复拖垮会话的兼容场景）。
+                            created.videoOnlyMode = auto.videoOnly
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
                             created.onMediaKey = { keyCode ->
@@ -3947,7 +4172,22 @@ object SessionController {
                                             streamOutH,
                                         )
                                     }
-                                    appendLog("VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}")
+                                    // switch-pool-auto：档位可覆盖画布声明策略；FOLLOW_DEFAULT = 沿用
+                                    // 用户/构建的 VideoCanvasMode（未识别车机走这条，行为零变化）。
+                                    val declareStream =
+                                        when (auto.videoCanvas) {
+                                            HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT -> VideoCanvasMode.declareStream
+                                            HeadUnitAuto.VideoCanvas.STREAM -> true
+                                            HeadUnitAuto.VideoCanvas.CAR -> false
+                                        }
+                                    appendLog(
+                                        "VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}" +
+                                            if (auto.videoCanvas != HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT) {
+                                                "（AUTO ${auto.family.label} → ${auto.videoCanvas.name.lowercase()}）"
+                                            } else {
+                                                ""
+                                            },
+                                    )
                                     // 车机画布（/info 通告值）：既是「声明画布」模式的 params[1]，
                                     // 也是「分离声明」模式的视口（params[3]/params[4]）。
                                     val carCanvas: Pair<Int, Int>? =
@@ -3974,7 +4214,7 @@ object SessionController {
                                             // （2026-11-04 奥迪 3810：画布 1412×654、直通码流
                                             // 被引擎降档成 1280×720，照码流声明 → 整屏黑）。
                                             canvasSize =
-                                                if (VideoCanvasMode.declareStream) {
+                                                if (declareStream) {
                                                     // 分离声明模式：params[1] 交给码流尺寸（见下方 liveSize），
                                                     // 画布改由 viewAreaSize 走 40/44 那两个字段。
                                                     null
@@ -3986,7 +4226,7 @@ object SessionController {
                                             // 所以码流只能 720p 时，正确做法是让视口仍是 1412×654
                                             // 由车机缩放，而不是把解码尺寸改成画布值（会与 SPS 打架）。
                                             viewAreaSize =
-                                                if (VideoCanvasMode.declareStream) {
+                                                if (declareStream) {
                                                     carCanvas?.let { size -> { size } }
                                                 } else {
                                                     null
@@ -4037,9 +4277,21 @@ object SessionController {
                                 // 现场就是「会话全绿、码流在送、屏幕全黑」。
                                 //
                                 // 正常车机走到这里链路早已 NORMAL → 整段跳过，行为零变化。
-                                if (!client.controlSessionReady) {
-                                    appendLog("MIB3: RECORD 时 iAP2 控制会话尚未就绪——等它就绪后补一次激活")
-                                    if (client.awaitControlSession(MIB3_REACTIVATE_WAIT_MS)) {
+                                //
+                                // switch-pool-auto：CL39/CL3D/CL35 的 HMI 状态机更保守，档位可要求
+                                // **无条件**重声明（reactivateAlways）——即使这里已就绪也补一次，
+                                // 只多两条 RTSP 报文，不改变握手顺序；未识别车机仍走原分支。
+                                val reactivate = HeadUnitAuto.current()
+                                val controlReady = client.controlSessionReady
+                                if (reactivate.reactivateAlways || !controlReady) {
+                                    appendLog(
+                                        when {
+                                            controlReady ->
+                                                "MIB3: 档位「${reactivate.family.label}」要求无条件重声明主屏 + 补发 RECORD"
+                                            else -> "MIB3: RECORD 时 iAP2 控制会话尚未就绪——等它就绪后补一次激活"
+                                        },
+                                    )
+                                    if (client.awaitControlSession(reactivate.reactivateWaitMs)) {
                                         appendLog("MIB3: 控制会话已就绪 → 重新声明主屏资源并补发 RECORD")
                                         client.assertModes()
                                         client.record()
@@ -4048,7 +4300,7 @@ object SessionController {
                                         }
                                     } else {
                                         appendLog(
-                                            "MIB3: ${MIB3_REACTIVATE_WAIT_MS}ms 内控制会话仍未就绪" +
+                                            "MIB3: ${reactivate.reactivateWaitMs}ms 内控制会话仍未就绪" +
                                                 "——保留首次激活，不重复（重复 RECORD 会被车机当噪声）",
                                         )
                                     }

@@ -511,6 +511,32 @@ class WifiCarPlayConnector(
     }
 
     /**
+     * 当前关联的 WiFi SSID（读不到返回 null）。
+     *
+     * 用途：车机只发 ctrl 邀请、不发 0x4301 时（BMW MGU 档案 B），网络名只能从手机
+     * 自己的 WiFi 状态取——邀请包里只有对端 IP，没有 SSID/密码。
+     * 读不到一律 null，**绝不猜**（猜错会把进程网络绑到家里 WiFi 上）。
+     */
+    fun currentSsid(): String? {
+        val viaConnectivity =
+            runCatching {
+                connectivityManager.allNetworks.firstNotNullOfOrNull { network ->
+                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@firstNotNullOfOrNull null
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@firstNotNullOfOrNull null
+                    val info = caps.transportInfo as? WifiInfo ?: return@firstNotNullOfOrNull null
+                    plainSsid(info.ssid)
+                }
+            }.getOrNull()
+        if (viaConnectivity != null) return viaConnectivity
+        val manager = wifiManager ?: return null
+        @Suppress("DEPRECATION")
+        val info = runCatching { manager.connectionInfo }.getOrNull() ?: return null
+        @Suppress("DEPRECATION")
+        if (info.networkId < 0) return null
+        return plainSsid(info.ssid)
+    }
+
+    /**
      * 系统当前是不是已经连在 [ssid] 这条热点上。
      *
      * 三种来源都算：用户手动在系统 WLAN 里连过、[registerSuggestion] 登记的建议网络被
