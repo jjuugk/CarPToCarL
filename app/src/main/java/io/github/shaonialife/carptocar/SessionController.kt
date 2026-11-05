@@ -1339,6 +1339,8 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
+        io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
         sessionWanted = true
         // 新一次点击 = 新的重试预算（上一轮用完的三次不该算到这一轮头上）；
