@@ -1643,9 +1643,25 @@ object SessionController {
         force: Boolean,
     ): WifiCarPlayConnector.JoinResult {
         val wired = connector.currentNetwork
-        if (boundCarSsid == wifi.ssid && wired != null) {
+        // 只认「系统仍然承认」的网络：手动断开 / 热点消失后 Network 对象仍然存在，
+        // 直接复用会让后续 socket 全部 ENONET（2026-11-04 实车：15 次重试全失败，只能杀进程）。
+        val wiredAlive =
+            wired?.let { net ->
+                runCatching {
+                    val caps =
+                        appContext?.getSystemService(android.net.ConnectivityManager::class.java)
+                            ?.getNetworkCapabilities(net)
+                    caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                }.getOrDefault(false)
+            } ?: false
+        if (boundCarSsid == wifi.ssid && wired != null && wiredAlive) {
             appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
             return WifiCarPlayConnector.JoinResult.Joined(wired)
+        }
+        if (wired != null && !wiredAlive) {
+            appendLog("WIFI: 缓存的网络已失效（系统已无该 Wi-Fi）——清掉重新加入")
+            connector.release()
+        }
         }
         return when (val decision = wifiJoinGate.decide(wifi.ssid, android.os.SystemClock.uptimeMillis(), force)) {
             is WifiJoinGate.Decision.Skip -> {
