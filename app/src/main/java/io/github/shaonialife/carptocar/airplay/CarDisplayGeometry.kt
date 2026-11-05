@@ -45,6 +45,10 @@ object CarDisplayGeometry {
         val uuid: String?,
         /** 车机声明的解码帧率上限；0 = 没声明。 */
         val maxFps: Int,
+        /** 车机声明的显示特性位图（/info displays[].features）；null = 没声明。 */
+        val features: Int?,
+        /** 车机声明的主输入设备（/info displays[].primaryInputDevice）；null = 没声明。1=触屏 2=触摸板 3=旋钮。 */
+        val primaryInputDevice: Int?,
         /** 命中的键名，进日志用。 */
         val widthKey: String,
         val heightKey: String,
@@ -56,8 +60,43 @@ object CarDisplayGeometry {
             "displays[$index] $text" +
                 (type?.let { " type=$it" } ?: "") +
                 (if (maxFps > 0) " maxFPS=$maxFps" else "") +
+                (features?.let { " features=${decodeFeatures(it)}" } ?: "") +
+                (primaryInputDevice?.let { " input=${inputDeviceLabel(it)}" } ?: "") +
                 (uuid?.let { " uuid=${it.take(8)}" } ?: "")
     }
+
+    /**
+     * 显示特性位图（/info displays[].features）的可读解码。
+     *
+     * 真车证据（AirPlayClient:576）：奥迪 display features=0x08 即 HIGHFI_TOUCH，配合 hidDevices 齐备
+     * 时触摸却无报文——这条位图是判断「该不该往这屏发触摸」的关键证据，旧实现没解析，只能人肉看注释。
+     * 现在直接进 /info 日志，旋钮车机盲发触摸的现象可一眼定位。
+     */
+    private val FEATURE_LABELS =
+        mapOf(
+            0x1 to "KNOBS",
+            0x2 to "LOWFI_TOUCH",
+            0x4 to "HIGHFI_TOUCH",
+            0x8 to "TOUCHPAD",
+        )
+
+    private fun decodeFeatures(mask: Int): String =
+        if (mask == 0) {
+            "none"
+        } else {
+            val hits = FEATURE_LABELS.filterKeys { mask and it != 0 }.values.joinToString("|")
+            if (hits.isEmpty()) "0x${mask.toString(16)}" else "$hits"
+        }
+
+    /** 主输入设备（/info displays[].primaryInputDevice）可读解码：1=触屏 2=触摸板 3=旋钮。 */
+    private fun inputDeviceLabel(id: Int): String =
+        when (id) {
+            1 -> "touchscreen"
+            2 -> "touchpad"
+            3 -> "knob"
+            0 -> "none"
+            else -> "0x${id.toString(16)}"
+        }
 
     private val WIDTH_KEYS = listOf("widthPixels", "WidthPhysical", "widthPhysical", "width", "pixelWidth")
     private val HEIGHT_KEYS = listOf("heightPixels", "HeightPhysical", "heightPhysical", "height", "pixelHeight")
@@ -83,6 +122,11 @@ object CarDisplayGeometry {
                     type = intOrNull(display["type"])?.takeIf { it >= 0 },
                     uuid = uuidText(display["uuid"] ?: display["UUID"] ?: display["displayUUID"]),
                     maxFps = positiveInt(display["maxFPS"]) ?: 0,
+                    // features / primaryInputDevice：显示特性位图与主输入设备，用于判断「该不该往这屏发触摸」。
+                    // 0 是合法取值（features=0 表示无特性、primaryInputDevice=0 表示无主输入），与 type 同理保留。
+                    features = intOrNull(display["features"])?.takeIf { it >= 0 },
+                    primaryInputDevice =
+                        intOrNull(display["primaryInputDevice"] ?: display["primaryInput"])?.takeIf { it >= 0 },
                     widthKey = width.second,
                     heightKey = height.second,
                 )

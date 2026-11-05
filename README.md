@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk)**
-> —— 主线固定直链（当前 1.2.23，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**
+> —— 主线固定直链（当前 1.2.24，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.23，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.23.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.24，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.24.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.23`（正式版；**修 QNX 车机随机卡死**：iAP2 隧道此前把链路引擎输出缓冲里的**全部**字节（同步标记 + 应答 + 多个数据帧）封成**一个**传输单元写出去，而按「一个传输单元 = 一个 iAP2 包」解析的接收端（QNX 系车机，如 HARMAN MIB3）会在第二个帧上错位，症状是投屏跑到一半随机卡死；现按帧边界切分后**一帧一个传输单元**，包头不认识/长度越界/末尾残帧一律退回旧行为（宁可整段原样发，也不丢帧——丢一帧等于控制链路死锁）；1.2.22 的**语音键改走 requestSiri + 长按松手才补 VR_STOP**、1.2.21 的**车机 GPS 转发**不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.24`（正式版；**修 0x4301 无线组解析**：信道/安全类型此前按取值区间盲猜，1 基编号车机 + 信道 1~4 时二者会被互换、安全类型漏读，WPA2 热点确定性连不上；现改为按 **ID 定位**（0 基 id2=信道/id4=安全类型，1 基 id3/id5，都读不到再按 ID 顺序兜底），并补 `/info displays[].features` / `primaryInputDevice` 解析入日志（旋钮车机盲发触摸可一眼诊断）；1.2.23 的**隧道一帧一传输单元（修 QNX 卡死）**、1.2.22 的语音键、1.2.21 的车机 GPS 转发均不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,35 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.24 —— 2026-11-05（修 0x4301 无线凭据解析：信道/安全类型按 ID 定位，兼容 1 基车机；补 /info 输入能力解析，正式版）
+
+**一、问题：某些 WPA2 车机确定性连不上，日志里 SSID/密码都对**
+
+0x4301 的无线组子参数，规范是 0 基（`0=SSID, 1=密码, 2=信道, 3=IP, 4=安全类型`），
+但个别车机把整套 ID +1（`3=信道, 5=安全类型`）。旧实现用「取值区间盲猜」区分：
+信道 1..196、安全类型 0..4——二者在 **1..4 区间重叠**。于是 1 基车机 + 信道 1~4 时，
+`singles[4]` 里其实是信道值（1~4）被当成安全类型，真实安全类型（在 id5）被漏掉，
+结果 `channel=0`、`securityType=信道值`——按开放网络去连 WPA2 热点，必然失败。
+
+**二、修法：按 ID 定位，不猜取值**
+
+- 0 基：`id2=信道、id4=安全类型`（Apple 规范；WinPlay 车机模拟器构造 0x4301 也是这套，
+  `build/engine/iap.js` 里 `param(2, channel)` / `param(4, [2])` 实测）；
+- 1 基兜底：`id3=信道、id5=安全类型`；
+- 都读不到：按 ID 顺序兜底——低 ID 是信道、高 ID 是安全类型（规范里信道 ID 永远小于安全类型 ID）。
+
+解析逻辑移入伴生对象并新增 `ParseWirelessApTest`（0 基 / 1 基 / 信道落 1~4 重叠区 /
+缺失 SSID / 4 字节 IP 排除，共 6 例）。现有 `Iap2SenderSessionTest` 的 0 基回环
+（channel=36、security=2）保持不变。
+
+**三、顺带：/info 输入能力解析进日志**
+
+`CarDisplayGeometry.Screen` 新增 `features`（位图：0x1 KNOBS / 0x2 LOWFI_TOUCH /
+0x4 HIGHFI_TOUCH / 0x8 TOUCHPAD）与 `primaryInputDevice`（1 触屏 / 2 触摸板 / 3 旋钮），
+并解码进「/info 共 N 块屏候选」那行日志。此前只有注释里人肉写着「奥迪 features=0x08」，
+面板不解析，旋钮车机盲发触摸时无从诊断。**纯增量**：不改屏幕选择与触摸路由，
+只把证据摆到日志里。
 
 ### 1.2.23 —— 2026-11-05（隧道发送改为一帧一个传输单元，修 QNX 车机随机卡死，正式版）
 

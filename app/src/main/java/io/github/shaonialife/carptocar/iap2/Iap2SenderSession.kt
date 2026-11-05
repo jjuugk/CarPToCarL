@@ -247,7 +247,75 @@ class Iap2SenderSession(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * 从 0x4301 的无线组里解析 AP 信息（新协议车机的唯一凭据来源）。
+         *
+         * 子参数 ID 约定（与车机侧实现/Apple 规范一致，WinPlay 实测也是这套）：
+         * `0=SSID, 1=密码, 2=信道, 3=IP, 4=安全类型`。
+         * 个别车机会把整套 ID +1（1 基：1=SSID, 2=密码, 3=信道, 4=IP, 5=安全类型）。
+         *
+         * 关键：信道(1..196)与安全类型(0..4)在 1..4 区间**重叠**，纯靠取值区间盲猜会
+         * 把信道 1~4 误当安全类型、把真实安全类型漏掉——这正是某些 WPA2 车机死活连不上的根因。
+         * 因此改用「ID 定位」：先按 0 基读 id2=信道/id4=安全类型；0 基缺字段时再退 1 基读
+         * id3=信道/id5=安全类型；都读不到就退回基于「ID 顺序」的兜底（低 ID 是信道、高 ID 是
+         * 安全类型——规范里信道 ID 永远小于安全类型 ID）。
+         */
+        internal fun parseWirelessAp(group: List<Iap2Csm.Param>): WifiConfiguration? {
+            val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")
+            val strings =
+                group
+                    .sortedBy { it.id }
+                    .mapNotNull { param -> param.value.asStringOrEmpty() }
+                    .filter { it.isNotEmpty() && !ipv4.matches(it) && !it.contains(':') }
+            val ssid = strings.getOrNull(0)?.takeIf { it.length <= 32 } ?: return null
+            val passphrase = strings.getOrNull(1) ?: ""
+
+            val singles = group.filter { it.value.size == 1 }.associate { it.id to (it.value[0].toInt() and 0xFF) }
+
+            // 0 基：信道@2、安全类型@4（规范 + WinPlay 实测）
+            var channel = singles[2]?.takeIf { it in 1..196 }
+            var security = singles[4]?.takeIf { it in 0..4 }
+
+            // 1 基兜底：信道@3、安全类型@5（个别车机把整套 ID +1）
+            if (channel == null) channel = singles[3]?.takeIf { it in 1..196 }
+            if (security == null) security = singles[5]?.takeIf { it in 0..4 }
+
+            // 最后一招：两个单字节字段都在、但上面没命中，按 ID 顺序兜底——
+            // 低 ID 是信道、高 ID 是安全类型（规范里信道 ID 永远小于安全类型 ID）。
+            if (channel == null || security == null) {
+                val bytes =
+                    group.filter { it.value.size == 1 }
+                        .sortedBy { it.id }
+                        .map { it.value[0].toInt() and 0xFF }
+                if (bytes.size >= 2) {
+                    val lo = bytes[0]
+                    val hi = bytes[1]
+                    if (channel == null && lo in 1..196) channel = lo
+                    if (security == null && hi in 0..4) security = hi
+                }
+            }
+
+            return WifiConfiguration(
+                ssid = ssid,
+                passphrase = passphrase,
+                channel = channel ?: 0,
+                securityType = security ?: 0,
+            )
+        }
+
+        /**
+         * NUL 结尾的 CSM 字符串：去掉全部尾部 NUL 后返回，否则（空或非 NUL 结尾）返回 null。
+         * 与外层类的同名扩展同义；放伴生对象内是因为 [parseWirelessAp] 移到伴生作用域后
+         * 访问不到外层 private 扩展（伴生是独立嵌套类）。
+         */
+        private fun ByteArray.asStringOrEmpty(): String? {
+            if (isEmpty() || last() != 0.toByte()) return null
+            var end = size
+            while (end > 0 && this[end - 1] == 0.toByte()) end--
+            return copyOf(end).decodeToString()
+        }
+
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
 
@@ -1546,34 +1614,6 @@ class Iap2SenderSession(
         )
     }
 
-    /**
-     * 从 0x4301 的无线组里解析 AP 信息（新协议车机的唯一凭据来源）。
-     *
-     * 只取「不像 IP 地址」的 NUL 结尾字符串：第一个当 SSID、第二个当密码；
-     * 单字节字段按取值范围归类（信道 1..196、安全类型 0..4），信道优先 id=2、
-     * 其次 id=4/id=3 中不是安全类型的那个。解析不出来返回 null（调用方会报错并留日志）。
-     */
-    private fun parseWirelessAp(group: List<Iap2Csm.Param>): WifiConfiguration? {
-        val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")
-        val strings =
-            group
-                .sortedBy { it.id }
-                .mapNotNull { param -> param.value.asStringOrEmpty() }
-                .filter { it.isNotEmpty() && !ipv4.matches(it) && !it.contains(':') }
-        val ssid = strings.getOrNull(0)?.takeIf { it.length <= 32 } ?: return null
-        val passphrase = strings.getOrNull(1) ?: ""
-        val singles = group.filter { it.value.size == 1 }.associate { it.id to (it.value[0].toInt() and 0xFF) }
-        val security =
-            singles[4]?.takeIf { it in 0..4 }
-                ?: singles[3]?.takeIf { it in 0..4 }
-                ?: 0
-        val channel =
-            singles[2]?.takeIf { it in 1..196 }
-                ?: singles[4]?.takeIf { it in 1..196 && it != security }
-                ?: singles[3]?.takeIf { it in 1..196 && it != security }
-                ?: 0
-        return WifiConfiguration(ssid = ssid, passphrase = passphrase, channel = channel, securityType = security)
-    }
 
     /**
      * 从 0x1D01 的 ExternalAccessoryProtocol 组件（参数组 10/11/12）解析 EA 协议：

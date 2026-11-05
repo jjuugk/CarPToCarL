@@ -92,4 +92,53 @@ class CarDisplayGeometryTest {
         assertEquals(1280, size?.width)
         assertTrue(size!!.source.contains("displays[2]"))
     }
+
+    /**
+     * 解析 /info displays[].features / primaryInputDevice，并在 describe() 里解码成可读文本。
+     * 这是「旋钮车机盲发触摸不可诊断」的修复点：奥迪 display features=0x08 即 HIGHFI_TOUCH，
+     * 之前 Screen 不解析这两个字段，只能靠注释人肉判断。
+     */
+    @Test
+    fun parsesFeaturesAndPrimaryInputDevice() {
+        // 0x4=HIGHFI_TOUCH, 0x8=TOUCHPAD（与奥迪 display features=0x08 注释对应），合并覆盖多比特解码
+        val screens =
+            CarDisplayGeometry.screens(
+                info(
+                    mapOf(
+                        "widthPixels" to 1412L,
+                        "heightPixels" to 654L,
+                        "features" to 0xC,
+                        "primaryInputDevice" to 3,
+                    ),
+                ),
+            )
+        assertEquals(1, screens.size)
+        val s = screens[0]
+        assertEquals(0xC, s.features)
+        assertEquals(3, s.primaryInputDevice)
+        val desc = s.describe()
+        assertTrue("features 应解码含 HIGHFI_TOUCH：$desc", desc.contains("features=HIGHFI_TOUCH|TOUCHPAD"))
+        assertTrue("input 应解码为 knob：$desc", desc.contains("input=knob"))
+    }
+
+    /** features=0（已声明但无特性）保留 0；primaryInputDevice 没声明则为 null，describe 不出现 input=。 */
+    @Test
+    fun featuresZeroAndInputMissingAreDistinct() {
+        val screens =
+            CarDisplayGeometry.screens(
+                info(
+                    mapOf(
+                        "widthPixels" to 800L,
+                        "heightPixels" to 480L,
+                        "features" to 0,
+                    ),
+                ),
+            )
+        val s = screens[0]
+        assertEquals(0, s.features)
+        assertEquals(null, s.primaryInputDevice)
+        val desc = s.describe()
+        assertTrue("features=0 应解码为 none：$desc", desc.contains("features=none"))
+        assertTrue("未声明 input 不应出现 input=：$desc", !desc.contains("input="))
+    }
 }
