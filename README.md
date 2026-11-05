@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk)**
-> —— 主线固定直链（当前 1.2.22，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk)**
+> —— 主线固定直链（当前 1.2.23，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.22，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.22.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.23，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.23.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.22`（正式版；**修语音键**：回看车上日志发现语音键根本不走 `0x6802` HID `0xCF`，而是 AirPlay 事件通道 `requestSiri`（`siriAction` 1=Prewarm / 2=ButtonDown / 3=ButtonUp，取自 Apple `AirPlayCommon.h`），1.2.21 那条链路在这些车上是死代码；现在两条通路统一进 `VoiceKeyRouter`，按下发 `0x68008 KEYCODE_VR_START=0x21`，**长按 ≥1.5s 松手才补 `KEYCODE_VR_STOP=0x22`**（短按交给 CarLife+ 自己结束，避免松手就把刚起来的识别掐掉）；同时补上 `hidSendReport` 通路漏掉的语音键转发；1.2.21 的**车机 GPS 转发 + 「使用车机 GPS」开关**不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.22.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.22/CarPToCarL-1.2.22.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.23`（正式版；**修 QNX 车机随机卡死**：iAP2 隧道此前把链路引擎输出缓冲里的**全部**字节（同步标记 + 应答 + 多个数据帧）封成**一个**传输单元写出去，而按「一个传输单元 = 一个 iAP2 包」解析的接收端（QNX 系车机，如 HARMAN MIB3）会在第二个帧上错位，症状是投屏跑到一半随机卡死；现按帧边界切分后**一帧一个传输单元**，包头不认识/长度越界/末尾残帧一律退回旧行为（宁可整段原样发，也不丢帧——丢一帧等于控制链路死锁）；1.2.22 的**语音键改走 requestSiri + 长按松手才补 VR_STOP**、1.2.21 的**车机 GPS 转发**不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.23.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.23/CarPToCarL-1.2.23.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,50 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.23 —— 2026-11-05（隧道发送改为一帧一个传输单元，修 QNX 车机随机卡死，正式版）
+
+**一、问题：投屏跑到一半随机卡死，且不是每次都死**
+
+这类故障最难归因——没有固定复现步骤、日志里也看不到异常，因为**报文本身都没错**，
+错的是「报文怎么装进传输单元」。2026-11-05 的《CarPlay 手机侧分析报告》§9 把这条
+写成了硬性契约：**同一传输只放一个 iAP2 包，接收侧按流式处理即可，发送时不要合并；
+违反后果是 QNX 车机随机卡死。**
+
+我们确实在合并。`AirPlayClient.IapTunnelClient.writeIapBytes` 把
+`engine.takeOutput()` 的**全部**字节封成一个 `APTransportPackage` 写出去，而链路引擎
+的输出缓冲里经常连着「同步标记 + 一个应答 + 一个数据帧」；MIB3（HARMAN，正是 QNX 系）
+在 `0xAA05` 之后的认证突发更是一次连发 8 条消息。接收端按「一个传输单元 = 一个包」
+解析时，第二个帧的包头就落到了第一个帧的载荷位置上，链路直接错位。
+
+**二、改法：按帧边界切分，但一切以「不丢帧」为前提**
+
+新增 `Iap2LinkPacket.splitFrames`，两种包头分别处理：
+
+| 包头 | 长度字段含义 | 切分依据 |
+| --- | --- | --- |
+| `FF 5A`（数据帧） | 头后的 u16 是**整帧**长度（9B 头 + 载荷 + 1B 校验） | 直接按该值切 |
+| `FF 55`（同步标记） | 头后的 u16 **不是**长度（`FF 55 02 00 EE 10` 里 `02 00` 大端读 512、小端读 2，两个都不对） | 按固定 6 字节形态 `FF 55 02 00 EE 10` 识别 |
+
+保守兜底：首字节不认识 / 声明长度越界 / 末尾有残帧，**一律整段原样返回**，调用方按
+旧行为「一坨」写出。丢一帧等于控制链路死锁，宁可保持现状也不要为了切开而丢数据。
+
+首轮出现多帧时打一行日志（`输出缓冲含 N 帧 → 已按帧拆成 N 个传输单元`），下次上车
+就能确认这台车机是否真的踩到了合并形态；只打一次，不刷屏。
+
+**三、影响范围**
+
+只影响走 iAP 隧道（type-130）的车机；走事件通道 `iAPSendMessage` 的老车机行为完全不变。
+`flushOutputLocked` 的 `mib3Armed` / `eventLinkArmed` 分支仍把多帧塞进一条
+`iAPSendMessage` 命令——那条路奥迪 MIB3 真车验证过可用，报告也没说 HTTP 命令要拆，
+本次不动；若将来出现「突发只生效第一条」，先查这里。
+
+**四、验证**
+
+- 新增 `Iap2LinkFrameSplitTest` 9 例：单帧 / 两帧 / 仅同步标记 / 三帧 / 未知包头 /
+  前导杂字节 / 残帧 / 脏长度 / 空输入。
+- 单测 **431 例 0 失败**（1.2.22 的 422 + 新增 9），`assembleRelease` 通过。
+- **没有实车回归**：QNX 车机上的实际效果要等下一次上车验证。
 
 ### 1.2.22 —— 2026-11-04（语音键改走 requestSiri + 长按收尾，正式版）
 
