@@ -750,6 +750,18 @@ object SessionController {
     /** 两次「叫醒」的最小间隔（ms）：比 AirPlay 端口重试节奏慢，避免把 iAP2 会话喂成噪声。 */
     private const val CARPLAY_WAKE_GAP_MS = 10_000L
 
+    /** 连上后先等这么久再判「没有 CarLife 画面」（给缓存回放/引擎首帧一点时间，正常 <1s）。 */
+    private const val NOTICE_FIRST_DELAY_MS = 1_200L
+
+    /** 车机仍然没画面时提示帧的重推间隔（ms）：车机偶尔丢帧，切屏回来也要能看到。 */
+    private const val NOTICE_REPEAT_MS = 5_000L
+
+    /** 提示帧最多推这么多次（≈60s），之后交给首帧门与视频看门狗。 */
+    private const val NOTICE_MAX_PUSHES = 12
+
+    /** 首帧门判「刚推过提示」的窗口（ms）：窗口内不重复推，避免两套文案互相覆盖。 */
+    private const val NOTICE_RECENT_MS = 8_000L
+
     /**
      * 屏幕接管门等首帧的上限（ms）。
      *
@@ -3198,6 +3210,56 @@ object SessionController {
     }
 
     /**
+     * 连上就立刻给反馈：会话已激活、但 CarLife 还没出画面时，**马上**把提示推到车机屏幕。
+     *
+     * 2026-11-06 用户要求：不要对着黑屏等 20 秒首帧门超时才发现「原来是 CarLife 没在出画面」。
+     *
+     * 提示帧本身是一帧 H.264（SPS/PPS+IDR，见 [VideoSender.pushNotice]），推上去之后空闲保活
+     * 会每秒重发它——所以文字会一直挂在车机上，直到 CarLife 的真实 IDR 到达（真实帧会替换
+     * `lastIdrNals`，提示自动消失）。
+     *
+     * 判据用 [videoSessionFrameBase]（attach **之前**取的累计送达数）：
+     *  - 本次会话一帧都没送出去 → 提示；
+     *  - 缓存回放/真实帧已经有增长 → 不提示（否则会拿提示帧盖掉刚显示的页面）。
+     */
+    private fun startCarlifeWaitNotice() {
+        Bg.run("carlife-wait-notice") {
+            // 先给「缓存回放 / 引擎首帧」一点时间：正常车机 <1s 就有画面，不能一上来就盖提示
+            sleepQuietly(NOTICE_FIRST_DELAY_MS)
+            if (connectCancelled) return@run
+            var pushed = 0
+            while (pushed < NOTICE_MAX_PUSHES) {
+                if (connectCancelled || videoSender?.isRunning != true) return@run
+                if (CarLifeHijack.framesDelivered > videoSessionFrameBase) {
+                    if (pushed > 0) {
+                        appendLog("CARLIFE: 画面已接上——车机侧提示帧会被真实画面替换")
+                    }
+                    return@run
+                }
+                // 两种「没画面」要说清：源在出帧但没送达（链路/配置），还是源压根没出帧
+                // （CarLife 没进无线连接）。用 sourceActive（带新鲜度）而不是 isStreaming。
+                val lines =
+                    if (CarLifeHijack.sourceActive) {
+                        listOf("已连接，但车机还没收到画面", "请在车机上重连或重启 CarLife+ 无线连接")
+                    } else {
+                        listOf("已连接，但没有 CarLife 画面", "请在手机上打开 CarLife+ →「无线连接」")
+                    }
+                val sent = videoSender?.pushNotice(lines) == true
+                pushed++
+                carlifeNoticePushedAt = android.os.SystemClock.uptimeMillis()
+                if (pushed == 1) {
+                    appendLog(
+                        "STAGE: 车机已连接但还没有 CarLife 画面——已立即推送提示帧到车机屏幕" +
+                            (if (sent) "" else "（送出失败，仅日志兜底）") +
+                            "；CarLife 出画面后提示会被真实帧替换",
+                    )
+                }
+                sleepQuietly(NOTICE_REPEAT_MS)
+            }
+        }
+    }
+
+    /**
      * 首帧门：SETUP 成功之后等首帧，超时**只报告不拆链**。
      *
      * 等的是「车机真的收到首帧」（`CarLifeHijack.framesDelivered` 相对本次会话起点有增长），
@@ -3219,8 +3281,10 @@ object SessionController {
      */
     private fun startFirstFrameGate() {
         Bg.run("first-frame-gate") {
-            // 以本次会话起点的累计送达数为基准：framesDelivered 不归零，必须用差值判断。
-            val base = CarLifeHijack.framesDelivered
+            // 基准取 attach **之前**的累计送达数（videoSessionFrameBase）：缓存回放成功时
+            // framesDelivered 在 attach 里已经涨过，若在这里重新取基准，会把「已经回放了画面」
+            // 误判成「20s 没帧」，然后用提示帧把真实画面盖掉。
+            val base = videoSessionFrameBase
             val budget = ConnectStage.FIRST_FRAME.budgetMs
             val deadline = android.os.SystemClock.uptimeMillis() + budget
             while (android.os.SystemClock.uptimeMillis() < deadline) {
@@ -3249,18 +3313,28 @@ object SessionController {
             } else {
                 listOf("未劫持到手机车联画面", "请在手机 CarLife+ 进入「无线连接」")
             }
-            val pushed = videoSender?.isRunning == true &&
-                (videoSender?.pushNotice(noticeLines) ?: false)
+            // 「没有 CarLife 画面」的提示已经由 startCarlifeWaitNotice 在**连上那一刻**推过了
+            // （2026-11-06 用户要求：不要对着黑屏等 20 秒）。这里只在确实没提示过时才补推，
+            // 避免两套文案互相覆盖、并把提示帧反复刷新。
+            val recentlyNoticed =
+                android.os.SystemClock.uptimeMillis() - carlifeNoticePushedAt < NOTICE_RECENT_MS
+            val pushed =
+                !recentlyNoticed && videoSender?.isRunning == true &&
+                    (videoSender?.pushNotice(noticeLines) ?: false)
             appendLog(
                 "STAGE: ⚠ ${ConnectStage.FIRST_FRAME.label}超时（${budget / 1000}s 内车机未收到本会话任何视频帧，" +
-                    "CarLife推流=$carlifePushing，累计送达=${CarLifeHijack.framesDelivered}）——" +
+                    "CarLife推流=$carlifePushing，累计送达=${CarLifeHijack.framesDelivered - base} 帧）——" +
                     (if (carlifePushing) {
                         "CarLife 在推流但帧未送达车机（检查 SPS/VideoConfig 或重连车机）"
                     } else {
                         "画面来自本机 CarLife+：确认它处于「无线连接」且引擎在推流（7240）"
                     }) +
                     "；会话本身已建立，不需要重连车机" +
-                    if (pushed) "；已向车机屏幕推送提示" else "",
+                    when {
+                        pushed -> "；已向车机屏幕推送提示"
+                        recentlyNoticed -> "；提示帧已在连上时推送（本次不重复）"
+                        else -> ""
+                    },
             )
             if (pushed) {
                 // 车机偶尔会丢掉首帧：每 5s 重推一次，最多 60s；本会话一旦收到帧或会话结束即停。
@@ -4335,6 +4409,10 @@ object SessionController {
                                                     },
                                             )
                                         }
+                                        // attach 之前取累计送达基准：「本次会话有没有送出过帧」以它为准。
+                                        // 缓存回放（FirstFramePolicy）会在这里之后立刻 +N 帧，
+                                        // 于是「已回放画面」不会被误判成「没有 CarLife 画面」。
+                                        videoSessionFrameBase = CarLifeHijack.framesDelivered
                                         CarLifeHijack.attach(target) { line -> appendLog(line) }
                                         ScreenDimmer.setSessionActive(true)
                                     } else {
@@ -4346,6 +4424,8 @@ object SessionController {
                                                 "「无线连接」，画面会自动接上（无需重连车机）",
                                         )
                                     }
+                                    // 连上就立刻给车机屏幕一个反馈（不等 20s 首帧门超时）
+                                    startCarlifeWaitNotice()
                                     startFirstFrameGate()
                                     startScreenHandoverGate(client)
                                 }
@@ -4589,6 +4669,20 @@ object SessionController {
     /** 最近一次收到车机事件命令的 `uptimeMillis`（0 = 从没收到）。 */
     @Volatile
     private var lastCarEventAtUptime = 0L
+
+    /**
+     * 本次视频会话「送出第一帧」的累计基准（attach **之前**取）。
+     *
+     * `CarLifeHijack.framesDelivered` 跨会话累加、从不归零，所以「本次有没有送出过帧」
+     * 只能用「当前值 - 本基准」判断。缓存回放（[io.github.shaonialife.carptocar.video.FirstFramePolicy]）
+     * 也会让它增长，因此基准必须在 attach 之前取——否则会拿提示帧盖掉刚回放出来的画面。
+     */
+    @Volatile
+    private var videoSessionFrameBase = 0L
+
+    /** 最近一次向车机推送「没有 CarLife 画面」提示的时刻（`uptimeMillis`；0 = 没推过）。 */
+    @Volatile
+    private var carlifeNoticePushedAt = 0L
 }
 
 /** 配对失败后的兜底路径决策（纯函数，真机抓包场景由 PairingFallbackTest 钉死）。 */
