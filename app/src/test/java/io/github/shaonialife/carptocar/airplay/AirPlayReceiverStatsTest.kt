@@ -59,6 +59,21 @@ class AirPlayReceiverStatsTest {
         assertFalse(AirPlayReceiverStats.present(root))
         assertTrue(AirPlayReceiverStats.screenStats(root).isEmpty())
         assertTrue(AirPlayReceiverStats.streamTypes(root).isEmpty())
+        assertFalse(AirPlayReceiverStats.presentButUnexpected(root))
+    }
+
+    /**
+     * 「键在但不是字典」必须与「压根没这个键」区分开。
+     *
+     * 否则日志会把「车机回了但我们解不动」写成「该固件不回报统计」，
+     * 下一轮就会直接放弃这条探针。
+     */
+    @Test
+    fun `键在但不是字典时单独标记`() {
+        val quoted = mapOf("statsDictionary" to "not-a-dict")
+        assertFalse(AirPlayReceiverStats.present(quoted))
+        assertTrue(AirPlayReceiverStats.presentButUnexpected(quoted))
+        assertTrue(AirPlayReceiverStats.screenStats(quoted).isEmpty())
     }
 
     @Test

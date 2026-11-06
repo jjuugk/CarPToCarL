@@ -138,6 +138,7 @@ STAGE: ⚠ 车机对画面无任何回落信号（首帧后 12s 内事件通道 
 ```
 AIRPLAY: 车机收帧统计 stream=1 type=110 rfps=19.8 ltnc=0 ahea=0（pre-decode：证明帧进了接收端前级，不能证明解码/交屏）
 AIRPLAY: /feedback 没有 statsDictionary——该固件不回报车机侧收帧统计（…）
+AIRPLAY: statsDictionary 存在但不是字典（…）——收帧统计解不动，按「没有统计」处理
 AIRPLAY: statsDictionary 里没有屏幕流条目（实有类型=[102]，屏幕应为 110/111）——说明接收端还没把这条流登记成屏幕流
 ```
 

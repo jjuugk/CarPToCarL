@@ -58,6 +58,14 @@ internal object AirPlayReceiverStats {
     /** 这份 `/feedback` 有没有带 `statsDictionary`（不论里面有没有屏幕流）。 */
     fun present(root: Map<*, *>): Boolean = root[KEY_STATS] is Map<*, *>
 
+    /**
+     * 键在、但**不是字典**（固件换了形态，或被别的类型占了）。
+     *
+     * 单独判一次，是为了别把「车机回了但我们解不动」写成「车机不回报」——
+     * 那句错误结论会让人下一轮直接放弃这条探针。
+     */
+    fun presentButUnexpected(root: Map<*, *>): Boolean = root.containsKey(KEY_STATS) && !present(root)
+
     /** 取屏幕流的收帧统计；没有 `statsDictionary` 时返回空表。 */
     fun screenStats(root: Map<*, *>): List<ScreenReceiveStat> {
         val dict = root[KEY_STATS] as? Map<*, *> ?: return emptyList()

@@ -666,8 +666,13 @@ class AirPlayClient(
             if (!statsMissingLogged) {
                 statsMissingLogged = true
                 log(
-                    "AIRPLAY: /feedback 没有 statsDictionary——该固件不回报车机侧收帧统计" +
-                        "（无法从手机侧判断帧是否到达；仍可看事件通道有没有回落命令）",
+                    if (AirPlayReceiverStats.presentButUnexpected(root)) {
+                        "AIRPLAY: statsDictionary 存在但不是字典" +
+                            "（${root["statsDictionary"]?.javaClass?.simpleName}）——收帧统计解不动，按「没有统计」处理"
+                    } else {
+                        "AIRPLAY: /feedback 没有 statsDictionary——该固件不回报车机侧收帧统计" +
+                            "（无法从手机侧判断帧是否到达；仍可看事件通道有没有回落命令）"
+                    },
                 )
             }
             return
