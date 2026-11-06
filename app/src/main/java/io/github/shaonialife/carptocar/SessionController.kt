@@ -46,6 +46,7 @@ import io.github.shaonialife.carptocar.net.WifiJoinGate
 import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
 import io.github.shaonialife.carptocar.service.CarPlayService
+import io.github.shaonialife.carptocar.service.ProcFreeze
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
@@ -2858,6 +2859,20 @@ object SessionController {
             appendLog(
                 "AUDIO: 通话档在线期间会话被拆——不归因到媒体档 ${profile.label}" +
                     (activeCallProfile?.let { "（通话档 ${it.label}）" } ?: ""),
+            )
+            activeAudioProfile = null
+            activeAudioStartedAt = 0L
+            return
+        }
+        // 冻结过就别怪音频档（2026-11-06 实车）：冻结期间不送帧、不回 keepAlive，车机按超时
+        // 撤会话，和档位毫无关系。旧实现只看「存活 < 20s」就记名单，把刚提到首选的 48K AAC
+        // 永久排到队尾，界面还会弹「该档位导致断开」——一次 3 秒冻结就能毁掉后续所有选档。
+        val nowUptime = android.os.SystemClock.uptimeMillis()
+        if (ProcFreeze.suspect(nowUptime)) {
+            appendLog(
+                "AUDIO: 会话在进程冻结后 ${ProcFreeze.sinceLast(nowUptime) / 1000}s 被拆——" +
+                    "不归因到音频档 ${profile.label}（冻结期间不回 keepAlive，车机按超时撤会话；" +
+                    "档位记忆保持不变）",
             )
             activeAudioProfile = null
             activeAudioStartedAt = 0L

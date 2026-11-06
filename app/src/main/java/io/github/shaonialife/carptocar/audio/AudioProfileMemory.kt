@@ -33,7 +33,13 @@ object AudioProfileMemory {
     // v2：档位键加入「流类型 + 编码方式」（102/AAC-LC 与 100/PCM 是两条完全不同的通路）。
     // 换文件名而不是复用旧文件，是为了让 v1 时代「PCM 三档全拆链」的结论不再挡路——
     // 那套结论只覆盖 PCM，对新增的 AAC 通路没有参考价值。
-    private const val FILE = "audio_profile_memory_v2"
+    //
+    // v3（2026-11-06）：**进程冻结会把一次拆链算到音频档头上**（vivo V2405A / 奥迪 CL3D：
+    // 冻结 3 秒 → 车机按 keepAlive 超时撤会话 → 20s 探针窗口内被判定「48K AAC 不兼容」），
+    // 于是那份名单里混进了假结论。归因逻辑已在 ProcFreeze 里修好，但**写错的旧条目无法
+    // 事后区分真假**，只能换文件名让它们一次性作废：每台车下次连接重新试一轮档位
+    // （代价一次连接，换来不再拿假结论排档）。
+    private const val FILE = "audio_profile_memory_v3"
     private const val KEY_OK = "ok_"
     private const val KEY_REJECTED = "rejected_"
     private const val KEY_DISABLED = "disabled_"

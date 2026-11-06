@@ -61,6 +61,9 @@ class CarPlayService : Service() {
             override fun run() {
                 val frozen = freezeWatch.tick(android.os.SystemClock.elapsedRealtime())
                 if (frozen > 0) {
+                    // 先把「刚冻过」记到全局：短冻结（<10s）不会走重建，但一样能把会话拖死，
+                    // 拆链归因要靠这一笔才不冤枉音频档（见 ProcFreeze 注释）。
+                    ProcFreeze.noteDetected()
                     val seconds = frozen / 1_000
                     val stalled = freezeWatch.stallMillis(frozen) / 1_000
                     SessionController.appendLog(
