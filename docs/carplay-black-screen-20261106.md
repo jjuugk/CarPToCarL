@@ -189,5 +189,26 @@ AIRPLAY: statsDictionary 里没有屏幕流条目（实有类型=[102]，屏幕�
 
 单测：`ProcFreezeTest`（窗口内/外、从未冻结、时钟回退）。
 
+## 九、对齐同源项目的三处画面时序（2026-11-06 18:36 CL39 日志）
+
+对照样本：`AMCar-log-20261106-183628.txt`（AMCar 1.0.17，**奥迪 4910 / CL39**，不是本车 3810/CL3D）。
+它证明的是「CL39 能连上并稳定送帧」，对本车的黑屏不构成反例；但三处时序差异值得对齐。
+
+| # | 现象（CL39 vs 我们 3810） | 改动 |
+| --- | --- | --- |
+| 1 | `RECORD 完成` → `帧 #1`：**4 毫秒** vs **5.5 秒**（1.2.25 清缓存等当期 IDR） | 新增 [FirstFramePolicy]：缓存 GOP 首帧**自带 SPS 的关键帧**时立即回放起播；否则仍等当期 IDR。`CarLifeHijack.attach` |
+| 2 | 源停摆：他们 `已 1s 没有新画面——重发最后一个 IDR`（每秒一次） | 本就有空闲重发，把阈值从 1.5s/2s 收到 **1s/1s**（`VideoSender.IDLE_RESEND_*`） |
+| 3 | 音频：他们 `控制会话就绪——允许音频 SETUP` 后 172ms 完成；我们抢在 MFi 前，往返 5097ms、期间 MFi 静默 | 音频 SETUP 前 `awaitControlSession(6s)`；等不到照发不拆链。`SessionController` |
+
+为什么第 1 条最要紧：4580 的 HMI 在屏幕流 SETUP 之后只等很短时间就要画面
+（`badFramesThreshold=4`、OMX 对非法头帧直接 flush），会话不会因此被拆，但**让屏窗口可能已经过去**
+——这正好解释「连上了、声音有、屏全黑」而不伴随任何错误。
+
+安全阀：回放只认「自带 SPS 的关键帧」（SPS 与参考帧同代），不会重演 1.2.25 想躲的
+「旧 SPS + 新参考帧」混搭。单测：`FirstFramePolicyTest`。
+
+⚠️ 偏好 `first_frame_policy_v1` 目前没有界面入口（回退要换包，默认即「立即起播」）。
+
+
 
 

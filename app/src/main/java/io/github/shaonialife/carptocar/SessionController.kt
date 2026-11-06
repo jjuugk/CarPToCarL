@@ -736,6 +736,15 @@ object SessionController {
     private const val MIB3_REACTIVATE_WAIT_MS = 2_500L
 
     /**
+     * 音频 SETUP 之前等隧道控制会话（MFi）就绪的上限（ms）。
+     *
+     * 2026-11-06 实车：抢在 MFi 前发音频，车机 5097ms 才回、期间 MFi 20B/32B 挑战
+     * 连续静默；对齐之后（同源项目在 CL39 上）音频 SETUP 往返只有 172ms。
+     * 取 6s 覆盖正常的 16B/20B 挑战 + 一次重试；等不到就照发，不能因为音频拖死主链路。
+     */
+    private const val AUDIO_CONTROL_SESSION_WAIT_MS = 6_000L
+
+    /**
      * 屏幕接管门等首帧的上限（ms）。
      *
      * 首帧都没送到就交给 first-frame-gate（那里的分类更准），这里不重复报。
@@ -4306,6 +4315,23 @@ object SessionController {
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                 // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
+                                //
+                                // **等隧道控制会话（MFi）就绪再 SETUP**（2026-11-06 实车）：
+                                // 抢在 MFi 前发，车机要 5097ms 才回应，同期 MFi 20B/32B 挑战
+                                // 连续静默，控制会话晚 6 秒才起来，6011 同步包还被 ICMP 拒。
+                                // 同源项目在 CL39 上就是「控制会话就绪——允许音频 SETUP」之后
+                                // 才发，往返只有 172ms。等不到也不拆链：照常发，超时兜底。
+                                if (sessionKey != null) {
+                                    val ready = client.awaitControlSession(AUDIO_CONTROL_SESSION_WAIT_MS)
+                                    appendLog(
+                                        if (ready) {
+                                            "AUDIO: 控制会话已就绪——开始音频 SETUP（不再抢在 MFi 前）"
+                                        } else {
+                                            "AUDIO: 等控制会话就绪超时（${AUDIO_CONTROL_SESSION_WAIT_MS}ms）" +
+                                                "——照常音频 SETUP（不拆链）"
+                                        },
+                                    )
+                                }
                                 val audioStarted = startAudioChannel(context, client, sessionKey, host)
                                 if (audioStarted) {
                                     // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD

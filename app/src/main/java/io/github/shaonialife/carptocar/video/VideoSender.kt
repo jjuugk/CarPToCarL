@@ -1308,11 +1308,22 @@ class VideoSender(
         /** 屏幕流 keepAlive 间隔（catplay `DEFAULT_KEEP_ALIVE` = 1s）。 */
         private const val KEEPALIVE_INTERVAL_MS = 1_000L
 
-        /** 直通空闲多久后开始重发 IDR（毫秒）。 */
-        private const val IDLE_RESEND_AFTER_MS = 1_500L
+        /**
+         * 直通空闲多久后开始重发 IDR（毫秒）。
+         *
+         * 对齐同源项目实车行为（2026-11-06 18:36 奥迪 CL39 日志：
+         * `已 1s 没有新画面——重发最后一个 IDR 维持车机连接（第 N 次）`）。
+         * 车机对屏流空闲的容忍很短，晚于 1s 开始补帧就可能被判「没有画面」。
+         */
+        private const val IDLE_RESEND_AFTER_MS = 1_000L
 
-        /** 空闲重发间隔（毫秒）：2s 一次足够撑住车机的存活判定，也不会白烧带宽。 */
-        private const val IDLE_RESEND_INTERVAL_MS = 2_000L
+        /**
+         * 空闲重发间隔（毫秒）。
+         *
+         * 同样对齐 1s：源停摆时每秒一个 10~200KB 的关键帧（≈1Mbps），
+         * 换来车机侧解码/让屏状态不被判空闲；真实帧一到立刻停补。
+         */
+        private const val IDLE_RESEND_INTERVAL_MS = 1_000L
 
         /**
          * 构造屏幕流 keepAlive 帧（明文头 + 可选 bplist 统计体）。

@@ -10,6 +10,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
+import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoCanvasMode
 
 /**
@@ -27,6 +28,8 @@ class SenderApp : Application() {
         DebugFileLog.markSessionStart(this)
         // VideoConfig 画布声明模式（车机画布 / 码流尺寸）——会话建立时读一次
         VideoCanvasMode.load(this)
+        // 首帧策略（缓存关键帧立即起播 / 等引擎当期 IDR）——attach 时读一次
+        FirstFramePolicy.load(this)
         // 「使用车机 GPS」开关（默认开）——iAP2 收帧线程每秒会读，启动时载入一次即可
         CarGpsOption.load(this)
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，

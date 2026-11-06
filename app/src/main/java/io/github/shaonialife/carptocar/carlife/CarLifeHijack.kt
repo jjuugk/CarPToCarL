@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.carlife
 
 import android.content.Context
 import io.github.shaonialife.carptocar.media.MediaSessionsState
+import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -549,17 +550,17 @@ object CarLifeHijack {
     }
 
     /**
-     * 会话建立后把车机通道接上：**等引擎当期 IDR 再建屏**，之后每帧实时直通。
+     * 会话建立后把车机通道接上：**默认用缓存关键帧立即起播**，之后每帧实时直通。
      *
-     * 2026-11-06 14:00 奥迪 3810 实车日志：旧实现在这里把上一轮缓存的 GOP
-     * （11 帧、首帧 160322B）连同缓存 SPS 一起灌给车机并触发 VideoConfig，
-     * 随后画面源停摆 8~15 秒、反复重发旧 IDR —— RECORD 之后整整 20 秒车机
-     * 没拿到一帧当期合法画面。固件 `badFramesThreshold=4`（连续 4 个坏帧即上报
-     * 屏幕会话错误）加 OMX 对非法头帧的 flush，足以让 displayable 93 的
-     * VideoState 进错误态；此后码流再健康也不会自动重新让屏。
+     * 两条实车证据对着看（详见 [io.github.shaonialife.carptocar.video.FirstFramePolicy]）：
+     * 同源项目在奥迪 CL39 上 RECORD 后 **4 毫秒**就送出首帧（回放缓存 GOP），
+     * 我们 1.2.25 在奥迪 3810 上「清空缓存、等当期 IDR」，RECORD 后 **5.5 秒**才有首帧。
+     * 4580 的 HMI 在屏幕流 SETUP 之后只等很短时间就要画面，这个空窗可能就是
+     * 「连上、有声、全黑」的原因。
      *
-     * 现在清空所有缓存帧，只保留 csd 兜底（当期 IDR 不带 SPS 时才用），并主动
-     * 请求引擎重建编码器，让它尽快给出带当期 SPS 的 IDR。
+     * 所以默认改成：缓存 GOP 的首帧**自带 SPS** 时立即回放（SPS 与参考帧同代，不存在
+     * 「旧 SPS + 新参考帧」的混搭）；不带 SPS 才退回旧行为等当期 IDR。
+     * 开关见 [io.github.shaonialife.carptocar.video.FirstFramePolicy]（可一键回退）。
      */
     fun attach(videoSender: VideoSender, log: (String) -> Unit) {
         logSink = log
@@ -569,9 +570,9 @@ object CarLifeHijack {
             gopBytes = 0
             snapshot
         }
-        // 缓存 SPS/PPS 只作兜底，不再由历史帧触发：当期 IDR 若自带 SPS 会覆盖它。
+        // 缓存 SPS/PPS 只作兜底：当期/回放帧自带 SPS 会覆盖它。
         spsPps?.let { videoSender.seedCsd(it) }
-        // attach 期间暂存进 GOP 的帧同样属于上一轮时间基准，一并丢弃。
+        // attach 期间暂存进 GOP 的帧属于上一轮时间基准，一律丢弃（不回放）。
         val late = synchronized(gopLock) {
             val snapshot = gop.toList()
             gop.clear()
@@ -581,13 +582,61 @@ object CarLifeHijack {
         sender = videoSender
         screenReactivateNeeded = true
         startFirstFrameWatchdog(videoSender)
-        log(
-            "CARLIFE: 已跳过 ${pending.size + late.size} 帧缓存（历史 GOP + attach 期间暂存）" +
-                "——等引擎当期 IDR 再发 VideoConfig/首帧，避免旧 SPS 与参考帧污染车机解码器",
+        val firstPending = pending.firstOrNull()
+        val replay = FirstFramePolicy.shouldReplay(
+            policyEnabled = FirstFramePolicy.useCachedGop,
+            firstFrameIsKey = firstPending?.second == true,
+            firstFrameHasSps = firstPending?.let { hasSpsNal(it.first) } == true,
         )
+        if (replay) {
+            log(
+                "CARLIFE: 回放缓存 ${pending.size} 帧立即起播（首帧自带 SPS，" +
+                    "策略=${FirstFramePolicy.describe()}；丢弃 attach 期间 ${late.size} 帧）",
+            )
+            var pushed = 0
+            for ((frame, keyFrame) in pending) {
+                // 缓存帧本来就是旧的，不传 sourceTimestamp（避免被算成排队延迟）
+                if (videoSender.submitH264(frame, keyFrame)) pushed++ else break
+            }
+            log("CARLIFE: 缓存回放已推送 $pushed/${pending.size} 帧——后续实时直通")
+        } else {
+            log(
+                "CARLIFE: 已跳过 ${pending.size + late.size} 帧缓存" +
+                    "（历史 GOP + attach 期间暂存）——" +
+                    when {
+                        !FirstFramePolicy.useCachedGop -> "策略=等当期 IDR（可用偏好回退到立即起播）"
+                        firstPending == null -> "缓存里没有帧，等引擎当期 IDR"
+                        firstPending.second != true -> "缓存首帧不是关键帧，等当期 IDR 更安全"
+                        else -> "缓存首帧不是自带 SPS 的关键帧，等当期 IDR 更安全"
+                    },
+            )
+        }
         // 主动催一个带 SPS 的当期 IDR；startFirstFrameWatchdog 还有 3 秒后的兜底。
         log("CARLIFE: 请求引擎重建编码器（约 1 秒后出当期首帧）")
         client?.requestVideoReinit()
+    }
+
+    /**
+     * 帧数据里有没有 SPS（NAL 类型 7）。
+     *
+     * 只用来判断「缓存 IDR 是否自带 SPS」——带就说明它和后面的 P 帧同属一代编码器，
+     * 回放不会出现「旧 csd + 新参考帧」的混搭。
+     */
+    private fun hasSpsNal(data: ByteArray): Boolean {
+        var index = 0
+        while (index + 3 < data.size) {
+            val startCode =
+                data[index] == 0.toByte() &&
+                    data[index + 1] == 0.toByte() &&
+                    data[index + 2] == 1.toByte()
+            if (startCode) {
+                if ((data[index + 3].toInt() and 0x1F) == 7) return true
+                index += 3
+            } else {
+                index++
+            }
+        }
+        return false
     }
 
     /**
