@@ -92,6 +92,16 @@ class VirtualIap2Link(
     private var mib3DeferredLogs = 0
     private var mib3WirelessSessionId: String? = null
 
+    // ---- 0x5000 订阅后的周期补推（歌名晚于订阅到达时唯一能自愈的路径）----
+    /** 车机是否订阅过 0x5000；没订阅不主动推 0x5001，避免改变既有会话形态。 */
+    private var nowPlayingSubscribed = false
+
+    /** 上次实际发出的 0x5001 内容键；订阅应答 / 事件补推 / 周期补推三条路径共用。 */
+    private var lastPushedNowPlayingKey: String? = null
+
+    /** 上次周期查询时刻（[nowMillis] 时钟）；0 = 还没查过。 */
+    private var lastNowPlayingPollMs = 0L
+
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
      *
@@ -227,12 +237,59 @@ class VirtualIap2Link(
         synchronized(lock) {
             if (!mib3Identified && !tunnelIdentified) return
             val nowPlaying = nowPlayingProvider?.invoke() ?: return
+            lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
             sendRawCsmLocked(buildNowPlayingUpdate(nowPlaying))
             log(
                 "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
                     " 歌手=${nowPlaying.artist ?: "?"}）",
             )
         }
+    }
+
+    /**
+     * 0x5001 内容键：**排除 elapsedMs**（播放进度每拍都在变，算进去等于每 1.5s 重推一次）。
+     *
+     * 只要歌名/歌手/专辑/来源/状态/时长/播放模式任一变化就认为该重推；逐行歌词被
+     * 某些播放器写进 title，也属于「内容变化」，与宿主 `pushNowPlayingAll` 的
+     * `title|artist` 去重语义一致。
+     */
+    internal fun nowPlayingKey(np: CarPlayNowPlaying): String =
+        listOf(
+            np.title,
+            np.artist,
+            np.album,
+            np.appName,
+            np.status,
+            np.durationMs,
+            np.shuffleMode,
+            np.repeatMode,
+        ).joinToString("|")
+
+    /**
+     * 车机订阅 0x5000 之后，按 [NOW_PLAYING_POLL_MILLIS] 周期主动查一次歌名。
+     *
+     * 存在的理由：0x5000 应答是**一次性**的，空态之后车机不会再来问；而补推原本
+     * 完全依赖 MediaSession / CarLife 的**变化事件**。若歌名先于订阅就存在（音乐
+     * 早就在放），或通知监听器晚绑定（vivo Android 17 上 requestRebind 常不生效），
+     * 就再也不会有事件 → 仪表永久空白，且手机侧日志一条错误都没有。
+     *
+     * 这里只查不猜：provider 返回 null 就静默等下一拍，绝不伪造歌名；内容键与
+     * 上次发出的一致也不重发。挂在既有 200ms 节拍上，不新增线程、不额外唤醒。
+     */
+    private fun maybePollNowPlayingLocked() {
+        if (!nowPlayingSubscribed || (!mib3Identified && !tunnelIdentified)) return
+        val now = nowMillis()
+        if (lastNowPlayingPollMs != 0L && now - lastNowPlayingPollMs < NOW_PLAYING_POLL_MILLIS) return
+        lastNowPlayingPollMs = now
+        val np = nowPlayingProvider?.invoke() ?: return
+        val key = nowPlayingKey(np)
+        if (key == lastPushedNowPlayingKey) return
+        lastPushedNowPlayingKey = key
+        sendRawCsmLocked(buildNowPlayingUpdate(np))
+        log(
+            "IAPLINK: 0x5000 订阅后周期补推 0x5001（歌名=${np.title ?: "?"}" +
+                " 歌手=${np.artist ?: "?"} 状态=${np.status}）",
+        )
     }
 
     /**
@@ -427,6 +484,8 @@ class VirtualIap2Link(
         flushOutputLocked()
         maybeStartControlCsmLocked()
         checkMfiTimeoutLocked()
+        // 订阅后的歌名补推要赶在同一次 flush 出去，否则要白等下一拍
+        maybePollNowPlayingLocked()
         flushOutputLocked()
     }
 
@@ -687,8 +746,14 @@ class VirtualIap2Link(
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
                 if (!mib3) return
+                // 每次（重）订阅都是全新上下文：清掉上次的内容键，允许同歌再推一次；
+                // 同时挂起周期补推——空态不是终点，歌名晚到时由节拍自愈。
+                nowPlayingSubscribed = true
+                lastPushedNowPlayingKey = null
+                lastNowPlayingPollMs = nowMillis()
                 val nowPlaying = nowPlayingProvider?.invoke()
                 if (nowPlaying != null) {
+                    lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
                     sendRawCsmLocked(buildNowPlayingUpdate(nowPlaying))
                     log(
                         "IAPLINK: MIB3 0x5000 → 0x5001（歌名=${nowPlaying.title ?: "?"}" +
@@ -696,7 +761,7 @@ class VirtualIap2Link(
                     )
                 } else {
                     sendRawCsmLocked(MIB3_NOW_PLAYING_UPDATE_IDLE)
-                    log("IAPLINK: MIB3 0x5000 → 0x5001（空态，无正在播放）")
+                    log("IAPLINK: MIB3 0x5000 → 0x5001（空态，无正在播放；已挂起周期补推）")
                 }
             }
 
@@ -974,6 +1039,16 @@ class VirtualIap2Link(
     }
 
     companion object {
+        /**
+         * 车机订阅 0x5000 后主动查歌名的周期。
+         *
+         * 真机时序里订阅常**早于**歌名：通知监听器晚绑定、音乐早就在放（歌名先于
+         * 订阅存在，不会再有 metadata 事件）时，事件驱动的补推永远不触发，车机就
+         * 一直停在 0x5001 空态。1.5s 既能让歌名及时补上，又不会给控制链路刷帧
+         * （只有内容键变化才真正发，见 [nowPlayingKey]）。
+         */
+        const val NOW_PLAYING_POLL_MILLIS = 1_500L
+
         /** 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。 */
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
         val TUNNEL_MFI_WINDOWS = mapOf(20 to 6_000L, 32 to 3_000L, 16 to 3_000L)
