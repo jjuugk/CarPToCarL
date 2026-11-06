@@ -1,9 +1,12 @@
 package io.github.shaonialife.carptocar.airplay
 
+import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
+import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -45,6 +48,8 @@ class VirtualIap2LinkTest {
         val allControl = ArrayList<ByteArray>()
         val eventSent = ArrayList<ByteArray>()
         val car = Iap2LinkEngine()
+        /** 可变歌名源：测试「订阅先于歌名」「内容变化」两条路径。 */
+        var nowPlaying: CarPlayNowPlaying? = null
         val link =
             VirtualIap2Link(
                 log = { },
@@ -60,9 +65,13 @@ class VirtualIap2LinkTest {
                 // 关闭节拍线程：测试内确定性驱动（无重传干扰）
                 alive = { false },
                 nowMillis = { clock },
+                nowPlayingProvider = { nowPlaying },
             )
         var clock = 0L
         var now = 1L
+
+        /** 手动驱动一次节拍：空字节对链路引擎是 no-op，只会跑一遍 drainLocked。 */
+        fun tick() = link.onCarBytes(ByteArray(0))
 
         /** 车机→手机：喂字节并冲刷链路出站。 */
         fun carToLink() {
@@ -253,6 +262,94 @@ class VirtualIap2LinkTest {
                 h.carSends(0x4157)
                 h.lastRawFrameOf(0x4158)!!.toList()
             },
+        )
+    }
+
+    /** 走完 MIB3 识别 + MFi，停在「车机即将订阅」之前。 */
+    private fun Harness.readyForSubscriptions() {
+        link.armMib3()
+        car.start(0)
+        exchangeUntilNormal()
+        carSends(0x1D01, Iap2Csm.string(0, "Audi") + Iap2Csm.string(1, "MMI"))
+        carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+    }
+
+    private fun song(
+        title: String,
+        elapsedMs: Int = 0,
+    ) = CarPlayNowPlaying(
+        title = title,
+        artist = "歌手",
+        album = "专辑",
+        durationMs = 180_000,
+        status = Iap2NowPlaying.STATUS_PLAYING,
+        elapsedMs = elapsedMs,
+        appName = "CarLife+",
+    )
+
+    /**
+     * 真机（vivo Android 17 / 通知监听器晚绑定）复现：车机先订阅 0x5000 拿到空态，
+     * 歌名稍后才存在且**再也不会有事件**。旧实现永久停在空态；现在由链路节拍自愈。
+     */
+    @Test
+    fun nowPlayingArrivingAfterSubscriptionIsPushedByPoll() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        assertEquals(listOf(0x5001), h.carSends(0x5000))
+        assertEquals(
+            VirtualIap2Link.MIB3_NOW_PLAYING_UPDATE_IDLE.toList(),
+            h.lastRawFrameOf(0x5001)!!.toList(),
+        )
+
+        // 歌名晚到，且不触发任何 MediaSession / CarLife 事件
+        h.nowPlaying = song("晚到的歌")
+        h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS
+        h.tick()
+        val updates = h.controlFrames().filter { it.second == 0x5001 }
+        assertEquals("订阅空态 + 周期补推应恰好两条 0x5001", 2, updates.size)
+        assertTrue(
+            "补推必须是带歌名的真帧而非空态常量：${updates.last().first.size}B",
+            String(updates.last().first, Charsets.UTF_8).contains("晚到的歌"),
+        )
+
+        // 内容未变：再过一周期也不重发（进度 elapsedMs 变化不算换歌）
+        h.nowPlaying = song("晚到的歌", elapsedMs = 9_000)
+        h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS
+        h.tick()
+        assertEquals("内容未变不该重发", 2, h.controlFrames().count { it.second == 0x5001 })
+
+        // 换歌（逐行歌词写进 title 同理）→ 再推一次
+        h.nowPlaying = song("下一首")
+        h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS
+        h.tick()
+        assertEquals("换歌应再推一次", 3, h.controlFrames().count { it.second == 0x5001 })
+    }
+
+    /** 周期补推只在车机订阅过 0x5000 之后生效，避免改变既有会话形态。 */
+    @Test
+    fun nowPlayingPollRequiresSubscriptionAndKeyIgnoresProgress() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying = song("未订阅的歌")
+        h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS * 2
+        h.tick()
+        assertEquals(
+            "车机没订阅 0x5000 时不该主动发 0x5001",
+            0,
+            h.controlFrames().count { it.second == 0x5001 },
+        )
+
+        val np = song("同一首歌")
+        assertEquals(
+            "播放进度变化不该触发重推",
+            h.link.nowPlayingKey(np),
+            h.link.nowPlayingKey(np.copy(elapsedMs = 9_000)),
+        )
+        assertNotEquals(
+            "换歌必须改变内容键",
+            h.link.nowPlayingKey(np),
+            h.link.nowPlayingKey(np.copy(title = "另一首")),
         )
     }
 

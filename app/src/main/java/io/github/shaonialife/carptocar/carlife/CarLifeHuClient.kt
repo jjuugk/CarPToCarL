@@ -818,9 +818,16 @@ class CarLifeHuClient(
                 // 手机 CarLife 内置播放器开始播放时主动推送的媒体信息（歌名/歌手/封面）
                 val infos = CarLifeProtocol.parseMediaInfoList(payload)
                 if (infos.isEmpty()) {
-                    // 每次媒体变化都会来一包，解析不出内容时对排查无帮助——限流 5 秒
+                    // 每次媒体变化都会来一包，解析不出内容时对排查无帮助——限流 5 秒。
+                    // 但只说「解析为空」永远查不出格式差异，带上头 32B：真机 7368B 的
+                    // 包（大概率带封面大图）究竟是复合 TLV、另一套 ID 还是加密分片，
+                    // 一眼就能看出来，不必再让用户导两份日志猜。
                     if (emptyMediaLog.allow("media-info-empty")) {
-                        log("CARLIFE: 收到媒体信息（${payload.size}B）但解析为空（同类提示 5 秒最多一行）")
+                        val head = payload.take(32).joinToString(" ") { "%02x".format(it) }
+                        log(
+                            "CARLIFE: 收到媒体信息（${payload.size}B）但解析为空 head=$head" +
+                                "（同类提示 5 秒最多一行）",
+                        )
                     }
                     return
                 }
