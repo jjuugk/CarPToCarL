@@ -21,11 +21,12 @@ object AppVersion {
      * 测试包的**日志专用**后缀（不写进 AndroidManifest，不改 versionName/versionCode）。
      *
      * `-test-x` 里的 x = 同一个 versionName 的第几个测试包：1.2.25 的 `-test-1` 是
-     * VideoConfig 视口 A/B 开关包，当前 `-test-2` 追加 0x5001 周期补推与 0x10035
-     * hex 诊断。以后再出 1.2.25 测试包递增 x、正式包合并时置回空串即可。
+     * VideoConfig 视口 A/B 开关包、`-test-2` 是 0x5001 音乐文字兜底，当前 `-test-3`
+     * 是「等当期 IDR 再建屏 + 首帧送达后重建屏激活」。以后再出 1.2.25 测试包递增
+     * x、正式包合并时置回空串即可。
      * 启动日志与「导出日志」头部的「应用版本」行都会带上它，便于一份日志判断跑的是哪个包。
      */
-    private const val LOG_VERSION_TAG = "-test-2"
+    private const val LOG_VERSION_TAG = "-test-3"
 
     @Volatile
     private var cached: String? = null
