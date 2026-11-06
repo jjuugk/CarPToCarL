@@ -3273,8 +3273,12 @@ object SessionController {
      *
      * 只观察、不改状态：真没有画面时收尾仍由视频看门狗与冻结恢复负责（这里不拆链，
      * 拆链由两套超时管着就够了，历史上叠第三套必打架）。
+     *
+     * 判据从此有两条腿：**事件通道有没有回落** + **车机侧实收帧率**（`/feedback` 的
+     * `statsDictionary.rfps`，见 `AirPlayReceiverStats`）。两条一起看才能分清
+     * 「帧根本没到车机」「到了但没解码」「解码了但 HMI 没交屏」。
      */
-    private fun startScreenHandoverGate() {
+    private fun startScreenHandoverGate(client: AirPlayClient) {
         Bg.run("screen-handover-gate") {
             val frameBase = CarLifeHijack.framesDelivered
             val waitDeadline = android.os.SystemClock.uptimeMillis() + HANDOVER_FIRST_FRAME_WAIT_MS
@@ -3291,22 +3295,37 @@ object SessionController {
             sleepQuietly(HANDOVER_QUIET_MS)
             if (connectCancelled || videoSender?.isRunning != true) return@run
             val events = carEventCount - eventsAtFrame
+            // 车机侧实收帧率（可能为 null：固件不回报统计）
+            val receive = client.screenReceiveSummary()
+            val receiveLine = receive ?: "车机未回报收帧统计（该固件没有 statsDictionary）"
             if (events > 0) {
                 appendLog(
                     "STAGE: 车机接管屏幕有回落信号（首帧后 ${HANDOVER_QUIET_MS / 1000}s 内 ${events} 条事件命令：" +
-                        carEventTypes.joinToString("、") + "）",
+                        carEventTypes.joinToString("、") + "；$receiveLine）",
                 )
                 return@run
             }
+            // 零事件时再用收帧率把两种完全不同的故障切开：
+            //  - 车机没收到帧（rfps 缺失/0）→ 传输/加密/数据口问题，看我们的 VideoSender；
+            //  - 车机收到了却不说话（rfps≈我们送的帧率）→ 解码/HMI 交屏，看车机侧日志。
+            val verdict =
+                when {
+                    receive == null ->
+                        "⚠ 车机没回报收帧统计，无法判断帧是否到达；先看 `VIDEO: 送帧统计` 与车机侧日志"
+                    client.screenReceiveFps == null || (client.screenReceiveFps ?: 0.0) < 1.0 ->
+                        "⚠ 车机侧实收帧率≈0：帧没进车机前级（数据口写入成功≠车机收到）——查加密/数据口/端口"
+                    else ->
+                        "车机确实在收帧（$receiveLine）却不回落任何命令：帧到了但没被当屏流解码/交屏，" +
+                            "**不是手机侧码流/分辨率问题**——别再调 VideoConfig"
+                }
             appendLog(
                 "STAGE: ⚠ 车机对画面无任何回落信号（首帧后 ${HANDOVER_QUIET_MS / 1000}s 内事件通道 0 条命令，" +
-                    "已送达 $delivered 帧 ${activeStreamWidth}×${activeStreamHeight}）\n" +
-                    "  ↳ 车机既没要 I 帧（forceKeyFrame）也没做资源仲裁（changeModes）：" +
-                    "这条流大概率没被当成屏流解码，**不是手机侧码流/分辨率问题**——别再调 VideoConfig。" +
-                    "对照：2026-11-03 奥迪 Q4（AUDI 3162）出画面那轮，同一条通道上收到过 " +
-                    "changeModes×5、requestUI×2。\n" +
-                    "  ↳ 要抓的是车机侧 CDSICarplayImpl 的 `<SCREEN> State changed` / " +
-                    "`Video state=active|inactive` / `Failed to overtake the screen: \"<reason>\"`",
+                    "已送达 $delivered 帧 ${activeStreamWidth}×${activeStreamHeight}；$receiveLine）\n" +
+                    "  ↳ $verdict。\n" +
+                    "  ↳ 对照：2026-11-03 奥迪 Q4（AUDI 3162）出画面那轮，同一条通道上收到过 " +
+                    "changeModes×5、requestUI×2；要抓的是车机侧 CDSICarplayImpl 的 " +
+                    "`<SCREEN> State changed` / `Video state=active|inactive` / " +
+                    "`Failed to overtake the screen: \"<reason>\"`",
             )
         }
     }
@@ -4268,7 +4287,7 @@ object SessionController {
                                         )
                                     }
                                     startFirstFrameGate()
-                                    startScreenHandoverGate()
+                                    startScreenHandoverGate(client)
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                 // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。

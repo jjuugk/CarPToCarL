@@ -571,8 +571,16 @@ class AirPlayClient(
                     // 判据——能区分「车机没收到包」与「收到但不播」（2026-10-17）。
                     // 前 8 次全打（约覆盖起流后的 8s，正好是 6.5s 拆链看门狗窗口）：
                     // 音频流的 sampleTime 会不会从 0 往前走，是判断「包有没有被消费」的硬证据。
-                    if (body.isNotEmpty() && (sent <= 8 || sent % 30 == 0)) {
-                        logFeedbackBody(body)
+                    //
+                    // 收帧统计（statsDictionary）**每次都解析**：它是屏幕接管门要用的实时量，
+                    // 而 /feedback 每秒一次、bplist 只有几百字节，代价可忽略；
+                    // 落日志仍按上一条的节流节奏走，不刷屏。
+                    if (body.isNotEmpty()) {
+                        val root = parseFeedbackBody(body)
+                        if (root != null) {
+                            updateScreenReceiveStats(root)
+                            if (sent <= 8 || sent % 30 == 0) logFeedbackBody(root)
+                        }
                     }
                 } catch (_: IOException) {
                     break // 连接已断（会话结束）
@@ -592,13 +600,7 @@ class AirPlayClient(
     /** 解析并打印 /feedback 应答（bplist）。字段对照 catplay `StreamFeedback`：
      *  sr / type / streamConnectionID / sampleTime / timestamp / timestampRawNs
      *  （没有包计数——车机回的是自己侧的播放时钟，可据此判断音频流是否被推进）。 */
-    private fun logFeedbackBody(body: ByteArray) {
-        val root =
-            runCatching { BinaryPlist.parse(body) as? Map<*, *> }.getOrNull()
-        if (root == null) {
-            log("AIRPLAY: feedback body 解析失败（${body.size}B）hex=${body.joinToString("") { "%02x".format(it) }}")
-            return
-        }
+    private fun logFeedbackBody(root: Map<*, *>) {
         val streams = root["streams"] as? List<*>
         if (streams == null) {
             log("AIRPLAY: feedback 无 streams 键（keys=${root.keys}）全字段=$root")
@@ -613,6 +615,105 @@ class AirPlayClient(
             )
         }
     }
+
+    /** 解析 /feedback 体；失败只在前几次留 hex 现场（不刷屏）。 */
+    private fun parseFeedbackBody(body: ByteArray): Map<*, *>? {
+        val root = runCatching { BinaryPlist.parse(body) as? Map<*, *> }.getOrNull()
+        if (root == null) {
+            if (feedbackParseFailures < 3) {
+                log("AIRPLAY: feedback body 解析失败（${body.size}B）hex=${body.joinToString("") { "%02x".format(it) }}")
+            }
+            feedbackParseFailures++
+        }
+        return root
+    }
+
+    /**
+     * 车机侧**实收帧率**（`/feedback` → `statsDictionary.rfps`，是我们送的屏幕流的接收端计数）。
+     *
+     * `null` = 车机没回统计（固件不支持，或 SETUP 里 `statsCollectionEnabled` 没开）。
+     * 语义边界见 [AirPlayReceiverStats]：只证明帧进了接收端前级，不证明解码/交屏。
+     */
+    @Volatile
+    var screenReceiveFps: Double? = null
+        private set
+
+    /** 最近一次拿到收帧统计的时刻（`uptimeMillis`；0 = 从没拿到）。 */
+    @Volatile
+    var screenReceiveStatsAt: Long = 0L
+        private set
+
+    /** 车机是否回过 `statsDictionary`（用来区分「没开探针」与「开了但车机不报」）。 */
+    @Volatile
+    var receiverStatsAvailable: Boolean = false
+        private set
+
+    @Volatile
+    private var statsMissingLogged = false
+
+    @Volatile
+    private var statsNoScreenEntryLogged = false
+
+    private var feedbackParseFailures = 0
+
+    private var lastStatsLogAt = 0L
+
+    private var lastLoggedFps: Double? = null
+
+    /** 吸收一条 /feedback 的收帧统计（每秒调用一次）；日志按「首条 + 变化 ≥3fps + 每 10s」节流。 */
+    private fun updateScreenReceiveStats(root: Map<*, *>) {
+        if (!AirPlayReceiverStats.present(root)) {
+            if (!statsMissingLogged) {
+                statsMissingLogged = true
+                log(
+                    "AIRPLAY: /feedback 没有 statsDictionary——该固件不回报车机侧收帧统计" +
+                        "（无法从手机侧判断帧是否到达；仍可看事件通道有没有回落命令）",
+                )
+            }
+            return
+        }
+        receiverStatsAvailable = true
+        val stats = AirPlayReceiverStats.screenStats(root)
+        if (stats.isEmpty()) {
+            if (!statsNoScreenEntryLogged) {
+                statsNoScreenEntryLogged = true
+                log(
+                    "AIRPLAY: statsDictionary 里没有屏幕流条目（实有类型=" +
+                        AirPlayReceiverStats.streamTypes(root) + "，屏幕应为 110/111）——" +
+                        "说明接收端还没把这条流登记成屏幕流",
+                )
+            }
+            return
+        }
+        val primary = stats.first()
+        screenReceiveFps = primary.receiveFps
+        val now = SystemClock.uptimeMillis()
+        screenReceiveStatsAt = now
+        val fps = primary.receiveFps
+        val previous = lastLoggedFps
+        val changed =
+            if (fps == null || previous == null) {
+                true
+            } else {
+                kotlin.math.abs(fps - previous) >= 3.0
+            }
+        if (changed || now - lastStatsLogAt >= 10_000) {
+            lastStatsLogAt = now
+            lastLoggedFps = fps
+            log(
+                "AIRPLAY: 车机收帧统计 " + stats.joinToString("；") { AirPlayReceiverStats.describe(it) } +
+                    "（pre-decode：证明帧进了接收端前级，不能证明解码/交屏）",
+            )
+        }
+    }
+
+    /** 给门禁/界面用的一句话；null = 车机根本没回统计。 */
+    fun screenReceiveSummary(): String? =
+        when {
+            !receiverStatsAvailable -> null
+            screenReceiveFps == null -> "车机有统计但没有屏幕流条目"
+            else -> "车机实收 " + AirPlayReceiverStats.describeFps(screenReceiveFps)
+        }
 
     /** 心跳线程的存活判据：RTSP socket 仍连着。 */
     private fun isSessionAlive(): Boolean = socket?.isClosed == false
@@ -3412,7 +3513,11 @@ class AirPlayClient(
                         .randomUUID()
                         .toString()
                         .uppercase(),
-                "statsCollectionEnabled" to false,
+                // 打开接收端统计：4580（CL3D）的 libairplay 只有在这个键为 true 时，才会在
+                // `/feedback` 里多回一个 `statsDictionary`，里面带**屏幕流实收帧率 rfps**。
+                // 那是手机侧唯一能回答「车机到底收没收到视频帧」的探针（见 AirPlayReceiverStats）。
+                // 代价只是 /feedback 每包多几百字节，可忽略；关掉就看不到收帧统计。
+                "statsCollectionEnabled" to true,
                 "updateSessionRequest" to false,
                 "keepAliveLowPower" to true,
                 "features" to CONTROLLER_FEATURES,

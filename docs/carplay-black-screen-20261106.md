@@ -122,3 +122,34 @@ STAGE: ⚠ 车机对画面无任何回落信号（首帧后 12s 内事件通道 
 而 11-06 那轮「37 秒全绿却全黑」里是 **0 条**。所以「零事件」不是噪声，而是
 「车机没把这条流当屏流」的硬信号——这就是把屏幕接管门写进日志的依据。
 
+## 七、新增探针：车机侧收帧统计（`statsDictionary.rfps`）
+
+来源：`AMCar`（同源项目）在 SETUP 里发 `statsCollectionEnabled=true`，奥迪 4580 的
+`libairplay` 就会在 `/feedback` 里多回一个 `statsDictionary`，键是流号、值带
+`stty`（流类型，110/111=屏幕）/`rfps`（接收端**实收帧率**）/`ltnc`/`ahea`。
+
+我们原本硬编码 `false`，所以「车机到底收没收到视频帧」在手机侧一直是黑箱——
+只能看 `VIDEO: 帧 #N 已发送`（写 socket 成功 ≠ 车机收到）。现在：
+
+- `AirPlayClient.buildSessionSetupBody` 固定发 `statsCollectionEnabled=true`；
+- `/feedback` 每秒解析一次（`AirPlayReceiverStats`），日志按「首条 + 帧率变化 ≥3 +
+  每 10s」节流：
+
+```
+AIRPLAY: 车机收帧统计 stream=1 type=110 rfps=19.8 ltnc=0 ahea=0（pre-decode：证明帧进了接收端前级，不能证明解码/交屏）
+AIRPLAY: /feedback 没有 statsDictionary——该固件不回报车机侧收帧统计（…）
+AIRPLAY: statsDictionary 里没有屏幕流条目（实有类型=[102]，屏幕应为 110/111）——说明接收端还没把这条流登记成屏幕流
+```
+
+- 屏幕接管门的结论里也带上它，三种情况分开报：
+
+| 门禁里的结论 | 含义 | 下一步 |
+| --- | --- | --- |
+| 车机未回报收帧统计 | 固件不支持/没开探针 | 只能靠事件通道 + 车机侧日志 |
+| 车机侧实收帧率 ≈ 0 | 帧没进车机前级（数据口写入成功是假象） | 查加密/数据口/端口，别再动 VideoConfig |
+| 车机确实在收帧却不回落命令 | 帧到了但没被当屏流解码/交屏 | 抓车机侧 `Video state=` / `Failed to overtake the screen` |
+
+⚠️ 语义边界（别过度解读）：`rfps` 是**认证之后、解码器之前**的计数，`rfps>0` 只证明
+帧进了接收端前级；解码成功与 HMI 交屏仍只能看车机侧日志。
+
+
