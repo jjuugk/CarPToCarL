@@ -3267,6 +3267,10 @@ object SessionController {
      * 屏依旧全黑。也就是说问题不在手机侧的码流/分辨率/VideoConfig 头——那条线今天
      * 四种组合全试过了。把这条结论自动写进日志，下一轮就不用再靠人工比对推。
      *
+     * 对照组（为什么「零事件」可以当判据）：2026-11-03 奥迪 Q4（`AUDI 3162` / DELPHI，
+     * 1.2.18-switchpool，出画面）那场会话在同一条事件通道上收到过 `changeModes`×5、
+     * `requestUI`×2——车机真接管屏幕时是会说话的。
+     *
      * 只观察、不改状态：真没有画面时收尾仍由视频看门狗与冻结恢复负责（这里不拆链，
      * 拆链由两套超时管着就够了，历史上叠第三套必打架）。
      */
@@ -3299,7 +3303,9 @@ object SessionController {
                     "已送达 $delivered 帧 ${activeStreamWidth}×${activeStreamHeight}）\n" +
                     "  ↳ 车机既没要 I 帧（forceKeyFrame）也没做资源仲裁（changeModes）：" +
                     "这条流大概率没被当成屏流解码，**不是手机侧码流/分辨率问题**——别再调 VideoConfig。" +
-                    "要抓的是车机侧 CDSICarplayImpl 的 `<SCREEN> State changed` / " +
+                    "对照：2026-11-03 奥迪 Q4（AUDI 3162）出画面那轮，同一条通道上收到过 " +
+                    "changeModes×5、requestUI×2。\n" +
+                    "  ↳ 要抓的是车机侧 CDSICarplayImpl 的 `<SCREEN> State changed` / " +
                     "`Video state=active|inactive` / `Failed to overtake the screen: \"<reason>\"`",
             )
         }
