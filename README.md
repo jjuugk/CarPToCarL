@@ -836,6 +836,10 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 2. ctrl 邀请先到、端点未就绪时挂起待决（30s TTL），端点晚到自动接续（catplay `cache_miss` 自愈）；
 3. `0x4301` 无线组删掉虚构的「整套 ID+1」兜底，改为按字段形态在 0x4301（2=信道/4=安全类型）
    与 0x5703 式（3=安全类型/4=信道）两套真实布局间二选一。
+4. **音频档位优先 48K AAC**（修 Q4 3873 重采样卡顿）：`audioCandidates` 的 `aacOptions` 原先把
+   44.1K AAC 排在 48K 前面，而 CarLife 恒输出 48K PCM，于是被迫做一次 48K→44.1K 重采样，
+   双晶振时钟域漂移在播放 3~5 分钟后累计成卡顿。改为 48K 在前，同时声明两种 AAC 的车机
+   直接走零重采样通路。
 
 **本分支特有（主线尚未包含）**：
 
