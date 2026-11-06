@@ -2238,12 +2238,16 @@ class AirPlayClient(
         // （真 iPhone 媒体音频走这条）。往 100 推 PCM 的表现为：SETUP 回 200、给 dataPort、
         // 但 controlPort=0、/feedback 里 sampleTime 恒 0，约 6.5s 后整条会话被拆。
         val aac = mutableListOf<AudioProfile>()
+        // 音频档位优先 48K AAC：CarLife 恒输出 48K PCM（MAX_RATE=48000），若选 44.1K AAC
+        // 会被迫做一次 48K→44.1K 重采样，双晶振时钟域漂移在播放数分钟后累计成卡顿
+        // （Audi Q4 3873 实车稳定复现：music 3~5 分钟开始逐渐卡顿）。把 48K 排前面，
+        // 绝大多数同时声明两种 AAC 的车机直接走零重采样通路。
         val aacOptions =
             listOf(
-                Triple(AUDIO_STREAM_TYPE_MAIN_HIGH, AUDIO_FORMAT_AAC_LC_44K_STEREO, 44_100),
                 Triple(AUDIO_STREAM_TYPE_MAIN_HIGH, AUDIO_FORMAT_AAC_48K_STEREO, 48_000),
-                Triple(AUDIO_STREAM_TYPE, AUDIO_FORMAT_AAC_LC_44K_STEREO, 44_100),
+                Triple(AUDIO_STREAM_TYPE_MAIN_HIGH, AUDIO_FORMAT_AAC_LC_44K_STEREO, 44_100),
                 Triple(AUDIO_STREAM_TYPE, AUDIO_FORMAT_AAC_48K_STEREO, 48_000),
+                Triple(AUDIO_STREAM_TYPE, AUDIO_FORMAT_AAC_LC_44K_STEREO, 44_100),
             )
         aacOptions.forEach { (streamType, bit, rate) ->
             declared
