@@ -60,6 +60,7 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogExporter
 import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.video.StreamFps
+import io.github.shaonialife.carptocar.video.VideoCanvasMode
 import java.util.Locale
 
 /**
@@ -1467,6 +1468,28 @@ class MainActivity : AppCompatActivity() {
                     "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
                 }
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
+        }
+
+        // 1.2.25-test-1 A/B 开关：强制「不写 VideoConfig 40/44 视口」，
+        // 回到 AuDiCar 1.1.1 能出画面的头形态。默认开（测试包即为验证这一路），
+        // 关掉则完全回到 1.2.25 的档位/偏好逻辑，方便现场一键对照。
+        val canvasTestSwitch = findViewById<SwitchCompat>(R.id.switchCanvasTest)
+        val canvasTestNote = findViewById<TextView>(R.id.canvasTestNote)
+        canvasTestSwitch.isChecked = VideoCanvasMode.testNoViewArea
+
+        fun refreshCanvasTestNote() {
+            canvasTestNote.text =
+                if (canvasTestSwitch.isChecked) {
+                    "已开启：VideoConfig 只写 params[1]（车机画布）+ flags，32..48 全 0 —— AuDiCar 1.1.1 形态，下次连接起效。"
+                } else {
+                    "已关闭：回到 1.2.25 分离声明（40/44 写视口），用于与开启时对照。"
+                }
+        }
+        refreshCanvasTestNote()
+        canvasTestSwitch.setOnCheckedChangeListener { _, checked ->
+            VideoCanvasMode.saveTestNoViewArea(ctx, checked)
+            refreshCanvasTestNote()
+            snack(if (checked) "已开启：不写 VideoConfig 视口（下次连接起效）" else "已关闭：恢复分离声明")
         }
 
         // 流分辨率缩放（30%–160%，步进 5；下次连接起效）

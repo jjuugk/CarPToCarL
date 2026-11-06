@@ -17,19 +17,29 @@ import io.github.shaonialife.carptocar.BuildConfig
  * BuildConfig。结果缓存一次（版本号在进程生命周期内不会变）。
  */
 object AppVersion {
+    /**
+     * 测试包的**日志专用**后缀（不写进 AndroidManifest，不改 versionName/versionCode）。
+     *
+     * `-test-x` 里的 x = 同一个 versionName 的第几个测试包：1.2.25 这是第 1 个 → `-test-1`。
+     * 以后再出 1.2.25 测试包改成 `-test-2`、正式包合并时置回空串即可。
+     * 启动日志与「导出日志」头部的「应用版本」行都会带上它，便于一份日志判断跑的是哪个包。
+     */
+    private const val LOG_VERSION_TAG = "-test-1"
+
     @Volatile
     private var cached: String? = null
 
     @Suppress("DEPRECATION")
     fun name(context: Context): String {
         cached?.let { return it }
-        val name =
+        val base =
             runCatching {
                 context.packageManager
                     .getPackageInfo(context.packageName, 0)
                     .versionName
                     .orEmpty()
             }.getOrNull()?.takeIf { it.isNotBlank() } ?: BuildConfig.VERSION_NAME
+        val name = base + LOG_VERSION_TAG
         cached = name
         return name
     }

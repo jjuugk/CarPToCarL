@@ -4245,18 +4245,27 @@ object SessionController {
                                     }
                                     // switch-pool-auto：档位可覆盖画布声明策略；FOLLOW_DEFAULT = 沿用
                                     // 用户/构建的 VideoCanvasMode（未识别车机走这条，行为零变化）。
+                                    // 1.2.25-test-1 A/B 开关优先级最高：打开时强制「不写 40/44 视口」
+                                    // （AuDiCar 1.1.1 能出画面的头形态），关掉则完全回到既有档位逻辑。
+                                    val testNoViewArea = VideoCanvasMode.testNoViewArea
                                     val declareStream =
-                                        when (auto.videoCanvas) {
-                                            HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT -> VideoCanvasMode.declareStream
-                                            HeadUnitAuto.VideoCanvas.STREAM -> true
-                                            HeadUnitAuto.VideoCanvas.CAR -> false
+                                        if (testNoViewArea) {
+                                            false
+                                        } else {
+                                            when (auto.videoCanvas) {
+                                                HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT -> VideoCanvasMode.declareStream
+                                                HeadUnitAuto.VideoCanvas.STREAM -> true
+                                                HeadUnitAuto.VideoCanvas.CAR -> false
+                                            }
                                         }
                                     appendLog(
-                                        "VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}" +
-                                            if (auto.videoCanvas != HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT) {
-                                                "（AUTO ${auto.family.label} → ${auto.videoCanvas.name.lowercase()}）"
-                                            } else {
-                                                ""
+                                        "VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe(declareStream)}" +
+                                            when {
+                                                testNoViewArea ->
+                                                    "（TEST 开关=开 → 不写 40/44；关掉即回到 1.2.25 行为）"
+                                                auto.videoCanvas != HeadUnitAuto.VideoCanvas.FOLLOW_DEFAULT ->
+                                                    "（AUTO ${auto.family.label} → ${auto.videoCanvas.name.lowercase()}）"
+                                                else -> ""
                                             },
                                     )
                                     // 车机画布（/info 通告值）：既是「声明画布」模式的 params[1]，

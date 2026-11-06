@@ -914,6 +914,55 @@
                     android:layout_marginStart="52dp"
                     android:background="#5A394444" />
 
+                <!-- 1.2.25-test-1 A/B：VideoConfig 是否写 40/44 视口 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="测试：不写 VideoConfig 视口"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/canvasTestNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="开启＝回到 AuDiCar 1.1.1 头格式（32..48 全 0）；关闭＝1.2.25 分离声明（40/44 写视口）。下次连接起效。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchCanvasTest"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
                 <!-- 流分辨率缩放 -->
                 <TextView
                     android:layout_width="wrap_content"
