@@ -17,19 +17,20 @@
 
 ## 立即下载
 
-**最新正式版**（免编译，直接装）：
+**`switch-pool-auto` 分支版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**
-> —— 主线固定直链（当前 1.2.24，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
-> 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
+> **[`CarPToCarL-1.2.25-auto.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25-auto/CarPToCarL-1.2.25-auto.apk)**
+> —— 本分支固定直链（当前 1.2.25，13.6 MB）。**刻意用固定 tag、不用 `releases/latest`**：
+> 本分支 Release 标记为预发布，不抢主线正式的 `latest` 指针；主线 1.2.25 见
+> [v1.2.25](https://github.com/jjuugk/CarPToCarL/releases/tag/v1.2.25)。
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.25-auto.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25-auto/CarPToCarL-1.2.25-auto.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.24，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.24.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.25（与主线同 versionCode 10225），但不要与其它来源的包混装 |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.25-auto.apk`                        |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +42,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.24`（正式版；**修 0x4301 无线组解析**：信道/安全类型此前按取值区间盲猜，1 基编号车机 + 信道 1~4 时二者会被互换、安全类型漏读，WPA2 热点确定性连不上；现改为按 **ID 定位**（0 基 id2=信道/id4=安全类型，1 基 id3/id5，都读不到再按 ID 顺序兜底），并补 `/info displays[].features` / `primaryInputDevice` 解析入日志（旋钮车机盲发触摸可一眼诊断）；1.2.23 的**隧道一帧一传输单元（修 QNX 卡死）**、1.2.22 的语音键、1.2.21 的车机 GPS 转发均不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.25`（`switch-pool-auto` 分支版；在主线 1.2.25 三项连接链路改进之上，另含**按车机身份自动选连接档位**（`auto/HeadUnitAuto`，识别 0x1D01 固件串 / 蓝牙名 / `/info`，CL35/CL39/CL3D 各自调窗口）、**BMW / MGU 车机主导策略**（被动监听 `…cafe`、保留 HFP/A2DP、ctrl 邀请合成端点）、**MFi 完成后异步补发 RECORD**（修 4580 连上但黑屏）。现场只看日志里的 `AUTO:` 两行与 `BMW:` 前缀行；档位说明见 [`docs/headunit-auto-profiles.md`](docs/headunit-auto-profiles.md)。版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.25-auto.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25-auto/CarPToCarL-1.2.25-auto.apk)**（见上方「立即下载」） |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +822,33 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.25 —— 2026-11-06（`switch-pool-auto` 分支版：自动档位 + BMW 策略 + 对照 catplay 复核）
+
+本分支与主线 [v1.2.25](https://github.com/jjuugk/CarPToCarL/releases/tag/v1.2.25) 同版本同签名
+（versionCode 10225，可互相覆盖安装），Release tag 为 `v1.2.25-auto`，**标记为预发布**
+以免抢走主线 `releases/latest`。
+
+**含主线 1.2.25 的三项连接链路改进**（对照 `catplay-labs/catplay` 与
+`ludwig-v/wireless-carplay-dongle-reverse-engineering` 复核，协议报文内容与顺序不变）：
+
+1. `_airplay._tcp` 的 bit37 `CARPLAY_CONTROL` 接入等邀请窗口判定，车机会不会主动发邀请不再靠固件串猜；
+2. ctrl 邀请先到、端点未就绪时挂起待决（30s TTL），端点晚到自动接续（catplay `cache_miss` 自愈）；
+3. `0x4301` 无线组删掉虚构的「整套 ID+1」兜底，改为按字段形态在 0x4301（2=信道/4=安全类型）
+   与 0x5703 式（3=安全类型/4=信道）两套真实布局间二选一。
+
+**本分支特有（主线尚未包含）**：
+
+- `auto/HeadUnitAuto`：按 0x1D01 固件串 / 蓝牙名 / `/info` 识别车机身份，CL35/CL39/CL3D
+  各自调整入网、ctrl 邀请、等 0x4301、绑网、重激活窗口；未识别车机逐字段等于主线默认参数。
+- BMW / MGU 车机主导策略：被动监听 `…cafe`、保留 HFP/A2DP、ctrl 邀请的 TCP 对端 IP + 7000
+  合成端点；档案 A 不拆链等车机切回档案 B。
+- MFi 完成后异步补发 RECORD：修 4580（AUDI 3810 / DELPHI MIB3）「会话全绿、码流在送、
+  屏幕全黑」——MFi 挑战要 8~9 秒，而原补激活窗口只有 5 秒，第二次 RECORD 永远发不出去。
+- `docs/headunit-auto-profiles.md`：识别信号强度、档位表、BMW 策略与现场验证方式。
+
+> 现场验证只看日志里的 `AUTO:` 两行（本轮档位 + 实际生效窗口）、`BMW:` 前缀行，以及
+> `MIB3: MFi 完成回调 → 补发 RECORD 激活`。
 
 ### 1.2.24 —— 2026-11-05（修 0x4301 无线凭据解析：信道/安全类型按 ID 定位，兼容 1 基车机；补 /info 输入能力解析，正式版）
 
