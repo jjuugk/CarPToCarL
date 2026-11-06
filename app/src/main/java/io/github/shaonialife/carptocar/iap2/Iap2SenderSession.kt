@@ -252,15 +252,22 @@ class Iap2SenderSession(
         /**
          * 从 0x4301 的无线组里解析 AP 信息（新协议车机的唯一凭据来源）。
          *
-         * 子参数 ID 约定（与车机侧实现/Apple 规范一致，WinPlay 实测也是这套）：
-         * `0=SSID, 1=密码, 2=信道, 3=IP, 4=安全类型`。
-         * 个别车机会把整套 ID +1（1 基：1=SSID, 2=密码, 3=信道, 4=IP, 5=安全类型）。
+         * 子参数 ID 约定（catplay `CarPlayStartSessionWirelessAttributes` 逐字段印证，
+         * WinPlay 与实车 0x4301 日志同款）：
+         * `0=SSID, 1=密码, 2=信道, 3=IP(可多个), 4=安全类型`。
          *
          * 关键：信道(1..196)与安全类型(0..4)在 1..4 区间**重叠**，纯靠取值区间盲猜会
          * 把信道 1~4 误当安全类型、把真实安全类型漏掉——这正是某些 WPA2 车机死活连不上的根因。
-         * 因此改用「ID 定位」：先按 0 基读 id2=信道/id4=安全类型；0 基缺字段时再退 1 基读
-         * id3=信道/id5=安全类型；都读不到就退回基于「ID 顺序」的兜底（低 ID 是信道、高 ID 是
-         * 安全类型——规范里信道 ID 永远小于安全类型 ID）。
+         * 因此改用「ID 定位」，且只认两种真实存在的布局：
+         *  - A（0x4301 规范）：`2=信道, 4=安全类型`；
+         *  - B（0x5703 `AccessoryWiFiConfigurationInformation` 的字段顺序被复用到无线组）：
+         *    `3=安全类型, 4=信道`。
+         *
+         * 旧版还有一条「整套 ID +1 → 3=信道/5=安全类型」的兜底，是把 0x5703 的 1 基编号
+         * 误当成了 0x4301 的变体：0x4301 恒 0 基、0x5703 是**另一条消息**，不存在整体 +1。
+         * 更糟的是 B 布局下 id3 是安全类型，那条兜底会把它读成信道。现改为按**字段形态**
+         * 二选一（A 的 id2 是单字节信道 / B 的 id2 是密码字符串、id3 是单字节安全类型），
+         * 不再按取值区间或「ID 小的是信道」猜（B 布局里恰恰相反）。
          */
         internal fun parseWirelessAp(group: List<Iap2Csm.Param>): WifiConfiguration? {
             val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")
@@ -274,27 +281,24 @@ class Iap2SenderSession(
 
             val singles = group.filter { it.value.size == 1 }.associate { it.id to (it.value[0].toInt() and 0xFF) }
 
-            // 0 基：信道@2、安全类型@4（规范 + WinPlay 实测）
-            var channel = singles[2]?.takeIf { it in 1..196 }
-            var security = singles[4]?.takeIf { it in 0..4 }
+            // 先按「字段形态」判定用哪套布局，再取值——不能按「A 有没有读到」来判断，
+            // 因为 B 布局且信道落在 1..4 时，A 会把 id4（信道）误读成合法的安全类型。
+            //  - A：id2 是单字节信道，id3 是 IP（字符串/4 字节，不进 singles）；
+            //  - B：id2 是密码字符串（不进 singles），id3 是单字节安全类型。
+            val bSecurity = singles[3]?.takeIf { it in 0..4 }
+            val bChannel = singles[4]?.takeIf { it in 1..196 }
+            val useOtherMessageLayout = singles[2] == null && bSecurity != null && bChannel != null
 
-            // 1 基兜底：信道@3、安全类型@5（个别车机把整套 ID +1）
-            if (channel == null) channel = singles[3]?.takeIf { it in 1..196 }
-            if (security == null) security = singles[5]?.takeIf { it in 0..4 }
-
-            // 最后一招：两个单字节字段都在、但上面没命中，按 ID 顺序兜底——
-            // 低 ID 是信道、高 ID 是安全类型（规范里信道 ID 永远小于安全类型 ID）。
-            if (channel == null || security == null) {
-                val bytes =
-                    group.filter { it.value.size == 1 }
-                        .sortedBy { it.id }
-                        .map { it.value[0].toInt() and 0xFF }
-                if (bytes.size >= 2) {
-                    val lo = bytes[0]
-                    val hi = bytes[1]
-                    if (channel == null && lo in 1..196) channel = lo
-                    if (security == null && hi in 0..4) security = hi
-                }
+            val channel: Int?
+            val security: Int?
+            if (useOtherMessageLayout) {
+                // 布局 B（0x5703 式）：3=安全类型, 4=信道。
+                security = bSecurity
+                channel = bChannel
+            } else {
+                // 布局 A（0x4301 规范，所有实车主路径）：2=信道, 4=安全类型。
+                channel = singles[2]?.takeIf { it in 1..196 }
+                security = singles[4]?.takeIf { it in 0..4 }
             }
 
             return WifiConfiguration(

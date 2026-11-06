@@ -34,6 +34,16 @@ object AirPlayFeatures {
     /** 接收端是否声明支持 HomeKit 配对/加密；null = TXT 缺失或不可解析。 */
     fun supportsPairing(features: Long?): Boolean? = features?.let { (it and HK_PAIRING_AND_ENCRYPT) != 0L }
 
+    /**
+     * 车机是否声明「由它主动发起连接」（bit37 `CARPLAY_CONTROL`）。
+     *
+     * catplay `AirPlayFeature::CARPLAY_CONTROL` 的语义是「Car initiates the connection
+     * through CarPlayStartSession or CarPlayControl」。声明了就说明车机会发 ctrl 邀请
+     * 或 0x4301，没声明的老车机只会等手机来连——此时死等邀请是白等。
+     * null = TXT 缺失或不可解析（调用方一律按「保持旧行为」处理，不能当成不支持）。
+     */
+    fun supportsCarPlayControl(features: Long?): Boolean? = features?.let { (it and CARPLAY_CONTROL) != 0L }
+
     private fun parseHex(value: String): Long? {
         val cleaned = value.removePrefix("0x").removePrefix("0X")
         if (cleaned.isEmpty()) return null
