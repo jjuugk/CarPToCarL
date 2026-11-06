@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**
-> —— 主线固定直链（当前 1.2.24，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk)**
+> —— 主线固定直链（当前 1.2.25，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.24，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.24.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.25，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.25.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.24`（正式版；**修 0x4301 无线组解析**：信道/安全类型此前按取值区间盲猜，1 基编号车机 + 信道 1~4 时二者会被互换、安全类型漏读，WPA2 热点确定性连不上；现改为按 **ID 定位**（0 基 id2=信道/id4=安全类型，1 基 id3/id5，都读不到再按 ID 顺序兜底），并补 `/info displays[].features` / `primaryInputDevice` 解析入日志（旋钮车机盲发触摸可一眼诊断）；1.2.23 的**隧道一帧一传输单元（修 QNX 卡死）**、1.2.22 的语音键、1.2.21 的车机 GPS 转发均不变；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.24.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.24/CarPToCarL-1.2.24.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.25`（正式版；**对照 catplay 复核无线 CarPlay 连接链路**：① `_airplay._tcp` 的 bit37 `CARPLAY_CONTROL` 接入等邀请窗口判定，车机会不会主动发邀请不再靠固件串猜；② ctrl 邀请先到、端点未就绪时挂起待决（30s TTL），端点晚到自动接续，不再把邀请信号丢掉；③ `0x4301` 无线组删掉虚构的「整套 ID+1」兜底，改为按字段形态在 0x4301（2=信道/4=安全类型）与 0x5703 式（3=安全类型/4=信道）两套真实布局间二选一。协议报文内容与顺序不变，1.2.24 的 0x4301 ID 定位、`/info` 输入能力解析、1.2.23 的隧道一帧一传输单元均保留；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,39 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.25 —— 2026-11-06（对照 catplay 复核连接链路：bit37 能力位、邀请自愈、0x4301 布局判定，正式版）
+
+**参考项目**：`catplay-labs/catplay`（Rust 净室 CarPlay 协议实现，双角色）、
+`ludwig-v/wireless-carplay-dongle-reverse-engineering`（Carlinkit 固件逆向）。
+三项都是纯增量改动，**协议报文内容与顺序不变**。
+
+**一、bit37 `CARPLAY_CONTROL` 接入判定链**
+
+`AirPlayFeatures.CARPLAY_CONTROL(1<<37)` 此前定义了却全仓零使用，等邀请窗口全靠
+按固件串猜车机代际。catplay 的 `AirPlayFeature::CARPLAY_CONTROL` 语义是「车机声明
+由它主动发起连接」。现在等邀请窗口读到 `_airplay._tcp` 的 TXT `features` 后明确判定
+并写进日志：未声明 = legacy 车机（不等邀请直接连）、已声明 / 未知 = 保持既有放行。
+不改变任何已成功的连接路径，只让「这台车会不会发邀请」一眼可见。
+
+**二、邀请先到、端点未就绪的 cache_miss 自愈**
+
+catplay `CarPlayCtrlServer::process_invite` 在 Bonjour 缓存里找不到车机条目时**不丢
+邀请**，置 `cache_miss` 等条目晚到自动 unglitch。我们的等价问题：`onCtrlInvite` 在
+`lastGoodEndpoint == null` 时直接 return，把邀请信号丢了，此后 0x4301/mDNS 晚到也
+不会再把它算作触发源。现挂起待决邀请（30s TTL），`awaitCtrlInvite` 消费后立即放行，
+`onCarPlayEndpoint` 端点就绪时清标记，避免跨轮误触发。
+
+**三、`0x4301` 无线组只认两套真实布局**
+
+catplay `CarPlayStartSessionWirelessAttributes` 逐字段印证 1.2.24 的主路径是对的：
+`0=SSID, 1=密码, 2=信道, 3=IP(可多个), 4=安全类型`。而 `0x5703` 是**另一条消息**
+（`AccessoryWiFiConfigurationInformation`：1=SSID, 2=密码, 3=安全类型, 4=信道），
+并不存在「0x4301 整套 ID +1」这种变体——1.2.24 里那条 `id3=信道/id5=安全类型`
+的兜底是虚构的，遇到 0x5703 式布局反而会把安全类型读成信道。现删掉它和「ID 小的
+是信道」的猜测（0x5703 布局里恰恰相反），改为按**字段形态**二选一：A 的 id2 是单字节
+信道 / B 的 id2 是密码串、id3 是单字节安全类型。单测补 B 布局、B+信道落在 1..4
+重叠区、A 缺信道不得把安全类型当信道共 3 个回归（共 7 例）。
 
 ### 1.2.24 —— 2026-11-05（修 0x4301 无线凭据解析：信道/安全类型按 ID 定位，兼容 1 基车机；补 /info 输入能力解析，正式版）
 
