@@ -740,6 +740,14 @@ object SessionController {
     /** 端口探测超时（本机回环 / 车机同网段，都不该慢）。 */
     private const val PROBE_TIMEOUT_MILLIS = 800L
 
+    /**
+     * 「邀请先到、端点未就绪」的有效期（ms）。
+     *
+     * 车机邀请与 0x4301/mDNS 谁先谁后没有保证；超过这个时间还没等到端点，
+     * 就当那次邀请已过期，别让上一轮的旧信号误触发新一轮会话。
+     */
+    private const val PENDING_INVITE_TTL_MS = 30_000L
+
     /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
     val sessionStarting = AtomicBoolean(false)
 
@@ -785,6 +793,21 @@ object SessionController {
      */
     @Volatile
     private var lastGoodEndpoint: Iap2SenderSession.CarPlayEndpoint? = null
+
+    /**
+     * 「邀请先到、端点未就绪」的待决时间戳（uptimeMillis，0 = 无待决）。
+     *
+     * catplay `CarPlayCtrlServer::process_invite` 在 Bonjour 缓存里还找不到车机
+     * `_airplay._tcp` 条目时**不丢弃邀请**，而是置 cache_miss，等条目晚到后自动
+     * unglitch。我们的等价场景：车机邀请到达时 `lastGoodEndpoint` 还是 null
+     * （当前 WiFi 也合成不出端点），旧实现直接 return 把信号丢了——此后
+     * 0x4301/mDNS 晚到时不会再把它算作触发源，表现为「邀请明明来过却没连」。
+     *
+     * 端点就绪（[onCarPlayEndpoint]）与等邀请窗口（[awaitCtrlInvite]）里消费，
+     * 超过 [PENDING_INVITE_TTL_MS] 自动作废。
+     */
+    @Volatile
+    private var pendingInviteAtMs: Long = 0L
 
     /** 解冻恢复的互斥：一次只允许一条恢复线程，避免冻结抖动叠出好几轮并行重建。 */
     private val freezeRecovery = AtomicBoolean(false)
@@ -1031,7 +1054,11 @@ object SessionController {
         }
         val endpoint = lastGoodEndpoint
         if (endpoint == null) {
-            appendLog("CTRL: 车机邀请到达（receiver=${receiverId ?: "?"}）——但还没有热点端点，等它下发 0x4301/0x5703")
+            pendingInviteAtMs = android.os.SystemClock.uptimeMillis()
+            appendLog(
+                "CTRL: 车机邀请到达（receiver=${receiverId ?: "?"}）——但还没有热点端点；" +
+                    "已挂起待决邀请（catplay cache_miss 自愈），端点晚到时直接接续，不再空等",
+            )
             return
         }
         if (sessionStarting.get()) {
@@ -2240,6 +2267,25 @@ object SessionController {
      *
      * @return true = 收到邀请 / 已发现端点；false = 等待窗口耗尽
      */
+    /**
+     * 消费「邀请先到、端点未就绪」的待决标记。
+     *
+     * 返回 true = 车机在更早的时候已经邀请过我们，只是当时拿不到端点；
+     * 现在这轮连接不必再空等一次邀请窗口，直接放行。过期或没有待决都返回 false。
+     */
+    private fun consumePendingInvite(source: String): Boolean {
+        val at = pendingInviteAtMs
+        if (at == 0L) return false
+        pendingInviteAtMs = 0L
+        val age = android.os.SystemClock.uptimeMillis() - at
+        if (age > PENDING_INVITE_TTL_MS) {
+            appendLog("CTRL: [$source] 待决邀请已过期（${age}ms）——不接续，按正常流程走")
+            return false
+        }
+        appendLog("CTRL: [$source] 接续 ${age}ms 前先到的车机邀请——直接放行，不再空等邀请窗口")
+        return true
+    }
+
     private fun awaitCtrlInvite(
         ssid: String,
         timeoutMillis: Long,
@@ -2259,9 +2305,28 @@ object SessionController {
                 )
                 return true
             }
-            if (endpointBrowser?.awaitEndpoint(0) != null) {
+            // 邀请更早到过、只是当时端点未就绪（catplay cache_miss 自愈）：直接接续。
+            if (consumePendingInvite("等邀请窗口")) return true
+            val browserInfo = endpointBrowser?.awaitEndpoint(0)
+            if (browserInfo != null) {
+                // bit37 CARPLAY_CONTROL = 车机声明「由它主动发起连接」。catplay 的
+                // AirPlayFeature 位域同款；没声明的老车机只会等手机来连，死等邀请是白等。
+                // 保持既有「发现 _airplay._tcp 就放行」的行为不变，只是把判定依据写进日志，
+                // 让「这台车到底会不会发邀请」在排查时一眼可见，不再靠固件串猜代际。
+                val control =
+                    AirPlayFeatures.supportsCarPlayControl(
+                        AirPlayFeatures.parse(txtValue(browserInfo, "features")),
+                    )
                 appendLog(
-                    "CTRL: 已发现 _airplay._tcp（未收到邀请，旧机型行为）——直接连接 AirPlay",
+                    when (control) {
+                        false ->
+                            "CTRL: 车机未声明 CARPLAY_CONTROL(bit37)——按 catplay legacy 行为" +
+                                "（车机不主动发起），不等邀请直接连 AirPlay"
+                        true ->
+                            "CTRL: 已发现 _airplay._tcp（bit37 已声明，车机会主动发起）——直接连接 AirPlay"
+                        null ->
+                            "CTRL: 已发现 _airplay._tcp（features 未知，按旧机型行为）——直接连接 AirPlay"
+                    },
                 )
                 return true
             }
@@ -3182,6 +3247,12 @@ object SessionController {
         // 新一轮交接开始：清掉上一轮（可能中途失败）遗留的晚到端点暂存，
         // 否则它会在本轮的 drain 阶段覆盖掉本会话刚解析出的端点。
         pendingEndpointUpdate = null
+        // 端点已经就绪：此前「邀请先到、端点未就绪」挂起的信号由本轮接续，
+        // 清掉标记避免它跨轮误触发下一次会话（catplay cache_miss 只在本次邀请生效）。
+        if (pendingInviteAtMs != 0L) {
+            pendingInviteAtMs = 0L
+            appendLog(">>> [$source] 端点晚到——接续此前挂起的车机邀请（邀请先到 cache_miss 已自愈）")
+        }
         // 阶段计时清零：从这里开始算「这次连接一共多久」。
         connectBudget.begin(source)
         // 新一轮推流：邀请计数归零（日志里"本流第 N 次"才读得懂）。
