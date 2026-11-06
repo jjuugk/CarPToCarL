@@ -744,6 +744,12 @@ object SessionController {
      */
     private const val AUDIO_CONTROL_SESSION_WAIT_MS = 6_000L
 
+    /** 车机没起 AirPlay 服务时「叫醒」的最大次数（每 10s 最多一次，见 AirPlayClient.onPortRefused）。 */
+    private const val CARPLAY_WAKE_MAX_TIMES = 3
+
+    /** 两次「叫醒」的最小间隔（ms）：比 AirPlay 端口重试节奏慢，避免把 iAP2 会话喂成噪声。 */
+    private const val CARPLAY_WAKE_GAP_MS = 10_000L
+
     /**
      * 屏幕接管门等首帧的上限（ms）。
      *
@@ -3509,12 +3515,42 @@ object SessionController {
                         return@run
                     }
 
+                    // 车机没起 AirPlay 服务时的「叫醒」：端口连续拒绝 → 重发 0x4e0e + 0x4300
+                    // 并重新公告 ctrl。限 3 次、每次间隔 ≥10s。
+                    // 2026-11-06 19:31 现场：凭据拿到、入网成功、0x4300 也发了，但 7000 连续
+                    // 15 次 ECONNREFUSED、ctrl 邀请 0 次、0x4301 不回——整轮 39 秒除了重试日志
+                    // 什么都没做，车机也就一直停在「等 IAP2 信息」里没起投影。
+                    var wakeCount = 0
+                    var lastWakeAt = 0L
+                    val wakeCarPlayWindow: (Int) -> Unit = { refused ->
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (wakeCount < CARPLAY_WAKE_MAX_TIMES && now - lastWakeAt >= CARPLAY_WAKE_GAP_MS) {
+                            lastWakeAt = now
+                            wakeCount++
+                            val reason = "7000 已连续拒绝 $refused 次"
+                            val nudged = bluetoothServer?.nudgeCarPlayAvailability(reason) == true ||
+                                bluetoothClient?.nudgeCarPlayAvailability(reason) == true
+                            ctrlAdvertiser?.ensureForNetwork(
+                                endpoint.ssid,
+                                force = true,
+                                network = wifiConnector?.currentNetwork,
+                            )
+                            appendLog(
+                                "AIRPLAY: 7000 已连续拒绝 $refused 次（车机没起 AirPlay 服务）——" +
+                                    "第 $wakeCount/$CARPLAY_WAKE_MAX_TIMES 次叫醒：" +
+                                    (if (nudged) "重发 0x4e0e+0x4300 + " else "iAP2 会话已不在，只能") +
+                                    "重新公告 ctrl；若仍不开，请在车机上点本机图标或重启 CarPlay",
+                            )
+                        }
+                    }
+
                     fun newClient() =
                         AirPlayClient(
                             effectiveEndpoint,
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
                             endpointRefresher = { current -> enrichEndpointFromBrowser(current, source) },
+                            onPortRefused = wakeCarPlayWindow,
                             retryTick = { attempt ->
                                 // 配对重试期间车机仍可能没探测到 ctrl（Bonjour 漏掉首次公告）：
                                 // 周期性强制重播一次，并把 mDNS 现状写进日志——否则排查时

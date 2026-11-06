@@ -972,6 +972,36 @@ class Iap2SenderSession(
      * **车机零回帧时直接跳过催问**（见 [lastNudgePeerFrames]）：催问里的问候是 ACK
      * 待确认的，喂给一个已经不回 ACK 的会话等于自己触发重传看门狗拆链。
      */
+    /**
+     * 车机 **AirPlay 端口一直不开**（7000 反复 `ECONNREFUSED`）时的一次「叫醒」。
+     *
+     * 现场（2026-11-06 19:31，奥迪 CL3D）：蓝牙 iAP2 全绿、MFi 成功、`0x5703` 拿到热点凭据、
+     * 入网成功、`0x4300` 也发了，但车机的 AirPlay 服务始终没起——`_airplay._tcp` 不广播、
+     * ctrl 邀请 0 次、`0x4301` 不回、7000 连续 15 次 `ECONNREFUSED`。固件里
+     * `CDIOManager::trySendCarPlayStartSession` 的跳过条件之一正是
+     * *"AirPlay server is not yet started"*（见 `docs/carplay-black-screen-20261106.md` §九）：
+     * 车机停在「设备还在场、等 required IAP2 information」的分支上，而 Phase 1 之后
+     * 我们这边再没有任何东西去敲它。
+     *
+     * 只重发**发后不管**的两条（`0x4E0E` 传输标识 + `0x4300` 可用性），**不带设备问候**：
+     * 问候走 ACK 待确认，喂给一个不回 ACK 的会话会被重传看门狗拆链——那正是 [nudgeIfDue]
+     * 里记录的别克 E2LB 死循环。
+     */
+    fun nudgeCarPlayAvailability(reason: String): Boolean {
+        if (!channel.isAlive) return false
+        recordUndeclaredReceive(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
+        sendFireAndForget(
+            Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
+            Iap2Csm.string(0, bluetoothMac),
+        )
+        sendAvailability()
+        log(
+            "iap2 叫醒车机（$reason）：重发 0x4e0e + 0x4300——" +
+                "车机没起 AirPlay 服务（7000 拒绝），用可用性请求把它从「等 IAP2 信息」里叫出来",
+        )
+        return true
+    }
+
     private fun nudgeIfDue() {
         val now = System.currentTimeMillis()
         if (now - lastNudgeAt < NUDGE_INTERVAL_MILLIS) return

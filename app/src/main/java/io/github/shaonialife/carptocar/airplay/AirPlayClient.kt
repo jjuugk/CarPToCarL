@@ -52,6 +52,18 @@ class AirPlayClient(
      * （catplay 每 1s force_announce）。
      */
     private val retryTick: ((attempt: Int) -> Unit)? = null,
+    /**
+     * 接收端端口**连续拒绝**时的高频钩子（每 3 次拒绝调用一次，必须非阻塞）。
+     *
+     * 2026-11-06 19:31 现场：`0x5703` 热点凭据拿到了、入网成功、`0x4300` 也发了，但车机的
+     * AirPlay 服务始终没起——`_airplay._tcp` 不广播、ctrl 邀请 0 次、7000 连续 15 次
+     * `ECONNREFUSED`，整轮 39 秒白等。固件里 `trySendCarPlayStartSession` 的跳过条件之一
+     * 就是 *"AirPlay server is not yet started"*：车机停在「设备还在场、等 IAP2 信息」的分支，
+     * 而 Phase 1 之后我们不再敲它。
+     *
+     * 主控用它做「叫醒」：重发 `0x4e0e + 0x4300` 并重新公告 ctrl mDNS（限次、限频）。
+     */
+    private val onPortRefused: ((refused: Int) -> Unit)? = null,
 ) {
 
     /** 音频 SETUP 时用的车机地址（会话中途要重新核对音量时复用）。 */
@@ -308,6 +320,8 @@ class AirPlayClient(
         // 默认 120s 内每 2s 试一次——用户在车机上点一下的等待不会被提前放弃。
         val deadline = System.currentTimeMillis() + windowMillis
         var attempt = 0
+        // 端口连续拒绝计数：每 [PORT_REFUSED_WAKE_EVERY] 次触发一次「叫醒车机」。
+        var refusedStreak = 0
         // 「退避」只多给一次重试机会：够了（一次退避基本就是车机刚被上一次中断搅了状态机），
         // 又不会在一台「其实已配对、只是回退避码」的车机上把 120s 窗口空转掉。
         var backoffRetried = false
@@ -324,12 +338,19 @@ class AirPlayClient(
             }
             close()
             if (!ensureConnected(2_000)) {
+                // 端口连续拒绝：接收端根本还没起 AirPlay 服务。每 3 次给主控一次机会去「叫醒」
+                // 车机（重发 0x4e0e + 0x4300 + 重新公告 ctrl），否则整轮就只是空转日志。
+                refusedStreak++
+                if (refusedStreak % PORT_REFUSED_WAKE_EVERY == 0) {
+                    runCatching { onPortRefused?.invoke(refusedStreak) }
+                }
                 if (attempt == 1 || attempt % 5 == 0) {
                     log("AIRPLAY: 车机 AirPlay 端口未开（等待你点车机上的手机图标 / 车机发 ctrl 邀请）…第 $attempt 次重试")
                 }
                 Thread.sleep(2_000)
                 continue
             }
+            refusedStreak = 0
             attemptedPairing = true
             // 本轮起点：用于判定失败到底是车机给的，还是我们自己 close() 掐断的。
             val attemptStartedAt = SystemClock.uptimeMillis()
@@ -2042,6 +2063,9 @@ class AirPlayClient(
 
         /** 配对重试期间调用 [retryTick] 的间隔（次）：每轮回 2s，10 次 ≈ 每 20s 重新公告一次。 */
         private const val RETRY_TICK_ATTEMPTS = 10
+
+        /** 端口每连续拒绝这么多次，就请主控「叫醒」一次车机（约 6s 一次，主控另有 10s/3 次限流）。 */
+        private const val PORT_REFUSED_WAKE_EVERY = 3
 
         /**
          * pair-setup 回 `Error=3`（退避）后等多久再重试**同一阶段**。

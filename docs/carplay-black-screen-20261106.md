@@ -209,6 +209,44 @@ AIRPLAY: statsDictionary 里没有屏幕流条目（实有类型=[102]，屏幕�
 
 ⚠️ 偏好 `first_frame_policy_v1` 目前没有界面入口（回退要换包，默认即「立即起播」）。
 
+## 十、车机没起 AirPlay 服务时的「叫醒」（2026-11-06 19:31 现场）
+
+那轮**根本没连上**，而且卡点在车机：`0x5703` 拿到热点凭据、入网成功、`0x4300` 也发了，
+但车机的 AirPlay 服务始终没起——
+
+```
+19:31:33.768  iap2 0x4301 在 3s 窗口内未到
+19:31:33.783  NSD: 开始发现 _airplay._tcp        → 全程未发现
+19:31:34.994  CTRL: 等待车机 ctrl 邀请…          → 邀请 0 次
+19:31:40.857  连接失败 10.174.189.1:7000 ECONNREFUSED
+   … 连续 15 次 …
+19:32:19.604  会话结束（未建链）· 用户手动断开
+```
+
+固件里 `CDIOManager::trySendCarPlayStartSession` 的跳过条件之一就是
+*"AirPlay server is not yet started"*：车机停在「设备还在场、等 required IAP2 information」
+的分支上，而我们在 Phase 1（拿到 `0x5703`）之后**再没有任何东西去敲它**。
+
+改动：
+
+| # | 改动 | 位置 |
+| --- | --- | --- |
+| 1 | AirPlay 端口连续拒绝时回调主控（每 3 次一次） | `AirPlayClient.onPortRefused` |
+| 2 | 主控「叫醒」：重发 `0x4e0e + 0x4300` + 重新公告 ctrl；限 **3 次**、间隔 ≥**10s** | `SessionController.wakeCarPlayWindow` |
+| 3 | 只发**发后不管**的两条，不补设备问候——问候走 ACK，喂给不回 ACK 的会话会被重传看门狗拆链 | `Iap2SenderSession.nudgeCarPlayAvailability` |
+
+日志里会看到：
+
+```
+AIRPLAY: 7000 已连续拒绝 3 次（车机没起 AirPlay 服务）——第 1/3 次叫醒：
+  重发 0x4e0e+0x4300 + 重新公告 ctrl；若仍不开，请在车机上点本机图标或重启 CarPlay
+```
+
+⚠️ 这只是**提高唤醒概率**，不是灵丹：车机是否起投影仍由它自己决定（MMI 上点手机图标、
+或 CarPlay 界面处于等待态）。三次叫醒都没开就别再点重连了——按 §九 的流程来：
+CarLife 先出画面 → 车机上点本机 → 手机点启动连接，中间不要取消。
+
+
 
 
 

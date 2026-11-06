@@ -68,6 +68,14 @@ class Iap2BluetoothServer(
         senderSession?.pushNowPlaying()
     }
 
+    /**
+     * 车机 AirPlay 端口一直不开时，让 iAP2 会话重发一次 `0x4e0e + 0x4300` 叫醒它。
+     *
+     * 返回 false = 当前没有可用的发送端会话（链路已断/还没起来），调用方只能退而重公告 ctrl。
+     */
+    fun nudgeCarPlayAvailability(reason: String): Boolean =
+        senderSession?.nudgeCarPlayAvailability(reason) ?: false
+
     fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
