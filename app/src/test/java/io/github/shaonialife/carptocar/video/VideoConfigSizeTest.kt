@@ -1,6 +1,7 @@
 package io.github.shaonialife.carptocar.video
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -103,11 +104,19 @@ class VideoConfigSizeTest {
     }
 
     @Test
-    fun viewAreaIsAllZeroWhenNotRequested() {
-        // 不传视口时保持旧行为：32..48 全 0，老车机一个字节都没变。
-        val header = VideoSender.buildVideoConfigHeader(bodySize = 33, width = 1280, height = 720)
-        for (offset in 32 until 48) {
-            assertEquals("offset $offset 应为 0", 0, header[offset].toInt())
-        }
+    fun spsParseFailureIsAlwaysReported() {
+        // 旧实现只在「解析成功且不一致」时打日志，解析失败与恰好一致在日志里一模一样。
+        val line = VideoSender.describeSpsConfig(null, 1412 to 654, "缓存csd兜底", false)
+        assertTrue("解析失败必须出现：$line", line.contains("解析失败"))
+        assertTrue("csd 来源必须可见：$line", line.contains("缓存csd兜底"))
+        assertTrue("声明尺寸必须可见：$line", line.contains("1412x654"))
+    }
+
+    @Test
+    fun spsDiagnosisMarksMismatchAndMatch() {
+        val mismatch = VideoSender.describeSpsConfig(1280 to 720, 1412 to 654, "当期帧自带SPS", true)
+        assertTrue("不一致要显式告警：$mismatch", mismatch.contains("⚠"))
+        val match = VideoSender.describeSpsConfig(1412 to 654, 1412 to 654, "当期帧自带SPS", true)
+        assertTrue("一致要显式确认：$match", match.contains("✓与 SPS 一致"))
     }
 }

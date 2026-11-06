@@ -307,6 +307,21 @@ object SessionController {
     private fun installNowPlayingBridge() {
         if (nowPlayingBridgeInstalled) return
         nowPlayingBridgeInstalled = true
+        // 当期首帧真正写进车机通道后再补一次 RECORD：车机让屏要求「解码成功 →
+        // VideoState=active」，若建屏阶段喂过旧帧或长时间无画面，屏幕会话可能已进
+        // 错误态（固件 badFramesThreshold=4）。此时光重发 VideoConfig 不够，需要在
+        // 合法当期帧到达之后重新触发一次让屏仲裁。每轮会话由 CarLifeHijack 置位一次。
+        // 回调跑在 CarLife 读线程，RTSP 不能阻塞它——投递到独立线程执行。
+        CarLifeHijack.onVideoSourceRecovered = {
+            Thread({
+                val client = currentClient
+                if (client != null && !client.cancelled) {
+                    appendLog("REACTIVATE: 当期首帧已送达车机 → 补发 assertModes + RECORD（重建屏激活）")
+                    client.assertModes()
+                    client.record()
+                }
+            }, "screen-reactivate").apply { isDaemon = true }.start()
+        }
         // 数据源 A：CarLife 内置播放器（0x10035）——兜底，仅其内置播放器会推。
         CarLifeHijack.addMediaInfoListener { info ->
             appendLog(
