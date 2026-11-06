@@ -230,12 +230,35 @@ class AirPlayClient(
     var pairingInProgress: Boolean = false
         private set
 
+    /**
+     * 最近一次 [close] **打断在飞请求**的时刻（`SystemClock.uptimeMillis()`；0 = 从没发生）。
+     *
+     * 配对循环用它把「本机掐断」与「车机拒绝」分开：前者只重试同一阶段，后者才写进
+     * [PairingMemory] 的 15 分钟记忆。2026-11-06 实车就是没分清这两种，把端点热更新
+     * 造成的中断记成了「车机不认这台手机」，顺手锁死 15 分钟。
+     */
+    @Volatile
+    private var interruptedExchangeAtUptime: Long = 0L
+
     /** 当前端点（主控合并晚到端点时用作兜底，避免 0x4301 不带 IP 时把可用地址抹掉）。 */
     val currentEndpoint: Iap2SenderSession.CarPlayEndpoint get() = endpoint
 
     /**
      * 热更新接收端端点（0x4301 晚到 / 配对期间 mDNS 新结果）。
-     * 地址或端口变化时关闭当前 TCP，让配对循环下一轮按新地址重连。
+     *
+     * **只在没有交换在飞时关掉当前 TCP**：地址变了当然要按新地址重连，但绝不能把
+     * 一次正在进行的 pair-setup / pair-verify 掐死。配对循环每轮起步前自己会
+     * `close()`（见 [runPairingLoop]），所以配对期间只改字段、下一轮自然用新地址。
+     *
+     * 2026-11-06 16:46 实车就是这个坑：0x4301 在 pair-setup M1→M3 之间晚到，
+     * 旧实现无条件 `close()` →
+     * ```
+     * 控制通道关闭——唤醒 1 个待响应请求
+     * pair-setup 失败（控制通道已关闭（CSeq=2 POST /pair-setup））
+     * → 车机要求退避（Error=3）→ 我们抢先做 pair-verify → Error=2（认证失败）
+     * → 被记成「车机确定性拒绝配对」→ 锁 15 分钟 + 降级明文会话
+     * ```
+     * 一个晚到报文就把整轮连接废掉，还顺手把好端端的配对身份写成了「车机不认」。
      *
      * @return true = 端点确有变化（已切换）；false = 与当前一致，未做任何事
      */
@@ -252,13 +275,19 @@ class AirPlayClient(
         if (unchanged) return false
         endpoint = newEndpoint
         endpointGeneration++
+        val inFlight = pendingResponses.isNotEmpty()
+        val deferClose = AirPlaySessionPolicy.deferEndpointClose(pairingInProgress, pendingResponses.size)
         log(
             "AIRPLAY: 端点更新（$reason）" +
                 "${old.ipAddresses.firstOrNull()}:${old.airPlayPort} → " +
                 "${newEndpoint.ipAddresses.firstOrNull()}:${newEndpoint.airPlayPort}" +
-                "（配对循环下一轮使用新地址）",
+                if (deferClose) {
+                    "（${if (inFlight) "请求在飞" else "配对进行中"}：不打断当前通道，下一轮重连生效）"
+                } else {
+                    "（配对循环下一轮使用新地址）"
+                },
         )
-        close()
+        if (!deferClose) close()
         return true
     }
 
@@ -279,6 +308,9 @@ class AirPlayClient(
         // 默认 120s 内每 2s 试一次——用户在车机上点一下的等待不会被提前放弃。
         val deadline = System.currentTimeMillis() + windowMillis
         var attempt = 0
+        // 「退避」只多给一次重试机会：够了（一次退避基本就是车机刚被上一次中断搅了状态机），
+        // 又不会在一台「其实已配对、只是回退避码」的车机上把 120s 窗口空转掉。
+        var backoffRetried = false
         while (System.currentTimeMillis() < deadline && !cancelled) {
             attempt++
             // 每轮重试前吸收一次 mDNS 新结果：网关兜底地址连不通时，车机的
@@ -299,6 +331,8 @@ class AirPlayClient(
                 continue
             }
             attemptedPairing = true
+            // 本轮起点：用于判定失败到底是车机给的，还是我们自己 close() 掐断的。
+            val attemptStartedAt = SystemClock.uptimeMillis()
             val transport = TlvTransport { path, body -> postPairing(path, body) }
             try {
                 val setupStatus =
@@ -312,14 +346,25 @@ class AirPlayClient(
                         val trouble = troubleOf(rejected)
                         pairingTrouble = trouble
                         log("AIRPLAY: ${trouble.text}——${trouble.advice}")
-                        when {
-                            // 「车机不接受再注册一次」≈ 403：它大概率已经存了我们的公钥，
-                            // 正确动作是直接 pair-verify（下面 "403" 分支就是这条路径）。
-                            PairingPolicy.shouldTryPairedFastPath(rejected.stage, rejected.code) -> "403"
-                            rejected.deterministic -> "terminal"
-                            else -> "failed"
+                        // 分派规则见 [pairSetupNext]：退避要先重试同一阶段，绝不能顺着往下
+                        // 做 pair-verify（那里只会回 Error=2，把好身份误记成「车机不认」）。
+                        when (pairSetupNext(rejected.code, backoffRetried)) {
+                            PairSetupNext.PAIRED_FAST_PATH -> "403"
+                            PairSetupNext.TERMINAL -> "terminal"
+                            PairSetupNext.RETRY_SAME_STAGE -> "backoff"
+                            PairSetupNext.CONTINUE_VERIFY -> "failed"
                         }
                     } catch (error: IOException) {
+                        // 被本机打断（端点热更新 / 重连 / 用户取消）：错误码不是车机给的，
+                        // 既不能退避也不能据此判「车机拒绝」，直接重来一轮。
+                        if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                            log(
+                                "AIRPLAY: pair-setup 被本机打断（${error.message}）" +
+                                    "——不计入车机拒绝，重试",
+                            )
+                            pairingTrouble = null
+                            continue
+                        }
                         val message = error.message.orEmpty()
                         val forbidden = message.contains("403")
                         if (forbidden) {
@@ -363,6 +408,19 @@ class AirPlayClient(
                     pairingTrouble = null
                     return keys
                 }
+                if (setupStatus == "backoff") {
+                    // 车机要求退避（常见于上一次 pair-setup 被打断、它刚清过 SRP 状态机）。
+                    // 此时**不能**顺着往下做 pair-verify：那一步只会回 Error=2，而 Error=2 在
+                    // PairingPolicy 里是「确定性失败」，会把好身份记成「车机不认」并锁 15 分钟。
+                    backoffRetried = true
+                    close()
+                    log(
+                        "AIRPLAY: pair-setup 要求退避——${PAIR_SETUP_BACKOFF_MS}ms 后重试同一阶段" +
+                            "（不抢先做 pair-verify：那里只会回 Error=2，把好身份误记成「车机不认」）",
+                    )
+                    Thread.sleep(PAIR_SETUP_BACKOFF_MS)
+                    continue
+                }
                 val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
                 val keys = PairVerifyClient(identity, transport, log).run(receiverStaticKey)
                 // pair-verify 之后双方立即启用加密（接收端在 M4 应答后开启）
@@ -375,6 +433,13 @@ class AirPlayClient(
                 // 典型现场：`pair-verify` M4 回 `{Error:2, State:4}` —— 车机不认这台手机的
                 // 配对身份。旧代码把它当成功，于是派生出两把对不上的密钥，加密 SETUP 被
                 // 静默丢弃 10s，最后降级明文（无共享密钥 → 没有声音、没有触摸）。
+                // 但**本机打断**（端点热更新 / 重连）造成的失败不是车机的结论：尤其不能
+                // 把随之而来的 Error=2 记成「确定性拒绝」（那会锁 15 分钟 + 降级明文）。
+                if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                    log("AIRPLAY: pair-verify 被本机打断（${rejected.message}）——不计入车机拒绝，重试")
+                    pairingTrouble = null
+                    continue
+                }
                 val trouble = troubleOf(rejected)
                 pairingTrouble = trouble
                 log("AIRPLAY: 配对第 $attempt 次尝试失败 - ${trouble.text}")
@@ -388,6 +453,11 @@ class AirPlayClient(
                 Thread.sleep(if (rejected.code == PairingErrorCode.BACKOFF) 5_000L else 1_000L)
             } catch (error: IOException) {
                 val message = error.message.orEmpty()
+                if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                    log("AIRPLAY: 配对第 $attempt 次尝试被本机打断（$message）——不计入车机拒绝，重试")
+                    pairingTrouble = null
+                    continue
+                }
                 // verify/认证段的 403 与 pair-setup 403 同源（车机信任已建立），
                 // 见 pairingForbidden 注释：标记后主控不再断 BT / 不降级明文
                 if (message.contains("403")) pairingForbidden = true
@@ -548,6 +618,9 @@ class AirPlayClient(
     private fun isSessionAlive(): Boolean = socket?.isClosed == false
 
     fun close() {
+        // 先记下「这次关闭会不会打断某个在飞的请求」：会把等待中的 CSeq 判死，
+        // 对配对来说这就是一次「本机打断」，不能算车机的结论。
+        val inFlight = pendingResponses.isNotEmpty()
         runCatching { socket?.close() }
         socket = null
         activeHost = null
@@ -561,6 +634,12 @@ class AirPlayClient(
             readerGeneration++
         }
         failAllPending("控制通道关闭")
+        if (inFlight) {
+            interruptedExchangeAtUptime = SystemClock.uptimeMillis()
+            if (pairingInProgress) {
+                log("AIRPLAY: 本次 close() 打断了在飞的配对交换——按「本机打断」处理，不计入车机拒绝")
+            }
+        }
         runCatching { iapTunnel?.socket?.close() }
         iapTunnel = null
         iapLink = null
@@ -1857,6 +1936,14 @@ class AirPlayClient(
 
         /** 配对重试期间调用 [retryTick] 的间隔（次）：每轮回 2s，10 次 ≈ 每 20s 重新公告一次。 */
         private const val RETRY_TICK_ATTEMPTS = 10
+
+        /**
+         * pair-setup 回 `Error=3`（退避）后等多久再重试**同一阶段**。
+         *
+         * 5s 是 HomeKit 规范给的最小退避粒度，也够车机把被打断的 SRP 状态机收干净；
+         * 关键是这段时间内**不要**改走 pair-verify（那条路只会回 Error=2）。
+         */
+        private const val PAIR_SETUP_BACKOFF_MS = 5_000L
 
         /**
          * 接收端明确回「没有这个接口」的 HTTP 状态。命中即判定为 pre-HomeKit 老车机，

@@ -735,6 +735,23 @@ object SessionController {
     private const val MIB3_REACTIVATE_WAIT_MS = 2_500L
 
     /**
+     * 屏幕接管门等首帧的上限（ms）。
+     *
+     * 首帧都没送到就交给 first-frame-gate（那里的分类更准），这里不重复报。
+     */
+    private const val HANDOVER_FIRST_FRAME_WAIT_MS = 20_000L
+
+    /**
+     * 首帧送达后给车机的观察窗（ms）：这段时间内车机若一条事件命令都没有，
+     * 就基本可以判定它没把这条流当屏流解码。
+     *
+     * 12 秒是「正常车机早已回落 forceKeyFrame/changeModes」与「不拖太久才出日志」
+     * 的折中；车机自己的 `badFramesThreshold=4`、~4 帧坏帧就会开口要 I 帧，20fps 下
+     * 不到 1 秒。
+     */
+    private const val HANDOVER_QUIET_MS = 12_000L
+
+    /**
      * 通话结束后多久重建音频流（ms）。
      * 车机从「通话」切回「媒体」自身有 1~3 秒的资源仲裁过渡，立刻重建会和它抢音频通路，
      * 取 2.5 秒让车机先把通话通路收干净。
@@ -3237,6 +3254,57 @@ object SessionController {
         }
     }
 
+    /**
+     * 屏幕接管门：首帧真的送进车机之后，看车机有没有「反应」。
+     *
+     * 判据来自 4580 固件的显示契约（`docs/mib3-carplay-display-contract.md`、
+     * `docs/carplay-no-projection-conditions.md` 门 5）：手机发帧 → 车机解码
+     * （`Video state=active`）→ 资源仲裁 → HMI 交屏。车机在解不出画面时会主动回落
+     * 事件命令：`forceKeyFrame`（要 I 帧）、`changeModes`（抢/让资源）、`requestUI`。
+     *
+     * 2026-11-06 奥迪 CL3D（AUDI 3810）那轮实车：帧 20fps 连送 37 秒、
+     * SPS = 车机画布 = 1412×654、RECORD 与 MFi 全绿，车机**一条事件命令都没发过**，
+     * 屏依旧全黑。也就是说问题不在手机侧的码流/分辨率/VideoConfig 头——那条线今天
+     * 四种组合全试过了。把这条结论自动写进日志，下一轮就不用再靠人工比对推。
+     *
+     * 只观察、不改状态：真没有画面时收尾仍由视频看门狗与冻结恢复负责（这里不拆链，
+     * 拆链由两套超时管着就够了，历史上叠第三套必打架）。
+     */
+    private fun startScreenHandoverGate() {
+        Bg.run("screen-handover-gate") {
+            val frameBase = CarLifeHijack.framesDelivered
+            val waitDeadline = android.os.SystemClock.uptimeMillis() + HANDOVER_FIRST_FRAME_WAIT_MS
+            while (android.os.SystemClock.uptimeMillis() < waitDeadline) {
+                if (connectCancelled || videoSender == null) return@run
+                if (CarLifeHijack.framesDelivered > frameBase) break
+                sleepQuietly(250)
+            }
+            val delivered = CarLifeHijack.framesDelivered - frameBase
+            // 首帧都没送到：这是「帧没进车机」而不是「车机不认屏流」，
+            // first-frame-gate 的分类比这里准，交给它，不重复刷屏。
+            if (delivered <= 0) return@run
+            val eventsAtFrame = carEventCount
+            sleepQuietly(HANDOVER_QUIET_MS)
+            if (connectCancelled || videoSender?.isRunning != true) return@run
+            val events = carEventCount - eventsAtFrame
+            if (events > 0) {
+                appendLog(
+                    "STAGE: 车机接管屏幕有回落信号（首帧后 ${HANDOVER_QUIET_MS / 1000}s 内 ${events} 条事件命令：" +
+                        carEventTypes.joinToString("、") + "）",
+                )
+                return@run
+            }
+            appendLog(
+                "STAGE: ⚠ 车机对画面无任何回落信号（首帧后 ${HANDOVER_QUIET_MS / 1000}s 内事件通道 0 条命令，" +
+                    "已送达 $delivered 帧 ${activeStreamWidth}×${activeStreamHeight}）\n" +
+                    "  ↳ 车机既没要 I 帧（forceKeyFrame）也没做资源仲裁（changeModes）：" +
+                    "这条流大概率没被当成屏流解码，**不是手机侧码流/分辨率问题**——别再调 VideoConfig。" +
+                    "要抓的是车机侧 CDSICarplayImpl 的 `<SCREEN> State changed` / " +
+                    "`Video state=active|inactive` / `Failed to overtake the screen: \"<reason>\"`",
+            )
+        }
+    }
+
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
         endpoint: Iap2SenderSession.CarPlayEndpoint,
@@ -3655,6 +3723,13 @@ object SessionController {
                                 client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
                             val eventChannelOk =
                                 client.connectEventChannel(sessionKey, setup) { command ->
+                                // 车机侧「有反应」计数：屏幕接管门（startScreenHandoverGate）用它
+                                // 区分「车机压根没把这条流当屏流」与「只是画面还没上屏」。
+                                command["type"]?.toString()?.let { type ->
+                                    carEventCount++
+                                    carEventTypes.add(type)
+                                    lastCarEventAtUptime = android.os.SystemClock.uptimeMillis()
+                                }
                                 when (command["type"]) {
                                     "hidSendReport" -> {
                                         val uuid = command["uuid"]?.toString()
@@ -4187,6 +4262,7 @@ object SessionController {
                                         )
                                     }
                                     startFirstFrameGate()
+                                    startScreenHandoverGate()
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                 // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
@@ -4394,6 +4470,23 @@ object SessionController {
 
     @Volatile
     private var iapEventMessageCount = 0
+
+    /**
+     * 车机事件通道收到的命令条数（任何 `type` 都算）。
+     *
+     * 用途见 [startScreenHandoverGate]：车机解不出画面时会主动回落 `forceKeyFrame`，
+     * 0 条命令就说明它连「解码」这一步都没进——这是判断「黑屏在车机侧还是在码流侧」
+     * 最省事的一条证据，2026-11-06 那轮全靠人工比对才看出来。
+     */
+    @Volatile
+    private var carEventCount = 0
+
+    /** 车机发过的事件命令 `type` 集合（去重，仅日志诊断用）。 */
+    private val carEventTypes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 最近一次收到车机事件命令的 `uptimeMillis`（0 = 从没收到）。 */
+    @Volatile
+    private var lastCarEventAtUptime = 0L
 }
 
 /** 配对失败后的兜底路径决策（纯函数，真机抓包场景由 PairingFallbackTest 钉死）。 */
