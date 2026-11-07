@@ -48,9 +48,13 @@ class Iap2CapabilityReportTest {
     @Test
     fun describeUsesCatalogueNameOnlyWhenKnown() {
         assertEquals("0x5200(StartRouteGuidanceUpdates)", Iap2CapabilityReport.describe(0x5200))
-        // 目录里没有的号：不能编名字，原样输出
-        assertFalse(Iap2CapabilityReport.hasName(0xAD00))
-        assertEquals("0xad00", Iap2CapabilityReport.describe(0xAD00))
+        // 规范里有、但本项目从没用过的号，也必须叫得出名字——否则「陌生 ID」会把
+        // 车机的正常声明误报成新东西（0xAD00 曾在旧实现里被当成陌生号）
+        assertTrue(Iap2CapabilityReport.hasName(0xAD00))
+        assertEquals("0xad00(StartAppDiscoveryUpdates)", Iap2CapabilityReport.describe(0xAD00))
+        // 规范里没有的号：不能编名字，原样输出
+        assertFalse(Iap2CapabilityReport.hasName(0x4D00))
+        assertEquals("0x4d00", Iap2CapabilityReport.describe(0x4D00))
     }
 
     @Test
@@ -94,9 +98,10 @@ class Iap2CapabilityReportTest {
 
     @Test
     fun unknownIdsAreListedSeparately() {
-        report("可收清单", listOf(0x5200, 0xAD00, 0xAD03), isReceiveList = true)
+        // 0x4D00 / 0x4D03 不在 iAP2 规范里（4C=媒体库、4E=设备状态，4D 是空段）
+        report("可收清单", listOf(0x5200, 0x4D00, 0x4D03), isReceiveList = true)
 
-        assertTrue(lines.any { it.contains("陌生 ID(2)=0xad00 0xad03") })
+        assertTrue(lines.any { it.contains("陌生 ID(2)=0x4d00 0x4d03") })
         // 有名字的不能被算进陌生 ID
         assertFalse(lines.any { it.contains("陌生 ID(3)") })
     }

@@ -31,6 +31,7 @@ object Iap2CapabilityReport {
         TELEPHONY("通话/通讯录"),
         POWER("电源"),
         HID("HID/输入"),
+        ACCESSIBILITY("辅助功能"),
         EA("EA 会话"),
         VEHICLE("车辆状态"),
         UNKNOWN("其他/未知"),
@@ -39,26 +40,47 @@ object Iap2CapabilityReport {
     /** 按 `0xNNNN` 段归堆。区间取各子系统的惯用段，边界值出现时以目录名为准（[hasName]）。 */
     fun groupOf(id: Int): Group =
         when (id) {
-            0x1D00, 0x1D01, 0x1D02, 0x1D03 -> Group.IDENT
+            in 0x1D00..0x1D0F -> Group.IDENT
             in 0xAA00..0xAA0F -> Group.IDENT
-            0x4300, 0x4301, 0x5702, 0x5703 -> Group.WIRELESS
-            in 0x4E09..0x4E0F -> Group.WIRELESS
+            // 0x4300~0x4303 = CarPlay 可用性/启动会话/数字车钥匙
+            in 0x4300..0x430F -> Group.WIRELESS
+            // 0x5700/0x5701 = WiFi 信息，0x5702/0x5703 = WiFi 配置
+            in 0x5700..0x570F -> Group.WIRELESS
+            // 0x4E01~0x4E0E = 蓝牙组件 / 蓝牙连接 / 设备状态 / 无线可用性
+            in 0x4E00..0x4E0F -> Group.WIRELESS
             // 0x00B0~0x00B4 = OOBBTPairing（无线 CarPlay 的带外蓝牙配对，交换 link key）
             in Iap2MessageIds.OOB_BT_PAIRING_BASE..0x00B4 -> Group.WIRELESS
-            // 0x52xx = Route Guidance（0x5200 StartRouteGuidanceUpdates 是已确认的那个）
+            // 0x0B00~0x0B03 = 蓝牙配对；0xB100~0xB107 = BLE
+            in 0x0B00..0x0B0F -> Group.WIRELESS
+            in 0xB100..0xB1FF -> Group.WIRELESS
+            // 0x52xx = Route Guidance；0x10DA~0x10DD = 目的地；0x0D00~0x0D02 = 道路物体检测；
+            // 0xFFF0~0xFFFC = 定位（GPRMC 状态 / 定位样本）
             in 0x5200..0x52FF -> Group.NAVIGATION
+            in 0x10DA..0x10DF -> Group.NAVIGATION
+            in 0x0D00..0x0D0F -> Group.NAVIGATION
+            in 0xFFF0..0xFFFF -> Group.NAVIGATION
+            // 0x4Cxx = 媒体库；0x50xx = NowPlaying
+            in 0x4C00..0x4CFF -> Group.MEDIA
             in 0x5000..0x50FF -> Group.MEDIA
-            in 0x4150..0x415F -> Group.TELEPHONY
-            0x4170, 0x4171 -> Group.TELEPHONY
+            in 0x4150..0x417F -> Group.TELEPHONY
             in 0xAE00..0xAEFF -> Group.POWER
             in 0x6800..0x68FF -> Group.HID
+            // 0x54xx = AssistiveTouch；0x56xx = VoiceOver
+            in 0x5400..0x54FF -> Group.ACCESSIBILITY
+            in 0x5600..0x56FF -> Group.ACCESSIBILITY
             in 0xEA00..0xEAFF -> Group.EA
             in 0xA100..0xA1FF -> Group.VEHICLE
             else -> Group.UNKNOWN
         }
 
-    /** 目录里有名字（[Iap2MessageIds.nameOf] 对未知 ID 会回退成 `0xNNNN` 字面量）。 */
-    fun hasName(id: Int): Boolean = !Iap2MessageIds.nameOf(id).startsWith("0x")
+    /**
+     * 此号是否在 iAP2 规范里存在（查 [Iap2MessageCatalog] 全表，不是「本项目实现过没有」）。
+     *
+     * 这条判据只用来决定「要不要按报文体反推」。判错的代价很具体：用「本项目用过没」
+     * 当判据时，`0x4E09`（设备名，天天发）、`0xAA00`（每次认证第一条）都会被列进
+     * 「陌生 ID」，现场看到就会以为车机冒出了新东西。
+     */
+    fun hasName(id: Int): Boolean = Iap2MessageCatalog.contains(id)
 
     /** `0x5200(StartRouteGuidanceUpdates)` / 未知则 `0xad00`。 */
     fun describe(id: Int): String =

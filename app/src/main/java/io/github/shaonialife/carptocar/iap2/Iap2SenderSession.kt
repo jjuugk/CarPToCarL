@@ -742,8 +742,7 @@ class Iap2SenderSession(
         // 真机顺序：0x4301 之后回 0x4E0E（传输标识确认）。
         // Audi 实测：车机对该消息**接受但从不 ACK**（其余包毫秒级 ACK）——必须发后不管，
         // 否则重传看门狗在 +20s 把整条蓝牙链路杀掉（EA 会话/触摸载体随之丢失）。
-        // 车机可收清单里没声明也照发（只记录，见 [recordUndeclaredReceive]）。
-        recordUndeclaredReceive(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
+        // 车机可收清单里没声明也照发（越权取证在 [send]/[sendFireAndForget] 出口统一做）。
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
@@ -983,8 +982,7 @@ class Iap2SenderSession(
         greetingsSent = true
         val sent = ArrayList<Int>(5)
         // 0x4E0D（无线可用）与 0x4E0C（设备 UUID）：车机可收清单里没声明也照发，
-        // 只记一条日志（2026-10-27 起取消裁剪，见 [recordUndeclaredReceive]）。
-        recordUndeclaredReceive(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+        // 只记一条日志（2026-10-27 起取消裁剪；取证在 [send] 出口统一做）。
         send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
         sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
         send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
@@ -1003,7 +1001,6 @@ class Iap2SenderSession(
                 Iap2Csm.u8(2, 0),
         )
         sent += Iap2MessageIds.DEVICE_TIME_UPDATE
-        recordUndeclaredReceive(Iap2MessageIds.DEVICE_UUID_UPDATE)
         send(
             Iap2MessageIds.DEVICE_UUID_UPDATE,
             Iap2Csm.string(0, deviceUuid()),
@@ -1047,7 +1044,6 @@ class Iap2SenderSession(
      */
     fun nudgeCarPlayAvailability(reason: String): Boolean {
         if (!channel.isAlive) return false
-        recordUndeclaredReceive(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
@@ -1092,7 +1088,6 @@ class Iap2SenderSession(
         // 车机可收清单里没声明也照发（只记录）——2026-10-27 起取消裁剪：别克 E2LB 与
         // 上游奥迪 3315 的证据都表明「没声明 ≠ 不能收」，裁掉只换来日志更干净。
         // **0x4300 本来就不裁**：它是驱动 0x4301 的请求本身，宁可多发一次也不能不发。
-        recordUndeclaredReceive(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
@@ -1437,6 +1432,9 @@ class Iap2SenderSession(
         messageId: Int,
         vararg body: ByteArray,
     ) {
+        // 越权取证放在**唯一出口**：早先是逐个调用点手加，20+ 种消息只覆盖了 4 种。
+        // 清单未到时 accessoryDeclaresReceive 返回 null，不会误报。
+        recordUndeclaredReceive(messageId)
         val joined =
             when (body.size) {
                 0 -> ByteArray(0)
@@ -1463,6 +1461,7 @@ class Iap2SenderSession(
         messageId: Int,
         body: ByteArray,
     ) {
+        recordUndeclaredReceive(messageId)
         val frame = Iap2Csm.encode(messageId, body)
         val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
         var offset = 0

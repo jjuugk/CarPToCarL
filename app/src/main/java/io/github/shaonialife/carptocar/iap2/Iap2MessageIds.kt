@@ -126,7 +126,9 @@ object Iap2MessageIds {
             EA_OPEN_SESSION -> "StartEASession"
             EA_CLOSE_SESSION -> "StopEASession"
             EA_SESSION_STATUS -> "EASessionStatus"
-            EA_SESSION_DATA -> "EASessionData"
+            // 规范里**没有** 0xEA04（EA 段只到 0xEA03）。必须自曝是推断，
+            // 不能让日志把它显示成一个「看起来有出处」的消息名。
+            EA_SESSION_DATA -> "0xEA04(推断未确认)"
             START_NOW_PLAYING_UPDATES -> "StartNowPlayingUpdates"
             NOW_PLAYING_UPDATE -> "NowPlayingUpdate"
             STOP_NOW_PLAYING_UPDATES -> "StopNowPlayingUpdates"
@@ -145,13 +147,9 @@ object Iap2MessageIds {
             LOCATION_GPRMC_STATUS -> "LocationGPRMCStatus"
             START_VEHICLE_STATUS_UPDATES -> "StartVehicleStatusUpdates"
             VEHICLE_STATUS_UPDATE -> "VehicleStatusUpdate"
-            in OOB_BT_PAIRING_BASE..0x00B4 -> "OOBBTPairing(0x%02X)".format(messageId)
-            0x4155 -> "CallStateUpdate"
-            0x4158 -> "CommunicationsUpdate"
-            0x4159 -> "StopCommunicationsUpdates"
-            0x4171 -> "ListUpdate"
-            in 0x415B..0x415C -> "CallControl(0x%04X)".format(messageId)
-            in 0xAE00..0xAE03 -> "PowerUpdates(0x%04X)".format(messageId)
-            else -> "0x%04X".format(messageId)
+            // 其余 144 条规范消息交给同一张目录（Apple 规格档案生成）。
+            // 这里**不再写泛化区间**（如 0xAE00..0xAE03）：泛化名会盖掉
+            // 目录里的精确名（0xAE02 是 StopPowerUpdates，不是「PowerUpdates」）。
+            else -> Iap2MessageCatalog.nameOf(messageId) ?: "0x%04X".format(messageId)
         }
 }
