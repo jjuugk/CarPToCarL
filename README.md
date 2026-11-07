@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；⑤ 通用系（Cinemo）修两个现场问题：`0x4300` 补上被漏掉的 group0（有线标识，两段 group 才是新版车机的完整形态，修「一直卡在获取 WiFi」），`0x4E09` 不再把 MagicOS 的占位名「未知设备」发给车机（同名占位串还会让车机蓝牙列表显示「未知设备」）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；⑤ 通用系（Cinemo）修两个现场问题：`0x4300` 补上被漏掉的 group0（有线标识，两段 group 才是新版车机的完整形态，修「一直卡在获取 WiFi」），`0x4E09` 不再把 MagicOS 的占位名「未知设备」发给车机（同名占位串还会让车机蓝牙列表显示「未知设备」）；⑥ 按 Apple 规格档案补 144 条消息目录（`0x4E09~0x4E0C` 等规范里有、项目没实现的消息不再被报「陌生 ID」，`0x1D01` 支持报文比对改用「规范里有没有」）；⑦ 全链路自查：失败轮次也有收尾结论（`ConnectBudget.end` 打「卡在哪个阶段 + grep 关键词」），「已发未声明可收消息」的埋点下沉到发送唯一出口；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -890,6 +890,41 @@ PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_
 奥迪 / 宝马 / DiPlay 测试台的 `0x4300` 顺序**不动**（它们现在都是通的），双标识体只给
 通用系开——修一台车不能把已经跑通的链路改坏。单测 **500 例 0 失败**（新增 6 例：
 `AvailabilityBodyMemoryTest` 4 例双标识阶梯、`DeviceIdentityTest` 2 例占位名过滤）。
+
+**六、车机支持报文对不上：按 Apple 规格档案补 144 条目录**
+
+依据 Apple `iap2messages-internal.i2mspecarchive`（同源工程 catplay 的注册表）新建
+`iap2/Iap2MessageCatalog.kt`。改动前只认 40 条，于是规范里有、本项目没实现的消息
+（`0x4E09~0x4E0C` 车机状态、`0xAA00~0xAA05`、`0xAD00` …）全被报成「陌生 ID」，
+`0x1D01` 能力清单比对时也会把车机**声明可收**的条目误判为未知。
+
+| 改动 | 说明 |
+|---|---|
+| `Iap2MessageIds.nameOf()` 兜底走目录 | 同时删掉两条**泛化区间**（`0xAE00..0xAE03`、`0x415B..0x415C`）——它们把 `0xAE02`（StopPowerUpdates）、`0x415C`（EndCall）盖成了错名字 |
+| `0xEA04` 标「推断未确认」 | 规范 EA 段只到 `0xEA03`，故不进目录；单测锁定，以后别顺手加进去 |
+| `Iap2CapabilityReport.hasName` | 判据从「本项目实现过没」改为「规范里有没有」——这才是「车机支持报文」该问的问题 |
+| `groupOf` 补齐分组 | 新增 `0x0Bxx / 0x4Cxx / 0x0Dxx / 0x10DA / 0x4172 / 0x4302 / 0x5700 / 0x4E01~05 / 0xB1xx / 0xFFF0~FFFC`，并新增 `ACCESSIBILITY` 组 |
+
+目录按 IDENTIFICATION / WIRELESS / MEDIA_NAV / VEHICLE 四段拆 private map 再合并
+（单个 map 里 ktlint 会删掉段间空行，分组就看不出来了）。
+
+**七、全链路自查：让日志直接回答「卡在哪一步」**
+
+- 「已发未声明可收消息」的埋点从 4 个手工点**下沉到 `send()` / `sendFireAndForget()` 唯一出口**，
+  覆盖 20+ 种发送；`0x1D01` 还没到时返回 `null`，不误报；
+- **失败轮次也有收尾结论**：新增 `ConnectBudget.end(cause, keywords)`，接入三条最常见的半路退出
+  （等 `0x4301` 超时、热点没绑上、配对线程结束但没推流），日志固定打
+  `STAGE: ✗ 本轮未连上，卡在「<阶段>」：<原因>｜关键词：<grep 词>`，再补一行小结
+  ——以前这些轮次只有「本轮开始」没有小结，看起来像卡死；
+- `expect()` 超时文案带消息名（`等待 0x1d01（IdentificationInformation）超时`），不再只有裸 ID；
+- 文档修正三处：`0x5703` 参数表（1=SSID / 2=密码 / 3=安全类型 / 4=信道，**没有 IP 字段**）、
+  EA 协议槽（参数 10 是 zero_or_more，不是 10~12）、`0x1D01` 组件参数表；
+- 文档新增**附录 E**：18 项逐阶段结论、四条有意偏离（伪 USB 传输标识、`zh-CN` 语言码、
+  不实现 `/fp-setup` 与 `/auth-setup`）、17 行日志诊断索引（按现象查关键词）；
+- 单测 **510 例 0 失败**（新增 `Iap2MessageCatalogTest` 6 例，含反射断言：`Iap2MessageIds`
+  的全部 `const Int` 除 `EA_SESSION_DATA` 外必须在 144 条目录里；`ConnectBudgetTest` 4 例
+  覆盖三条半路退出与关键词输出）。设备侧未解决项见文档附录 E 末尾（宝马 `0x4E0C` 载荷异常、
+  通用系 `0x4300` 双标识体形态待现场验证）。
 
 ### 1.2.25 —— 2026-11-06（对照 catplay 复核连接链路：bit37 能力位、邀请自愈、0x4301 布局判定，正式版）
 
