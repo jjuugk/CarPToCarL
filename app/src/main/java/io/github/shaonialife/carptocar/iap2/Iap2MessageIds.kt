@@ -91,22 +91,6 @@ object Iap2MessageIds {
     const val START_VEHICLE_STATUS_UPDATES = 0xA100
     const val VEHICLE_STATUS_UPDATE = 0xA101
 
-    // ---- ExternalAccessory 会话（链路 2 号会话承载 EA 数据；触摸 HID 高概率载体）----
-    const val EA_OPEN_SESSION = 0xEA00 // 手机 → 配件（奥迪可收清单明确支持）
-    const val EA_CLOSE_SESSION = 0xEA01 // 手机 → 配件
-    const val EA_SESSION_STATUS = 0xEA03 // 配件 → 手机（奥迪发送清单明确声明）
-
-    /**
-     * EA 会话数据（双向）：EA 隧道里的裸字节流由这条承载。
-     *
-     * **注意 ID 与载荷形态都是推断**：0xEA03 之后的数据帧不在 `carplay.json` 的
-     * 可收/可发清单里（那份清单只列 0xEA00/0xEA01/0xEA02/0xEA03），0xEA04 取自
-     * iAP2 EA 模块的惯用编号，载荷按「整段裸字节塞进 body」发送。MIB3 车机控制
-     * （viwi）依赖它，首次实车必须看日志确认：车机是否回 0xEA03、0xEA04 是否
-     * 有来有回。详见 `docs/mib3-viwi-control.md` 的「未确认项」。
-     */
-    const val EA_SESSION_DATA = 0xEA04
-
     fun nameOf(messageId: Int): String =
         when (messageId) {
             START_IDENTIFICATION -> "StartIdentification"
@@ -123,12 +107,6 @@ object Iap2MessageIds {
             DEVICE_HID_REPORT -> "DeviceHIDReport"
             ACCESSORY_HID_REPORT -> "AccessoryHIDReport"
             STOP_HID -> "StopHID"
-            EA_OPEN_SESSION -> "StartEASession"
-            EA_CLOSE_SESSION -> "StopEASession"
-            EA_SESSION_STATUS -> "EASessionStatus"
-            // 规范里**没有** 0xEA04（EA 段只到 0xEA03）。必须自曝是推断，
-            // 不能让日志把它显示成一个「看起来有出处」的消息名。
-            EA_SESSION_DATA -> "0xEA04(推断未确认)"
             START_NOW_PLAYING_UPDATES -> "StartNowPlayingUpdates"
             NOW_PLAYING_UPDATE -> "NowPlayingUpdate"
             STOP_NOW_PLAYING_UPDATES -> "StopNowPlayingUpdates"

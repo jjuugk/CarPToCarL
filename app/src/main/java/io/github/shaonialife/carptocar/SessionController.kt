@@ -4384,7 +4384,7 @@ object SessionController {
 
                                     "iAPSendMessage" -> {
                                         // 事件通道上的 iAP2 虚拟链路字节（车机先发 marker 开场）。
-                                        // 喂给链路引擎：握手 → EA 会话 → 触摸 HID。
+                                        // 喂给链路引擎：握手 → 触摸 HID（EA 车机控制已移除）。
                                         val params = command["params"] as? Map<*, *>
                                         val data = params?.get("data") as? ByteArray
                                         if (data == null) {
@@ -4511,7 +4511,7 @@ object SessionController {
                                     client.startKeepAlive(host, setup.keepAlivePort!!)
                                 }
                                 client.startFeedbackLoop()
-                                // iAP 隧道（type-130）：车机→手机的 iAP2 EA 数据（触摸 HID 载体）。
+                                // iAP 隧道（type-130）：车机→手机的 iAP2 数据（触摸 HID 载体）。
                                 // 建立失败不阻塞会话（触摸不可用但视频照常）。
                                 val tunnel = client.runIapTunnel(sessionKey)
                                 tunnel?.onIapMessage = { frame ->

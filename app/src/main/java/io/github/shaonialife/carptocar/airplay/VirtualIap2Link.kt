@@ -71,7 +71,6 @@ class VirtualIap2Link(
     private val engine = Iap2LinkEngine()
     private val parser = Iap2Csm.Parser()
     private var frameCount = 0
-    private var eaCount = 0
     private var started = false
 
     // ---- DiPlay 隧道路径状态 ----
@@ -174,7 +173,6 @@ class VirtualIap2Link(
         get() = synchronized(lock) { engine.state == Iap2LinkEngine.State.NORMAL && mfiFinished }
 
     init {
-        engine.onEaData = { bytes -> handleEaData(bytes) }
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
         Thread(
             {
@@ -995,9 +993,6 @@ class VirtualIap2Link(
         }
     }
 
-    /** 引擎回调：EA 会话（2 号）数据帧——触摸 HID 的高概率载体。 */
-    var onEaData: ((ByteArray) -> Unit)? = null
-
     /**
      * 引擎回调：iAP2 控制会话下发的 HID 报告解析出的 Android 媒体键。
      *
@@ -1028,15 +1023,6 @@ class VirtualIap2Link(
 
     /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
     private var hidDescriptor: ByteArray? = null
-
-    fun handleEaData(bytes: ByteArray) {
-        eaCount++
-        val hex = bytes.joinToString(" ") { "%02x".format(it) }
-        if (eaCount <= 30 || eaCount % 100 == 0) {
-            log("IAPLINK: EA 数据 #$eaCount ${bytes.size}B hex=${hex.take(200)}")
-        }
-        onEaData?.invoke(bytes)
-    }
 
     companion object {
         /**

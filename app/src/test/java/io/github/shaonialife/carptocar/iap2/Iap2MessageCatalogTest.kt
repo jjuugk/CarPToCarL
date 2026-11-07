@@ -60,25 +60,22 @@ class Iap2MessageCatalogTest {
     @Test
     fun everyIdWeDefineExistsInTheSpecification() {
         // 反射拿到 Iap2MessageIds 里所有 const Int，逐个查目录。
-        // 唯一的例外是 EA_SESSION_DATA（0xEA04）：它自己已经标注「推断未确认」，
-        // nameOf 也返回 "0xEA04(推断未确认)" 而不是伪装成规范名。
+        // 本项目已不定义任何「规范里没有」的号：EA 会话（0xEA00~0xEA04）整体移除后，
+        // 这里不再需要例外清单——目录缺哪个号就直接失败。
         val fields =
             Iap2MessageIds::class.java.declaredFields
                 .filter { it.type == Int::class.javaPrimitiveType }
                 .filter { Modifier.isStatic(it.modifiers) }
                 .associate { it.name to it.apply { isAccessible = true }.getInt(null) }
         assertTrue("反射没拿到常量，断言会空转", fields.size > 30)
-        val missing =
-            fields
-                .filterKeys { it != "EA_SESSION_DATA" }
-                .filterValues { !Iap2MessageCatalog.contains(it) }
+        val missing = fields.filterValues { !Iap2MessageCatalog.contains(it) }
         assertTrue("这些常量在 iAP2 规范里不存在：$missing", missing.isEmpty())
     }
 
     @Test
-    fun inferredIdsAreLabelledAsSuch() {
-        // 断言的号必须自曝身份，不能在日志里看起来像真的
-        assertEquals("0xEA04(推断未确认)", Iap2MessageIds.nameOf(0xEA04))
+    fun removedEaSessionIdsAreNotNamedAsIfImplemented() {
+        // EA 车机控制已移除：0xEA04 既不在目录里，也不再自造一个「推断未确认」的名字。
+        assertEquals("0xEA04", Iap2MessageIds.nameOf(0xEA04))
         // 规范里的号走目录，不许再写泛化名（0xAE02 是 StopPowerUpdates）
         assertEquals("StopPowerUpdates", Iap2MessageIds.nameOf(0xAE02))
         assertEquals("EndCall", Iap2MessageIds.nameOf(0x415C))

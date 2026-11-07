@@ -110,45 +110,6 @@ class Iap2SenderSession(
 
     private val random = SecureRandom()
 
-    // ---- ExternalAccessory（EA）隧道 ----
-    // 奥迪 MIB3 把 EA 会话桥接到车机内部 viwi 总线（127.0.0.1:14751），整车控制
-    // （车门/车窗/空调/灯光…）都从这个入口走。详见 docs/mib3-viwi-control.md。
-
-    /** 车机在 0x1D01 里声明的 EA 协议（protocolId to name），bring-up 后填充。 */
-    @Volatile
-    var eaProtocols: List<Pair<Int, String>> = emptyList()
-        private set
-
-    /** 承载数据的 EA 协议号（优先 `com.audi.cpp.eadata0`）；null = 车机没声明可用协议。 */
-    @Volatile
-    var eaDataProtocolId: Int? = null
-        private set
-
-    /** 最近一次 0xEA03 的原始 body（null = 车机一次都没回会话状态）。 */
-    @Volatile
-    var eaStatusRaw: ByteArray? = null
-        private set
-
-    /** EA 隧道双向字节计数（只用于界面上判断「有没有真的通」）。 */
-    @Volatile
-    var eaTxBytes: Int = 0
-        private set
-
-    @Volatile
-    var eaRxBytes: Int = 0
-        private set
-
-    /** 收到 0xEA03（会话状态）时回调，原始 body 交给上层解读。 */
-    @Volatile
-    var onEaStatus: ((ByteArray) -> Unit)? = null
-
-    /** 收到 0xEA04（隧道数据）时回调，参数是裸字节（viwi 报文）。 */
-    @Volatile
-    var onEaData: ((ByteArray) -> Unit)? = null
-
-    /** 0xEA00 的催问是否已经排过（每轮会话只排一次）。 */
-    private var eaRetryScheduled = false
-
     /** 0x5703 解析结果（保活期间车机重发 0x5702 时需重新应答）。 */
     @Volatile
     private var wifi: WifiConfiguration? = null
@@ -363,23 +324,6 @@ class Iap2SenderSession(
         const val HID_WAIT_NANOS = 2_000_000_000L
 
         /**
-         * 0xEA00 没回执时的催问延迟。
-         *
-         * 取 8 秒：奥迪 MIB3 的 AirPlay 音频/视频流 SETUP 在 BT 连上后 4~10 秒才完成，
-         * 而它可能要到那时才认 EA 会话。太早催等于再发一次同样的东西。
-         */
-        const val EA_RETRY_DELAY_MILLIS = 8_000L
-
-        /**
-         * 发 0xEA01 之前允许「对端多久没回过帧」。
-         *
-         * 超过这个时长说明车机已经停摆（奥迪那次 `packet 115 not acknowledged`：socket
-         * 还通、心跳照发，但车机从 115 之后一帧都没回过）。这种情况下再写 0xEA01
-         * 只是多一条没人处理的帧，还会占满发送窗口，直接断更干净。
-         */
-        const val EA_CLOSE_PEER_IDLE_MILLIS = 5_000L
-
-        /**
          * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
          * 只在「车机没给声明清单」时才会用满窗口——从 10s 收到 3s：真车整个
          * bring-up 只有几十秒预算，且实测应答都在毫秒级。
@@ -466,11 +410,6 @@ class Iap2SenderSession(
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
 
-        // EA 协议解析（启动时机见下方 MFi 完成后——2026-10-11 DiPlay 实测：
-        // 认证前发 0xEA00 会让测试台状态机停摆，不再回 0xAA01；奥迪对此不敏感）
-        val declaredEaProtocols = parseEaProtocols(identification)
-        eaProtocols = declaredEaProtocols
-
         // ---- MFi（跳过校验：0xAA05 自报成功）----
         val identityText = identityText(identification)
         // 0x4300 报文体形态的按车机试错记忆（见 AvailabilityBodyMemory 文档：
@@ -529,30 +468,6 @@ class Iap2SenderSession(
         // 排在 awaitOptionalHid（最多 2s）之后，等于让车机多等 2 秒——凯迪拉克日志里
         // 0xaa05 在 33.248、问候在 35.249，中间空了 2 秒正是那段 HID 等待。
         sendDeviceStateGreetings()
-
-        // ---- EA 会话启动（MFi 认证完成后）----
-        // 奥迪 0x1D01 声明 de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1
-        // 三个 EA 协议；触摸 HID 相关数据经 EA 会话。认证前发送会噎死 DiPlay（见上）。
-        for ((protocolId, name) in declaredEaProtocols) {
-            sendFireAndForget(
-                Iap2MessageIds.EA_OPEN_SESSION,
-                // param 1 = EA 协议名（UTF-8 字符串）。发成协议号时车机不回 0xEA03
-                // （上游 PR #17 实测修正）。
-                Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
-            )
-            log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
-        }
-        // 数据走哪条 EA 协议：优先 `...eadata0`（奥迪 viwi 数据口），退而取第一条。
-        // 只要车机声明了任一协议就记下来——能不能真通由 0xEA03 与首个往返决定。
-        eaDataProtocolId =
-            declaredEaProtocols.firstOrNull { it.second.endsWith("eadata0") }?.first
-                ?: declaredEaProtocols.firstOrNull()?.first
-        if (eaDataProtocolId != null) {
-            log("EA: 数据通道协议 = ${declaredEaProtocols.first { it.first == eaDataProtocolId }.second}（0xEA04 承载）")
-        } else {
-            log("EA: 车机未声明任何 EA 协议——MIB3 车机控制不可用")
-        }
-        scheduleEaSessionRetry(declaredEaProtocols)
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
         // xcertplay 在订阅后发 StartHID；DiPlay 删掉了这一步（订阅完直接等 0x5702）。
@@ -785,7 +700,7 @@ class Iap2SenderSession(
 
         // 真机顺序：0x4301 之后回 0x4E0E（传输标识确认）。
         // Audi 实测：车机对该消息**接受但从不 ACK**（其余包毫秒级 ACK）——必须发后不管，
-        // 否则重传看门狗在 +20s 把整条蓝牙链路杀掉（EA 会话/触摸载体随之丢失）。
+        // 否则重传看门狗在 +20s 把整条蓝牙链路杀掉（会话与触摸载体随之丢失）。
         // 车机可收清单里没声明也照发（越权取证在 [send]/[sendFireAndForget] 出口统一做）。
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
@@ -840,17 +755,6 @@ class Iap2SenderSession(
             if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
                 handleLateStartSession(frame)
             }
-            // EA 隧道：0xEA03 是会话状态、0xEA04 是隧道数据。**必须排在下面的重复限流
-            // 之前**——viwi 一旦进入长轮询，数据帧会连续到达，跟着限流走等于每 100 条
-            // 才放行一条（车机控制面板会看到「发了没回」）。
-            if (frame.messageId == Iap2MessageIds.EA_SESSION_STATUS) {
-                handleEaStatus(frame)
-            }
-            if (frame.messageId == Iap2MessageIds.EA_SESSION_DATA) {
-                handleEaData(frame)
-                // 数据帧内容由上层记日志（可能是二进制），这里不再打 keep-alive 行。
-                continue
-            }
             // 0x5000 NowPlaying 订阅：蓝牙链路（测试台）在这里订阅，回一次 0x5001。
             // 真车（MIB3）的 NowPlaying 订阅走 WiFi 隧道（VirtualIap2Link），此处
             // provider 为 null 时静默忽略，不影响链路。
@@ -873,142 +777,6 @@ class Iap2SenderSession(
             )
         }
         log("SESSION 保活结束（链路断开）")
-    }
-
-    // ---- EA（ExternalAccessory）隧道：MIB3 viwi 车机控制的唯一通道 ----
-
-    private fun handleEaStatus(frame: Iap2Csm.Frame) {
-        eaStatusRaw = frame.body
-        val hex = frame.body.joinToString(" ") { "%02x".format(it) }
-        log("iap2 rx=0xea03 EASessionStatus bytes=${frame.body.size} [$hex]")
-        runCatching { onEaStatus?.invoke(frame.body) }
-            .onFailure { log("EA: 会话状态回调异常 ${it.message}") }
-    }
-
-    private fun handleEaData(frame: Iap2Csm.Frame) {
-        eaRxBytes += frame.body.size
-        val sink = onEaData
-        if (sink == null) {
-            log("iap2 rx=0xea04 EA 数据 ${frame.body.size}B（无消费者，丢弃）")
-            return
-        }
-        runCatching { sink(frame.body) }
-            .onFailure { log("EA: 数据处理异常 ${it.message}") }
-    }
-
-    /**
-     * 0xEA00 只催一轮。
-     *
-     * 0xEA00 是**发后不管**（车机不 ACK 它，只用 0xEA03 回执），所以「没回」既可能是
-     * 丢包，也可能是车机当时还没准备好。奥迪 MIB3 的实际情况是：0xEA00 在 bring-up
-     * 第 4 秒就发出去了，而它自己的 CarPlay 栈要到 WiFi/AirPlay 会话建立之后才认这个
-     * EA 会话。所以这里等 [EA_RETRY_DELAY_MILLIS] 再催一轮——那时 AirPlay 多半已建立。
-     *
-     * 只催一次：这条通路上多刷没有意义（车机要么回 0xEA03，要么就是不支持）。
-     */
-    private fun scheduleEaSessionRetry(protocols: List<Pair<Int, String>>) {
-        if (protocols.isEmpty() || eaRetryScheduled) return
-        eaRetryScheduled = true
-        Thread(
-            {
-                try {
-                    Thread.sleep(EA_RETRY_DELAY_MILLIS)
-                } catch (_: InterruptedException) {
-                    return@Thread
-                }
-                if (eaStatusRaw != null) return@Thread
-                runCatching {
-                    log("EA: ${EA_RETRY_DELAY_MILLIS / 1000} 秒内没等到 0xEA03——再催一轮 0xEA00（${protocols.size} 个协议）")
-                    for ((protocolId, name) in protocols) {
-                        sendFireAndForget(
-                            Iap2MessageIds.EA_OPEN_SESSION,
-                            Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
-                        )
-                    }
-                }.onFailure { log("EA: 催问 0xEA00 失败 ${it.message}") }
-            },
-            "ea-session-retry",
-        ).apply { isDaemon = true }.start()
-    }
-
-    /**
-     * 通过 EA 隧道发一段裸字节（viwi 请求报文）。
-     *
-     * 返回 false 只有两种原因：车机没声明可用的 EA 协议，或链路在写的时候断了。
-     * **载荷形态是推断的**（整段裸字节塞进 body，不加 CSM 参数包装）——见
-     * [Iap2MessageIds.EA_SESSION_DATA] 的注释，首次实车按日志校正。
-     */
-    fun sendEaData(payload: ByteArray): Boolean {
-        if (payload.isEmpty()) return false
-        if (eaDataProtocolId == null) {
-            log("EA: 车机未声明 EA 协议，无法发送（${payload.size}B）")
-            return false
-        }
-        return runCatching {
-            send(Iap2MessageIds.EA_SESSION_DATA, payload)
-            eaTxBytes += payload.size
-            log("EA: tx ${payload.size}B（累计 $eaTxBytes/$eaRxBytes）")
-            true
-        }.getOrElse { error ->
-            log("EA: 发送失败 ${error.message}")
-            false
-        }
-    }
-
-    /**
-     * 主动结束 EA 会话（0xEA01 StopEASession）——**断开控制链路前必须发**。
-     *
-     * 为什么：车机侧（MIB3 `Smartphone_Integrator`）对 EA 会话有泄漏保护，固件原文——
-     * ```
-     * [CIAP2EAPProtocolViwi] EAP session for eapSessionIdentifier: %d already exist
-     * [CIAP2EAPProtocolKeepAlive] Failed to start EAP session, another session is already running
-     * ```
-     * 会话没被显式停掉时，残留的 EAP/VIWI 会话会挡住下一次连接；而车机自己的
-     * 「设备已移除」判定要等 `mediaDisconnectTimeout=15000ms` 才成立。发一条 0xEA01
-     * 能让它立刻把这条路清掉，不必依赖超时。
-     *
-     * 三个「不要发」的条件，都是避免往一个已经死掉的链路里塞帧：
-     *  - 车机从没声明过 EA 协议（发了它也不认识）；
-     *  - 链路已经关；
-     *  - 对端超过 [EA_CLOSE_PEER_IDLE_MILLIS] 没回过任何帧（停摆了，见该常量注释）。
-     *
-     * 用**发后不管**（与 0xEA00 同语义）：链路已经慢下来时用等 ACK 的 [send] 会把
-     * 收尾拖到重传看门狗超时之后，用户看到的是「点了断开要转十几秒」。
-     *
-     * @return 实际发出的条数（0 = 什么都没发，原因已写日志）
-     */
-    fun closeEaSessions(reason: String): Int {
-        val protocols = eaProtocols
-        if (protocols.isEmpty()) {
-            log("EA: 车机没声明过 EA 协议——不发 0xEA01（$reason）")
-            return 0
-        }
-        if (!channel.isAlive) {
-            log("EA: 链路已关，0xEA01 发不出去（$reason）")
-            return 0
-        }
-        val idle = channel.millisSinceLastPeerFrame()
-        if (idle < 0 || idle > EA_CLOSE_PEER_IDLE_MILLIS) {
-            val how = if (idle < 0) "一帧都没回过" else "已 ${idle / 1000} 秒没回帧"
-            log("EA: 对端$how——跳过 0xEA01（写了也没人处理，$reason）")
-            return 0
-        }
-        var sent = 0
-        for ((protocolId, name) in protocols) {
-            val ok =
-                runCatching {
-                    sendFireAndForget(
-                        Iap2MessageIds.EA_CLOSE_SESSION,
-                        Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
-                    )
-                }.onFailure { log("EA: 发 0xEA01（$name）失败——${it.message}") }
-                    .isSuccess
-            if (ok) sent++
-        }
-        if (sent > 0) {
-            log("EA: 已发 $sent 条 0xEA01 结束 EA 会话（$reason）——车机不必再等会话超时")
-        }
-        return sent
     }
 
     /** 设备状态问候是否已发过（幂等；[sendDeviceStateGreetings] 的 force 可再发一轮）。 */
@@ -1690,16 +1458,6 @@ class Iap2SenderSession(
         // 完整会话录制：原始报文（含 0x1D01 能力清单这类大包）进 session_trace.log，
         // 与 main_debug.log 的摘要行按时间戳对齐，用于事后离线分析拆链/超时。
         frames.forEach { SessionTrace.csm(SessionTrace.Dir.RX, "bt", it.messageId, it.body) }
-        // 0xEA03（EA 会话状态）是 0xEA00 的唯一回执，催问线程靠 [eaStatusRaw] 判断
-        // 「车机认了没」。必须在帧进入 expect/暂存区之前记账——否则当它是以「非目标帧」
-        // 的身份到达时，只会躺在 [receivedFrames] 里，等主循环下一次派发才被看到；
-        // 若那段等待跨过 8 秒，催问线程就会冤枉地补发一轮 0xEA00。
-        //
-        // 这里只记账不打印：日志与上层回调仍由派发路径上的 handleEaStatus 统一负责，
-        // 避免同一帧打两行。
-        frames.forEach { frame ->
-            if (frame.messageId == Iap2MessageIds.EA_SESSION_STATUS) eaStatusRaw = frame.body
-        }
         frames.forEachIndexed { index, frame -> if (index > 0) receivedFrames += frame }
         return frames.first()
     }
@@ -1820,19 +1578,6 @@ class Iap2SenderSession(
         )
     }
 
-
-    /**
-     * 从 0x1D01 的 ExternalAccessoryProtocol 组件（参数组 10/11/12）解析 EA 协议：
-     * 子参数 0 = 协议号（u8）、1 = 协议名。对照 DiPlay 同款构造（u8(0,index)+string(1,name)+u8(2,0)）。
-     */
-    private fun parseEaProtocols(frame: Iap2Csm.Frame): List<Pair<Int, String>> {
-        // 解析细节（含「参数号可重复出现」这个坑）见 [Iap2Ea.parseProtocols]。
-        val protocols = Iap2Ea.parseProtocols(frame.body)
-        protocols.forEach { (paramId, protocolId, name) ->
-            log("iap2 0x1d01 EA 组件[$paramId] protocol=$protocolId name=$name")
-        }
-        return protocols.map { it.second to it.third }
-    }
 
     private fun logIdentification(frame: Iap2Csm.Frame) {
         val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }

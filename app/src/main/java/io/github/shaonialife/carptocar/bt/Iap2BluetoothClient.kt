@@ -757,9 +757,6 @@ class Iap2BluetoothClient(
     fun detachCurrentSession() {
         // 主动拆的不要被当成「掉线」去补连（否则会立刻把刚退役的控制会话又建回来）
         manualTeardown = true
-        // 断链**之前**先告诉车机「EA 会话结束」。车机侧没被显式停掉的 EAP/VIWI 会话
-        // 会挡住下一次连接，而它自己的清理要等 mediaDisconnectTimeout(15s) 才成立。
-        senderSession?.closeEaSessions("主动断开控制会话")
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()
@@ -773,8 +770,6 @@ class Iap2BluetoothClient(
         // 递增世代：即便有线程卡在 connect()，事后也会因世代不符自杀，不会在下次启动时复活
         generation.incrementAndGet()
         BtSessionGate.clearLinkLost()
-        // 同 detachCurrentSession：先把 EA 会话收干净，再关 socket
-        senderSession?.closeEaSessions("停止控制链路")
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
         activeChannel?.let { runCatching { it.close() } }
         thread?.interrupt()

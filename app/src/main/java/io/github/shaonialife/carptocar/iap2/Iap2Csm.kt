@@ -181,49 +181,6 @@ object Iap2Csm {
     }
 }
 
-/**
- * 0x1D01（IdentificationInformation）里 EA 协议清单的解析。
- *
- * 单独提出来是为了能被单测直接咬住：车机可以用**同一个参数号（10/11/12）重复出现**
- * 来表达多个 EA 协议，而参数号并不是唯一键。奥迪 MIB3 一次声明三个
- * （de.audi.mmiconnectdatatransfer / com.audi.cpp.eadata0 / com.audi.cpp.eadata1），
- * 旧实现用 `associateBy { it.id }` 只留下最后一个，于是只对 eadata1 发了 0xEA00，
- * 车机一个 0xEA03 都不回、EA 隧道永远建不起来
- * （2026-11-04 实车日志逐字节核对，见 `docs/audi-mib3-ea-tunnel-20261104.md`；
- * C8-4580（CL3D）固件报告 §5.7 从车机侧证实：EA 会话正是 AirPlay/车控数据的
- * 承载管道，少发一个协议就少一条隧道，见 `docs/mib3-firmware-c8-4580.md`）。
- */
-object Iap2Ea {
-    /** EA 协议参数号：车机把这几个号各当作一个「EA 协议槽」，可以重复出现。 */
-    private val GROUP_IDS = 10..12
-
-    /**
-     * 解析出 [(参数号, 协议号, 协议名)]，保留车机声明顺序、去重。
-     *
-     * 空名按 `?` 记，协议号取不到（子参数 0 缺失/为空）则跳过该槽。
-     */
-    fun parseProtocols(body: ByteArray): List<Triple<Int, Int, String>> {
-        val out = ArrayList<Triple<Int, Int, String>>()
-        for (param in Iap2Csm.parseParams(body)) {
-            if (param.id !in GROUP_IDS) continue
-            val sub = Iap2Csm.parseParams(param.value)
-            val protocolId =
-                sub.firstOrNull { it.id == 0 }
-                    ?.value
-                    ?.firstOrNull()
-                    ?.toInt()
-                    ?.and(0xFF) ?: continue
-            val name =
-                sub.firstOrNull { it.id == 1 }?.value?.let { bytes ->
-                    bytes.decodeToString().substringBefore('\u0000').ifEmpty { "?" }
-                } ?: "?"
-            if (out.any { it.second == protocolId && it.third == name }) continue
-            out += Triple(param.id, protocolId, name)
-        }
-        return out
-    }
-}
-
 fun Iap2Csm.Param.asString(): String? =
     if (value.isNotEmpty() && value.last() == 0.toByte()) {
         value.copyOf(value.size - 1).decodeToString()

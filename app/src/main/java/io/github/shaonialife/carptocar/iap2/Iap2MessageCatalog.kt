@@ -15,7 +15,10 @@ package io.github.shaonialife.carptocar.iap2
  * 现场据此误判成「车机出了新东西」。
  *
  * 约定：**只放规范里真有的号**。由本项目推断、规范里查不到的号（如 `0xEA04`）
- * 绝不允许写进来——那会把「猜测」伪装成「规范」，见 [Iap2MessageIds.EA_SESSION_DATA]。
+ * 绝不允许写进来——那会把「猜测」伪装成「规范」。
+ *
+ * 注：`0xEA00~0xEA03`（ExternalAccessory 会话）保留在表里，只为让诊断日志能把车机
+ * 声明的那几条显示成名字；本项目**已移除 EA 车机控制**，不再发起 EA 会话。
  */
 object Iap2MessageCatalog {
     /** 配对 / 识别 / MFi 认证 / 电话通讯（39 条）。 */

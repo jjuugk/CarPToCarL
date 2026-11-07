@@ -162,12 +162,6 @@ class Iap2LinkEngine(
     /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
 
-    /**
-     * EA 会话（2 号）数据帧回调：设置后 EA 帧不再被当作未知会话丢弃，
-     * 而是交由此回调（事件通道虚拟链路上的触摸 HID 载体）。
-     */
-    var onEaData: ((bytes: ByteArray) -> Unit)? = null
-
     /** 诊断：每个入向链路帧的摘要（control/seq/ack/sessionId/载荷长度），真车排查用。 */
     var onFrameReceived: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
 
@@ -515,9 +509,10 @@ class Iap2LinkEngine(
                 // 收到对端的数据即代表对端认为链路可用；ACK 帧若丢失/被跳过，这里兜底进入 NORMAL
                 completeNegotiationIfPending(nowMillis)
                 handleData(sequence, payload!!)
-            } else if (sessionId == SESSION_EA && onEaData != null) {
-                // EA 会话数据（含触摸 HID）：对端序号账法与控制会话独立，直接上抛
-                onEaData?.invoke(payload!!)
+            } else if (sessionId == SESSION_EA) {
+                // EA（ExternalAccessory）会话数据：本项目**已移除 EA 车机控制**，这里不再
+                // 上抛给任何消费者。但链路层仍要 ACK——不确认会让对端不停重传同一个包，
+                // 连带把控制会话也拖慢（EA 的序号账法与控制会话独立，只补 ACK 不前移自身序号）。
                 sendAcknowledgement()
             } else {
                 reportUnknownSessionData(sessionId, payload!!.size)
