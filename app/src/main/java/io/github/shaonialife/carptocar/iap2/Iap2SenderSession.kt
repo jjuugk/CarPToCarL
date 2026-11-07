@@ -24,8 +24,6 @@ class Iap2SenderSession(
     private val log: (String) -> Unit,
     /** 本机真实蓝牙 MAC（0x4300/0x4E0E 的传输标识与 _carplay-ctrl 广播的 id；真车会校验）。 */
     private val bluetoothMac: String = "02:00:00:00:00:00",
-    /** 本机蓝牙名（0x4E09 设备信息）。 */
-    private val deviceName: String = "iPhone",
     /**
      * 收到 0x5703（热点凭据）时回调 —— 主控须立即：绑定车机 WiFi + 广播
      * `_carplay-ctrl._tcp`（带真实蓝牙 MAC）。真车（Audi MIB3）流程：
@@ -76,6 +74,20 @@ class Iap2SenderSession(
          */
         val advertisedFeatures: Long? = null,
     )
+
+    /**
+     * iAP2 自报的设备名（0x4E09 DeviceInformationUpdate）。
+     *
+     * **固定 `iPhone`，不跟手机本地蓝牙名走**：真机 Frida 抓包（MIB3 隧道
+     * `VirtualIap2Link` 的逐字节常量同样是 `iPhone`）与市售盒子一致，车机把它当
+     * 「设备自报身份」，部分固件（Cinemo / myCadillac 这类）还会拿它决定 UI 归类。
+     *
+     * 蓝牙名是**另一件事**：车机配对列表里显示的是它，由
+     * `DeviceIdentity.ensureUsableBluetoothName` 负责修占位串（「未知设备」）。
+     * 2026-11-07 上午为了修「未知设备」把 0x4E09 改成发蓝牙名（BKQ-AN10），
+     * 反而让自报身份偏离真机——这里拆开：身份归身份，展示归展示。
+     */
+    private val deviceName: String = IAP2_DEVICE_NAME
 
     private val parser = Iap2Csm.Parser()
 
@@ -266,6 +278,15 @@ class Iap2SenderSession(
     }
 
     internal companion object {
+        /**
+         * 0x4E09 自报的设备名（iAP2 身份，**不是**蓝牙名）。
+         *
+         * 依据：MIB3 真机 Frida 抓包的逐字节常量、catplay/xcertplay 发送端、
+         * 市售 CarPlay 盒子固件在这一层都是 `iPhone`。改这里等于改「我是谁」，
+         * 只在有反例抓包时才能动（单测 [Iap2SenderSessionTest] 锁住）。
+         */
+        const val IAP2_DEVICE_NAME = "iPhone"
+
         /**
          * 从 0x4301 的无线组里解析 AP 信息（新协议车机的唯一凭据来源）。
          *

@@ -32,7 +32,6 @@ class Iap2SenderSessionTest {
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "AA:BB:CC:DD:EE:FF",
-                deviceName = "test-device",
             ).run(timeoutMillis = 10_000L)
 
         assertEquals("MockAP", endpoint.ssid)
@@ -46,6 +45,41 @@ class Iap2SenderSessionTest {
 
         phoneChannel.close()
         accessoryChannel.close()
+    }
+
+    /**
+     * 0x4E09 自报的是 **iAP2 身份**，不是本机蓝牙名。
+     *
+     * 真 iPhone 与市售 CarPlay 盒子这一层都是 `iPhone`（MIB3 隧道 Frida 抓包的逐字节
+     * 常量同款）。2026-11-07 别克 E2LB 现场为了修车机蓝牙列表的「未知设备」，把
+     * 0x4E09 改成发手机本地蓝牙名（BKQ-AN10）——修好了展示，却把自报身份弄偏了。
+     * 本用例锁住两者分离：蓝牙名归蓝牙名，0x4E09 固定 iPhone。
+     */
+    @Test
+    fun deviceInformationUpdateAlwaysReportsIPhone() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        Iap2SenderSession(
+            phoneChannel,
+            log = { line -> println("PHONE $line") },
+            bluetoothMac = "AA:BB:CC:DD:EE:FF",
+        ).run(timeoutMillis = 10_000L)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+
+        assertTrue("mock 没收到 0x4E09——脚本可能已错位", accessory.deviceNames.isNotEmpty())
+        assertTrue(
+            "0x4E09 必须自报 iPhone，实际=${accessory.deviceNames}",
+            accessory.deviceNames.all { it == Iap2SenderSession.IAP2_DEVICE_NAME },
+        )
     }
 
     /**
@@ -72,7 +106,6 @@ class Iap2SenderSessionTest {
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "AA:BB:CC:DD:EE:FF",
-                deviceName = "test-device",
                 onEndpointUpdate = {
                     updates.set(it)
                     updateLatch.countDown()
@@ -126,7 +159,6 @@ class Iap2SenderSessionTest {
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "34:86:DA:BE:EF:01",
-                deviceName = "test-device",
                 onEndpointUpdate = {
                     updates.set(it)
                     updateLatch.countDown()
@@ -175,7 +207,6 @@ class Iap2SenderSessionTest {
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "84:A1:B7:D1:95:33",
-                deviceName = "BKQ-AN10",
             ).run(timeoutMillis = 20_000L)
 
         assertEquals("MockAP", endpoint.ssid)
@@ -208,7 +239,6 @@ class Iap2SenderSessionTest {
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "AA:BB:CC:DD:EE:FF",
-                deviceName = "test-device",
             ).run(timeoutMillis = 10_000L)
 
         // 每个地址都必须干净：没有 NUL、没有空白
@@ -249,6 +279,14 @@ class Iap2SenderSessionTest {
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
+
+        /**
+         * 收到的 0x4E09 自报设备名（解析出的可打印部分）。
+         *
+         * 用来锁住「iAP2 身份固定 iPhone」这条：真机 / 盒子的 0x4E09 都是 `iPhone`，
+         * 发本地蓝牙名会让车机把发送端归类成普通蓝牙设备。
+         */
+        val deviceNames = java.util.concurrent.CopyOnWriteArrayList<String>()
 
         /** 早到、但当前脚本还没轮到看的目标帧（如先于 StartHID 到达的 0x4300）。 */
         private val stashed = ArrayDeque<Iap2Csm.Frame>()
@@ -519,14 +557,25 @@ class Iap2SenderSessionTest {
             pending.firstOrNull()?.let {
                 pending.removeFirst()
                 if (it.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += it.messageId
+                noteDeviceName(it)
                 return it
             }
             val bytes = channel.recvControl(timeoutMillis) ?: return null
             val frames = parser.offer(bytes)
             if (frames.isEmpty()) return null
             frames.forEachIndexed { index, frame -> if (index > 0) pending += frame }
-            frames.first().let { if (it.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += it.messageId }
+            frames.first().let {
+                if (it.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += it.messageId
+                noteDeviceName(it)
+            }
             return frames.first()
+        }
+
+        /** 记下 0x4E09 的报文体（CSM 参数头里有二进制长度，只取可打印字符）。 */
+        private fun noteDeviceName(frame: Iap2Csm.Frame) {
+            if (frame.messageId != Iap2MessageIds.DEVICE_INFORMATION_UPDATE) return
+            val text = String(frame.body, Charsets.UTF_8).filter { it.code in 32..126 }
+            if (text.isNotEmpty()) deviceNames += text
         }
 
         private companion object {

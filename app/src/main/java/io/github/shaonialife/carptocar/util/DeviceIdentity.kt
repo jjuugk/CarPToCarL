@@ -168,12 +168,13 @@ object DeviceIdentity {
     }
 
     /**
-     * 设备名（0x4E09 DeviceInformationUpdate 用；对齐真机发的是本机蓝牙名）。
+     * 车机蓝牙列表里要显示的**蓝牙名**（占位串一律换掉）。
      *
-     * 2026-11-07 别克 E2LB 现场：车机蓝牙列表里我们这台手机显示成「未知设备」——
-     * 因为 MagicOS 在本地蓝牙名未设置时 `BluetoothAdapter.getName()` 就返回这个
-     * 本地化占位串，而我们把它原样塞进了 0x4E09。占位串一律换成
-     * 「营销名 → Build.MODEL → CarPToCarL」，绝不把「未知设备」发给车机。
+     * **不要把它塞进 iAP2 的 0x4E09**：那一层是真机身份，固定 `iPhone`
+     * （见 `Iap2SenderSession.IAP2_DEVICE_NAME`）。2026-11-07 别克 E2LB 现场
+     * 把两者混用，车机把我们归类成普通蓝牙设备。
+     *
+     * 取名顺序：适配器名 → `Settings.Secure.bluetooth_name` → 营销名 → MODEL。
      */
     fun deviceName(context: Context): String =
         displayName(adapterName(context))
@@ -259,11 +260,11 @@ object DeviceIdentity {
                 false
             }
         if (renamed) {
-            log("BT: 本机蓝牙名是占位「${current.orEmpty()}」——已改名为「$target」（车机蓝牙列表与 0x4E09 都用它）")
+            log("BT: 本机蓝牙名是占位「${current.orEmpty()}」——已改名为「$target」（只影响车机蓝牙列表；iAP2 0x4E09 固定发 iPhone）")
         } else {
             log(
                 "BT: 本机蓝牙名是占位「${current.orEmpty()}」——改名失败（ROM 拦了 setName），" +
-                    "0x4E09 改用「$target」；车机列表里仍可能显示旧名",
+                    "车机列表里仍可能显示旧名；iAP2 0x4E09 不受影响（固定发 iPhone）",
             )
         }
     }

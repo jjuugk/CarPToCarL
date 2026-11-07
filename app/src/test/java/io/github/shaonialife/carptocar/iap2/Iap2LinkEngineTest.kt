@@ -153,14 +153,15 @@ class Iap2LinkEngineTest {
     fun synAckUsesFreshSequenceNumber() {
         val phone = Iap2LinkEngine()
         phone.start(0)
-        phone.takeOutput() // marker + 我方 SYN（seq=99）
+        // 初始序号每条链路随机（手册 4.3 / catplay take_own_seq），只能断言相对关系
+        val ownSyn = parseFrames(phone.takeOutput()).single { it.control == 0x80 }
 
         phone.feed(synFrame(peerSequence = 161), 1)
         val frames = parseFrames(phone.takeOutput())
         val synAck = frames.single { it.control == 0xC0 }
 
         assertEquals("ack 必须回显对端 SYN 序号", 161, synAck.ack)
-        assertEquals("SYN-ACK 序号必须比 SYN 大 1", 100, synAck.sequence)
+        assertEquals("SYN-ACK 序号必须是 SYN 的下一个（模 256）", (ownSyn.sequence + 1) and 0xFF, synAck.sequence)
     }
 
     /**
@@ -173,7 +174,7 @@ class Iap2LinkEngineTest {
     fun everySynGetsASynAckReply() {
         val phone = Iap2LinkEngine()
         phone.start(0)
-        phone.takeOutput()
+        val ownSyn = parseFrames(phone.takeOutput()).single { it.control == 0x80 }
 
         // 车机连续三轮用不同序号重开协商（复刻日志 161 → 191 → 40）
         val sequences = listOf(161, 191, 40)
@@ -187,8 +188,11 @@ class Iap2LinkEngineTest {
 
         assertEquals("每条 SYN 都应有 SYN|ACK", sequences.size, replies.size)
         assertEquals(sequences, replies.map { it.second })
-        // 序号逐次递增（99 → 100 → 101 → 102）
-        assertEquals(listOf(100, 101, 102), replies.map { it.first })
+        // 序号逐次递增（初始序号随机，只能从 ownSyn 起算）
+        assertEquals(
+            listOf(1, 2, 3).map { (ownSyn.sequence + it) and 0xFF },
+            replies.map { it.first },
+        )
     }
 
     /** 同一个 SYN 的字节级重发必须幂等：整对帧原样重放，不推进序号、不产生新序号。 */
@@ -196,7 +200,7 @@ class Iap2LinkEngineTest {
     fun retransmittedSynKeepsTheSameEcho() {
         val phone = Iap2LinkEngine()
         phone.start(0)
-        phone.takeOutput()
+        val ownSyn = parseFrames(phone.takeOutput()).single { it.control == 0x80 }
 
         phone.feed(synFrame(peerSequence = 77), 1)
         val first = phone.takeOutput()
@@ -204,7 +208,7 @@ class Iap2LinkEngineTest {
         val again = phone.takeOutput()
 
         assertArrayEquals("重传同一 SYN 应原样重放", first, again)
-        assertEquals(100, parseFrames(first).single { it.control == 0xC0 }.sequence)
+        assertEquals((ownSyn.sequence + 1) and 0xFF, parseFrames(first).single { it.control == 0xC0 }.sequence)
     }
 
     /** 裸 ACK 不能与已发出的 SYN|ACK 撞序号（BMW 会把同序号帧当重复丢弃）。 */
@@ -220,7 +224,10 @@ class Iap2LinkEngineTest {
             emitted += parseFrames(phone.takeOutput()).map { it.sequence }
         }
         assertEquals("序号必须严格递增且无重复", emitted.size, emitted.distinct().size)
-        assertEquals(emitted.sorted(), emitted)
+        // 初始序号随机 → 不能用 sorted（跨 255→0 回绕时会失败），按模 256 严格 +1 校验
+        emitted.zipWithNext().forEach { (previous, next) ->
+            assertEquals("序号必须每次 +1（模 256）", (previous + 1) and 0xFF, next)
+        }
     }
 
     // ---- 工具 ----
