@@ -18,6 +18,9 @@ import android.content.Context
  *  2. [Variant.LEGACY_FLAT] 老版平铺体（`param0={1}` + DeviceIdentifier），原样与小写各一份；
  *  3. [Variant.NONE] 完全不发，只等车机自己发 0x4301。
  *
+ * 2026-11-07 增补 [Variant.DUAL_GROUPS]：同源工程 link_plus 给新版车机发的是「两段 group」
+ * （有线标识 + 无线标识），而我们只发了其中一段。通用系（Cinemo 栈）先用它，见 [GM_ORDER]。
+ *
  * 判据不是「车机没发 0x4301」（这个家族从来不发），而是**它是否还回链路 ACK**：
  * 发出 0x4300 后整个等待窗口内对端零控制帧 = 该形态把这台车的会话打住了 → 记为
  * [recordSilent]，下一轮自动换下一档。换成能正常 ACK 的形态后立刻记住成功档
@@ -28,17 +31,40 @@ import android.content.Context
  * 因此单元测试里的协议时序与改动前完全一致。
  */
 object AvailabilityBodyMemory {
-    /** 0x4300 报文体的三种形态（声明顺序即尝试顺序）。 */
+    /** 0x4300 报文体的四种形态（声明顺序即尝试顺序）。 */
     enum class Variant(
         val label: String,
     ) {
+        /**
+         * 新版**双标识**体：`group0={0:1, 1:"00008110"+MAC+"0000"}` +
+         * `group1={0:1, 1:"mac 小写"}`。
+         *
+         * 2026-11-07 别克 E2LB 现场对照 link_plus（同源 Buick 工程）才发现：人家给新版车机
+         * 发的是**两段 group**，我们一直只发了 group1（= 人家的「旧版」分支形态）。
+         * 车机把 group0 当作「这台设备是 CarPlay 设备」的有线标识，缺了它整条 iAP2
+         * 会话只回链路 ACK、不发起任何消息（0x6800/0x5000/0x4c00/0x4301 一条不发）。
+         */
+        DUAL_GROUPS("新版双标识体（有线标识+无线标识两段）"),
         MODERN_NESTED("新版嵌套体 transportId=蓝牙MAC"),
         LEGACY_FLAT("老版平铺体 DeviceIdentifier"),
         NONE("不发 0x4300"),
     }
 
-    /** 尝试顺序：新版 → 老版 → 不发。 */
+    /** 默认尝试顺序：新版 → 老版 → 不发。 */
     val ORDER: List<Variant> = listOf(Variant.MODERN_NESTED, Variant.LEGACY_FLAT, Variant.NONE)
+
+    /**
+     * 通用系（SAIC-GM / Cinemo 栈）的尝试顺序：**双标识体优先**，其余同默认。
+     *
+     * 只给这一族开：凯迪拉克 7731 与别克 E2LB 都是「收下 0x4300 却不发起 0x4301」，
+     * 而缺 group0 恰恰是这两台车的共同点；奥迪/宝马/测试台（现有能通的）保持默认顺序，
+     * 免得为了修一台车把已经跑通的链路改坏。
+     */
+    val GM_ORDER: List<Variant> =
+        listOf(Variant.DUAL_GROUPS, Variant.MODERN_NESTED, Variant.LEGACY_FLAT, Variant.NONE)
+
+    /** 全部形态（存储排序用，必须是所有档的超集）。 */
+    private val ALL: List<Variant> = GM_ORDER
 
     private const val FILE = "availability_body_memory"
     private const val KEY_OK = "ok_"
@@ -52,15 +78,19 @@ object AvailabilityBodyMemory {
      *
      * 规则：记住过成功档就直接用；否则取第一个没被判「静默」的档；全被判静默时
      * 停在 [Variant.NONE]（不再打扰车机，只等它自己开口）。
+     *
+     * @param preferDual 通用系（Cinemo 栈）优先试 [Variant.DUAL_GROUPS]——见 [GM_ORDER]
      */
     fun nextVariant(
         context: Context?,
         identityText: String,
+        preferDual: Boolean = false,
     ): Variant {
         val ok = readOk(context, identityText)
         if (ok != null) return ok
         val silent = readSilent(context, identityText)
-        return ORDER.firstOrNull { it.name !in silent } ?: Variant.NONE
+        val order = if (preferDual) GM_ORDER else ORDER
+        return order.firstOrNull { it.name !in silent } ?: Variant.NONE
     }
 
     /** 已经试过哪些档（日志用）。 */
@@ -70,24 +100,26 @@ object AvailabilityBodyMemory {
     ): String {
         val silent = readSilent(context, identityText)
         if (silent.isEmpty()) return "无"
-        return ORDER.filter { it.name in silent }.joinToString("/") { it.name }
+        return ALL.filter { it.name in silent }.joinToString("/") { it.name }
     }
 
     /**
      * 记录「该形态发出去后对端零反馈」。
      *
+     * @param preferDual 与 [nextVariant] 保持一致，否则日志里「下一轮改用 X」会与实际不符
      * @return 下一轮将改用的形态（用于日志：让用户/排查直接看到阶梯走到哪了）
      */
     fun recordSilent(
         context: Context?,
         identityText: String,
         variant: Variant,
+        preferDual: Boolean = false,
     ): Variant {
         if (variant == Variant.NONE) return Variant.NONE
         val key = receiverKey(identityText)
         val silent = readSilent(context, identityText) + variant.name
         store(context, key, readOk(context, identityText), silent)
-        return nextVariant(context, identityText)
+        return nextVariant(context, identityText, preferDual)
     }
 
     /** 记录「该形态车机正常应答（拿到了 0x4301 / 继续推进）」——成功即定档，清掉旧结论。 */
@@ -116,7 +148,7 @@ object AvailabilityBodyMemory {
             } else {
                 prefs(context).getString(KEY_OK + key, null)
             }
-        return ORDER.firstOrNull { it.name == raw }
+        return ALL.firstOrNull { it.name == raw }
     }
 
     private fun readSilent(
@@ -145,7 +177,7 @@ object AvailabilityBodyMemory {
         ok: Variant?,
         silent: Set<String>,
     ) {
-        val ordered = ORDER.filter { it.name in silent }.map { it.name }
+        val ordered = ALL.filter { it.name in silent }.map { it.name }
         if (context == null) {
             synchronized(memory) { memory[key] = ok?.name to ordered.toSet() }
             return

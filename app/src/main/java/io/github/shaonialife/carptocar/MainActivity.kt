@@ -2200,15 +2200,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     /** 设备营销名（ro.product.marketname），取不到时退回 Build.MODEL。 */
-    private fun deviceName(): String =
-        try {
-            val sp = Class.forName("android.os.SystemProperties")
-            val get = sp.getMethod("get", String::class.java)
-            (get.invoke(null, "ro.product.marketname") as? String)
-                ?.takeIf { it.isNotBlank() } ?: Build.MODEL
-        } catch (_: Exception) {
-            Build.MODEL
-        }
+    private fun deviceName(): String = DeviceIdentity.marketingName() ?: Build.MODEL
 
     /** 副标题只显示设备名（原来的 Shizuku 状态已随依赖移除）。 */
     private fun updateDeviceSubtitle() {

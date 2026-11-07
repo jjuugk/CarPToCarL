@@ -24,6 +24,9 @@ internal fun Iap2LinkChannel.runSenderSession(
     /** 保活泵退出（链路断开）回调——用于释放主控的「会话处理中」互斥，见调用处注释。 */
     onLinkClosed: () -> Unit = {},
 ) {
+    // 车机蓝牙列表/0x4E09 显示的名字先修一遍：MagicOS 在本地蓝牙名未设置时会把
+    // 「未知设备」当成适配器名，车机屏幕上就出现「未知设备 / 已连接」。
+    DeviceIdentity.ensureUsableBluetoothName(context, log)
     val session =
         Iap2SenderSession(
             this,

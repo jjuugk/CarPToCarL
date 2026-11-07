@@ -68,4 +68,59 @@ class AvailabilityBodyMemoryTest {
             AvailabilityBodyMemory.silentDescription(null, key),
         )
     }
+
+    // ---- 2026-11-07：通用系（Cinemo 栈）先试「双标识体」 ----
+
+    @Test
+    fun cinemoReceiverPrefersDualGroupsBody() {
+        val key = "buick_8948 e2lb saic general motors dual_${System.nanoTime()}"
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+    }
+
+    @Test
+    fun nonCinemoReceiverKeepsDefaultLadder() {
+        val key = "bmw_92438 g08 bmw dual_${System.nanoTime()}"
+        assertEquals(
+            AvailabilityBodyMemory.Variant.MODERN_NESTED,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = false),
+        )
+    }
+
+    @Test
+    fun silentDualGroupsFallsBackToModernNested() {
+        val key = "cadillac_7731 a2ll general motors dual_${System.nanoTime()}"
+        val next =
+            AvailabilityBodyMemory.recordSilent(
+                null,
+                key,
+                AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+                preferDual = true,
+            )
+        assertEquals(AvailabilityBodyMemory.Variant.MODERN_NESTED, next)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.MODERN_NESTED,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+        // 已经记过「双标识静默」的车机，日志里要能看到它（否则排查时以为阶梯没走）
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS.name,
+            AvailabilityBodyMemory.silentDescription(null, key),
+        )
+    }
+
+    @Test
+    fun dualGroupsSuccessIsPinnedAndReadBack() {
+        val key = "buick_8948 e2lb saic general motors pin_${System.nanoTime()}"
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS, preferDual = true)
+        // 车机终于回 0x4301 → 定档双标识体，并清掉静默记录
+        AvailabilityBodyMemory.recordSuccess(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+        assertEquals("无", AvailabilityBodyMemory.silentDescription(null, key))
+    }
 }

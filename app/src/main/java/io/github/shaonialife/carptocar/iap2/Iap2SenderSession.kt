@@ -155,6 +155,15 @@ class Iap2SenderSession(
      */
     private var availabilityVariant: AvailabilityBodyMemory.Variant? = null
 
+    /**
+     * 是否通用系（SAIC-GM / Cinemo 栈）——决定 0x4300 优先试「双标识体」。
+     *
+     * 依据 2026-11-07 别克 E2LB 现场：该族车机收到我们只带 group1 的 0x4300 后
+     * 只回链路 ACK，`0x6800/0x5000/0x4c00/0x4301` 一条都不发起；同源工程 link_plus
+     * 对这一代发的是 group0（有线标识）+ group1（无线标识）两段。
+     */
+    private var preferDualAvailability = false
+
     /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
     private var lastLateStartSessionSignature: Int? = null
 
@@ -407,6 +416,21 @@ class Iap2SenderSession(
         ).joinToString(" ").lowercase()
     }
 
+    /**
+     * 是否通用系 Cinemo 栈（别克 E2LB / 凯迪拉克 7731 等）。
+     *
+     * 两条判据任取其一：身份里 manufacturer 含 `General Motors`；或 0x1D01 的传输组件里
+     * 带 `Cinemo`（`CinemoBTComponent` / `CinemoWIFIComponent` / `CinemoHIDRemote`）。
+     * 雪佛兰/别克/凯迪拉克都是 SAIC-GM 出品，组件名一致，所以按栈判而不是按品牌名判。
+     */
+    private fun isCinemoStack(
+        identification: Iap2Csm.Frame,
+        identityText: String,
+    ): Boolean {
+        if (identityText.contains("general motors")) return true
+        return identification.body.decodeToString().contains("Cinemo", ignoreCase = true)
+    }
+
     fun run(timeoutMillis: Long = 60_000L): CarPlayEndpoint {
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         if (!channel.awaitReady(remainingMillis(deadline))) {
@@ -431,13 +455,21 @@ class Iap2SenderSession(
         // 0x4300 报文体形态的按车机试错记忆（见 AvailabilityBodyMemory 文档：
         // 别克 E2LB 收到新版嵌套体后控制会话直接停摆）。无 Context（单测）时固定新版。
         receiverIdentity = identityText
+        // 通用系（General Motors / Cinemo 组件栈）：0x4300 优先试「双标识体」。
+        preferDualAvailability = isCinemoStack(identification, identityText)
         // 只有真机（有 Context，可持久化）才启用阶梯；单测/纯 JVM 固定新版嵌套体，
         // 协议时序与改动前完全一致（也让用例之间不会通过进程内记忆互相污染）。
-        availabilityVariant = if (context == null) null else AvailabilityBodyMemory.nextVariant(context, identityText)
+        availabilityVariant =
+            if (context == null) {
+                null
+            } else {
+                AvailabilityBodyMemory.nextVariant(context, identityText, preferDualAvailability)
+            }
         availabilityVariant?.let {
             log(
                 "iap2 0x4300 报文体形态：${it.label}" +
-                    "（该车机历史静默档=${AvailabilityBodyMemory.silentDescription(context, identityText)}）",
+                    "（该车机历史静默档=${AvailabilityBodyMemory.silentDescription(context, identityText)}" +
+                    if (preferDualAvailability) " · 通用系 Cinemo：双标识优先）" else "）",
             )
         }
         val legacyCar = LEGACY_RECEIVER_MARKERS.any { identityText.contains(it) }
@@ -1088,6 +1120,19 @@ class Iap2SenderSession(
      */
     private fun sendAvailability() {
         when (availabilityVariant ?: AvailabilityBodyMemory.Variant.MODERN_NESTED) {
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS -> {
+                // 与 link_plus 的 modernBootstrap 完全一致：group0 = 有线标识（00008110+MAC+0000），
+                // group1 = 无线标识（MAC 小写）。两段都要有——别克 E2LB / 凯迪拉克 7731 缺 group0
+                // 时只回链路 ACK，一条主动消息都不发（0x6800/0x5000/0x4c00/0x4301 全无）。
+                val wired = legacyDeviceIdentifier()
+                val wireless = bluetoothMac.lowercase()
+                sendFireAndForget(
+                    Iap2MessageIds.CARPLAY_AVAILABILITY,
+                    Iap2Csm.group(0, Iap2Csm.u8(0, 1), Iap2Csm.string(1, wired)) +
+                        Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, wireless)),
+                )
+            }
+
             AvailabilityBodyMemory.Variant.MODERN_NESTED ->
                 sendFireAndForget(
                     Iap2MessageIds.CARPLAY_AVAILABILITY,
@@ -1125,7 +1170,7 @@ class Iap2SenderSession(
         if (variant == AvailabilityBodyMemory.Variant.NONE) return
         val framesAfter = channel.peerFrameCount
         if (framesAfter != framesBefore) return
-        val next = AvailabilityBodyMemory.recordSilent(context, receiverIdentity, variant)
+        val next = AvailabilityBodyMemory.recordSilent(context, receiverIdentity, variant, preferDualAvailability)
         log(
             "iap2 ⚠ 0x4300（${variant.label}）发出后 ${windowNanos / 1_000_000_000}s 内车机零反馈：" +
                 "连链路层 ACK 都没回（同一份字节在凯迪拉克 CADILLAC_7731 上是正常 ACK 的），" +
