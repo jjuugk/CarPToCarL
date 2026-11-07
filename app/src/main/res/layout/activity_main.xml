@@ -586,6 +586,52 @@
                     android:layout_marginStart="54dp"
                     android:background="#5A394444" />
 
+                <!-- 车机只认苹果设备时的兼容探针（默认关）：额外注册两条 CarPlay 占位
+                     SDP 记录，并让 iAP2 监听常开（App 一启动就发布服务）。
+                     不动已跑通的车型——奥迪 MIB3 这类固件根本不看 EIR/SDP 里的 Apple UUID -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:minHeight="56dp"
+                    android:orientation="horizontal"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="54dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="兼容「只认苹果设备」的车机"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="13.5sp" />
+
+                        <TextView
+                            android:id="@+id/btCompatNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="默认关闭。开启后多声明两条 CarPlay 服务，并让蓝牙监听常开（界面显示「不支持 Apple CarPlay」的车机可试）"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="11.5sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchBtCompat"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
+
                 <!-- 本机蓝牙地址：接收端（WinPlay 等）按它做设备过滤，厂商脱敏时必须手填 -->
                 <LinearLayout
                     android:layout_width="match_parent"

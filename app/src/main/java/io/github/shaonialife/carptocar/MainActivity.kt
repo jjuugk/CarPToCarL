@@ -33,6 +33,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.bt.AppUiPresence
+import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
@@ -964,6 +965,47 @@ class MainActivity : AppCompatActivity() {
             if (checked) {
                 ensureBatteryExempt(force = true)
                 ensureOverlayPermission(force = true)
+            }
+        }
+
+        // 兼容「只认苹果设备」的车机（默认关，2026-11-07）：宝马 iD6 在蓝牙设备列表里
+        // 直接给本机打「设备不支持 Apple CarPlay」，那句判定发生在 iAP2 之前——改报文没用，
+        // 它看的是发现层（EIR 里的 iPhone CarPlay UUID / SDP 服务），而 Android 应用层
+        // 写不了 EIR。这里能做的是多注册两条占位 SDP 记录，并让监听常开
+        // （先配对、后开 App 的那一瞥也能看到服务）。见 BtCompatPrefs。
+        val switchBtCompat =
+            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchBtCompat)
+        val btCompatNote = findViewById<TextView>(R.id.btCompatNote)
+        fun renderBtCompatNote(checked: Boolean) {
+            btCompatNote.text =
+                if (checked) {
+                    "已开启：多声明两条 CarPlay 服务 + 蓝牙监听常开（对照日志 BT-PROBE 看车机有没有连占位记录）"
+                } else {
+                    "默认关闭。开启后多声明两条 CarPlay 服务，并让蓝牙监听常开（界面显示「不支持 Apple CarPlay」的车机可试）"
+                }
+        }
+        switchBtCompat.isChecked = BtCompatPrefs.enabled(this)
+        renderBtCompatNote(switchBtCompat.isChecked)
+        switchBtCompat.setOnCheckedChangeListener { _, checked ->
+            BtCompatPrefs.setEnabled(this, checked)
+            renderBtCompatNote(checked)
+            SessionController.applyBtCompat(checked, fromUser = true)
+            log(
+                "BT-PROBE: 兼容模式已${if (checked) "开启" else "关闭"}" +
+                    if (checked) {
+                        "——额外注册 CarPlay 占位 SDP 记录并保持监听常开"
+                    } else {
+                        "——占位记录已撤下（不影响已建立的控制链路）"
+                    },
+            )
+            if (checked &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                // 这里只申请权限，**不能**走 ensureBluetoothReady：它授权成功后会直接
+                // 发起整轮连接（pendingStartAfterBtPermission），而用户只是想开个开关。
+                // 授权后由兼容模式看门狗在 30 秒内把占位记录挂上。
+                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
         }
 

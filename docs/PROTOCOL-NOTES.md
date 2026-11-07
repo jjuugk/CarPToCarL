@@ -624,3 +624,41 @@ down in ~12s with no picture."
 结论：该车型只对「iAP2 配供应链带出的那次入网」激活 CarPlay 栈——系统里保存过/手动
 连过车机热点都会堵死连接（我们的「同 SSID 已保存弹窗清理」对此车是关键步骤），
 且必须严格用 0x5703 下发的 SSID（双频 SSID，成功路径是 `_5GHz`）。
+
+## §14 车机「只认苹果设备」：发现层声明与兼容探针（2026-11-07）
+
+现象：宝马 iD6（F49-NBTEvo-0716 / iDrive 6 / QNX 6.5.1）在**蓝牙设备列表**里直接给
+本机打 `设备不支持 Apple CarPlay`，下面只按普通蓝牙电话提示。这句文案出现在
+**iAP2 之前**——车机还没和我们跑任何协议就下了结论，所以调 `0x4300`、改识别顺序、
+改问候时机在这条路径上全都无效。
+
+同一台车 11-06 曾一路走到 `0xAA05`（MFi 认证成功），随后被整批 MIB3 突发打崩
+（AirPlay 服务进程重启，mDNS `pi` 变化）。所以「不支持」更可能是车机侧的设备注册表
+随服务重启后把本机降级成普通电话，而不是每个安卓机都会被永久拒绝。
+
+它看的是**发现层**，只有两处与苹果身份有关：
+
+| 层 | 内容 | 应用层可改 |
+|---|---|---|
+| EIR（inquiry 响应） | iPhone 广播 `2d8d2466-e14d-451c-88bc-7301abea291a` | ✗ 需 hook `WriteEIR` / 改 system/bt |
+| SDP 记录 | `Wireless iAP v2` = `02030302-1d19-415f-86f2-22a2106a0a77` | ✓ `listenUsingRfcommWithServiceRecord` |
+| 配对本身（SSP） | 无身份字段，只要求 authenticated+encrypted | 无需改 |
+| iAP2 识别（0x1D00/0x1D02） | 空报文体，没有「我是 iPhone」这一项 | 无需改 |
+| MFi | 方向是**手机验证车机**（0xAA01→0xAA05） | 无需改 |
+
+据此做了个默认关闭的开关（`BtCompatPrefs` → 设置页「兼容「只认苹果设备」的车机」）：
+
+1. 监听 iAP2 时**额外注册两条占位 SDP 记录**（`BtIdentityProbe`：`CarPlay` 用上面的
+   EIR UUID、`Wireless iAP v2` 用 catplay 那条 SDP UUID）。记录不做任何协议，
+   连进来只记一行日志并立刻关闭——那行日志本身就是结论：**车机确实在看这个 UUID**。
+2. **监听常开**：App 一启动就发布服务，不等「启动连接」。按「先配对、后开 App」的
+   顺序操作时，车机那一瞥看不到任何服务，很容易把设备记成「不支持」。
+
+日志关键词：`BT-PROBE:`（注册/连入/撤下）、`BT: 兼容模式`（常开状态）。
+判定顺序建议：先删设备重配对（缓存判死）→ 借一台真 iPhone 看同一菜单（区分是否
+EIR 判定）→ 再开本开关试。奥迪 MIB3 固件 `CoWSupported: false`，根本不看 EIR，
+开这个开关对它没有任何收益（这也是默认关的原因之一）。
+
+顺带修的隐患：`Iap2BluetoothServer.acceptLoop` 在 IOException 退出时没把 `running`
+改回 false，`isRunning` 会一直骗人说「在监听」，而 `start()` 又因 `running==true`
+直接返回——监听永久假死。常开监听依赖这个修复。

@@ -11,6 +11,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
+import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
@@ -268,6 +269,9 @@ object SessionController {
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
         startMediaWatchdog()
+        // 「车机只认苹果设备」兼容模式（默认关）：开了就立刻挂机监听，不等「启动连接」
+        startBtCompatWatchdog()
+        if (BtCompatPrefs.enabled(context.applicationContext)) applyBtCompat(true)
     }
 
     /** 媒体看门狗是否已启动（幂等）。 */
@@ -624,6 +628,26 @@ object SessionController {
     private var ctrlAdvertiser: CarPlayCtrlAdvertiser? = null
 
     /**
+     * 蓝牙监听是「兼容模式的常开挂机」而不是「本轮连接拉起来的」。
+     *
+     * 只影响 [isSessionRunning] 的判定——不能让它冒充「有会话在跑」，
+     * 否则 `maybeAutoConnect` 会以为自己已经在连、通知栏会写成「蓝牙已连上车机」。
+     * 一旦真有设备连进来（[Iap2BluetoothServer] 的 onPeerConnected）立刻清零。
+     */
+    @Volatile
+    private var idleListening = false
+
+    /**
+     * 用户在本轮里**手动断过**（或关掉了开关）：常开监听不再自动复活。
+     *
+     * 没有这一位的话，「断开」之后 30 秒看门狗又会把监听拉起来——用户明确叫停的东西
+     * 自己回来了，车机在旁边时还会重新握手。下一次点「启动连接」或重新打开开关才清。
+     */
+    @Volatile
+    private var compatSuppressed = false
+    private var btCompatWatchdogStarted = false
+
+    /**
      * 常驻 `_airplay._tcp` 发现器（对照 catplay 的常驻 Bonjour cache）。
      * 加入热点即开始后台发现，交接端点时地址多半已就绪，不再现查现等。
      */
@@ -812,6 +836,9 @@ object SessionController {
 
     /** 每次重建后给交接流程的观察窗：配对 + SETUP + RECORD 正常 3~6 秒出首帧。 */
     private const val RECOVERY_SETTLE_MILLIS = 8_000L
+
+    /** 兼容模式常开监听的复检间隔：监听/占位记录掉了多久之内必须被发现。 */
+    private const val BT_COMPAT_REVIVE_MILLIS = 30_000L
 
     /** 端口探测超时（本机回环 / 车机同网段，都不该慢）。 */
     private const val PROBE_TIMEOUT_MILLIS = 800L
@@ -1044,6 +1071,89 @@ object SessionController {
         runCatching { bluetoothClient?.start() }
         runCatching { bluetoothServer?.start() }
         appendLog("PROC: 蓝牙链路已重新拉起（等车机重新下发 0x4301）")
+    }
+
+    /**
+     * 「车机只认苹果设备」兼容模式（[BtCompatPrefs]，默认关）：挂机监听 + 占位 SDP 记录。
+     *
+     * 场景（2026-11-07 宝马 iD6）：车机在蓝牙设备列表里直接给本机打
+     * `设备不支持 Apple CarPlay`。这句判定发生在 iAP2 之前，改 0x4300 之类全都无效——
+     * 它看的是发现层（EIR 有没有 iPhone 的 CarPlay UUID、SDP 里有没有对应服务）。
+     * Android 应用层写不了 EIR，能做的只有多注册两条占位 SDP 记录，
+     * 并**在 App 一启动就把服务发布出去**（按「先配对、后开 App」的顺序操作时，
+     * 车机那一瞥看不到任何服务，很容易把设备记成「不支持」）。
+     *
+     * 关掉只撤占位记录，不动已经在跑的控制链路——这一刀的语义是「别再声明苹果身份」，
+     * 不是「断开连接」。
+     *
+     * [fromUser] 区分「用户刚拨了开关」和「Activity 重建时按偏好补齐」：前者要解除
+     * 手动断开留下的抑制，后者不能——否则用户点过「断开」，回到界面又被挂上监听。
+     */
+    fun applyBtCompat(
+        enabled: Boolean,
+        fromUser: Boolean = false,
+    ) {
+        val server = bluetoothServer ?: return
+        if (!enabled) {
+            idleListening = false
+            server.stopProbe()
+            return
+        }
+        if (fromUser) compatSuppressed = false
+        if (compatSuppressed) return
+        if (!server.hasPermission()) {
+            // 首次启动还没授权：不刷屏，等授权后由看门狗在 30 秒内自己挂上
+            return
+        }
+        Bg.run("bt-compat-listen") {
+            if (isSessionRunning() || sessionStarting.get()) {
+                // 正在连/已在跑：start() 幂等，顺带把占位记录同步到当前开关状态
+                server.start()
+                return@run
+            }
+            idleListening = true
+            if (server.start()) {
+                appendLog("BT: 兼容模式——蓝牙监听常开（iAP2 + CarPlay 占位 SDP）")
+            } else {
+                idleListening = false
+            }
+        }
+    }
+
+    /** 兼容模式看门狗：常开的监听死了（accept 异常退出、蓝牙被关又打开）就自己拉回来。 */
+    private fun startBtCompatWatchdog() {
+        if (btCompatWatchdogStarted) return
+        btCompatWatchdogStarted = true
+        Thread({
+            while (true) {
+                try {
+                    Thread.sleep(BT_COMPAT_REVIVE_MILLIS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                val ctx = appContext ?: continue
+                if (!BtCompatPrefs.enabled(ctx) || compatSuppressed) continue
+                // 连接流程/推流中由它们自己维护监听，这里不插手
+                if (sessionStarting.get() || isStreaming()) continue
+                val server = bluetoothServer ?: continue
+                if (server.isRunning && server.isProbeRunning) continue
+                if (!server.hasPermission()) continue
+                if (server.isRunning) {
+                    // 监听在但占位没了（极少见：注册被系统拒过）：只补挂记录
+                    server.start()
+                    continue
+                }
+                idleListening = true
+                if (server.start()) {
+                    appendLog("BT: 兼容模式——常开监听已自动恢复")
+                } else {
+                    idleListening = false
+                }
+            }
+        }, "bt-compat-watchdog").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     /**
@@ -1359,6 +1469,13 @@ object SessionController {
                     targetProvider = targetProvider,
                     nowPlayingProvider = nowPlayingProvider,
                     onLinkClosed = ::onSenderLinkClosed,
+                    onPeerConnected = {
+                        // 挂着等 ≠ 有会话：真有车机连进来，立刻恢复成「会话进行中」
+                        if (idleListening) {
+                            idleListening = false
+                            appendLog("BT: 兼容模式的挂机监听已转为正式会话")
+                        }
+                    },
                 )
             bluetoothClient =
                 Iap2BluetoothClient(
@@ -1407,7 +1524,9 @@ object SessionController {
     /** 会话是否活跃（推出流进程或 BT 任一在跑）。 */
     fun isSessionRunning(): Boolean =
         videoSender?.isRunning == true ||
-            bluetoothServer?.isRunning == true ||
+            // 「兼容模式」下监听常开：只是挂着等服务 ≠ 有会话。算进去会让自动连接
+            // 被自己挡掉、通知栏写成「蓝牙已连上车机」、靠近触发也判成已在跑。
+            (bluetoothServer?.isRunning == true && !idleListening) ||
             bluetoothClient?.isRunning == true
 
     /**
@@ -1451,6 +1570,10 @@ object SessionController {
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
         sessionWanted = true
+        // 用户主动开链 = 解除「别再挂机」的抑制；这一轮由连接流程自己拉监听，
+        // 不算挂机态（否则 isSessionRunning 会漏判）
+        compatSuppressed = false
+        idleListening = false
         // 新一次点击 = 新的重试预算（上一轮用完的三次不该算到这一轮头上）；
         // 令牌 +1 让还在退避睡眠里的旧线程作废，避免与手动这一轮并行交接
         synchronized(connectRetryLock) {
@@ -1499,6 +1622,10 @@ object SessionController {
         val hadProjection = CarPlayService.mediaProjection != null
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
+        // 兼容模式的常开监听也一并停在这里；记下「用户叫停过」，
+        // 否则看门狗 30 秒后又把监听挂回来（用户会以为断开没生效）
+        compatSuppressed = true
+        idleListening = false
         // 记下这一刀的时刻：车机固件 `mediaDisconnectTimeout=15000ms`，设备没被判
         // 「已移除」之前它只重开旧会话、不启动 AirPlay。出站循环据此强制冷却
         // （见 BtSessionGate.REACTIVATE_COOLDOWN_MILLIS）——否则用户断开后立刻
