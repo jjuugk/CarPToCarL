@@ -153,6 +153,39 @@ class Iap2SenderSessionTest {
     }
 
     /**
+     * 别克 E2LB（GM/Cinemo）在 0x1D01 的「会发」清单里列了 0xAA06 认证序列号——
+     * 真 iPhone 是「先要序列号、拿到后再要完整证书」。旧实现直接要证书，车机那条
+     * 「发序列号」的分支从头到尾没被触发过（2026-11-07 12:45 日志 6 轮里 0xaa06 零次）。
+     *
+     * 本用例锁住这条握手：收到 0xAA06 必须再发一次 0xAA00，否则两边互等到超时。
+     */
+    @Test
+    fun authSerialNumberIsRequestedBeforeCertificate() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, newProtocol = true, serialNumberFirst = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "84:A1:B7:D1:95:33",
+                deviceName = "BKQ-AN10",
+            ).run(timeoutMillis = 20_000L)
+
+        assertEquals("MockAP", endpoint.ssid)
+        assertEquals(49152, endpoint.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
+    /**
      * Audi MMI 0000 形态：0x4301 的地址字段按定长 NUL 填充（IPv6 后 22 个、IPv4 后 5 个）。
      * 旧实现只去掉**一个**尾部 NUL，得到 `"10.174.189.1\0\0\0\0\0"`——它 contains('.')=true、
      * contains(':')=false，能骗过所有「是不是 IPv4」的判断，但 Android 的 getaddrinfo 解不了，
@@ -208,9 +241,17 @@ class Iap2SenderSessionTest {
          * 且应等到 Phase 1 结束（保活期）才补发 0x4301。
          */
         private val newProtocol: Boolean = false,
+        /**
+         * 车机先回 0xAA06（MFi 序列号）、再给完整证书——真 iPhone 与参考实现的
+         * modernBootstrap 分支都是这个次序（别克 E2LB 的发送清单里就列着 0xAA06）。
+         */
+        private val serialNumberFirst: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
+
+        /** 早到、但当前脚本还没轮到看的目标帧（如先于 StartHID 到达的 0x4300）。 */
+        private val stashed = ArrayDeque<Iap2Csm.Frame>()
 
         /** 收到过的「车机可收清单未声明」的消息（证明只记录不拦截）。 */
         private val seenUndeclared = HashSet<Int>()
@@ -244,6 +285,14 @@ class Iap2SenderSessionTest {
             expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
 
             expect(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+            if (serialNumberFirst) {
+                // 车机把序列号先推过来：发送端必须再要一次完整证书，否则双方互等。
+                send(
+                    Iap2MessageIds.MFI_AUTH_SERIAL_NUMBER,
+                    Iap2Csm.param(0, byteArrayOf(0x49, 0x50, 0x41, 0x5f, 0x01, 0x02)),
+                )
+                expect(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+            }
             send(Iap2MessageIds.MFI_CERTIFICATE, Iap2Csm.param(0, ByteArray(64) { it.toByte() }))
             expect(Iap2MessageIds.MFI_REQUEST_CHALLENGE)
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
@@ -254,10 +303,13 @@ class Iap2SenderSessionTest {
             // 2026-10-27 起取消「按声明裁剪」：0x4E0D 即使不在可收清单里也照发
             // （清单只能证明「有」不能证明「没有」，见 Iap2SenderSession.recordUndeclaredReceive）。
             expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
-            expect(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE)
-            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
-            expect(Iap2MessageIds.DEVICE_TIME_UPDATE)
-            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
+            // 顺序不限（新协议代按真 iPhone 的 UUID→时间→语言→名称，旧代保持原序）
+            expectAll(
+                Iap2MessageIds.DEVICE_UUID_UPDATE,
+                Iap2MessageIds.DEVICE_TIME_UPDATE,
+                Iap2MessageIds.DEVICE_LANGUAGE_UPDATE,
+                Iap2MessageIds.DEVICE_INFORMATION_UPDATE,
+            )
 
             // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
             if (!audiDeclarations) {
@@ -403,6 +455,12 @@ class Iap2SenderSessionTest {
          */
         private fun expect(messageId: Int) {
             println("MOCK expect 0x${messageId.toString(16)}")
+            // 已经收到过、只是当时还没轮到它看的目标帧：直接拿走
+            stashed.firstOrNull { it.messageId == messageId }?.let {
+                stashed.remove(it)
+                println("MOCK got 0x${it.messageId.toString(16)}（暂存区）")
+                return
+            }
             val deadlineAt = System.nanoTime() + 10_000_000_000L
             var skipped = 0
             while (System.nanoTime() < deadlineAt) {
@@ -414,6 +472,12 @@ class Iap2SenderSessionTest {
                     return
                 }
                 if (frame.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += frame.messageId
+                // 0x4300 可能先于 StartHID 到达（新协议代不再在 0x6800 上空等 2s）：
+                // 不能像其它帧那样丢掉，否则后面永远等不到它。
+                if (frame.messageId == Iap2MessageIds.CARPLAY_AVAILABILITY) {
+                    stashed += frame
+                    continue
+                }
                 skipped++
                 println("MOCK skip 0x${frame.messageId.toString(16)}（在等 0x${messageId.toString(16)}）")
                 check(skipped <= 64) {
@@ -421,6 +485,34 @@ class Iap2SenderSessionTest {
                 }
             }
             error("mock timed out waiting 0x${messageId.toString(16)}")
+        }
+
+        /**
+         * 期望收到 [messageIds] 里的每一条，**顺序不限**。
+         *
+         * 问候那 4 条的顺序是实现细节（真 iPhone / 参考实现是 UUID→时间→语言→名称，
+         * 老实现是语言→名称→时间→UUID），脚本按固定顺序断言只会在换序时误报。
+         */
+        private fun expectAll(vararg messageIds: Int) {
+            val remaining = messageIds.toMutableSet()
+            val deadlineAt = System.nanoTime() + 10_000_000_000L
+            var skipped = 0
+            while (remaining.isNotEmpty() && System.nanoTime() < deadlineAt) {
+                val frame =
+                    recvFrame(10_000)
+                        ?: error("mock timed out waiting ${remaining.joinToString { "0x%04x".format(it) }}")
+                if (frame.messageId in remaining) {
+                    remaining -= frame.messageId
+                    println("MOCK got 0x${frame.messageId.toString(16)}")
+                    continue
+                }
+                if (frame.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += frame.messageId
+                skipped++
+                check(skipped <= 64) { "mock 等问候期间跳过了 $skipped 条消息——脚本可能已错位" }
+            }
+            check(remaining.isEmpty()) {
+                "mock 没等到问候：" + remaining.joinToString(" ") { "0x%04x".format(it) }
+            }
         }
 
         private fun recvFrame(timeoutMillis: Long): Iap2Csm.Frame? {

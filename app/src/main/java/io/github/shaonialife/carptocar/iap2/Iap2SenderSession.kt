@@ -476,7 +476,20 @@ class Iap2SenderSession(
         if (legacyCar) {
             log("iap2 识别为真车系（$identityText）——MFi 首选 20B（真 iPhone 实录长度；32B 对真车处置不稳定）")
         }
-        send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+        // 车机在 0x1D01 的「会发」清单里声明 0xAA06（MFi 序列号）时，真 iPhone 会先要序列号
+        // 再要完整证书——请求体带一个**空的 param0** 就是这个动作。
+        // 依据：同源参考实现 link_plus `modernBootstrap` 分支（它对别克做过实车）；
+        // 通用系 Cinemo（BUICK_8948/E2LB）恰好在发送清单里列了 0xAA06，而我们一直直接要证书，
+        // 车机那条「发序列号」的分支从头到尾没被触发过（2026-11-07 12:45 日志）。
+        val wantsAuthSerial =
+            wifiGen == ReceiverProfile.WifiGen.NEW &&
+                accessoryDeclaresSend(Iap2MessageIds.MFI_AUTH_SERIAL_NUMBER) == true
+        if (wantsAuthSerial) {
+            send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE, Iap2Csm.param(0, ByteArray(0)))
+            log("iap2 车机声明会发 0xaa06 认证序列号——先索取序列号，收到后再要完整证书")
+        } else {
+            send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+        }
         val certificate = expect(Iap2MessageIds.MFI_CERTIFICATE, deadline)
         log("iap2 rx=0xaa01 certificate bytes=${certificate.body.size}（跳过校验）")
         // 挑战长度按接收端身份选择（2026-10-11 奥迪字节级实测修正）：
@@ -523,7 +536,17 @@ class Iap2SenderSession(
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
         // xcertplay 在订阅后发 StartHID；DiPlay 删掉了这一步（订阅完直接等 0x5702）。
         // 因此这里只短暂等待：收到 0x6800 就应答 0x6801，2 秒内没等到就直接继续。
-        awaitOptionalHid(deadline)
+        //
+        // **新协议代（NEW）干脆不等**：参考实现 link_plus 的 modernBootstrap 分支就是
+        // 「问候完立刻发 0x4300」。我们在这段空等 2 秒，等于让 0x4300 前出现一段静默——
+        // BUICK_8948（E2LB）两次实测里，车机最后一次 ACK 都停在问候的最后一帧（ack=110），
+        // 2 秒后发出的 0x4300 连链路 ACK 都拿不到（2026-11-07 12:33 / 12:39 两轮）。
+        // 晚到的 0x6800 仍会被 expect 循环接住并应答（见 expectOrNull / respondToStartHid）。
+        if (wifiGen == ReceiverProfile.WifiGen.NEW) {
+            log("iap2 新协议代：不在 0x6800 上空等 2s——问候后立刻发 0x4300（与参考实现一致）")
+        } else {
+            awaitOptionalHid(deadline)
+        }
 
         // ---- WiFi 配置交换（两代协议）----
         // 旧协议（0x5702 → 0x5703）：手机请求，车机回 AP 明文——Audi MIB3 走这条。
@@ -969,6 +992,9 @@ class Iap2SenderSession(
 
     /** 设备状态问候是否已发过（幂等；[sendDeviceStateGreetings] 的 force 可再发一轮）。 */
     private var greetingsSent = false
+
+    /** 是否已因 0xAA06（认证序列号）重发过「索取完整证书」——只补一次，避免与车机互相追。 */
+    private var fullCertificateRequested = false
     /**
      * 设备状态问候：0x4E0D 无线会话标识 / 0x4E0A 语言 / 0x4E09 设备名 /
      * 0x4E0B 设备时间 / 0x4E0C 设备 UUID。
@@ -985,31 +1011,48 @@ class Iap2SenderSession(
         // 只记一条日志（2026-10-27 起取消裁剪；取证在 [send] 出口统一做）。
         send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
         sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
-        send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
-        sent += Iap2MessageIds.DEVICE_LANGUAGE_UPDATE
-        send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
-        sent += Iap2MessageIds.DEVICE_INFORMATION_UPDATE
+        // 语言字段：iAP2 只认 ISO 639 的两字母码。新协议代按参考实现发 `zh`，
+        // 旧代沿用 `zh-CN`（奥迪侧已按这个串跑通，不动）。
+        val language = if (wifiGen == ReceiverProfile.WifiGen.NEW) "zh" else "zh-CN"
         val epochSeconds = System.currentTimeMillis() / 1000L
         val timezoneMinutes =
             java.util.TimeZone
                 .getDefault()
                 .getOffset(System.currentTimeMillis()) / 60_000
-        send(
-            Iap2MessageIds.DEVICE_TIME_UPDATE,
+        val uuidUpdate = Iap2Csm.string(0, deviceUuid())
+        val timeUpdate =
             Iap2Csm.param(0, u64Bytes(epochSeconds)) +
                 Iap2Csm.u16(1, timezoneMinutes and 0xFFFF) +
-                Iap2Csm.u8(2, 0),
-        )
-        sent += Iap2MessageIds.DEVICE_TIME_UPDATE
-        send(
-            Iap2MessageIds.DEVICE_UUID_UPDATE,
-            Iap2Csm.string(0, deviceUuid()),
-        )
-        sent += Iap2MessageIds.DEVICE_UUID_UPDATE
+                Iap2Csm.u8(2, 0)
+        val languageUpdate = Iap2Csm.string(0, language)
+        val nameUpdate = Iap2Csm.string(0, deviceName)
+        // 顺序不是随便排的：真 iPhone / 参考实现的 modernBootstrap 是
+        // UUID → 时间 → 语言 → 名称（先给身份，再给环境，最后给名字）。
+        // 我们此前一直是 语言 → 名称 → 时间 → UUID，车机若按位置推进状态机就会走岔。
+        val ordered =
+            if (wifiGen == ReceiverProfile.WifiGen.NEW) {
+                listOf(
+                    Iap2MessageIds.DEVICE_UUID_UPDATE to uuidUpdate,
+                    Iap2MessageIds.DEVICE_TIME_UPDATE to timeUpdate,
+                    Iap2MessageIds.DEVICE_LANGUAGE_UPDATE to languageUpdate,
+                    Iap2MessageIds.DEVICE_INFORMATION_UPDATE to nameUpdate,
+                )
+            } else {
+                listOf(
+                    Iap2MessageIds.DEVICE_LANGUAGE_UPDATE to languageUpdate,
+                    Iap2MessageIds.DEVICE_INFORMATION_UPDATE to nameUpdate,
+                    Iap2MessageIds.DEVICE_TIME_UPDATE to timeUpdate,
+                    Iap2MessageIds.DEVICE_UUID_UPDATE to uuidUpdate,
+                )
+            }
+        for ((messageId, body) in ordered) {
+            send(messageId, body)
+            sent += messageId
+        }
         val tag = if (force) "（补发）" else ""
         log(
             "iap2 tx=" + sent.joinToString("/") { "0x%04x".format(it) } +
-                " 设备状态问候$tag（name=$deviceName mac=$bluetoothMac）",
+                " 设备状态问候$tag（name=$deviceName mac=$bluetoothMac lang=$language）",
         )
     }
 
@@ -1511,6 +1554,33 @@ class Iap2SenderSession(
                 continue
             }
             if (frame.messageId == messageId) return frame
+            // 0xAA06 认证序列号：真 iPhone 先要序列号、拿到后再要完整证书。
+            // 车机把序列号先推过来时不回一句 0xAA00，双方就都停在原地（互等）。
+            if (messageId == Iap2MessageIds.MFI_CERTIFICATE &&
+                frame.messageId == Iap2MessageIds.MFI_AUTH_SERIAL_NUMBER
+            ) {
+                if (!fullCertificateRequested) {
+                    fullCertificateRequested = true
+                    log(
+                        "iap2 rx=0xaa06 认证序列号 bytes=${frame.body.size}" +
+                            "（${frame.body.take(16).joinToString(" ") { "%02x".format(it) }}…）" +
+                            "——再要一次完整证书",
+                    )
+                    send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+                }
+                continue
+            }
+            // 0x6800 StartHID 晚到：新协议代不再空等它，但它真到了必须就地应答，
+            // 否则车机的 HID 通道永远停在「已请求未应答」，触摸/方控就没了。
+            if (frame.messageId == Iap2MessageIds.START_HID) {
+                log("iap2 rx=0x6800 start-hid bytes=${frame.body.size}（晚到——就地应答 0x6801）")
+                send(
+                    Iap2MessageIds.DEVICE_HID_REPORT,
+                    Iap2Csm.u16(0, 0),
+                    Iap2Csm.param(1, byteArrayOf(0)),
+                )
+                continue
+            }
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                     "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",

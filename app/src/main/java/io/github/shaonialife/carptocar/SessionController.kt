@@ -119,6 +119,20 @@ object SessionController {
     private const val PENDING_START_SESSION_WAIT_MS = 5 * 60_000L
 
     /**
+     * 保活期「当前 WiFi 里有没有车机 AirPlay 服务」的探测节奏。
+     *
+     * 一次探测 = 绑当前 WiFi + 起 8s mDNS + 停。30s 一次的用意是接住「车机是在被点了
+     * 之后才把 AirPlay 起起来」的情况（车机侧启动常常晚于蓝牙握手几十秒）。
+     */
+    private const val PROBE_INTERVAL_MS = 30_000L
+
+    /** 一次探测等 `_airplay._tcp` 的时长；局域网内 Bonjour 应答通常 <500ms。 */
+    private const val PROBE_TIMEOUT_MS = 8_000L
+
+    /** 同一网络里最多探 6 次（≈3 分钟），再多只是刷日志。 */
+    private const val PROBE_MAX_TIMES = 6
+
+    /**
      * 等车机 ctrl 邀请的上限（事件驱动，收到即走）。
      * catplay 以邀请为连接触发点；实测邀请在 ctrl 重注册后 ~1.0-1.3s 到达。
      * 车机不发邀请时（旧机型）由「已发现 _airplay._tcp」提前放行，最坏也只等这么久。
@@ -2322,10 +2336,55 @@ object SessionController {
     }
 
     /**
+     * 保活期在当前 WiFi 里找一次车机的 AirPlay 服务（`_airplay._tcp`）。
+     *
+     * 为什么值得单独做：车机不下发 `0x4301` 时，我们唯一还能自己动的线索就是 WiFi 侧——
+     * 它的 AirPlay 接收端起没起、地址端口是多少。找到了就能直接连（真 iPhone 也是这么定位
+     * 接收端的）；找不到则证明「车机没起 AirPlay 服务」，把问题稳稳地留在车机侧，
+     * 不必再猜是不是我们的 iAP2 帧发错了。
+     *
+     * 绑定当前 WiFi 是必须的：mDNS 组播跟随进程默认网络，手机同时挂着蜂窝/另一条 WiFi 时
+     * 不绑就发不出去，也收不到应答。
+     *
+     * @return true = 已发现并放进浏览器的缓存（调用方随后合成端点即可）
+     */
+    private fun probeAirplayOnCurrentWifi(
+        ssid: String,
+        attempt: Int,
+    ): Boolean {
+        val connector = wifiConnector ?: return false
+        appendLog("PROBE #$attempt: 在 \"$ssid\" 里找车机 _airplay._tcp（最多等 ${PROBE_TIMEOUT_MS / 1000}s）")
+        val bound = connector.bindCurrentWifiBlocking(4_000L) { connectCancelled }
+        if (bound == null) {
+            appendLog("PROBE #$attempt: 绑定当前 WiFi 失败——跳过本轮探测（蓝牙保活不受影响）")
+            return false
+        }
+        // 广播跟着同一条网络走，车机才可能发出 ctrl 邀请。
+        ctrlAdvertiser?.ensureForNetwork(ssid, force = true, network = bound)
+        endpointBrowser?.resetCache()
+        endpointBrowser?.start()
+        val info = endpointBrowser?.awaitEndpoint(PROBE_TIMEOUT_MS)
+        if (info == null) {
+            endpointBrowser?.stop()
+            appendLog(
+                "PROBE #$attempt: \"$ssid\" 里 ${PROBE_TIMEOUT_MS / 1000}s 内没有 _airplay._tcp ——" +
+                    "车机的 AirPlay 接收端没起来（不是我们 iAP2 帧的问题）；请确认车机上已打开无线 CarPlay / 点过本机图标",
+            )
+            return false
+        }
+        appendLog(
+            "PROBE #$attempt: ✓ 发现 _airplay._tcp ${info.host?.hostAddress}:${info.port}" +
+                "（${info.serviceName}）——车机 AirPlay 已就绪",
+        )
+        return true
+    }
+
+    /**
      * 空端点等待期（车机声明会发 0x4301 但迟迟未到）的观察任务。
      *
      * 1. 每 5s 轮询当前 WiFi——用户手动连上车机热点后弹窗确认，确认即以该 SSID 合成
-     *    端点重走 [onCarPlayEndpoint]（无端口 → mDNS/网关兜底）；
+     *    端点重走 [onCarPlayEndpoint]（无端口 → mDNS/网关兜底）；同时每 30s 在当前
+     *    WiFi 里找一次车机的 `_airplay._tcp`（见 [probeAirplayOnCurrentWifi]）。
      * 2. 晚到 0x4301 触发新一轮交接（sessionStarting 重新置位）时让位退出；
      * 3. 超过 [PENDING_START_SESSION_WAIT_MS] 无进展：记日志并拆掉保活链路，让 BT
      *    重连循环接管（与旧「8s 拆链」的区别只在窗口长度）。
@@ -2357,6 +2416,11 @@ object SessionController {
                     "（提示无法上网时选「保持连接」），App 检测到入网会自动接着走 mDNS",
             )
             var promptedSsid: String? = null
+            // 保活期每轮 mDNS 探测的状态：换了网络重置；同一网络里最多探 6 次（每 30s 一次），
+            // 车机的 AirPlay 服务常常是在「车机屏幕被点了/它自己醒了」之后才起来的。
+            var probedSsid: String? = null
+            var probeCount = 0
+            var lastProbeAt = 0L
             // 预算从**用户点击**算起：车机反复断链重连时不能每轮重新计 5 分钟（否则永不超时）。
             if (pendingWaitBudgetStartedAt == 0L) pendingWaitBudgetStartedAt = android.os.SystemClock.uptimeMillis()
             val watchStartedAt = pendingWaitBudgetStartedAt
@@ -2385,6 +2449,36 @@ object SessionController {
                     )
                 }
                 val ssid = if (wifiEnabled) currentSsid else null
+                // ---- 保活期的 mDNS 探测 ----
+                // 2026-11-07 12:39 那轮：手机已经挂在车机热点（10.154.116.159）上，蓝牙链路
+                // 也正常，可我们整轮既没找过 `_airplay._tcp`、也没发过任何 WiFi 侧的包——
+                // 「车机到底有没有把 AirPlay 服务起起来」这个问题在日志里完全查不到。
+                // 这里每 30s 在当前 WiFi 里找一次：找到就直接走 AirPlay（不依赖 0x4301），
+                // 找不到也至少留下一条「它没起服务」的硬证据，不用再靠猜。
+                if (!ssid.isNullOrEmpty()) {
+                    if (probedSsid != ssid) {
+                        probedSsid = ssid
+                        probeCount = 0
+                        lastProbeAt = 0L
+                    }
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (probeCount < PROBE_MAX_TIMES && now - lastProbeAt >= PROBE_INTERVAL_MS) {
+                        probeCount++
+                        lastProbeAt = now
+                        if (probeAirplayOnCurrentWifi(ssid, probeCount)) {
+                            if (!connectCancelled && !sessionStarting.get()) {
+                                appendLog(
+                                    ">>> [$source] \"$ssid\" 里已有车机 AirPlay 服务——" +
+                                        "以该网络合成端点重走连接（不再等 0x4301）",
+                                )
+                                onCarPlayEndpoint(endpoint.copy(ssid = ssid), "$source/热点探测")
+                            }
+                            return@run
+                        }
+                        // 探测会把进程默认网络绑到 WiFi 上；已经确认车机没有 AirPlay 服务时，
+                        // 仍保留蓝牙保活，继续等 0x4301 与用户确认。
+                    }
+                }
                 // 同一 SSID 只问一次（用户选「继续等待」后不再打扰）；换网络再问。
                 if (ssid.isNullOrEmpty() || promptedSsid == ssid) continue
                 promptedSsid = ssid
