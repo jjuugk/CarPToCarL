@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk)**
-> —— 主线固定直链（当前 1.2.28，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**
+> —— 主线固定直链（当前 1.2.29，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.28，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.28.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.29，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.29.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.28`（正式版；**实车日志驱动的四项修复**：① 等待 `0x4301` 期间读不到 SSID——`cmd wifi status` 在普通应用身份下必然失败，日志一律写「已开但未连接任何网络」，于是「检测到已连车机热点 → 按热点继续」这个弹窗永不触发，唯一不依赖 `0x4301` 的兜底路（手动入网 + mDNS 邀请）被代码堵死；现在加框架侧兜底（`ConnectivityManager` → `NetworkCapabilities.transportInfo` → `WifiInfo.ssid`，只需定位/附近设备权限），读不到仍返回 null（不猜，避免绑到家里的网）；② 通用系新协议代按参考实现对齐：MFi 先按车机 `0x1D01` 的「会发」声明索取认证序列号（`0xAA00` 带空 param0 → 收到 `0xAA06` → 再要完整证书），问候后**立刻**发 `0x4300`（不再在 `0x6800` 上空等 2 秒，晚到的 `0x6800` 由接收循环就地应答，HID 通道不丢），新代问候顺序改为 UUID → 时间 → 语言（`zh`）→ 名称，旧代（奥迪等）完全不动；③ 等 `0x4301` 的保活期每 30s 在当前 WiFi 里探一次车机 `_airplay._tcp`——找到就直接走 AirPlay（不依赖 `0x4301`），找不到也留下「车机没起服务」的硬证据，补上「手机挂在车机热点上却一个 WiFi 侧包都没发」的盲区；④ 新增设置开关「兼容「只认苹果设备」的车机」（**默认关**）：占位 SDP 记录（CarPlay UUID / Wireless iAP v2）+ App 启动即挂监听 + 30s 看门狗自愈，并修 `Iap2BluetoothServer.acceptLoop` 异常退出不复位 `running` 导致的监听假死；另新增构建标记 `AppVersion.BUILD_TAG`（日志头显示 `1.2.28 #标记`），同版本号的多个测试包不再互相冒充；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.29`（正式版；**身份对齐两项修复 + 手册对照**：① `0x4E09` 设备信息固定自报 `iPhone`，与蓝牙名彻底解耦——1.2.28 当天为修车机蓝牙列表里的「未知设备」把 `0x4E09` 改成发本机蓝牙名（`BKQ-AN10`），修好了展示却弄偏了「我们是谁」；真机 Frida 抓包（MIB3 隧道同款常量）与市售盒子在这一层发的都是 `iPhone`。构造参数 `deviceName` 直接删除以杜绝再传错，新增单测断言报文体全文都是 `iPhone`；② iAP2 链路初始序号由固定 `99` 改为每条链路 `SecureRandom(0x100)`——myCadillac 13 轮重连的 486 个 SYN 字节完全一致（`seq=99`），做过会话缓存/重放判定的车机会把重复序号按重传帧丢掉，真机与 catplay 取的都是随机初值；③ 新增 `docs/carplay-manual-crosscheck-20261107.md`：把外部《CarPlay 车机开发手册》对发送端主链路的 10 处建议逐条核过，采纳 1 处、明确不采纳 9 处（每处都附本项目实车证据），并指出手册自身的两处硬错误（EIR 两列写反、`0x5702` 角色写反）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,40 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.29 —— 2026-11-07（身份对齐：`0x4E09` 固定报 iPhone、链路初始序号随机，正式版）
+
+1.2.28 发版后接着跑 myCadillac 与别克 E2LB，两处都指向同一个问题：**车机眼里的「我们是谁」**
+对不上。本版只改这两点 + 补一份手册对照，主链路其余部分一处未动。
+
+**一、`0x4E09` 自报身份固定 `iPhone`，与蓝牙名彻底解耦**
+
+| 项 | 内容 |
+|---|---|
+| 起因 | 车机蓝牙列表把本机显示成「未知设备」，1.2.28 当天把 `0x4E09` 的 device name 改成本机蓝牙名（`BKQ-AN10`）——展示是修好了，但换掉了「我们是谁」这个最不该动的东西 |
+| 证据 | 真机 Frida 抓包（MIB3 隧道 `VirtualIap2Link` 同款常量）与市售盒子在这一层发的都是 `iPhone`；`0x4E09` 是身份声明，不是展示名 |
+| 修法 | 新增常量 `Iap2SenderSession.IAP2_DEVICE_NAME = "iPhone"`，构造参数 `deviceName` **直接删掉**（少一个能传错的口子）；`DeviceIdentity.ensureUsableBluetoothName()` 只负责蓝牙名，并过滤占位名（未知设备/未命名/unknown/`null`/`N/A`/`android`） |
+| 防回归 | 单测 `deviceInformationUpdateAlwaysReportsIPhone`：`MockAccessory` 记录 `0x4E09` 报文体，断言全文都是 `iPhone` |
+
+蓝牙名与身份分开之后，「未知设备」仍由 `ensureUsableBluetoothName()` 兜底改名解决，两条路不再互相牵制。
+
+**二、iAP2 链路初始序号改为随机**
+
+myCadillac 13 轮重连里，486 个 SYN 字节**完全一致**（`seq=99`），车机连链路层 SYN-ACK 都不给。
+此前初始序号是常量 `Iap2LinkEngine.INITIAL_SEQUENCE = 99`，所有链路、所有重连都一样。
+
+| 项 | 内容 |
+|---|---|
+| 依据 | 手册 §4.3：初始序号 0–255 随机取；真机与 catplay `take_own_seq` 亦然 |
+| 修法 | `sentSequence = SecureRandom().nextInt(0x100)`，每条链路新建时取一次；对端本来就是用 `ack` 回显「期望的下一个」，与初值无关，改这个不动任何账法 |
+| 单测 | `Iap2LinkEngineTest` 改为「以本方 SYN 的 seq 为基准 +1（模 256）」断言，不再硬编码 `99/100` |
+
+**三、附《CarPlay 车机开发手册》对照核查（`docs/carplay-manual-crosscheck-20261107.md`）**
+
+把外部手册针对发送端主链路（蓝牙 iAP2 → Wi-Fi 凭证 → AirPlay 会话）的建议逐条核了一遍：
+**10 处候选改动，采纳 1 处，明确不采纳 9 处**，不采纳的每一条都写了本项目实车证据
+（负载 CRC-16、SYN 发起方、认证先于识别、`0x5702` 方向、EIR 字节序、会话 ID、SYN 3 次判死等）。
+同时指出手册自身两处硬错误：EIR 两列写反、`0x5702` 角色写反。
 
 ### 1.2.28 —— 2026-11-07（通用系现场四项修复：SSID 兜底 / MFi 序列号握手 / mDNS 探测 / 只认苹果车机开关，正式版）
 
