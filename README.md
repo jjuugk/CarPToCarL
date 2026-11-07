@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk)**
-> —— 主线固定直链（当前 1.2.25，13.6 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**
+> —— 主线固定直链（当前 1.2.27，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.25，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.25.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.27，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.27.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.25`（正式版；**对照 catplay 复核无线 CarPlay 连接链路**：① `_airplay._tcp` 的 bit37 `CARPLAY_CONTROL` 接入等邀请窗口判定，车机会不会主动发邀请不再靠固件串猜；② ctrl 邀请先到、端点未就绪时挂起待决（30s TTL），端点晚到自动接续，不再把邀请信号丢掉；③ `0x4301` 无线组删掉虚构的「整套 ID+1」兜底，改为按字段形态在 0x4301（2=信道/4=安全类型）与 0x5703 式（3=安全类型/4=信道）两套真实布局间二选一。协议报文内容与顺序不变，1.2.24 的 0x4301 ID 定位、`/info` 输入能力解析、1.2.23 的隧道一帧一传输单元均保留；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.25.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.25/CarPToCarL-1.2.25.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,62 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.27 —— 2026-11-07（新旧协议自动切换 + 协议一致性审计，正式版）
+
+依据新增的 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md`（车机端/接收端视角的无线 CarPlay
+规范），把「新旧协议差异」全部收口成**一处判定**，并把每一处「规范要求」与「车机实际
+回的」不一致落成可导出的问题清单。协议报文内容与顺序不变。
+（1.2.26 为 `switch-pool-auto` 测试线专用号，未进主线，故主线顺延至 1.2.27。）
+
+**一、判据收口：画像成为唯一开关**
+
+改动前新旧判定散在三处：`ReceiverProfile` 算出 era 只写日志、`SessionController` 自己
+读 TXT bit38、`AirPlayFeatures.supportsPairing` 又被单独调用一次。三者一旦不一致，就会
+出现「画像判定老车机、连接逻辑却去跑 pair-setup 空转 120s」这类事故。现在
+`ReceiverProfile` 新增 `PairingPolicy`（era → 策略的**唯一映射**）与 `dispatchSummary`，
+`SessionController` 改为查画像结论，不再自己解析能力位。
+
+**二、换固件自动换代（`protocol/ProtocolGeneration`）**
+
+按车机身份（name+model+manufacturer）持久化 `era|wifiGen|srcvers|features` 快照。
+关键约束：**只有「已知 → 已知且不同」才算换代**。`0x1D01`（蓝牙）与 mDNS 到达顺序不
+固定，先到的那一方必然有一侧是 UNKNOWN，把 UNKNOWN→已知 也算换代会导致每台车第一次
+连上都误报。真换代时：按新一代协议重新分派 + 作废该车机旧 MFi 档位记忆（`MfiLengthMemory.forget`），
+避免「升级固件后这台车突然连不上、只能清数据重来」。
+
+**三、协议审计（`protocol/ProtocolAudit`）**
+
+9 个审计码，每个都绑定规范章节号，实时输出、可 grep、可导出：
+
+| 码 | 含义 | 依据 |
+|---|---|---|
+| `WIFI_GEN_MISMATCH` | 画像判的 WiFi 凭据代际与车机实际回的消息号不符 | SPEC §2.10 |
+| `LEGACY_WIFI_SILENT` | 判为旧代际但 `0x5703` 在窗口内完全没来 | SPEC §2.10 |
+| `PAIRING_POLICY_MISMATCH` | 实际走的配对/明文路径与画像结论不一致 | SPEC §3.3 |
+| `MFI_LENGTH_REJECTED` | MFi 挑战长度被车机确定性拒绝 | SPEC §2.9 |
+| `FEATURES_TXT_VS_INFO` | mDNS TXT 的 features 与 `/info` 的 features 不一致 | SPEC §3.2 |
+| `DEVICE_ID_MISMATCH` | TXT deviceID 与 `/info` deviceID 不一致 | SPEC §3.2 |
+| `UNSOLICITED_MESSAGE` | 发了对端 `0x1D01` 未声明可收的消息 | SPEC §2.8 / §7 |
+| `NO_ENDPOINT_ADDRESS` | 端点没有任何可用地址（仅 IPv6 / 地址为空） | SPEC §3.3 |
+| `ERA_SWITCHED` | 该车机协议代际发生翻转（换固件） | SPEC §6 |
+
+日志固定格式，同 `(码, 细节)` 一轮只记一次（`0x5702` 重发、端点热更新不会刷屏）：
+
+```
+PROTO! WARN [WIFI_GEN_MISMATCH] 新旧 WiFi 凭据代际判错 —— 画像判 wifiGen=NEW（等 0x4301），
+车机却回了 0x5703（依据 SPEC §2.10 / §7；证据 ssid=AUDI_MMI_5G 信道=149）
+
+PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_MISMATCH ERA_SWITCHED
+```
+
+干净的一轮会打「PROTO 一致性审计通过」，用户问「这次有没有协议问题」不必再翻几百行日志。
+
+**四、文档与测试**
+
+`docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增**附录 D**：差异点 → 代码切换点 → 审计码
+对照表 + 输出格式 + grep 方法。单测 **494 例 0 失败**（新增 17 例：`ProtocolAuditTest` 7、
+`ProtocolGenerationTest` 7、`ReceiverProfileTest` 3）。
 
 ### 1.2.25 —— 2026-11-06（对照 catplay 复核连接链路：bit37 能力位、邀请自愈、0x4301 布局判定，正式版）
 
