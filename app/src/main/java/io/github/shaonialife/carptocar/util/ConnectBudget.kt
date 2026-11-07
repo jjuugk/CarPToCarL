@@ -138,21 +138,68 @@ class ConnectBudget(
 
     /** 一轮结束时的汇总：「共 143s：等端点 8.2s → 热点 3.1s → 配对 120.4s（超预算）」。 */
     fun summary(): String {
-        val (stages, total, tail) =
-            synchronized(lock) {
-                if (!active) return "STAGE: 本轮无计时记录"
-                val now = clock()
-                val parts = StringBuilder()
-                for ((index, entry) in history.withIndex()) {
-                    val end = history.getOrNull(index + 1)?.atMillis ?: now
-                    val spent = end - entry.atMillis
-                    if (index > 0) parts.append(" → ")
-                    parts.append(entry.stage.label).append(' ').append(seconds(spent))
-                    if (entry.stage.hasBudget && spent > entry.stage.budgetMs) parts.append("（超预算）")
+        synchronized(lock) {
+            if (!active) return "STAGE: 本轮无计时记录"
+            return summaryLocked(clock())
+        }
+    }
+
+    /**
+     * 本轮收尾：先打一条**结论行**（卡在哪个阶段 + 原因 + 日志关键词），再打小结，然后把
+     * 计时器置空。**幂等**——同一次退出被多条路径触发时只会输出一次。
+     *
+     * 为什么需要它：旧实现只在配对线程的 `finally` 里调 [summary]，而最常见的失败形态
+     * （车机始终不下发 0x4301、手机没加入车机热点）根本不进那段 try。真机日志
+     * `CarPToCarL-log-20261107-103708` 就是这样：三轮连接、三条「本轮开始」、**零条小结**，
+     * 用户问「这次卡在哪」时仍要人工翻几百行。结论行把答案压成一行，且带可搜索关键词。
+     *
+     * @param cause 一句话原因（通常直接传 `phaseHint`），为空时只给阶段名
+     * @param keywords 日志关键词，按词 grep 就能找到对应证据行
+     */
+    fun end(
+        cause: String = "",
+        keywords: String = "",
+    ): String? {
+        val verdict: String
+        val summaryLine: String
+        synchronized(lock) {
+            if (!active) return null
+            val now = clock()
+            val stage = current?.stage ?: ConnectStage.ENDPOINT
+            // 总耗时留给紧跟其后的小结行，结论行只说「卡在哪、为什么」——两行各司其职，
+            // 同一条「共 60s」不要在相邻两行里重复。
+            verdict =
+                if (stage == ConnectStage.STREAMING) {
+                    "STAGE: 本轮结束（已推流）" + causeSuffix(cause)
+                } else {
+                    "STAGE: ✗ 本轮未连上，卡在「${stage.label}」" +
+                        causeSuffix(cause) +
+                        if (keywords.isBlank()) "" else "｜关键词：$keywords"
                 }
-                Triple(parts.toString(), now - startedAt, reason)
-            }
-        return "STAGE: 本轮小结（$tail）共 ${seconds(total)}：$stages"
+            summaryLine = summaryLocked(now)
+            active = false
+            current = null
+            history.clear()
+            reason = ""
+        }
+        sink(verdict)
+        sink(summaryLine)
+        return verdict
+    }
+
+    private fun causeSuffix(cause: String): String = if (cause.isBlank()) "" else "：$cause"
+
+    /** 持锁调用：小结正文（[summary] 与 [end] 共用，避免两处格式漂移）。 */
+    private fun summaryLocked(now: Long): String {
+        val parts = StringBuilder()
+        for ((index, entry) in history.withIndex()) {
+            val end = history.getOrNull(index + 1)?.atMillis ?: now
+            val spent = end - entry.atMillis
+            if (index > 0) parts.append(" → ")
+            parts.append(entry.stage.label).append(' ').append(seconds(spent))
+            if (entry.stage.hasBudget && spent > entry.stage.budgetMs) parts.append("（超预算）")
+        }
+        return "STAGE: 本轮小结（$reason）共 ${seconds(now - startedAt)}：$parts"
     }
 
     /** 一分钟以内保留一位小数（连接耗时多在这个量级，差 0.3s 也要看得出来），更长的取整。 */

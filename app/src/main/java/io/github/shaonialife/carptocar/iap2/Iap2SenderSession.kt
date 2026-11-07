@@ -1481,7 +1481,11 @@ class Iap2SenderSession(
         deadline: Long,
     ): Iap2Csm.Frame =
         expectOrNull(messageId, deadline)
-            ?: throw IOException("等待 0x${messageId.toString(16)} 超时")
+            // 带名字：只写「等待 0x1d01 超时」看不出这是「识别信息没回」，容易被误判成
+            // 链路问题；写成「等待 0x1d01（IdentificationInformation）超时」才指向车机侧。
+            ?: throw IOException(
+                "等待 0x${messageId.toString(16).padStart(4, '0')}（${Iap2MessageIds.nameOf(messageId)}）超时",
+            )
 
     /**
      * 同 [expect]，但超时返回 null（用于可选消息）。非预期帧进暂存区供后续消费。

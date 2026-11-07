@@ -93,4 +93,51 @@ class ConnectBudgetTest {
         assertEquals(30_000L, ConnectStage.SETUP.budgetMs)
         assertEquals(20_000L, ConnectStage.FIRST_FRAME.budgetMs)
     }
+
+    @Test
+    fun endStatesWhereTheRoundGotStuckWithCauseAndKeywords() {
+        budget.begin("主动连车机")
+        now = 6 * 60_000L
+        val verdict = budget.end(cause = "车机始终未下发 0x4301", keywords = "零反馈 / 仍在等 0x4301")
+
+        assertNotNull(verdict)
+        // 结论行必须同时给出：卡在哪个阶段、为什么、按什么词去 grep
+        assertTrue("要指出阶段：$verdict", verdict!!.contains("等车机连接信息（0x4301）"))
+        assertTrue("要带原因：$verdict", verdict.contains("车机始终未下发 0x4301"))
+        assertTrue("要给关键词：$verdict", verdict.contains("关键词：零反馈 / 仍在等 0x4301"))
+        // 紧接着必须还有一行阶段小结（总耗时只在这一行，避免两行重复）
+        assertTrue(logs.any { it.contains("本轮小结") && it.contains("共 360s") })
+    }
+
+    @Test
+    fun endIsIdempotentSoOverlappingExitsDoNotSpam() {
+        budget.begin("test")
+        now = 5_000
+        assertNotNull(budget.end(cause = "第一次"))
+        val afterFirst = logs.size
+        now = 9_000
+        assertNull("第二次调用必须什么都不做", budget.end(cause = "第二次"))
+        assertEquals("不能重复输出", afterFirst, logs.size)
+        assertTrue(!budget.isActive)
+        // 收尾后 summary 回到「无计时记录」，不会再被后面的路径打一份旧小结
+        assertTrue(budget.summary().contains("无计时记录"))
+    }
+
+    @Test
+    fun endWithoutRoundIsSilent() {
+        assertNull(ConnectBudget(clock = { 0L }, sink = { logs += it }).end(cause = "x"))
+        assertTrue(logs.isEmpty())
+    }
+
+    @Test
+    fun endAfterStreamingSaysSoInsteadOfFailure() {
+        budget.begin("0x4301")
+        now = 23_500
+        budget.markStreaming()
+        now = 90_000
+        val verdict = budget.end()
+        assertNotNull(verdict)
+        assertTrue("已推流的一轮不能报「未连上」：$verdict", verdict!!.contains("已推流"))
+        assertTrue(!verdict.contains("✗"))
+    }
 }

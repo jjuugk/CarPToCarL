@@ -2342,6 +2342,12 @@ object SessionController {
                         "「⚠ 零反馈」两行）。先拆掉保活链路停止空转；确认车机开了无线 CarPlay 后再点" +
                         "「启动连接」，并把日志发出来",
                 )
+                // 等待预算耗尽 = 这一轮确定连不上：先落一条「卡在哪」的结论行（幂等），
+                // 否则日志里只有「本轮开始」、没有收尾，用户不知道该看哪一段。
+                connectBudget.end(
+                    cause = "车机在 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟内始终未下发 0x4301",
+                    keywords = "0x4300 报文体形态 / ⚠ 零反馈 / 仍在等 0x4301",
+                )
                 detachActiveBtSessions()
                 // 等待预算耗尽 = 这一轮确定连不上：把内存里的报文快照落盘（独立文件）
                 SessionTrace.sessionEnd("等待 0x4301 超时（车机未下发热点信息），本轮放弃")
@@ -3589,6 +3595,11 @@ object SessionController {
             if (!bound) {
                 phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
                 appendLog(">>> [$source] 手机当前不在该热点——请到 设置>WLAN 加入 \"${endpoint.ssid}\" 后断开重连")
+                // 这一轮到此为止（没有配对线程会接手），必须自己收尾，否则只有「本轮开始」。
+                connectBudget.end(
+                    cause = "手机没加入车机热点 \"${endpoint.ssid}\"",
+                    keywords = "手机当前不在该热点 / 入网",
+                )
                 sessionStarting.set(false)
                 return@proceed
             }
@@ -4566,7 +4577,17 @@ object SessionController {
                 } finally {
                     // 阶段汇总：成功也打——「这次连接一共多久、花在哪」是用户最常问的问题
                     // （2026-11-01 日志 090105 就是靠人工掐时间才拆出 29.7s 的构成）。
-                    appendLog(connectBudget.summary())
+                    // 没推起来的一轮改用 end()：多一行「✗ 卡在哪个阶段」的结论，并把计时器
+                    // 关掉（避免保活/重试路径上又打一次同一份小结）。推流中则保持计时，
+                    // 由后续失败/结束时再收尾。
+                    if (videoSender?.isRunning != true) {
+                        connectBudget.end(
+                            cause = phaseHint ?: "",
+                            keywords = "SETUP / /info / 配对 / 事件通道",
+                        )
+                    } else {
+                        appendLog(connectBudget.summary())
+                    }
                     sessionStarting.set(false)
                     // 配对未成功建立推流（fail/异常/start 失败提前退出）时解除静默降噪，
                     // 否则 BT-C 会永久停在门闸外、连真车路径失效。
