@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；⑤ 通用系（Cinemo）修两个现场问题：`0x4300` 补上被漏掉的 group0（有线标识，两段 group 才是新版车机的完整形态，修「一直卡在获取 WiFi」），`0x4E09` 不再把 MagicOS 的占位名「未知设备」发给车机（同名占位串还会让车机蓝牙列表显示「未知设备」）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -877,6 +877,19 @@ PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_
 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增**附录 D**：差异点 → 代码切换点 → 审计码
 对照表 + 输出格式 + grep 方法。单测 **494 例 0 失败**（新增 17 例：`ProtocolAuditTest` 7、
 `ProtocolGenerationTest` 7、`ReceiverProfileTest` 3）。
+
+**五、通用系（Cinemo）：补上 0x4300 的另一半 + 设备名不再发「未知设备」**
+
+2026-11-07 别克 E2LB（`BUICK_8948`）现场，详见 `docs/gm-4300-dual-identifier-20261107.md`：
+
+| 现象 | 根因 | 改动 |
+|---|---|---|
+| 车机只回链路 ACK（`ff 55 … ee …`），`0x6800/0x5000/0x4c00/0x4301` 一条都不发起，一直卡在「获取 WiFi」 | 我们抄的「新版嵌套体」其实是同源工程 `link_plus` 的**旧版分支**形态——新版车机要的是**两段 group**：`group0={0:1, 1:"00008110"+MAC+"0000"}`（有线标识）+ `group1={0:1, 1:MAC 小写}`（无线标识） | 新增 `AvailabilityBodyMemory.Variant.DUAL_GROUPS` 与 `GM_ORDER`；通用系（manufacturer 含 `General Motors` 或 `0x1D01` 带 `Cinemo` 组件）优先试它，静默后仍按 `MODERN_NESTED → LEGACY_FLAT → NONE` 回退 |
+| 车机蓝牙列表把这台手机显示成「未知设备 / 已连接」 | MagicOS 本地蓝牙名未设置时 `BluetoothAdapter.getName()` 返回本地化占位串，旧实现只判 `isNotBlank()`，于是 `0x4E09` 把「未知设备」发给车机 | `DeviceIdentity.displayName()` 过滤占位串；取名顺序改为 适配器名 → `Settings.Secure.bluetooth_name` → 营销名 → `Build.MODEL`；`ensureUsableBluetoothName()` 在占位时 `setName()` 改成可用名（车机列表与 `0x4E09` 一起修） |
+
+奥迪 / 宝马 / DiPlay 测试台的 `0x4300` 顺序**不动**（它们现在都是通的），双标识体只给
+通用系开——修一台车不能把已经跑通的链路改坏。单测 **500 例 0 失败**（新增 6 例：
+`AvailabilityBodyMemoryTest` 4 例双标识阶梯、`DeviceIdentityTest` 2 例占位名过滤）。
 
 ### 1.2.25 —— 2026-11-06（对照 catplay 复核连接链路：bit37 能力位、邀请自愈、0x4301 布局判定，正式版）
 
