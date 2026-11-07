@@ -106,5 +106,61 @@ class ReceiverProfileTest {
         assertTrue(text.contains("era=MODERN"))
         assertTrue(text.contains("wifiGen=LEGACY"))
         assertTrue(text.contains("srcvers=450.14.2"))
+        // 配对策略必须同行可见：排查「为什么没走配对」先看这一项
+        assertTrue(text.contains("pairing=REQUIRED"))
+    }
+
+    /**
+     * **配对策略只有一个来源**：era → PairingPolicy。
+     *
+     * 这条用例钉的是「老车机空转 120 秒配对窗口」的拦截点：TXT 无 bit38 时必须落到
+     * PLAINTEXT_ONLY，连接侧（SessionController）据此跳过 pair-setup；若哪天有人
+     * 又在别处直接读 bit38 并判错，这条会先红。
+     */
+    @Test
+    fun pairingPolicyFollowsEra() {
+        assertEquals(
+            ReceiverProfile.PairingPolicy.UNKNOWN,
+            ReceiverProfile.classify(ReceiverProfile.Signals()).pairingPolicy,
+        )
+        val modernFeatures = AirPlayFeatures.parse("0x44540380,0x61") ?: 0L
+        val legacyFeatures = modernFeatures and AirPlayFeatures.HK_PAIRING_AND_ENCRYPT.inv()
+        assertEquals(
+            ReceiverProfile.PairingPolicy.PLAINTEXT_ONLY,
+            ReceiverProfile.classify(ReceiverProfile.Signals(features = legacyFeatures)).pairingPolicy,
+        )
+        assertEquals(
+            ReceiverProfile.PairingPolicy.REQUIRED,
+            ReceiverProfile.classify(ReceiverProfile.Signals(features = modernFeatures)).pairingPolicy,
+        )
+    }
+
+    @Test
+    fun dispatchSummaryNamesBothGenerations() {
+        // 新代车机：WiFi 走 0x4301，且声明了配对
+        val modern =
+            ReceiverProfile.classify(
+                ReceiverProfile.Signals(
+                    features = AirPlayFeatures.parse("0x44540380,0x61"),
+                    sendIds = setOf(0x4301, 0x5000, 0x5002, 0x5200, 0x5203, 0xae00, 0xae02, 0x4157),
+                    receiveIds = setOf(0x4300, 0x4e09, 0xaa00, 0xaa02, 0x5001, 0x5201, 0x4158),
+                ),
+            )
+        val modernText = ReceiverProfile.dispatchSummary(modern)
+        assertTrue(modernText.contains("0x4300→0x4301"))
+        assertTrue(modernText.contains("先配对"))
+
+        // 老车机：WiFi 走 0x5702/0x5703，且直接明文
+        val legacy =
+            ReceiverProfile.classify(
+                ReceiverProfile.Signals(
+                    features = (AirPlayFeatures.parse("0x44540380,0x61") ?: 0L) and
+                        AirPlayFeatures.HK_PAIRING_AND_ENCRYPT.inv(),
+                    sendIds = setOf(0x5703),
+                ),
+            )
+        val legacyText = ReceiverProfile.dispatchSummary(legacy)
+        assertTrue(legacyText.contains("0x5702→0x5703"))
+        assertTrue(legacyText.contains("et=NONE"))
     }
 }

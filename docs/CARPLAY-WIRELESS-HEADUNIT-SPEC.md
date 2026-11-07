@@ -1072,5 +1072,75 @@ byte3-4: Y u16 LE（≤ 屏高）
 
 ---
 
+## 附录 D：新旧协议的自动切换与一致性审计（本项目发送端实现）
+
+规范描述的是「车机端该怎么做」；本项目跑的是**反方向**（手机端 / 发送端），因此本文里每一处
+「新旧差异」在代码里都落成同一个问题：**这一轮按哪一代协议发**。这些判据必须只有一份，
+否则就会出现「画像判老车机、连接逻辑另判一次」的分叉（历史事故：TXT 无 bit38 却被拿去
+pair-setup，白等 120 秒窗口）。
+
+### D.1 差异点 → 代码切换点 → 审计码
+
+| 规范章节 | 新旧差异 | 代码切换点 | 审计码 |
+|---|---|---|---|
+| §2.10 | WiFi 凭据：旧 `0x5702→0x5703` / 新 `0x4300→0x4301` | `iap2/Iap2SenderSession`（`wifiGen` 分派 + 0x5702 短窗并行兜底） | `WIFI_GEN_MISMATCH`、`LEGACY_WIFI_SILENT` |
+| §3.3 | AirPlay 时代：bit38 `HK_PAIRING_AND_ENCRYPT` 在 → 配对；不在 → `et=NONE` 明文 | `iap2/ReceiverProfile.PairingPolicy`（唯一判定）→ `SessionController` 配对分支 | `PAIRING_POLICY_MISMATCH` |
+| §2.9 | MFi 挑战长度：老车机 20B / 测试台 32B，规范要求「接受任意长度」 | `iap2/MfiLengthMemory` 阶梯 + 按车机记忆 | `MFI_LENGTH_REJECTED` |
+| §3.2 | TXT 的 `deviceid` / `features` 必须与 `/info` 一致 | `airplay/AirPlayClient.logInfoSummary` | `FEATURES_TXT_VS_INFO`、`DEVICE_ID_MISMATCH` |
+| §2.8 / §7 | 不得发对端未声明可收的消息（越权 → 车机重启） | `Iap2SenderSession.recordUndeclaredReceive` | `UNSOLICITED_MESSAGE` |
+| §3.4 | 端点只能来自 `0x4301` / mDNS（新代没有网关兜底） | `AirPlayClient.connect`（无候选地址分支） | `WIFI_NEW_WITHOUT_AP` |
+| §3.3 | 同一台车换固件 → 代际翻转 | `protocol/ProtocolGeneration`（代际快照 + 作废旧 MFi 档） | `ERA_SWITCHED` |
+
+**判据铁律**（与 §9 一致）：**按能力与实测行为分派，不按品牌/版本号硬编码**。
+`srcvers` / `features` 只作先验提示；清单只能证明「有」，不能证明「没有」——奥迪 3315 的可收
+清单不含 `0x5702`，但它完整支持旧协议。所以「代际不确定」时一律**两条请求并行发、谁先回用谁**。
+
+### D.2 审计输出格式
+
+每条问题**当场**进日志（logcat + 文件 + 界面三路同源），格式固定、可 grep：
+
+```text
+PROTO! WARN [WIFI_GEN_MISMATCH] 新旧 WiFi 凭据代际判错 —— 画像判 wifiGen=NEW（等 0x4301），
+车机却回了 0x5703（依据 SPEC §2.10 / §7；证据 ssid=AUDI_MMI_5G 信道=149）
+```
+
+会话退役时补一行**汇总**（条目数变化才打，避免每轮配对起步都刷）：
+
+```text
+PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_MISMATCH ERA_SWITCHED
+```
+
+排查入口：`grep "PROTO" CarPToCarL-log-*.txt`。一行干净时是
+`PROTO 一致性审计通过：未发现与本规范不一致的现象`。
+
+### D.3 审计码表（`protocol/ProtocolAudit.kt`）
+
+| 码 | 严重度 | 触发条件 | 依据 |
+|---|---|---|---|
+| `WIFI_GEN_MISMATCH` | 警告 | 画像判 NEW（跳过旧协议）却收到 `0x5703` | §2.10 |
+| `LEGACY_WIFI_SILENT` | 警告 | 发了 `0x5702`，窗口内无 `0x5703` | §2.10 / §7 |
+| `WIFI_NEW_WITHOUT_AP` | 警告 | 既无 `0x4301` 也无 mDNS，取不到 AirPlay 地址 | §3.2 |
+| `PAIRING_POLICY_MISMATCH` | 警告 | 画像说「该配对」，接收端却无 `/pair-setup` | §3.3 |
+| `FEATURES_TXT_VS_INFO` | 错误 | TXT `features` ≠ `/info` `features`（SETUP 400 常见根因） | §3.2 / §8 步 7 |
+| `DEVICE_ID_MISMATCH` | 错误 | TXT `deviceid` ≠ `/info` `deviceID` | §3.2 / §7 |
+| `UNSOLICITED_MESSAGE` | 警告 | 发了车机可收清单里没有的消息（仍照发，仅留证） | §2.8 / §7 |
+| `MFI_LENGTH_REJECTED` | 提示 | 挑战长度被 `0xAA04` 明确拒绝，本轮换档 | §2.9 |
+| `ERA_SWITCHED` | 提示 | 同一台车机的时代/凭据代际翻转（换固件） | §3.3 |
+
+同一 `(码, 细节)` 一轮只记一次（链路会反复触发同一根因）；上限 64 条，完整过程仍看原始日志。
+
+### D.4 代际快照与旧档作废
+
+`protocol/ProtocolGeneration` 按车机身份（name+model+manufacturer）记一份快照
+`era | wifiGen | srcvers | features`，两侧信号（0x1D01 / mDNS）谁先到都能合并：
+
+- **UNKNOWN 不参与比较**：信号补齐不是换代（0x1D01 先到时必然 era=UNKNOWN）；
+- 只有「已知 → 已知且不同」才算变更，era 与 wifiGen 各自独立判；
+- 变更时 → 打一行 `协议代际变更：…` + 记 `ERA_SWITCHED` + **作废该车机的 MFi 档位记忆**
+  （`MfiLengthMemory.forget`）。理由：挑战长度偏好是上一代协议下的最优解，换固件后沿用
+  会把新一轮锁死在老参数上，表现为「升级固件后这台车突然连不上」。
+
+---
+
 _本文与 `docs/PROTOCOL-NOTES.md`（发送端视角）互补；协议事实以实车字节级日志为准，
 公开源码与 Apple 规格档案仅作为交叉印证。_

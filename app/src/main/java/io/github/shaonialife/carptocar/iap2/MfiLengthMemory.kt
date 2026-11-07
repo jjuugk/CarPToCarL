@@ -162,6 +162,31 @@ object MfiLengthMemory {
         return (listOfNotNull(succeeded) + normal + silentOrdered + rejectedOrdered).distinct()
     }
 
+    /**
+     * 作废某台车机的全部 MFi 记忆。
+     *
+     * 只有一种正当调用场景：**该车机的协议代际变了**（固件升级后从旧代 0x5702/0x5703
+     * 切到新代 0x4300/0x4301，或 AirPlay 特性位翻转，见 `protocol/ProtocolGeneration`）。
+     * 挑战长度偏好是「上一代协议下的最优解」，换代后继续沿用会把新一轮锁在老参数上，
+     * 表现为「升级固件之后这台车突然连不上」。作废后回到基线顺序，从零重新学习。
+     */
+    fun forget(
+        context: Context?,
+        identityText: String,
+    ) {
+        val key = receiverKey(identityText)
+        synchronized(memory) {
+            memory.remove(key)
+            val prefs = prefs(context) ?: return
+            prefs
+                .edit()
+                .remove(KEY_OK + key)
+                .remove(KEY_SILENT + key)
+                .remove(KEY_REJECTED + key)
+                .apply()
+        }
+    }
+
     // ---- 内部 ----
 
     private val memory = HashMap<String, Entry>()

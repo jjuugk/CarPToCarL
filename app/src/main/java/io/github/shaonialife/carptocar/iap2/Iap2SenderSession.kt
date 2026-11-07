@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.iap2
 
+import io.github.shaonialife.carptocar.protocol.ProtocolAudit
+import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.io.IOException
@@ -243,6 +245,13 @@ class Iap2SenderSession(
                 "iap2 车机可收清单未声明 0x${messageId.toString(16).padStart(4, '0')} " +
                     "(${Iap2MessageIds.nameOf(messageId)}) reason=accessory-did-not-advertise" +
                     "—— 仍照常发送（清单只能证明「有」不能证明「没有」，见上游 0.1.28 奥迪定谳）",
+            )
+            // 审计留档：这一条确实是「越权」（SPEC §2.8 / §7 末行），只是本项目权衡后
+            // 仍然发。清单不完整是常态（奥迪 3315 只列 5 项），所以是 WARN 不是 ERROR。
+            ProtocolAudit.record(
+                ProtocolAudit.Code.UNSOLICITED_MESSAGE,
+                detail = "0x${messageId.toString(16).padStart(4, '0')} ${Iap2MessageIds.nameOf(messageId)}",
+                evidence = "车机可收清单(${accessoryReceiveIds.size} 项)未包含该号",
             )
         }
     }
@@ -542,6 +551,14 @@ class Iap2SenderSession(
                 }
                 if (wifiConfiguration == null) {
                     log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
+                    // 审计：判据是「发了 0x5702、车机一个字节都没回」。新代车机会走到这里，
+                    // 属于「画像 UNKNOWN/LEGACY 但实际是新代」——记下来，下一轮画像就能对上
+                    // （SPEC §2.10 的两代协议 / §7「0x5703 一直不来」行）。
+                    ProtocolAudit.record(
+                        ProtocolAudit.Code.LEGACY_WIFI_SILENT,
+                        detail = "0x5702 发出后无 0x5703（画像 wifiGen=${wifiGen.name}），已并行发 0x4300",
+                        evidence = "等待窗口 ${LEGACY_WIFI_FIRST_WAIT_NANOS / 1_000_000}ms 无应答",
+                    )
                     null
                 } else {
                     val parsed = parseWifiConfiguration(wifiConfiguration)
@@ -549,6 +566,15 @@ class Iap2SenderSession(
                         "iap2 rx=0x5703 ssid=${parsed.ssid} channel=${parsed.channel} " +
                             "security=${parsed.securityType} psk=${if (parsed.passphrase.isEmpty()) "(空)" else "***"}",
                     )
+                    if (!legacyWifiExchange) {
+                        // 画像判了 NEW（跳过旧协议）却仍然收到 0x5703 —— 判据被车机行为证伪。
+                        // 不能只留在日志里：下一轮必须回退旧协议，否则每轮都白等 0x4301。
+                        ProtocolAudit.record(
+                            ProtocolAudit.Code.WIFI_GEN_MISMATCH,
+                            detail = "画像判 wifiGen=NEW（等 0x4301），车机却回了 0x5703",
+                            evidence = "ssid=${parsed.ssid} 信道=${parsed.channel}",
+                        )
+                    }
                     // 真车死锁解药（catplay CarPlayInviter 实证）：车机在 WiFi 网络上发现手机的
                     // _carplay-ctrl._tcp 后主动发 GET /ctrl-int/1/connect 邀请，**邀请成功才发 0x4301**。
                     // 因此这里必须立即通知主控绑 WiFi + 广播 ctrl（带真实蓝牙 MAC 作 TXT id）。
@@ -1343,6 +1369,13 @@ class Iap2SenderSession(
             }
             if (gotFailure) {
                 MfiLengthMemory.recordRejected(context, receiverKey, size)
+                // 审计留档：挑战长度被车机明确拒绝（0xAA04）。规范说「接受任意长度」
+                // （SPEC §2.9），真车却各有偏好——这条是「为什么本轮要换档重试」的依据。
+                ProtocolAudit.record(
+                    ProtocolAudit.Code.MFI_LENGTH_REJECTED,
+                    detail = "0xAA04 拒绝 ${size}B 挑战",
+                    evidence = "已试 $order，命中第 ${position + 1} 档",
+                )
             } else {
                 MfiLengthMemory.recordSilent(context, receiverKey, size)
             }
@@ -1707,6 +1740,19 @@ class Iap2SenderSession(
             log(ReceiverProfile.describe(profile))
             // 画像结论是本轮 WiFi 分派的唯一依据（见 wifiGen 字段注释）
             wifiGen = profile.wifiGen
+            // 代际快照：这台车上一次是哪个协议档？变了就按新一代重新分派，并作废该车
+            // 旧的 MFi 档位记忆——换固件（LEGACY→NEW）是真实场景，旧结论会把新一轮
+            // 锁死在上代参数上（详见 protocol/ProtocolGeneration 的类注释）。
+            val generationChange = ProtocolGeneration.observe(context, profile.identityKey, profile)
+            if (generationChange != null) {
+                log(ProtocolGeneration.describe(generationChange))
+                MfiLengthMemory.forget(context, profile.identityKey)
+                ProtocolAudit.record(
+                    ProtocolAudit.Code.ERA_SWITCHED,
+                    detail = "${generationChange.from.era}/${generationChange.from.wifiGen}" +
+                        " → ${generationChange.to.era}/${generationChange.to.wifiGen}",
+                )
+            }
             val dispatchHint =
                 if (profile.wifiGen == ReceiverProfile.WifiGen.NEW) {
                     "不发 0x5702（等 0x4301 给 AP 信息）"

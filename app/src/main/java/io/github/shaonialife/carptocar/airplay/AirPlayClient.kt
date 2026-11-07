@@ -12,6 +12,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2LinkPacket
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.net.EndpointHosts
+import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.io.IOException
@@ -3037,6 +3038,14 @@ class AirPlayClient(
         val candidates = EndpointHosts.candidates(target.ipAddresses)
         if (candidates.isEmpty()) {
             log("AIRPLAY: 0x4301/ mDNS 未提供可用地址，无法连接")
+            // 审计：走到了「拿不到 AirPlay 端点」这一步。新代车机（WiFi 凭据走
+            // 0x4300→0x4301）唯一的地址来源就是 0x4301 或 mDNS，两者都没有就是硬缺口；
+            // 老车机还多一条网关兜底（SPEC §3.4），所以这里只作 WARN 记录、不改变流程。
+            ProtocolAudit.record(
+                ProtocolAudit.Code.WIFI_NEW_WITHOUT_AP,
+                detail = "端点无可用地址（0x4301 与 _airplay._tcp 都没给出）",
+                evidence = "ssid=${target.ssid} airPlayPort=${target.airPlayPort}",
+            )
             return false
         }
         if (target.airPlayPort <= 0) {
@@ -3586,6 +3595,28 @@ class AirPlayClient(
                 "deviceID=${root["deviceID"]}" +
                 if (features != null) " features=0x${features.toString(16)}" else "",
         )
+        // ---- 通告一致性（SPEC §3.2 / §8 步 7）----
+        // 车机有两套自报口径：mDNS TXT（Bonjour 里）与 /info（RTSP 里）。规范要求严格一致；
+        // 不一致是 SETUP 400 的常见根因——接收端会拿 TXT 的内容校验我们 SETUP 里声明的
+        // features，两边对不上就拒绝（真实车机不做友好提示，只回 400）。
+        val txtFeatures = currentEndpoint.advertisedFeatures
+        if (features != null && txtFeatures != null && features != txtFeatures) {
+            ProtocolAudit.record(
+                ProtocolAudit.Code.FEATURES_TXT_VS_INFO,
+                detail = "/info=0x${features.toString(16)} TXT=0x${txtFeatures.toString(16)}",
+                evidence = "异或差异=0x${(features xor txtFeatures).toString(16)}",
+            )
+        }
+        // deviceID：TXT 的 `deviceid` 与 /info 的 `deviceID` 应是同一台车机。不一致说明它
+        // 自己的通告互相矛盾，后续 SETUP 里我们用哪个都会被另一方校验失败（SPEC §7 SETUP 403）。
+        val infoDeviceId = root["deviceID"] as? String
+        val txtDeviceId = currentEndpoint.deviceIdentifier
+        if (infoDeviceId != null && txtDeviceId != null && !infoDeviceId.equals(txtDeviceId, ignoreCase = true)) {
+            ProtocolAudit.record(
+                ProtocolAudit.Code.DEVICE_ID_MISMATCH,
+                detail = "/info deviceID=$infoDeviceId，TXT deviceid=$txtDeviceId",
+            )
+        }
         (root["displays"] as? List<*>)?.forEachIndexed { index, display ->
             log("AIRPLAY: /info displays[$index]=$display")
             if (display is Map<*, *>) {

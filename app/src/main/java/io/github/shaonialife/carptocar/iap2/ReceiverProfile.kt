@@ -21,6 +21,32 @@ object ReceiverProfile {
     /** WiFi 凭据交换协议代际（PR #10 的分派依据，收口进画像）。 */
     enum class WifiGen { LEGACY, NEW, UNKNOWN }
 
+    /**
+     * **配对策略**：新旧协议「自动切换」在 AirPlay 侧的执行面。
+     *
+     * 此前这个判断散在 `SessionController`（`AirPlayFeatures.supportsPairing(...) == false`）
+     * 与 `AirPlayClient.pairingFallback` 两处，各自解释 bit38——画像算出的 [Era] 只进日志、
+     * 不参与分派，于是「画像说老车机、连接逻辑还要自己再判一次」，判据一旦不一致就
+     * 出现「画像判 pre-HomeKit、连接时照样去配对空转 120 秒」（SPEC §3.3 / §7 配对 403 行）。
+     *
+     * 现在只留这一个枚举，[Profile.pairingPolicy] 由 [Era] 派生，谁都能查、只有一处定义。
+     */
+    enum class PairingPolicy(
+        val label: String,
+    ) {
+        /** pre-HomeKit（TXT 无 bit38）：只接受 `et=NONE` 明文 + AES-CTR 屏幕流。 */
+        PLAINTEXT_ONLY("明文会话 et=NONE"),
+
+        /** 280 时代：声明支持配对，但也可以走明文。 */
+        OPTIONAL("配对可选"),
+
+        /** 现代：先配对，失败才降级（保持既有行为）。 */
+        REQUIRED("必须配对"),
+
+        /** 信号缺失：先试配对（保守），失败再降级。 */
+        UNKNOWN("先配对（信号缺失）"),
+    }
+
     /** 画像输入：全字段可空——信号到多少算多少。 */
     data class Signals(
         val name: String? = null,
@@ -43,7 +69,11 @@ object ReceiverProfile {
         val identityKey: String,
         /** 判定依据（可解释性：每条结论对应的信号原文）。 */
         val reasons: List<String>,
-    )
+    ) {
+        /** 配对策略（唯一执行面，见 [PairingPolicy]）。 */
+        val pairingPolicy: PairingPolicy
+            get() = pairingPolicyOf(era)
+    }
 
     fun classify(signals: Signals): Profile {
         val reasons = ArrayList<String>()
@@ -116,8 +146,45 @@ object ReceiverProfile {
             signals.manufacturer?.takeIf { it.isNotBlank() },
         ).joinToString(" ").ifBlank { "unknown" }
 
+    /** [Era] → [PairingPolicy]（唯一映射点，别在调用侧再写一遍 when）。 */
+    fun pairingPolicyOf(era: Era): PairingPolicy =
+        when (era) {
+            Era.PRE_HOMEKIT -> PairingPolicy.PLAINTEXT_ONLY
+            // 280 时代：声明支持配对但也能走明文。本项目无实车证据把「280 档」与现役车机
+            // 分开（两者都是「先配对，失败降级」），因此 [classify] 目前不产出这个值；
+            // 保留映射是为了将来拿到实车证据时只改 classify，调用侧一行都不用动。
+            Era.OPTIONAL_PAIRING -> PairingPolicy.OPTIONAL
+            Era.MODERN -> PairingPolicy.REQUIRED
+            Era.UNKNOWN -> PairingPolicy.UNKNOWN
+        }
+
     /** 一行可读判定（进文件日志）。 */
     fun describe(profile: Profile): String =
-        "PROFILE: era=${profile.era} wifiGen=${profile.wifiGen} key=${MfiLengthMemory.receiverKey(profile.identityKey)}" +
+        "PROFILE: era=${profile.era} wifiGen=${profile.wifiGen} pairing=${profile.pairingPolicy.name}" +
+            " key=${MfiLengthMemory.receiverKey(profile.identityKey)}" +
             " 依据[" + profile.reasons.joinToString("；") + "]"
+
+    /**
+     * 本轮按哪个档位跑——**一句话分派结论**，连接建立时打一次。
+     *
+     * 为什么要单独一行：排查「连不上」时最常问的是「这次到底按新协议还是旧协议发的」，
+     * 而旧日志要跨 `PROFILE`（0x1D01 时刻）与端点诊断（mDNS 时刻）两处拼。这里有
+     * 一行就直接给出「发什么、怎么加密」。
+     */
+    fun dispatchSummary(profile: Profile): String {
+        val wifi =
+            when (profile.wifiGen) {
+                WifiGen.NEW -> "WiFi 凭据走新代 0x4300→0x4301（不发 0x5702）"
+                WifiGen.LEGACY -> "WiFi 凭据走旧代 0x5702→0x5703"
+                WifiGen.UNKNOWN -> "WiFi 凭据旧代优先、0x5702 无应答即并行发 0x4300"
+            }
+        val airplay =
+            when (profile.pairingPolicy) {
+                PairingPolicy.PLAINTEXT_ONLY -> "AirPlay 直接 et=NONE 明文（跳过 pair-setup）"
+                PairingPolicy.REQUIRED -> "AirPlay 先配对，失败才降级明文"
+                PairingPolicy.OPTIONAL -> "AirPlay 配对可选（仍先配对）"
+                PairingPolicy.UNKNOWN -> "AirPlay 先配对（信号缺失，保守）"
+            }
+        return "PROTO 本轮档位：$wifi；$airplay"
+    }
 }

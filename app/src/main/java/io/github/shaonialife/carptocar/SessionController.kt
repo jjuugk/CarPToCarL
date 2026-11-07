@@ -45,6 +45,8 @@ import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiJoinGate
 import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
+import io.github.shaonialife.carptocar.protocol.ProtocolAudit
+import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -1426,6 +1428,11 @@ object SessionController {
      */
     fun startConnection(context: Context) {
         connectCancelled = false
+        // 新一轮 = 新的一致性审计：清空上一轮的问题清单，并把输出口接到本控制器的
+        // appendLog（logcat + 文件 + 界面三路都走它，用户导出日志即带走整份清单）。
+        ProtocolAudit.reset()
+        ProtocolAudit.sink = ::appendLog
+        auditSummarizedCount = -1
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
@@ -1517,6 +1524,28 @@ object SessionController {
         }
     }
 
+    /** 上次打出审计汇总时的条目数（-1 = 本轮还没打过；用于「只在有新问题时补一行」）。 */
+    private var auditSummarizedCount = 0
+
+    /**
+     * 把「本轮发现的协议不一致」汇总成一行。
+     *
+     * 实时逐条输出由 [ProtocolAudit.sink] 负责（每条问题当场进日志），这里只补**汇总**——
+     * 用户反馈「连不上」时最想一眼看到的是「这一轮到底有几处不对、都是哪几类」，
+     * 而不是在几百行日志里翻 `PROTO!`。按条目数去重，因此 [retireSession] 在每轮配对
+     * 起步时也会被调用也不会刷屏（那时条目数没变）。
+     */
+    private fun flushProtocolAudit(reason: String) {
+        val total = ProtocolAudit.snapshot().size
+        if (total == auditSummarizedCount) return
+        auditSummarizedCount = total
+        if (total == 0) {
+            appendLog(ProtocolAudit.summary())
+        } else {
+            appendLog("PROTO 审计（$reason）：${ProtocolAudit.summary()}")
+        }
+    }
+
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
         // 只断车机视频通道，不拆 CarLife 劫持本身：本方法在每轮配对起步也会执行，
@@ -1556,6 +1585,9 @@ object SessionController {
         // 配对前，等于每次连接白等 1.6s（2026-10-18 实测）。执行器串行保证
         // 「先复原上一会话、后写入本会话」的顺序。
         appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
+        // 协议一致性汇总：放在最后一行，拆链原因与问题清单一前一后，反馈日志时最上面、
+        // 最下面各有一条结论，不用翻中间过程。
+        flushProtocolAudit("会话退役")
     }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
@@ -3505,7 +3537,17 @@ object SessionController {
         // 奥迪 4xxx 两种「连不上」都源于这里——旧版日志里完全没有这两项。
         val addresses = endpoint.ipAddresses
         val hasIpv4 = addresses.any { EndpointHosts.isIpv4(it) }
-        val pairingFlag = AirPlayFeatures.supportsPairing(endpoint.advertisedFeatures)
+        // 车机画像（信号收口点）：mDNS 侧信号到达——era 判定 + wifiGen 沿用 0x1D01 的结论
+        // （本处没有收/发清单，classify 会给 UNKNOWN；代际快照的 merge 负责「保留已知」，
+        //  所以同一台车「先 0x1D01 后 mDNS」的到达顺序不会被误判成换代）。
+        val endpointProfile =
+            ReceiverProfile.classify(
+                ReceiverProfile.Signals(
+                    features = endpoint.advertisedFeatures,
+                    srcvers = endpoint.sourceVersion,
+                ),
+            )
+        val pairingPolicy = endpointProfile.pairingPolicy
         appendLog(
             ">>> [$source] 端点诊断：地址=${addresses.ifEmpty { listOf("(无)") }}" +
                 "（${if (hasIpv4) {
@@ -3516,24 +3558,29 @@ object SessionController {
                     "仅 IPv6"
                 }}）" +
                 " features=" + (endpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知") +
-                " HomeKit配对=" +
-                when (pairingFlag) {
-                    true -> "声明支持"
-                    false -> "未声明（按 pre-HomeKit 明文会话处理）"
-                    null -> "未知（按需配对）"
-                },
+                " HomeKit配对=" + pairingPolicy.label,
         )
-        // 车机画像（信号收口点）：mDNS 侧信号到达——era 判定 + 依据一行可解释
-        appendLog(
-            ReceiverProfile.describe(
-                ReceiverProfile.classify(
-                    ReceiverProfile.Signals(
-                        features = endpoint.advertisedFeatures,
-                        srcvers = endpoint.sourceVersion,
-                    ),
-                ),
-            ),
-        )
+        appendLog(ReceiverProfile.describe(endpointProfile))
+        // 一句话分派结论：0x1D01 与 mDNS 两个信号都到齐了，这时才说得清「本轮按哪一代跑」
+        appendLog(ReceiverProfile.dispatchSummary(endpointProfile))
+        // 代际快照（mDNS 侧）：AirPlay 特性位翻转（例如换固件后开始/停止声明 bit38）
+        // 同样算换代——必须重算并作废旧 MFi 档，否则新一轮会卡在上代参数上。
+        ProtocolGeneration
+            .observe(
+                appContext,
+                endpointProfile.identityKey,
+                endpointProfile,
+                srcvers = endpoint.sourceVersion,
+                features = endpoint.advertisedFeatures,
+            )?.let { change ->
+                appendLog(ProtocolGeneration.describe(change))
+                ProtocolAudit.record(
+                    ProtocolAudit.Code.ERA_SWITCHED,
+                    detail = "${change.from.era}/${change.from.wifiGen}" +
+                        " → ${change.to.era}/${change.to.wifiGen}",
+                    evidence = "mDNS features=${change.to.featuresHex ?: "未知"} srcvers=${change.to.srcvers ?: "未知"}",
+                )
+            }
         // 先绑网络再解析端点：mDNS 组播跟随 bindProcessToNetwork 的网络，解析放前面
         // 只会拿到旧网络的结果（此前靠 resolveEndpointHost 内部重试掩盖，白等数秒）。
         // 绑定完成后再并行做三件事：ctrl 广播针对新网络重注册、后台发现 _airplay._tcp、
@@ -3699,8 +3746,19 @@ object SessionController {
                     // 明文 SETUP（et=NONE）+ AES-CTR 屏幕流，走 pair-setup 必然失败。
                     // catplay 的接收端分类 1 即此形态；旧实现会在这里空转 120s 配对窗口，
                     // 用户看到的就是「连不上」。
-                    val txtNoPairing =
-                        AirPlayFeatures.supportsPairing(client.currentEndpoint.advertisedFeatures) == false
+                    //
+                    // **判据只认画像**（[ReceiverProfile.PairingPolicy]）：端点可能在配对前
+                    // 被 0x4301 热更新过，所以按当前端点重新分类一次；不要再这里直接读 bit38，
+                    // 否则「画像说老车机、这里说新」的下一处分叉迟早出现（SPEC §3.3）。
+                    val pairingPolicy =
+                        ReceiverProfile
+                            .classify(
+                                ReceiverProfile.Signals(
+                                    features = client.currentEndpoint.advertisedFeatures,
+                                    srcvers = client.currentEndpoint.sourceVersion,
+                                ),
+                            ).pairingPolicy
+                    val txtNoPairing = pairingPolicy == ReceiverProfile.PairingPolicy.PLAINTEXT_ONLY
                     // 短期记忆：上次被车机确定性拒绝配对（Error=2 这类），本轮直接跳过
                     // pair-setup——它会一直回同一个码，120s 窗口纯属白等（日志 221747）。
                     // 记忆只影响「要不要再试一次重复动作」，不影响明文会话，也不影响
@@ -3718,6 +3776,16 @@ object SessionController {
                             System.currentTimeMillis(),
                         )
                     val noPairing = txtNoPairing || pairingGate == PairingGate.SKIP_SETUP
+                    appendLog(
+                        "PROTO 配对策略=$pairingPolicy" +
+                            (if (noPairing) {
+                                "（本轮跳过 pair-setup）"
+                            } else {
+                                "（本轮先配对）"
+                            }) +
+                            "；依据：端点 features=" +
+                            (client.currentEndpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知"),
+                    )
                     var keys: PairVerifyClient.ControlKeys? =
                         if (noPairing) {
                             if (pairingGate == PairingGate.SKIP_SETUP) {
@@ -3733,6 +3801,17 @@ object SessionController {
                         } else {
                             client.runPairing()
                         }
+                    // 审计：画像说「该配对」，接收端却根本没有 /pair-setup（404/不可用）。
+                    // 这是 SPEC §3.3 特征位与实测不符的硬证据（多见于自称新代的老固件），
+                    // 记下来才能解释「为什么每轮都白等配对窗口」。
+                    if (client.pairingUnsupported && !txtNoPairing) {
+                        ProtocolAudit.record(
+                            ProtocolAudit.Code.PAIRING_POLICY_MISMATCH,
+                            detail = "画像判 $pairingPolicy（应配对），接收端不提供 /pair-setup",
+                            evidence = "features=" +
+                                (client.currentEndpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知"),
+                        )
+                    }
                     if (connectCancelled) {
                         retireSession()
                         appendLog("AIRPLAY: 用户已取消——中止配对")
