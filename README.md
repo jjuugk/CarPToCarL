@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**
-> —— 主线固定直链（当前 1.2.27，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk)**
+> —— 主线固定直链（当前 1.2.28，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.27，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.27.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.28，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.28.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.27`（正式版；**新旧协议自动切换 + 协议一致性审计**：① 新旧代际判定收口到 `ReceiverProfile`/`ProtocolGeneration` 一处——WiFi 凭据代际（`0x5702/0x5703` 旧 vs `0x4300/0x4301` 新）、AirPlay 时代（TXT bit38 有无 → 配对 / `et=NONE` 明文）、MFi 挑战长度档位不再各判一套；② 按车机身份持久化 `era|wifiGen|srcvers|features` 快照，只有「已知→已知且不同」才算换代，真换代自动按新一代重分派并作废该车旧 MFi 档位记忆（换固件后不会突然连不上）；③ 新增 `protocol/ProtocolAudit`：9 个审计码，每条带规范章节号，实时输出 `PROTO! [码] 结论 —— 细节`，会话退役补一行汇总，可 grep 可导出；④ 规范文档 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` 新增附录 D（差异点 → 代码切换点 → 审计码对照）。协议报文内容与顺序不变，1.2.25 的 bit37 判定/邀请自愈/0x4301 布局二选一全部保留；⑤ 通用系（Cinemo）修两个现场问题：`0x4300` 补上被漏掉的 group0（有线标识，两段 group 才是新版车机的完整形态，修「一直卡在获取 WiFi」），`0x4E09` 不再把 MagicOS 的占位名「未知设备」发给车机（同名占位串还会让车机蓝牙列表显示「未知设备」）；⑥ 按 Apple 规格档案补 144 条消息目录（`0x4E09~0x4E0C` 等规范里有、项目没实现的消息不再被报「陌生 ID」，`0x1D01` 支持报文比对改用「规范里有没有」）；⑦ 全链路自查：失败轮次也有收尾结论（`ConnectBudget.end` 打「卡在哪个阶段 + grep 关键词」），「已发未声明可收消息」的埋点下沉到发送唯一出口；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.27.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.27/CarPToCarL-1.2.27.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.28`（正式版；**实车日志驱动的四项修复**：① 等待 `0x4301` 期间读不到 SSID——`cmd wifi status` 在普通应用身份下必然失败，日志一律写「已开但未连接任何网络」，于是「检测到已连车机热点 → 按热点继续」这个弹窗永不触发，唯一不依赖 `0x4301` 的兜底路（手动入网 + mDNS 邀请）被代码堵死；现在加框架侧兜底（`ConnectivityManager` → `NetworkCapabilities.transportInfo` → `WifiInfo.ssid`，只需定位/附近设备权限），读不到仍返回 null（不猜，避免绑到家里的网）；② 通用系新协议代按参考实现对齐：MFi 先按车机 `0x1D01` 的「会发」声明索取认证序列号（`0xAA00` 带空 param0 → 收到 `0xAA06` → 再要完整证书），问候后**立刻**发 `0x4300`（不再在 `0x6800` 上空等 2 秒，晚到的 `0x6800` 由接收循环就地应答，HID 通道不丢），新代问候顺序改为 UUID → 时间 → 语言（`zh`）→ 名称，旧代（奥迪等）完全不动；③ 等 `0x4301` 的保活期每 30s 在当前 WiFi 里探一次车机 `_airplay._tcp`——找到就直接走 AirPlay（不依赖 `0x4301`），找不到也留下「车机没起服务」的硬证据，补上「手机挂在车机热点上却一个 WiFi 侧包都没发」的盲区；④ 新增设置开关「兼容「只认苹果设备」的车机」（**默认关**）：占位 SDP 记录（CarPlay UUID / Wireless iAP v2）+ App 启动即挂监听 + 30s 看门狗自愈，并修 `Iap2BluetoothServer.acceptLoop` 异常退出不复位 `running` 导致的监听假死；另新增构建标记 `AppVersion.BUILD_TAG`（日志头显示 `1.2.28 #标记`），同版本号的多个测试包不再互相冒充；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.28.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.28/CarPToCarL-1.2.28.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -821,6 +821,73 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.28 —— 2026-11-07（通用系现场四项修复：SSID 兜底 / MFi 序列号握手 / mDNS 探测 / 只认苹果车机开关，正式版）
+
+1.2.27 发布后连续跑了六轮别克 E2LB（`BUICK_8948`，Cinemo 栈）实车日志，本版全部改动都由
+日志里可复现的现象驱动，**奥迪 / 宝马 / DiPlay 测试台已跑通的路径一处未动**。
+
+**一、等 `0x4301` 期间读不到 SSID：唯一的兜底路被代码堵死**
+
+等待期日志每 30 秒都在写 `Wi-Fi=已开但未连接任何网络`，可同一份日志里
+`WIFI: wifi=[wlan0/10.154.116.159] default=wlan0/…`——手机其实挂在车机热点上。
+
+| 项 | 内容 |
+|---|---|
+| 根因 | `shellWifiStatus()` 只走 `cmd wifi status`；Shizuku 移除后普通应用身份跑不了这条命令，`ok=false` 直接返回 SSID=null |
+| 后果 | 「检测到已连接 XXX，按车机热点继续」弹窗**要求 SSID 非空**才触发 → 手动入网 + mDNS 邀请这条完全不依赖 `0x4301` 的路，整份日志里一次都没跑到 |
+| 修法 | 新增 `frameworkWifiStatus()` 兜底：`ConnectivityManager` → `NetworkCapabilities.transportInfo` → `WifiInfo.ssid`，只需定位/附近设备权限；读不到**仍返回 null**，不猜（绑错网比不绑更糟） |
+| 日志 | 区分「未连网络」与「读不到 SSID」，等待期提示去车机「连接 → 车辆热点」抄 SSID/密码 |
+
+**二、通用系新协议代对齐参考实现（`link_plus` 的 `modernBootstrap`）**
+
+这两台车的现场形态一致：识别、MFi、问候全部通过，车机最后一次 ACK 停在问候的最后一帧
+（`ack=110`），其后的 `0x4300` 连链路层 ACK 都拿不到，`0x4301/0x6800/0x5000` 全程零条。
+逐行对照同源工程后发现三处差异，全部补齐：
+
+| 改动 | 旧行为 | 新行为 |
+|---|---|---|
+| MFi 先要序列号 | 直接 `0xAA00` 要证书 | 车机 `0x1D01` 的「会发」清单里列了 `0xAA06` 时，先发**带空 param0** 的 `0xAA00`，收到 `0xAA06` 认证序列号后再要完整证书（车机「发序列号」分支此前 6 轮 0 次被触发） |
+| `0x4300` 时机 | `awaitOptionalHid` 在 `0x6800` 上空等 2 秒，`0x4300` 被压到 `0x1D02` 之后约 2.7 秒 | 新协议代问候完**立刻**发；晚到的 `0x6800` 由接收循环就地应答（`respondToStartHid`），HID 通道不会丢 |
+| 问候顺序与语言 | 名称 → 语言(`zh-CN`) → … | 新代：UUID → 时间 → 语言(`zh`) → 名称；旧代（奥迪等）保持原顺序与 `zh-CN` |
+
+> 报文体形态这条线到此为止：无线单标识（`MODERN_NESTED`）、有线标识（`LEGACY_FLAT`）、
+> 两段 group（`DUAL_GROUPS`）**三种都试过**，全部被车机 ACK、全部无回应。
+> 详见 `docs/gm-4300-dual-identifier-20261107.md` §6——不要再试第四种。
+
+**三、保活期在 WiFi 侧找一次车机 AirPlay**
+
+手机挂在车机热点上 6 分钟，我们一个 WiFi 侧的包都没发过，「车机到底起没起 AirPlay」
+在日志里查不到，这是排查时最大的盲区。新增：等 `0x4301` 期间每 **30 秒**在当前网络里
+探一次 `_airplay._tcp`——找到就直接走 AirPlay（不依赖 `0x4301`），找不到也留下
+`PROBE #n: 没有 _airplay._tcp` 这条硬证据。
+
+**四、新开关：兼容「只认苹果设备」的车机（默认关）**
+
+宝马 iD6 在蓝牙列表里直接给本机打「设备不支持 Apple CarPlay」，这句判定发生在 iAP2 之前
+——改 `0x4300` / 识别顺序在这条路径上全无作用，它看的是发现层（EIR 里的 iPhone CarPlay
+UUID、SDP 里的 Wireless iAP v2）。Android 应用层写不了 EIR，能做的只有 SDP 占位与
+「别让车机看不到服务」：
+
+- 开关打开时额外注册两条占位记录（CarPlay `2d8d2466-…`、Wireless iAP v2 `02030302-…`），
+  不做任何协议，连进来只记日志并立即关闭——那行 `BT-PROBE` 就是「车机确实在看这个 UUID」的铁证；
+- 监听常开：`Iap2BluetoothServer.start()` 幂等对齐占位记录，`SessionController` 在 App 启动时即挂
+  监听，30s 看门狗自愈——按「先配对、后开 App」的顺序操作时车机那一瞥不再什么都看不到；
+- 区分「挂着等」与「有会话」（`idleListening`）：`isSessionRunning()` 不再把挂机监听算作会话，
+  否则自动重连会被自己挡掉、通知栏误报「已连上」；手动断开置 `compatSuppressed`，看门狗不得自动挂回；
+- 顺手修 `Iap2BluetoothServer.acceptLoop`：`IOException` 退出时没把 `running` 置回 false，
+  导致 `isRunning` 说谎、`start()` 永久短路（监听假死）——常开监听依赖此修复。
+
+**五、构建标记与测试**
+
+同一 `appVersionName` 下当天出过 5 个测试包，11:41 那轮就因日志头只写 `1.2.27` 而误判
+「新包已生效」，白跑一轮实车。新增 `AppVersion.BUILD_TAG`，日志头显示 `1.2.28 #标记`
+（正式版为空），以后同版本号的测试包可直接分辨。单测 **517 例 0 失败**（新增 7 例：
+`BtIdentityProbeTest` 6、`Iap2SenderSessionTest` 的 MFi 序列号握手 1）。
+
+**仍未解决**：别克 E2LB 在三种 `0x4300` 报文体、`0xAA06` 序列号握手、提前 `0x4300` 全部到位后
+依然只有 `0x1d01/0xaa01/0xaa03` 三条主动消息；若下一轮 `PROBE` 显示车机热点上**没有**
+`_airplay._tcp`，即可判定是车机侧 CarPlay 应用未被唤醒，与我们的 iAP2 帧无关。
 
 ### 1.2.27 —— 2026-11-07（新旧协议自动切换 + 协议一致性审计，正式版）
 
