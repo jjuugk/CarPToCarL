@@ -2227,19 +2227,88 @@ object SessionController {
         }
     }
 
+    /** 只记一次「SSID 读不到」，避免 5 秒一次的轮询把日志刷满。 */
+    @Volatile
+    private var wifiSsidUnreadableLogged = false
+
     /**
-     * WiFi 开关与当前连接的 SSID（一次 `cmd wifi status` 查询）。
-     * 输出形如：`Wifi is enabled` + `Wifi is connected to "Redmi K40"`（未连接无此行）。
+     * WiFi 开关与当前连接的 SSID。
+     *
+     * 两条来源，**先 shell 后框架**：
+     *  1. `cmd wifi status`（要有 shell 身份，Shizuku/root 在时才有），输出形如
+     *     `Wifi is enabled` + `Wifi is connected to "Redmi K40"`；
+     *  2. [frameworkWifiStatus]：不需要任何特权，只要给了定位 / 附近设备权限。
+     *
+     * 为什么必须补第 2 条（2026-11-07 别克 E2LB 现场）：Shizuku 移除后 `cmd wifi status`
+     * 一律失败，于是这里永远返回「已开、SSID=null」，日志里一直写「Wi-Fi=已开但未连接任何
+     * 网络」——而手机其实挂在 192.168.9.15 上。后果不只是日志难看：「手动连车机热点」那条
+     * 兜底路径靠 SSID 非空才会弹窗，读不到 SSID 等于这条路根本走不到（空等 5 分钟超时）。
      */
     private fun shellWifiStatus(): Pair<Boolean, String?> {
-        val result =
-            SysShell
-                .exec("cmd wifi status", 5_000L)
-        if (!result.ok) return true to null
-        val enabled = !result.output.contains("Wifi is disabled")
-        val ssid = Regex("connected to \"(.*)\"").find(result.output)?.groupValues?.get(1)
+        val result = SysShell.exec("cmd wifi status", 5_000L)
+        if (result.ok) {
+            val enabled = !result.output.contains("Wifi is disabled")
+            // 老 ROM 写 `connected to "X"`，新 ROM（13+）写 `SSID: "X"`——两种都收。
+            val ssid =
+                Regex("connected to \"(.*)\"").find(result.output)?.groupValues?.get(1)
+                    ?: Regex("SSID: \"(.*)\"").find(result.output)?.groupValues?.get(1)
+            if (!ssid.isNullOrEmpty()) return enabled to ssid
+            if (!enabled) return false to null
+        }
+        val (enabled, ssid) = frameworkWifiStatus()
+        if (ssid == null && enabled && !wifiSsidUnreadableLogged) {
+            wifiSsidUnreadableLogged = true
+            appendLog(
+                "WIFI: 读不到当前 SSID（无 shell 权限，且定位/附近设备权限不足）——" +
+                    "「已连网络是否就是车机热点」这一步需要它；请到系统设置给本应用「位置」或「附近的设备」权限",
+            )
+        }
         return enabled to ssid
     }
+
+    /**
+     * 框架侧读取 WiFi 状态（无特权）。
+     *
+     * SSID 走 [android.net.NetworkCapabilities.transportInfo]：Android 12 起
+     * `wifiManager.connectionInfo` 对应用专属网络常常报 `<unknown ssid>`，而 transportInfo
+     * 在所有已连网络上都有。读不到（没权限 / 未连接）返回 null——**不猜**，猜错会把进程
+     * 绑到家里的 WiFi 上（AirPlay 必然连不上，其它应用还会瞬间断网）。
+     */
+    private fun frameworkWifiStatus(): Pair<Boolean, String?> {
+        val ctx = appContext ?: return true to null
+        val wifiManager =
+            runCatching { ctx.getSystemService(android.net.wifi.WifiManager::class.java) }.getOrNull()
+        @Suppress("DEPRECATION")
+        val enabled = runCatching { wifiManager?.isWifiEnabled == true }.getOrDefault(true)
+        val connectivityManager =
+            runCatching {
+                ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            }.getOrNull() ?: return enabled to null
+        val ssid =
+            runCatching {
+                connectivityManager.allNetworks.firstNotNullOfOrNull { network ->
+                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@firstNotNullOfOrNull null
+                    if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                        return@firstNotNullOfOrNull null
+                    }
+                    plainSsid((caps.transportInfo as? android.net.wifi.WifiInfo)?.ssid)
+                        ?: runCatching {
+                            @Suppress("DEPRECATION")
+                            plainSsid(wifiManager?.connectionInfo?.ssid)
+                        }.getOrNull()
+                }
+            }.getOrNull()
+        return enabled to ssid
+    }
+
+    /** 去掉系统给的双引号，把「读不到」的占位值统一成 null。 */
+    private fun plainSsid(raw: String?): String? {
+        val plain = raw?.removePrefix("\"")?.removeSuffix("\"") ?: return null
+        return if (plain.isEmpty() || plain == UNKNOWN_SSID) null else plain
+    }
+
+    /** 没权限读 SSID 时系统给的占位值（与 WifiCarPlayConnector 里的同名常量同义）。 */
+    private const val UNKNOWN_SSID = "<unknown ssid>"
 
     private fun shellWifiDisabled(): Boolean = !shellWifiStatus().first
 
@@ -2283,7 +2352,9 @@ object SessionController {
             appendLog(
                 ">>> [$source] 进入保活等待：车机声明会发 0x4301 但窗口内未到。" +
                     "蓝牙链路保持（最多 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟，从点「启动连接」算起），" +
-                    "期间请保持手机 Wi-Fi 开启；车机多数要看到手机进入它自己的网络后才会下发凭据",
+                    "期间请保持手机 Wi-Fi 开启；车机多数要看到手机进入它自己的网络后才会下发凭据。" +
+                    "若车机屏幕上有「车辆热点 / 热点名称」，抄下 SSID 与密码在系统 WLAN 里手动连上" +
+                    "（提示无法上网时选「保持连接」），App 检测到入网会自动接着走 mDNS",
             )
             var promptedSsid: String? = null
             // 预算从**用户点击**算起：车机反复断链重连时不能每轮重新计 5 分钟（否则永不超时）。
@@ -2307,7 +2378,8 @@ object SessionController {
                             "${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟）· Wi-Fi=" +
                             when {
                                 !wifiEnabled -> "已关闭（请打开——车机看不到手机就不会下发凭据）"
-                                currentSsid.isNullOrEmpty() -> "已开但未连接任何网络"
+                                currentSsid.isNullOrEmpty() ->
+                                    "已开，SSID 读不到（未连网络，或缺定位/附近设备权限）"
                                 else -> "\"$currentSsid\""
                             },
                     )

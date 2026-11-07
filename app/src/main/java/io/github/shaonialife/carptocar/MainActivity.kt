@@ -1103,7 +1103,7 @@ class MainActivity : AppCompatActivity() {
 
         // 版本号走运行时读取：BuildConfig.VERSION_NAME 会被 Kotlin 折叠成字面量，
         // 改版本号后增量编译不重编本类时，日志会印上一版的号（1.2.13 踩过一次）。
-        log("CarPToCarL ${AppVersion.name(this)}（画面=本地劫持 CarLife · 音频=PCM 直通）就绪")
+        log("CarPToCarL ${AppVersion.nameWithTag(this)}（画面=本地劫持 CarLife · 音频=PCM 直通）就绪")
         log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
         // 接收端（WinPlay 等）按真实蓝牙地址过滤设备：解析不到就等于注定 SETUP 403，

@@ -17,8 +17,24 @@ import io.github.shaonialife.carptocar.BuildConfig
  * BuildConfig。结果缓存一次（版本号在进程生命周期内不会变）。
  */
 object AppVersion {
+    /**
+     * 本轮测试包的构建标记（日志里显示成 `1.2.27 #wifi-ssid`）。
+     *
+     * 为什么需要：同一个 `appVersionName` 下会出好几个测试包，而日志头只能读到
+     * **安装包的 versionName**——2026-11-07 就因为一条「1.2.27」的日志误判成新包已生效，
+     * 白白跑了一轮实车（日志里 0x4E09 还在发「未知设备」，那两项修复其实没装）。
+     * 每次打测试包改这里的值；正式发版前清空。
+     */
+    const val BUILD_TAG = "wifi-ssid"
+
     @Volatile
     private var cached: String? = null
+
+    /** 日志/界面展示用：`版本号 #构建标记`（构建标记为空时只有版本号）。 */
+    fun nameWithTag(context: Context): String {
+        val base = name(context)
+        return if (BUILD_TAG.isBlank()) base else "$base #$BUILD_TAG"
+    }
 
     @Suppress("DEPRECATION")
     fun name(context: Context): String {
