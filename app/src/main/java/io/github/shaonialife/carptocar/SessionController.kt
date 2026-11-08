@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar
 import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
+import io.github.shaonialife.carptocar.airplay.FreshAuthPolicy
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
 import io.github.shaonialife.carptocar.airplay.PairingGate
 import io.github.shaonialife.carptocar.airplay.PairingMemory
@@ -327,6 +328,20 @@ object SessionController {
     private var connectRetryScheduled = false
     private var connectRetryAttempt = 0
     private var connectRetryGeneration = 0
+
+    /**
+     * 「复用网络 ≠ 复用认证」：同一接收端连续两轮没建立起会话，下一轮强制重做认证。
+     *
+     * 只影响**认证姿态**（是否还按上一次的配对结论跳过 pair-setup），不影响入网顺序，
+     * 也不会因此拆掉已经在推流的会话。判据与 [PairingMemory] 同一把 key（见
+     * [FreshAuthPolicy] 注释）：两处若各用一套，记忆跳过认证、失败计数却以为在重做，
+     * 正好把「失败两次后必须重做」这个兜底吃掉。
+     */
+    private val freshAuthPolicy = FreshAuthPolicy(FreshAuthPolicy.DEFAULT_FAILURE_THRESHOLD)
+
+    /** 本轮认证归属的接收端 key——成功/失败结算时用它核算连续失败轮次。 */
+    @Volatile
+    private var authReceiverKey: String? = null
 
     /**
      * 推流期间收到的 ctrl 邀请计数与时刻（2026-11-03 ID7 实测）。
@@ -2155,7 +2170,7 @@ object SessionController {
     ): WifiCarPlayConnector.JoinResult {
         val wired = connector.currentNetwork
         if (boundCarSsid == wifi.ssid && wired != null) {
-            appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
+            appendLog("WIFI: 应用专属网络已在位——跳过重复加入（只复用网络，认证照常重做）")
             return WifiCarPlayConnector.JoinResult.Joined(wired)
         }
         return when (val decision = wifiJoinGate.decide(wifi.ssid, android.os.SystemClock.uptimeMillis(), force)) {
@@ -2191,6 +2206,17 @@ object SessionController {
                 //  3) 建议：只有 specifier 真进不来才登记，等系统自己关联（授权过一次
                 //     后长期有效）。排在最后是因为它会让快路先白等一轮。
                 val adopted = connector.adoptIfAlreadyConnected(wifi.ssid)
+                if (adopted != null) {
+                    // 参考实现 OcarPlay 的 CURRENT_WIFI_REUSE 语义：
+                    // `verified_previous_transport=true / fresh_authentication_required=true /
+                    //  network_switch=false` —— 复用的只是**网络**（L2 已关联），
+                    // 认证/会话状态一律不继承，本轮照常从配对重新做一遍。
+                    // 写这一行是为了让「复用」在日志里不再等于「沿用上次结果」。
+                    appendLog(
+                        "WIFI: 复用系统已连热点 \"${wifi.ssid}\"（$adopted）——只复用网络，" +
+                            "认证不继承：本轮仍重新做一遍配对/会话认证",
+                    )
+                }
                 val result =
                     if (adopted != null) {
                         WifiCarPlayConnector.JoinResult.Joined(adopted)
@@ -4038,6 +4064,11 @@ object SessionController {
         // 记下这一轮的完整端点：进程被系统冻结后车机不会再补发 0x4301，
         // 解冻恢复只能靠这份快照重走交接（见 onProcessResumed）。
         lastGoodEndpoint = endpoint
+        // 认证归属：先按端点算一次（配对前就失败的轮次——没入网、端口没开——也要能计数，
+        // 否则「连不上两次」这类最常见的失败根本进不了认证重做的判据）。
+        // 口径与配对阶段一致（[PairingMemory.receiverKey]），那边拿到 mDNS 的 pk 后会覆盖。
+        authReceiverKey =
+            PairingMemory.receiverKey(endpoint.publicKey, endpoint.deviceIdentifier, endpoint.ssid)
         phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
         // 0x4301 同样带热点密码（BMW iD9 不发 0x5703，AP 信息只走这条路）。
@@ -4285,12 +4316,29 @@ object SessionController {
                             client.currentEndpoint.deviceIdentifier,
                             endpoint.ssid,
                         )
-                    val pairingGate =
-                        PairingMemory.decide(
-                            PairingMemory.read(context),
-                            pairingReceiverKey,
-                            System.currentTimeMillis(),
+                    authReceiverKey = pairingReceiverKey
+                    freshAuthPolicy.onAttempt(pairingReceiverKey)
+                    // 连续两轮没建立起会话 → 本轮认证重做：先清掉「上次被车机确定性拒绝」
+                    // 的记忆，再强制走完整 pair-setup。复用网络只代表 L2 通了，不代表车机
+                    // 还是上次那个状态（它可能已删掉本机配对记录 / 自己的状态机复位过）。
+                    val redoAuth = freshAuthPolicy.consumeRedo(pairingReceiverKey)
+                    if (redoAuth) {
+                        PairingMemory.clear(context)
+                        appendLog(
+                            "AUTH: 同一车机连续 ${FreshAuthPolicy.DEFAULT_FAILURE_THRESHOLD} 轮未建立会话" +
+                                "——本轮强制重做认证（清掉配对记忆，不再跳过 pair-setup）",
                         )
+                    }
+                    val pairingGate =
+                        if (redoAuth) {
+                            PairingGate.NORMAL
+                        } else {
+                            PairingMemory.decide(
+                                PairingMemory.read(context),
+                                pairingReceiverKey,
+                                System.currentTimeMillis(),
+                            )
+                        }
                     val noPairing = txtNoPairing || pairingGate == PairingGate.SKIP_SETUP
                     appendLog(
                         "PROTO 配对策略=$pairingPolicy" +
@@ -5095,6 +5143,22 @@ object SessionController {
                         appendLog(connectBudget.summary())
                     }
                     sessionStarting.set(false)
+                    // 认证轮次结算（「只复用网络、认证重做」的判据来源）。
+                    // 用户主动取消 / 被新一轮顶掉不算车机失败——拿它推「认证重做」
+                    // 只会在本来能连的车机上白多花一轮 120s 配对窗口。
+                    authReceiverKey?.let { key ->
+                        val established = videoSender?.isRunning == true
+                        when {
+                            established -> freshAuthPolicy.onResult(key, true)
+                            !connectCancelled ->
+                                if (freshAuthPolicy.onResult(key, false)) {
+                                    appendLog(
+                                        "RETRY: 同一车机已连续 ${FreshAuthPolicy.DEFAULT_FAILURE_THRESHOLD} 轮" +
+                                            "未建立会话——下一轮认证重做（不再沿用上一次的配对结论）",
+                                    )
+                                }
+                        }
+                    }
                     // 配对未成功建立推流（fail/异常/start 失败提前退出）时解除静默降噪，
                     // 否则 BT-C 会永久停在门闸外、连真车路径失效。
                     // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
@@ -5139,7 +5203,7 @@ object SessionController {
         // 1.2.10 加的自动重绑对它们等于不存在（只有 0x5703 车型才生效）。
         lastCarWifi = wifiConfig
         if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
-            appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
+            appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定（只复用网络，认证照常重做）")
             continueWithNetwork(true)
         } else {
             // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。

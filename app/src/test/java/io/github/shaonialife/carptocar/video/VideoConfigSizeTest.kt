@@ -119,14 +119,34 @@ class VideoConfigSizeTest {
         val line = VideoSender.describeSpsConfig(null, 1412 to 654, "缓存csd兜底", false)
         assertTrue("解析失败必须出现：$line", line.contains("解析失败"))
         assertTrue("csd 来源必须可见：$line", line.contains("缓存csd兜底"))
-        assertTrue("声明尺寸必须可见：$line", line.contains("1412x654"))
+        assertTrue("声明尺寸必须可见：$line", line.contains("declared=1412x654"))
+        assertTrue("未解析时要显式告警：$line", line.contains("⚠"))
     }
 
     @Test
     fun spsDiagnosisMarksMismatchAndMatch() {
-        val mismatch = VideoSender.describeSpsConfig(1280 to 720, 1412 to 654, "当期帧自带SPS", true)
-        assertTrue("不一致要显式告警：$mismatch", mismatch.contains("⚠"))
-        val match = VideoSender.describeSpsConfig(1412 to 654, 1412 to 654, "当期帧自带SPS", true)
-        assertTrue("一致要显式确认：$match", match.contains("✓与 SPS 一致"))
+        // 声明的判据是 visible（去裁剪后的真实画面），不是 coded（宏块对齐值）。
+        val aligned = VideoSender.SpsSize(codedWidth = 1424, codedHeight = 656, visibleWidth = 1412, visibleHeight = 654)
+        val match = VideoSender.describeSpsConfig(aligned, 1412 to 654, "当期帧自带SPS", true)
+        assertTrue("一致要显式确认：$match", match.contains("✓与 visible 一致"))
+        assertTrue("coded 与 visible 必须分开：$match", match.contains("coded=1424x656") && match.contains("visible=1412x654"))
+        assertTrue("裁剪量必须可见：$match", match.contains("裁剪 12x2"))
+
+        val smaller = VideoSender.SpsSize(codedWidth = 1280, codedHeight = 720, visibleWidth = 1280, visibleHeight = 720)
+        val mismatch = VideoSender.describeSpsConfig(smaller, 1412 to 654, "当期帧自带SPS", true)
+        assertTrue("不一致要显式告警：$mismatch", mismatch.contains("⚠与 visible 不一致"))
+        assertTrue("差值要带符号：$mismatch", mismatch.contains("+132x-66"))
+    }
+
+    @Test
+    fun spsCropIsReportedEvenWithoutMismatch() {
+        // 对齐值本身就是画面尺寸时也要说清楚「无裁剪」，否则 coded 与 visible 相同会被误读成解析错。
+        val noCrop = VideoSender.SpsSize(codedWidth = 1280, codedHeight = 720, visibleWidth = 1280, visibleHeight = 720)
+        val line = VideoSender.describeSpsConfig(noCrop, 1280 to 720, "本机编码器输出SPS", true)
+        assertTrue("无裁剪也要写出来：$line", line.contains("无裁剪"))
+
+        val insane = VideoSender.SpsSize(codedWidth = 272, codedHeight = 112, visibleWidth = 272, visibleHeight = 112)
+        val bad = VideoSender.describeSpsConfig(insane, 1412 to 654, "本机编码器输出SPS", false)
+        assertTrue("不合理尺寸要单独标注：$bad", bad.contains("⚠visible 不合理"))
     }
 }

@@ -311,7 +311,7 @@ internal object CarLifeProtocol {
     const val I_FRAME_INTERVAL_DEFAULT = 20
 
     /**
-     * 特征配置：CONNECT_TYPE + I 帧间隔 + 分辨率直通 + 歌词支持。
+     * 特征配置：CONNECT_TYPE + I 帧间隔 + 分辨率直通 + 内容加密 + 歌词支持。
      *
      * 2026-10-25 逆向 `FeatureConfigManager.excute()`（手机引擎）实证两条关键开关：
      *  - `DISABLE_RESOLUTION_OPTION = 1` → `Recorder.useVehicleResolution = true`：
@@ -320,17 +320,24 @@ internal object CarLifeProtocol {
      *    **21:9 车机不再被横向拉伸**。
      *  - `MEDIA_LYRIC_SUPPORT = 1` → 引擎 dispatch `carlife_other_media_lyric_support`，
      *    开启歌词支持。
+     *
+     * 2026-11-08 补 `CONTENT_ENCRYPTION = 1`：参考实现 OcarPlay（CarPlay 接收端）的
+     * 同一份特征清单里带这一项，而我们此前只发了 `DISABLE_RESOLUTION_OPTION`。
+     * 它属于引擎侧「内容是否加密传输」的开关，缺失时部分车机固件会在建流后挑剔链路；
+     * 与 `DISABLE_RESOLUTION_OPTION` 同批下发，行为差异只能靠 A/B 观察，故单列一版。
      */
     fun featureConfig(
         connectType: Int = CONNECT_TYPE_WIFI,
         iFrameInterval: Int = I_FRAME_INTERVAL_DEFAULT,
         useVehicleResolution: Boolean = true,
         mediaLyricSupport: Boolean = true,
+        contentEncryption: Boolean = true,
     ): ByteArray {
         val items = ArrayList<ByteArray>()
         items += pbString(1, "I_FRAME_INTERVAL") + pbVarint(2, iFrameInterval)
         items += pbString(1, "CONNECT_TYPE") + pbVarint(2, connectType)
         items += pbString(1, "DISABLE_RESOLUTION_OPTION") + pbVarint(2, if (useVehicleResolution) 1 else 0)
+        items += pbString(1, "CONTENT_ENCRYPTION") + pbVarint(2, if (contentEncryption) 1 else 0)
         items += pbString(1, "MEDIA_LYRIC_SUPPORT") + pbVarint(2, if (mediaLyricSupport) 1 else 0)
         var list = ByteArray(0)
         for (item in items) list += pbBytes(2, item)

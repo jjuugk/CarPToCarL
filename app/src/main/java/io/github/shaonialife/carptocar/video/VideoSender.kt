@@ -990,8 +990,8 @@ class VideoSender(
         val live = liveSize?.invoke()
         val parsed = parseSpsDimensions(sps)
         val spsSane = parsed != null &&
-            parsed.first in 320..4096 && parsed.second in 180..2304
-        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, parsed)
+            parsed.visibleWidth in 320..4096 && parsed.visibleHeight in 180..2304
+        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, parsed?.visible)
         // SPS 诊断**每次发 config 都打**，包括解析失败的情况。
         // 旧实现只在「解析出来且与声明不一致」时打，于是「解析失败」和「恰好一致」
         // 在日志里长得一模一样——排查时无法判断车机在让屏那一刻拿到的 avcC 究竟
@@ -1053,14 +1053,22 @@ class VideoSender(
     /**
      * 从 H.264 SPS NAL 解析画面宽高（去掉 0x67 起始码后的 RBSP）。
      *
+     * 返回**两个**尺寸，这是参考 OcarPlay 的做法后补上的一项诊断（2026-11-08）：
+     *  - `coded`：宏块对齐后的编码尺寸（`pic_width_in_mbs * 16` 那一层，未裁剪）；
+     *  - `visible`：再减掉 `frame_cropping` 之后的真实画面（1412×654 就出在这一层）。
+     *
+     * 只报 visible 时，日志里分不清「车机看到的是 1424×656 还是 1412×654」——而这恰好
+     * 是黑屏/拉伸排查里最常要回答的问题。两个都给，再和 `declared` 并排，一眼能看出
+     * 声明取的到底是哪一层。
+     *
      * 按 ITU-T H.264 语法：跳过 profile/constraints/level（3 字节）→ 读 exp-Golomb
      * 得到 seq_parameter_set_id → 若 profile 是 100/110/122/244/44/83/86/118/128/138/139/134
      * 则先读 chroma_format_idc + 可能的扩展 → log2_max_frame_num_minus4 →
      * pic_order_cnt_type 相关 → max_num_ref_frames → gaps_in_frame_num_value_allowed_flag →
      * pic_width_in_mbs_minus1 → pic_height_in_map_units_minus1 → frame_mbs_only_flag 等。
-     * 返回 (宽, 高)，解析失败返回 null。
+     * 解析失败返回 null。
      */
-    private fun parseSpsDimensions(sps: ByteArray): Pair<Int, Int>? {
+    private fun parseSpsDimensions(sps: ByteArray): SpsSize? {
         if (sps.size < 8) return null
         return runCatching {
             // 1) 重建 RBSP：跳过 NAL 头，并剔除 emulation prevention bytes（00 00 03 → 00 00）。
@@ -1165,6 +1173,9 @@ class VideoSender(
 
             var width = widthMbs * 16
             var height = heightMapUnits * 16 * (if (frameMbsOnly == 1) 1 else 2)
+            // coded = 裁剪前的宏块对齐值，先留一份；visible 才是画面真实尺寸。
+            val codedWidth = width
+            val codedHeight = height
             // frame_cropping：编码器常把画面 padding 到宏块边界，再用裁剪字段声明真实尺寸。
             // 例如 1412x654 会被编码成 1424x656，再裁掉 12x2——不处理就会得到对齐值。
             if (readBit() == 1) {
@@ -1175,7 +1186,7 @@ class VideoSender(
                 width -= (cropLeft + cropRight) * 2
                 height -= (cropTop + cropBottom) * 2 * (if (frameMbsOnly == 1) 1 else 2)
             }
-            width to height
+            SpsSize(codedWidth, codedHeight, width, height)
         }.getOrNull()
     }
 
@@ -1325,6 +1336,28 @@ class VideoSender(
         return units
     }
 
+    /**
+     * SPS 解析结果：**coded 与 visible 是两个不同的数**。
+     *
+     *  - [codedWidth]/[codedHeight]：宏块对齐后的编码尺寸（1424×656 这一层）；
+     *  - [visibleWidth]/[visibleHeight]：减掉 `frame_cropping` 的真实画面（1412×654）。
+     *
+     * 参考 OcarPlay 的 `coded= / visible= / declared=` 三值口径——它判「声明是否可信」
+     * 比的是 **visible vs declared**，coded 只作对齐诊断（宏块 padding 不是画面）。
+     */
+    data class SpsSize(
+        val codedWidth: Int,
+        val codedHeight: Int,
+        val visibleWidth: Int,
+        val visibleHeight: Int,
+    ) {
+        val coded: Pair<Int, Int> get() = codedWidth to codedHeight
+        val visible: Pair<Int, Int> get() = visibleWidth to visibleHeight
+
+        /** 裁剪掉的像素数（宽, 高）；都 0 表示编码尺寸本身就是对齐的。 */
+        val cropped: Pair<Int, Int> get() = (codedWidth - visibleWidth) to (codedHeight - visibleHeight)
+    }
+
     companion object {
         private const val HEADER_LEN = 128
         private const val OP_FRAME = 0
@@ -1435,29 +1468,41 @@ class VideoSender(
         }
 
         /**
-         * SPS 诊断行（纯函数，便于单测）：**无论解析成功与否都返回一行**。
+         * 尺寸诊断行（纯函数，便于单测）：**无论解析成功与否都返回一行**。
          *
          * 旧实现只在「SPS 解析出来且 ≠ 声明」时才打日志，导致「解析失败」与「恰好
          * 一致」在日志里完全无法区分。2026-11-06 14:00 那份日志正是因此无法确定
          * 车机在让屏时刻收到的 avcC 到底是什么尺寸。现在把 csd 来源（当期帧自带 /
          * 缓存兜底 / 本机编码器）也一起写进去，一次导日志即可定案。
+         *
+         * 2026-11-08 起按 OcarPlay 的三值口径排成一行：`coded= / visible= / declared=`，
+         * 判据是 **declared vs visible**（对齐值只是编码器的 padding，不是画面尺寸）。
          */
         internal fun describeSpsConfig(
-            parsed: Pair<Int, Int>?,
+            parsed: SpsSize?,
             cfg: Pair<Int, Int>,
             csdSource: String,
             sane: Boolean,
         ): String {
-            val parsedText = parsed?.let { "${it.first}x${it.second}" } ?: "解析失败"
+            val codedText = parsed?.let { "${it.codedWidth}x${it.codedHeight}" } ?: "解析失败"
+            val visibleText = parsed?.let { "${it.visibleWidth}x${it.visibleHeight}" } ?: "解析失败"
+            val cropText =
+                parsed?.let {
+                    val (dw, dh) = it.cropped
+                    if (dw != 0 || dh != 0) "（宏块对齐裁剪 ${dw}x$dh）" else "（无裁剪）"
+                } ?: ""
+            val delta = { d: Int -> if (d > 0) "+$d" else "$d" }
             val verdict =
-                if (parsed == null || parsed.first != cfg.first || parsed.second != cfg.second) {
-                    " ⚠ 与 SPS 不一致/未解析"
-                } else {
-                    " ✓与 SPS 一致"
+                when {
+                    parsed == null -> " ⚠声明无法与 visible 比较（SPS 未解析）"
+                    !sane -> " ⚠visible 不合理（应 320..4096 × 180..2304）"
+                    parsed.visibleWidth == cfg.first && parsed.visibleHeight == cfg.second -> " ✓与 visible 一致"
+                    else ->
+                        " ⚠与 visible 不一致（${delta(cfg.first - parsed.visibleWidth)}x" +
+                            "${delta(cfg.second - parsed.visibleHeight)}）"
                 }
-            return "VIDEO: SPS=$parsedText" +
-                "（${if (sane) "宏块对齐值，仅诊断" else "不合理/解析失败"}）" +
-                " csd来源=$csdSource → VideoConfig 声明 ${cfg.first}x${cfg.second}$verdict"
+            return "VIDEO: 尺寸 coded=$codedText visible=$visibleText declared=${cfg.first}x${cfg.second}" +
+                cropText + " ·" + verdict + " · csd来源=$csdSource"
         }
 
         /**
