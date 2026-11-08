@@ -25,7 +25,7 @@ object AppVersion {
      * 白白跑了一轮实车（日志里 0x4E09 还在发「未知设备」，那两项修复其实没装）。
      * 每次打测试包改这里的值；正式发版前清空。
      */
-    const val BUILD_TAG = ""
+    const val BUILD_TAG = "oneperm"
 
     @Volatile
     private var cached: String? = null

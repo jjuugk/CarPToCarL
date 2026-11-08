@@ -184,18 +184,133 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { ssidInput.setText(ssid) }
     }
 
+    /**
+     * 单权限申请入口。**只用于「通知」这类不属于连接前提的权限。**
+     *
+     * 连接前提的权限不能走这里：Android 12+ 的 `BLUETOOTH_CONNECT`、
+     * `NEARBY_WIFI_DEVICES`（以及 12/12L 的定位）是各自独立的条目，逐个申请就会
+     * 连续弹出好几个内容几乎一样的系统框（框里都带应用名），用户看到的是
+     * 「怎么一直要我点」。连接前统一走 [connectionPermissionLauncher]——
+     * 一次请求、一个框。
+     */
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("BLUETOOTH_CONNECT 授权: $granted")
-            if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
-                proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
+            log("权限申请结果: $granted")
+        }
+
+    /**
+     * 连接车机的运行时权限，**一次性打包申请**。
+     *
+     * 系统对同一权限组（Android 13+ 的「附近的设备」组）只显示一个授权框，
+     * 所以把 `BLUETOOTH_CONNECT` 与 `NEARBY_WIFI_DEVICES` 放进同一次请求里，
+     * 用户点一次「允许」就够；分成两次请求则会连弹两个框，正是「一直提示」的根源。
+     */
+    private val connectionPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            log(
+                "权限申请结果: " +
+                    result.entries.joinToString { "${it.key.substringAfterLast('.')}=${it.value}" },
+            )
+            val missing = result.filterValues { !it }.keys
+            when {
+                missing.isNotEmpty() -> {
+                    connectionPermissionDenied.set(true)
+                    promptConnectionPermissionDenied(missing)
+                }
+
+                pendingStartAfterPermission.compareAndSet(true, false) -> {
+                    proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
+                }
             }
         }
 
-    /** 蓝牙权限授权后自动继续启动连接。 */
-    private val pendingStartAfterBtPermission =
+    /** 权限授权后自动继续启动连接（「只想开个开关」的路径上不要置位）。 */
+    private val pendingStartAfterPermission =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
+
+    /**
+     * 本进程内已被拒绝过：**不再重复弹系统框**。
+     *
+     * 重复弹没有意义——系统从第三次起自己就不显示了，调用只会立刻返回「未授权」，
+     * 白白让用户以为程序在反复索要权限。改为记日志 + 一次自家提示（带「去设置」）。
+     */
+    private val connectionPermissionDenied =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
+    /** 「缺权限，请去设置」这条自家提示每个进程只弹一次，之后只记日志。 */
+    private val permissionHintShown =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
+    private fun isGranted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * 连接前必须拿到的权限（缺哪个列哪个）。
+     *
+     * - 13+：`BLUETOOTH_CONNECT`（iAP2 控制通道）+ `NEARBY_WIFI_DEVICES`
+     *   （`WifiNetworkSpecifier`／热点建议；缺了它 `requestNetwork` 会**静默挂起**，
+     *   既不回调也不抛异常，现场表现是「发起加入后一条日志都没有」）；
+     * - 12/12L：`BLUETOOTH_CONNECT` + `ACCESS_FINE_LOCATION`（那时应用专属网络
+     *   还靠定位权限来判定可连接的 WiFi）。
+     */
+    private fun requiredConnectionPermissions(): List<String> {
+        val missing = mutableListOf<String>()
+        if (!isGranted(Manifest.permission.BLUETOOTH_CONNECT)) {
+            missing += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (!isGranted(Manifest.permission.NEARBY_WIFI_DEVICES)) {
+                missing += Manifest.permission.NEARBY_WIFI_DEVICES
+            }
+        } else if (!isGranted(Manifest.permission.ACCESS_FINE_LOCATION)) {
+            missing += Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        return missing
+    }
+
+    /**
+     * 权限被拒后的唯一提示：说明缺哪一项、为什么必须给，并给一个「去设置」按钮。
+     *
+     * 提示只弹一次（[permissionHintShown]），避免每次点「启动连接」都被自己的框挡住。
+     */
+    private fun promptConnectionPermissionDenied(missing: Collection<String>) {
+        if (!permissionHintShown.compareAndSet(false, true)) return
+        val names =
+            missing.joinToString("、") { permission ->
+                when (permission.substringAfterLast('.')) {
+                    "BLUETOOTH_CONNECT" -> "附近的蓝牙设备"
+                    "NEARBY_WIFI_DEVICES" -> "附近的 WLAN 设备"
+                    "ACCESS_FINE_LOCATION" -> "位置信息"
+                    else -> permission.substringAfterLast('.')
+                }
+            }
+        DarkMessageDialog.show(
+            activity = this,
+            title = "缺少「$names」权限",
+            message =
+                "没有这项权限，系统不允许 App 加入车机热点，也不允许通过蓝牙与车机通信，" +
+                    "连接必然失败。\n\n这是 Android 的系统级授权，只能由你点一次「允许」，" +
+                    "没有任何应用能绕过。请到「设置 > 应用 > 权限 > 附近的设备」里打开，" +
+                    "然后重新点「启动连接」。",
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("知道了") {},
+                    DarkMessageDialog.Action("去设置", DarkMessageDialog.Emphasis.PRIMARY) {
+                        runCatching {
+                            startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    android.net.Uri.fromParts("package", packageName, null),
+                                ),
+                            )
+                        }.onFailure { log("权限: 无法打开应用详情页，请手动到设置里授予") }
+                    },
+                ),
+        )
+    }
 
     /** 「取消连接」确认弹窗（防误触）：中止当前连接尝试并断开蓝牙/WiFi 链路。 */
     private fun promptCancelConnecting() {
@@ -343,91 +458,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关 → WLAN 位置权限（仅 Android 12/12L）。
-     * 任一不满足都弹窗引导（蓝牙关闭时可一键跳系统蓝牙设置），通过后回调继续。
+     * 启动连接的前置检查：**权限（一次申请完）** → 位置服务（仅 Android 12/12L）
+     * → 蓝牙开关。任一不满足都引导（蓝牙关闭可一键跳系统设置），通过后回调继续。
+     *
+     * 权限这里只调用一次 [connectionPermissionLauncher]：以前是「先申请蓝牙权限、
+     * 授权后再申请 WLAN 权限」两段接力，于是用户会连着看到两个内容几乎一样的系统框
+     * （都带应用名），看起来就像「一直提示要与 CarPToCarL 配合的设备」。
      */
     private fun ensureBluetoothReady(onReady: () -> Unit) {
-        val granted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
-                PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            pendingStartAfterBtPermission.set(true)
-            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-            return
-        }
-        ensureWifiLocationReady {
-            val on =
-                try {
-                    (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
-                        .adapter
-                        ?.isEnabled == true
-                } catch (_: SecurityException) {
-                    true
-                }
-            if (!on) {
-                DarkMessageDialog.show(
-                    activity = this,
-                    title = "蓝牙未开启",
-                    message = "与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。",
-                    actions =
-                        listOf(
-                            DarkMessageDialog.Action("取消") {},
-                            DarkMessageDialog.Action("去开启蓝牙", DarkMessageDialog.Emphasis.PRIMARY) {
-                                runCatching {
-                                    startActivity(
-                                        android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
-                                    )
-                                }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
-                            },
-                        ),
+        val missing = requiredConnectionPermissions()
+        if (missing.isNotEmpty()) {
+            if (connectionPermissionDenied.get()) {
+                log(
+                    "权限: 仍缺 " +
+                        missing.joinToString { it.substringAfterLast('.') } +
+                        "——本次不再弹系统授权框（重复弹没有用，只能去设置里给）",
                 )
-                log("BT: 蓝牙未开启——本次连接未发起")
-                return@ensureWifiLocationReady
-            }
-            onReady()
-        }
-    }
-
-    /**
-     * 应用专属网络（WifiNetworkSpecifier）在 Android 12/12L 需要位置权限与位置服务；
-     * 13+ 由 NEARBY_WIFI_DEVICES 接管、不再要求定位。缺权限时系统会直接
-     * `requestNetwork` 失败（表现为「未能加入车机热点」，很难自查），因此前置拦截。
-     */
-    private fun ensureWifiLocationReady(onReady: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+：应用专属网络（WifiNetworkSpecifier）与 WiFi 建议
-            // （WifiNetworkSuggestion）**都**要求 NEARBY_WIFI_DEVICES 运行时权限。
-            // 旧实现以为 13+ 不需要就原地放行——结果 requestNetwork 在无权限时
-            // 静默挂起：既不回调 onAvailable 也不回调 onUnavailable，也不抛异常。
-            // 2026-10-29 BMW iD9 日志里连续 8 轮「发起加入后一条日志都没有」
-            // 就是这个形态，必须在这里前置拦截。
-            val granted =
-                ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) ==
-                    PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                pendingStartAfterLocationPermission.set(true)
-                nearbyWifiPermissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+                promptConnectionPermissionDenied(missing)
                 return
             }
-            onReady()
+            pendingStartAfterPermission.set(true)
+            connectionPermissionLauncher.launch(missing.toTypedArray())
             return
         }
-        val granted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            pendingStartAfterLocationPermission.set(true)
-            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-            return
-        }
-        val locationOn =
-            try {
-                androidx.core.location.LocationManagerCompat
-                    .isLocationEnabled(getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager)
-            } catch (_: Exception) {
-                true
-            }
-        if (!locationOn) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && !locationServiceEnabled()) {
             DarkMessageDialog.show(
                 activity = this,
                 title = "需要开启位置服务",
@@ -450,33 +504,57 @@ class MainActivity : AppCompatActivity() {
             log("WIFI: 位置服务未开启——Android 12 下应用专属网络不可用，本次连接未发起")
             return
         }
+        val on =
+            try {
+                (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                    .adapter
+                    ?.isEnabled == true
+            } catch (_: SecurityException) {
+                true
+            }
+        if (!on) {
+            DarkMessageDialog.show(
+                activity = this,
+                title = "蓝牙未开启",
+                message = "与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。",
+                actions =
+                    listOf(
+                        DarkMessageDialog.Action("取消") {},
+                        DarkMessageDialog.Action("去开启蓝牙", DarkMessageDialog.Emphasis.PRIMARY) {
+                            runCatching {
+                                startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
+                                )
+                            }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                        },
+                    ),
+            )
+            log("BT: 蓝牙未开启——本次连接未发起")
+            return
+        }
         onReady()
     }
 
-    /** 位置权限授权后自动继续启动连接（仅 Android 12/12L）。 */
-    private val pendingStartAfterLocationPermission =
-        java.util.concurrent.atomic
-            .AtomicBoolean(false)
-
-    private val locationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log("ACCESS_FINE_LOCATION 授权: $granted")
-            if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
-                proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
-            }
+    /** 位置服务是否开启（仅 Android 12/12L 的应用专属网络需要）。 */
+    private fun locationServiceEnabled(): Boolean =
+        try {
+            androidx.core.location.LocationManagerCompat
+                .isLocationEnabled(getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager)
+        } catch (_: Exception) {
+            true
         }
 
-    /** Android 13+ 的 NEARBY_WIFI_DEVICES 授权后自动续跑（与位置权限共用同一 pending 标志）。 */
-    private val nearbyWifiPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            log(
-                "NEARBY_WIFI_DEVICES 授权: $granted" +
-                    if (granted) "" else "——无法加入车机热点，请到「设置 > 应用 > 权限 > 附近的设备」授予",
-            )
-            if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
-                proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
-            }
-        }
+    /*
+     * 这里原本还有 ensureWifiLocationReady()：权限检查（13+ 的 NEARBY_WIFI_DEVICES /
+     * 12/12L 的 ACCESS_FINE_LOCATION）+ 位置服务检查，各自配一个 launcher，授权后
+     * 再接力回连接流程。
+     *
+     * 2026-11-08 合并：权限部分收进 requiredConnectionPermissions() +
+     * connectionPermissionLauncher（一次请求，系统只弹一个「附近的设备」框），
+     * 位置服务检查上移进 ensureBluetoothReady()。原因是旧结构在首次连接时会
+     * 依次弹「蓝牙」「附近的 WLAN 设备」「通知」三个系统框，用户体感就是
+     * 「一直提示要与 CarPToCarL 配合的设备」。
+     */
 
     /**
      * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面，
@@ -591,24 +669,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
+    /** 「启动连接」主体（权限已在 [ensureBluetoothReady] 里一次申请完；会话启动交给 [SessionController]，幂等不双开）。 */
     private fun startConnectionNow() {
         runOnUiThread {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
+            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活。
+            // **每个进程只问一次**——以前每点一次「启动连接」就问一遍，用户会以为
+            // App 在反复索要权限（这个框同样带应用名）。拒绝后不再纠缠。
             if (Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
-                PackageManager.PERMISSION_GRANTED
+                notificationPermissionAsked.compareAndSet(false, true) &&
+                !isGranted("android.permission.POST_NOTIFICATIONS")
             ) {
                 permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
             }
             SessionController.startConnection(this)
         }
     }
+
+    /** 通知权限是否已经问过（只问一次，拒绝也不再打扰）。 */
+    private val notificationPermissionAsked =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -996,14 +1076,13 @@ class MainActivity : AppCompatActivity() {
                         "——占位记录已撤下（不影响已建立的控制链路）"
                     },
             )
-            if (checked &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
+            val missingForSwitch = if (checked) requiredConnectionPermissions() else emptyList()
+            if (missingForSwitch.isNotEmpty()) {
                 // 这里只申请权限，**不能**走 ensureBluetoothReady：它授权成功后会直接
-                // 发起整轮连接（pendingStartAfterBtPermission），而用户只是想开个开关。
+                // 发起整轮连接（pendingStartAfterPermission），而用户只是想开个开关。
+                // 分组申请（一次一个系统框），且不置 pending → 不会自动开始连接。
                 // 授权后由兼容模式看门狗在 30 秒内把占位记录挂上。
-                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                connectionPermissionLauncher.launch(missingForSwitch.toTypedArray())
             }
         }
 
@@ -1104,11 +1183,10 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-        }
+        // 这里原本「启动即申请 BLUETOOTH_CONNECT」：结果是**每打开一次 App 就弹一次
+        // 系统「附近的设备」框**（框里带应用名），用户会以为程序在反复索要权限。
+        // 权限改到真正要用的时候（点「启动连接」/ 打开自动连接）一次性申请，
+        // 见 ensureBluetoothReady()。
 
         // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 移除后没有静默授予通道，
         // 需要用户自己在系统设置里打开；这里不再阻塞启动。
