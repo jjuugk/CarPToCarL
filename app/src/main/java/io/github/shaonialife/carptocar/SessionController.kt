@@ -11,6 +11,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
+import io.github.shaonialife.carptocar.audio.MicUplink
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
@@ -57,6 +58,7 @@ import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
 import io.github.shaonialife.carptocar.util.ConnectStage
 import io.github.shaonialife.carptocar.util.DebugFileLog
+import io.github.shaonialife.carptocar.util.MicDumpWriter
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.video.StreamFps
@@ -229,18 +231,27 @@ object SessionController {
     private const val SILENT_JOIN_MAX_MISSES = 2
 
     /**
-     * 车机麦克风上行探针开关（**诊断用，正式发版前关掉**）。
+     * 车机麦克风上行开关（**本轮验证用**）。
      *
-     * 背景：车机 `/info` 的四路音频档都声明了输入位图（compatibility `in=0x54`、
-     * default/telephony `in=0x30000050`、speechRecognition `in=0x20000040`），说明它
-     * **声称**愿意把麦克风推给手机；但本项目从未实建过 `input=true` 的流，所以
-     * 「实际推不推」一直是空白。开这个开关后每轮会话跑一次探针（只数数据报），
-     * 结论看日志里 `MIC: 结论——…` 那一行。
+     * 打开后每轮会话：建音频流之前先绑一个本地 UDP 端口，把端口写进主音频 SETUP 的
+     * `dataPort`（真 iPhone 要麦就是这个写法，不是另开 `input=true` 的流），
+     * 建流成功后由 [MicUplink] 收包、解密、把 PCM 落成 wav 到 `下载/CarPToCarL`。
      *
-     * 为什么不能少这一步：车机若不推，后面「解密 → PCM → 灌进 CarLife 9242」全是白工；
-     * 而且输入流的端口方向与下行相反（车机往我们的端口发），参数必须现场试。
+     * 验证内容只有一件：**车机到底推不推**。日志看 `MIC: …`，wav 用耳朵听。
+     * 通了之后再谈「灌进 CarLife 9242」——那一步引擎认不认注入还是未知。
+     *
+     * 风险控制：端口是**可选字段**，只在开关打开时出现；关掉就退回纯下行，
+     * 与 1.2.31 的行为完全一致。看到下行音频出问题就先把这里改 false。
      */
-    private const val MIC_PROBE_ENABLED = true
+    private const val MIC_UPLINK_ENABLED = true
+
+    /**
+     * 旧的「独立 `input=true` 流」探针开关（**已停用**，代码先留着）。
+     *
+     * 2026-11-08 由 xcertplay 的接收端实现纠正：真 iPhone 不这么要麦，车机很可能不认；
+     * 而且它会额外建一条同类型的流，和正常的音频流抢车机资源。新机制见 [MIC_UPLINK_ENABLED]。
+     */
+    private const val MIC_PROBE_ENABLED = false
 
     /** 探针启动前的等待：音频流刚建好时车机在做资源仲裁，抢跑会被拒。 */
     private const val MIC_PROBE_DELAY_MS = 12_000L
@@ -775,6 +786,15 @@ object SessionController {
 
     @Volatile
     var audioSender: AudioSender? = null
+
+    /**
+     * 车机麦克风上行监听（收包 + 解密 + 落 wav）。
+     *
+     * 与 [audioSender] 成对存在：端口在音频 SETUP 里声明，所以必须先有 [MicUplink] 才能建流；
+     * 流的生命周期与音频流一致（换流/断会话时 stop）。
+     */
+    @Volatile
+    var micUplink: MicUplink? = null
 
     @Volatile
     var currentClient: AirPlayClient? = null
@@ -1903,6 +1923,10 @@ object SessionController {
         ScreenDimmer.setSessionActive(false)
         audioSender?.stop()
         audioSender = null
+        // 麦克风上行跟着音频流一起收：车机那边流一停就不会再推，留着端口空转没意义。
+        // stop() 里会落 wav 并打一行 `MIC: 结论——…`，所以必须在会话日志收尾之前调。
+        micUplink?.stop()
+        micUplink = null
         // 通话场景标记必须随会话清掉：留着的话下一轮会被当成「已经在通话档」，
         // 进入通话时 switchAudioScene 直接返回 true，一条通话流都不会建。
         audioInCallMode = false
@@ -2958,29 +2982,53 @@ object SessionController {
             // 两条完全不同的通路，前者不被接受时应当立刻退到后者，而不是让用户白连一次。
             var chosen: AudioProfile? = null
             var streamInfo: AirPlayClient.AudioStreamInfo? = null
-            for (candidate in ordered) {
-                val result = client.runAudioStream(sharedSecret, candidate, tuning)
-                if (result != null) {
-                    chosen = candidate
-                    streamInfo = result
-                    break
+            // 麦克风上行：端口必须**在 SETUP 之前**绑好——车机就是照这个端口往我们这边推麦，
+            // 建流后再绑就没有声明的机会了。绑不上（极少）就退回纯下行，不影响现有功能。
+            val uplink =
+                if (MIC_UPLINK_ENABLED) {
+                    MicUplink(
+                        channels = 1,
+                        log = { line -> appendLog(line) },
+                        dumpWav = { data, rate, ch -> MicDumpWriter.writeWav(context.applicationContext, data, rate, ch) },
+                    ).takeIf { it.open() }
+                } else {
+                    null
                 }
-                // SETUP 被拒不等于「车机不兼容」：可能只是资源仲裁/网络抖动，
-                // 不能据此把整台车机的音频判死（置 disabled 只认「拆链」证据）。
-                AudioProfileMemory.recordRejected(
-                    context.applicationContext,
-                    identity,
-                    candidate.key,
-                    ordered.map { it.key }.toSet(),
-                    markExhausted = false,
-                )
-                appendLog("AUDIO: 档位 ${candidate.label} 协商失败——本会话继续试下一档")
+            try {
+                for (candidate in ordered) {
+                    val result = client.runAudioStream(sharedSecret, candidate, tuning, micPort = uplink?.localPort ?: 0)
+                    if (result != null) {
+                        chosen = candidate
+                        streamInfo = result
+                        break
+                    }
+                    // SETUP 被拒不等于「车机不兼容」：可能只是资源仲裁/网络抖动，
+                    // 不能据此把整台车机的音频判死（置 disabled 只认「拆链」证据）。
+                    AudioProfileMemory.recordRejected(
+                        context.applicationContext,
+                        identity,
+                        candidate.key,
+                        ordered.map { it.key }.toSet(),
+                        markExhausted = false,
+                    )
+                    appendLog("AUDIO: 档位 ${candidate.label} 协商失败——本会话继续试下一档")
+                }
+            } catch (error: Exception) {
+                uplink?.stop()
+                throw error
             }
             val profile = chosen
             val audio = streamInfo
             if (profile == null || audio == null) {
+                // 没有音频流就没人往那个端口推麦，收尾掉（会打一行「一包没收到」）
+                uplink?.stop()
                 appendLog("AUDIO: 全部候选档位协商失败（共 ${ordered.size} 档）——本次仅推视频")
                 return false
+            }
+            if (uplink != null) {
+                // 密钥的盐是这条流的 streamConnectionID，必须用建流后返回的那个值
+                uplink.start(sharedSecret, audio.streamConnectionId, audio.sampleRate)
+                micUplink = uplink
             }
             activeAudioProfile = profile
             activeAudioReceiverKey = identity
@@ -3048,7 +3096,8 @@ object SessionController {
         appendLog("AUDIO: $reason → 重建音频流（接收端音频输出在通话期间被释放，需新建流才会重开）")
         val info =
             try {
-                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF)
+                // 重建时把上行端口继续声明进去：不然车机以为手机不要麦了，通话里反而没上行
+                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = micUplink?.localPort ?: 0)
             } catch (error: Exception) {
                 appendLog("AUDIO: 重建协商异常 - ${error.message}")
                 null
@@ -3057,6 +3106,8 @@ object SessionController {
             appendLog("AUDIO: 重建协商失败——保持原音频流继续推（不降级成无声）")
             return false
         }
+        // 新流的密钥盐变了，上行监听跟换
+        micUplink?.updateKey(secret, info.streamConnectionId)
         // 新流已就绪：停旧发送端。旧流不再有包，接收端会在超时后自行回收。
         old.stop()
         audioSender = null
@@ -3157,7 +3208,8 @@ object SessionController {
         )
         val info =
             try {
-                client.runAudioStream(secret, target, AudioTuning.RAW_SPF)
+                // 同理：换档（媒体↔通话）也是新流，上行端口继续声明，避免车机当手机不要麦
+                client.runAudioStream(secret, target, AudioTuning.RAW_SPF, micPort = micUplink?.localPort ?: 0)
             } catch (error: Exception) {
                 appendLog("AUDIO: 切换协商异常 - ${error.message}")
                 null
@@ -3167,6 +3219,7 @@ object SessionController {
             appendLog("AUDIO: 切到 ${target.label} 失败——保持原音频流继续推（不降级成无声）")
             return false
         }
+        micUplink?.updateKey(secret, info.streamConnectionId)
         // 新流已就绪：停旧流。旧流不再有包，接收端会在超时后自行回收。
         old.stop()
         audioSender = null

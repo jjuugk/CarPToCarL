@@ -170,3 +170,84 @@ CarLife 协议里 `9242` 是 VR 通道（`CarLifeProtocol.PORT_VR`），对应�
 `keepAlivePort` 仅在请求带 `keepAliveLowPower` 时给——这几条我们**已按同样顺序实现**，
 可当作交叉验证。它的 `invokeSiri()` 连发 `requestSiri {siriAction:2}` 与 `{3}` 两帧，
 也印证了我们 `VoiceKeyRouter` 对 2=ButtonDown / 3=ButtonUp 的解析。
+
+---
+
+## 十、按正确机制实现（2026-11-08 晚，`#micuplink` 测试包）
+
+第九节确认了机制，这一节是把它写进代码。**探针模型已经作废**（`MIC_PROBE_ENABLED=false`，
+代码先留着），新的路径是「主音频 SETUP 带 dataPort」。
+
+### 10.1 链路
+
+```
+SessionController.startAudioChannel()
+  ├─ MicUplink.open()                 // 绑一个本地 UDP 端口，不发任何报文
+  ├─ client.runAudioStream(..., micPort = uplink.localPort)
+  │     └─ SETUP 的 stream dict 多一项 dataPort=<我们的端口>
+  ├─ 建流成功 → uplink.start(shared, audio.streamConnectionId, audio.sampleRate)
+  │     └─ HKDF(..., "DataStream-Input-Encryption-Key") → 起收包线程
+  └─ teardown → uplink.stop()         // 落 wav + 打结论
+```
+
+音频流被**重建**（通话结束 / 看门狗重连 / 媒体↔通话换档）时，新 SETUP 继续带同一个
+端口（UDP socket 一直绑着，重复声明合法），成功后只调 `updateKey()` 换密钥——
+盐是 `streamConnectionID`，换流就换。
+
+### 10.2 关键参数（写死在代码里的）
+
+| 项 | 值 | 位置 |
+| --- | --- | --- |
+| 端口方向 | 我们声明 `dataPort`，车机往这里推 | `AirPlayClient.runAudioStream(micPort=…)` |
+| 密钥 | `HKDF-SHA512(shared, "DataStream-Salt<connId>", "DataStream-Input-Encryption-Key", 32)` | `MicUplink.start()` |
+| 包 | `[RTP 头][ChaCha20-Poly1305 密文+16B tag][8B 尾部 nonce]` | `MicUplink.decodePacket()` |
+| AAD | RTP 头 `[4..12)`（ts+ssrc） | 同上 |
+| 负载 | LPCM 16bit **大端** → 换序成小端再落盘 | `MicUplink.swapS16()` |
+
+### 10.3 三个「先试了再说」的地方
+
+手里的几份实现对这三处并不一致，而每次验证都要等上车，所以首包按顺序试解、
+Poly1305 tag 校验命中即锁定（128 位，误判概率可忽略），日志会打 `MIC: 包格式=…`：
+
+1. 尾部 8 字节是 nonce 还是密文（`nonce=尾部` / `nonce=序号计数器`）；
+2. 尾部 nonce 是小端还是大端存放；
+3. AAD 算不算（`+AAD(头4..12)` / `+无AAD`）。
+
+RTP 头长度也不再假设 12 字节——按 `CC` 与扩展位动态算，否则真机带扩展时
+「每包都解不开」，而这种错在日志里看不出原因。
+
+### 10.4 日志判读（连上车后搜 `MIC:`）
+
+| 日志 | 含义 | 下一步 |
+| --- | --- | --- |
+| `MIC: 上行监听已启动 dataPort=… connId=…` | 端口已声明，等车机推 | — |
+| `MIC: 首个数据报 … ts=… head=…` | **车机在推**（第一道关通了） | 看下一行包格式 |
+| `MIC: 包格式=nonce=尾部小端 + AAD(头4..12)` | 与下行同族，符合预期 | 听 wav |
+| `MIC: 第 N 包解不开` | 密钥或格式不对 | 看 `connId` 是否与 SETUP 日志一致 |
+| `MIC: 结论——✓ 收到 12 包、解开 12 包…峰值 8134/32767` | 成功，wav 已落盘 | 拉 wav 听 |
+| `MIC: 结论——…端口一包没收到` | 车机没推（可能只在语音激活时推） | 按方向盘语音键再试一轮 |
+| `MIC: 结论——收到 N 包但一包都解不开` | 端口对了、密钥/格式错 | 把 head 前 24 字节发我 |
+
+峰值（`峰值 x/32767`）能一眼区分三种情况：接近 0 = 车机推的是静音流；
+几百到几千 = 有声音（人声/环境声）；恒在 32767 = 解错了（噪声满幅）。
+
+### 10.5 wav
+
+落盘位置：`下载/CarPToCarL/CarPToCarL-mic-<时间>.wav`（MediaStore，无需权限），
+`adb pull /sdcard/Download/CarPToCarL/` 也能拿到。采样率取建流时协商到的那一档
+（48k/44.1k），声道按单声道写——**采样率写错只会让播放速度不对，不影响「是不是人声」的判断**。
+只保留前 20 秒（够听清，且不占内存）。
+
+### 10.6 风险与回退
+
+- `dataPort` 是**可选字段**，只在 `MIC_UPLINK_ENABLED=true` 时出现；关掉即回到
+  1.2.31 的纯下行行为，零残留。
+- 若加了 `dataPort` 后下行音频出问题（车机把这条流当成通话上行，不再给下行通路），
+  第一件事是把这个开关改 `false` 再验一轮——这就是「A/B 对照」。
+- 音频流重建后端口沿用旧值；若车机要求新端口，表现是「重建后一包不收」，日志可见。
+
+### 10.7 还没做的一步
+
+即使 wav 里是清晰人声，也只是第一道关。**第二道关（CarLife 认不认注入）仍未验证**：
+引擎收到 `0x68008 VR_START` 后用的是手机自己的麦克风（11-04 实测），9242 VR 通道
+我们只连不发。验法见第二节 ②，不需要车机。

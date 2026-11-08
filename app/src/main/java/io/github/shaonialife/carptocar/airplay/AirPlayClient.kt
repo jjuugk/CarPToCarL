@@ -2161,6 +2161,11 @@ class AirPlayClient(
         sharedSecret: ByteArray,
         profile: AudioProfile,
         tuning: AudioTuning = AudioTuning.RAW_SPF,
+        /**
+         * 麦克风上行：>0 = 把**我们自己的 UDP 端口**写进这条流的 `dataPort`，
+         * 车机会把麦克风音频推到该端口（见 [MicUplink]）。0 = 纯下行（默认，行为不变）。
+         */
+        micPort: Int = 0,
     ): AudioStreamInfo? {
         // 档位由调用方按「车机 /info 声明的候选 + 本车机历史记忆」选定后传进来：
         // 同一台车机上不同 audioType 档位的可用性完全不同（见 AudioProfile 注释），
@@ -2196,6 +2201,12 @@ class AirPlayClient(
                                 put("audioFormat", negotiation.formatBit)
                                 put("audioType", negotiation.audioType)
                                 put("audioLatencyMs", negotiation.latencyMs)
+                                // 麦克风上行（2026-11-08 修订）：真 iPhone 要麦时的做法不是另开一路
+                                // input=true 的流，而是把**自己的输入端口**写进主音频流的 dataPort
+                                // （shilapi/xcertplay 接收端的原话：input port，而非 downlink category，
+                                // 才是「手机请求麦克风」的信号）。车机看到有效端口就往这里推麦。
+                                // 端口方向与下行相反：这条我们只收不发。
+                                if (micPort > 0) put("dataPort", micPort.toLong())
                                 // 与 catplay 发送端（StreamDescriptionAudio::new）逐字段对齐：
                                 // input = 这条流是不是**麦克风上行**（车机 → 手机）：
                                 //   false（默认）只下行；true 用于通话上行流（见 microphoneCandidates）。
@@ -2328,6 +2339,7 @@ class AirPlayClient(
                 "format=0x${negotiation.formatBit.toString(16)} ${negotiation.sampleRate}Hz " +
                 "latency=${negotiation.latencyMs}ms）" +
                 "dataPort=$dataPort controlPort=${portOf(audio["controlPort"])} connId=$connectionId" +
+                (if (micPort > 0) " 已声明麦克风上行 micPort=$micPort" else "") +
                 " 全字段=$audio",
         )
         // 音频通路已建好，但「车机在收数据、喇叭没声」还剩一种很常见的原因：
