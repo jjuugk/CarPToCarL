@@ -129,3 +129,44 @@ CarLife 协议里 `9242` 是 VR 通道（`CarLifeProtocol.PORT_VR`），对应�
 其余内容对本项目是**方向相反或已覆盖**：控制通道 ChaCha20-Poly1305 帧格式与密钥方向
 （我们用 `AirPlayCrypto.chachaSeal` + `ControlCipher` 已实现）、视频 128 字节头与 nonce 计数器
 （我们是发送端）、ARP 陈旧与随机 MAC（他们是 AP 侧）、iAP2 PSN 99/100 与会话号（我们已跑通）。
+
+---
+
+## 九、xcertplay 给出的正确做法（2026-11-08 下午，重要修订）
+
+参考 `github.com/shilapi/xcertplay`（Android 车机端接收器，**GPLv3**；本项目 MIT，
+因此**只取协议事实，不搬代码**）。它已实现「车机麦克风上行」，说明前面第二～四节的
+探针模型**判断错了方向**，真正的机制是：
+
+> **不是**另开一路 `input=true` 的流，而是**在 type=100 的主音频 SETUP 里带上我们自己的
+> `dataPort`**——车机看到这个端口，就开始把麦克风音频推过来。它的原话：
+> *"The input port, rather than the downlink category, signals that the phone requests a mic."*
+> 判据只有两条：`type == 100` 且 `dataPort` 在 1..65535。
+
+### 9.1 完整参数（可直接实现）
+
+| 项 | 值 |
+| --- | --- |
+| 触发 | 主音频 SETUP 的 stream dict 里带 `dataPort`（我们的 UDP 端口）；建流后**持续推**，不必等 Siri 激活 |
+| 密钥 | `HKDF-SHA512(sharedSecret, "DataStream-Salt<streamConnectionID>", "DataStream-Input-Encryption-Key", 32)` —— 与我们已有的 Output 密钥同一个函数，只是 label 换成 `Input` |
+| 包格式 | `[12B RTP 头][ChaCha20-Poly1305 密文][16B tag][8B LE nonce]` |
+| RTP 头 | `80 <PT=type> <seq BE16> <ts BE32> <SSRC 4B>`；PT = 100 |
+| AAD | RTP 头的 `[4..12)`（timestamp + SSRC） |
+| nonce | 4 个零字节 + 8 字节 **LE** 计数器（同一流内递增） |
+| 负载 | **LPCM 16bit 大端**（单声道按声道数复制）/ Opus 48k mono / AAC-ELD mono；**AAC-LC 不支持** |
+| 采样率 | 按协商 audioFormat 位图；对端采集 16k 再重采样 |
+
+### 9.2 对我们两个已有实现的修正
+
+1. **探针（`probeMicrophoneInput`）**：独立开一路 `input=true` 的 SETUP 并非真 iPhone 的做法，
+   车机很可能不认。正确做法是把 `dataPort` 加进**现有主音频 stream**，然后用
+   `DataStream-Input-Encryption-Key` 解密。
+2. **9242 注入**（第二节 ②）依然是独立问题，且**不需要车机**就能验，仍建议先做。
+
+### 9.3 连接方式本身：没有新东西
+
+它是接收端，我们是发送端，流程是镜像的（它 mDNS 广播等电话来连，我们主动连车机）。
+`/info → SETUP → RECORD → /feedback`、`eventPort` 由电话在 SETUP 应答后主动连、
+`keepAlivePort` 仅在请求带 `keepAliveLowPower` 时给——这几条我们**已按同样顺序实现**，
+可当作交叉验证。它的 `invokeSiri()` 连发 `requestSiri {siriAction:2}` 与 `{3}` 两帧，
+也印证了我们 `VoiceKeyRouter` 对 2=ButtonDown / 3=ButtonUp 的解析。
