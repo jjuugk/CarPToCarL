@@ -433,8 +433,8 @@ class MainActivity : AppCompatActivity() {
                 title = "需要开启位置服务",
                 message =
                     "Android 12 加入车机热点（应用专属 WiFi）要求位置服务开启——系统用它判定" +
-                        "可连接的 WiFi，不会记录你的位置。\n\n请打开位置服务后重试；也可以到" +
-                        "WLAN 设置手动连接热点。",
+                        "可连接的 WiFi，不会记录你的位置。\n\n请打开位置服务后重试（打开后" +
+                        "热点会静默自动连上，不需要在 WLAN 列表里手动点选）。",
                 actions =
                     listOf(
                         DarkMessageDialog.Action("取消") {},
@@ -702,8 +702,9 @@ class MainActivity : AppCompatActivity() {
         SessionController.logListener = logListener
         // 连接流程的重要提示（WiFi 未开启/热点加入限制等）以 Snackbar 长显
         SessionController.uiHintSink = uiHintSinkRef
-        // 加入热点确认弹窗：继续自动加入 / 打开 WLAN 设置手动连。
-        // 取消连接时 cancel() 联动关闭（触发 onChoice(null) → 流程检查取消标志中止）
+        // 兜底提示弹窗（现在只剩「WiFi 未开启」一种：加入热点的确认框已在 2026-11-08
+        // 全部取消，改为静默自动连）。取消连接时 cancel() 联动关闭（触发 onChoice(null)
+        // → 流程检查取消标志中止）
         SessionController.dialogSink = { spec, onChoice ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) {

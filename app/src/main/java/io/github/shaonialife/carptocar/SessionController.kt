@@ -43,6 +43,7 @@ import io.github.shaonialife.carptocar.net.AirPlayFeatures
 import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
+import io.github.shaonialife.carptocar.net.SilentJoinPolicy
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiJoinGate
 import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
@@ -207,18 +208,35 @@ object SessionController {
     private const val SPECIFIER_JOIN_GRACE_MS = 20_000L
 
     /**
-     * 建议网络（[registerSuggestion]）生效后，等系统自动关联车机热点的上限。
-     * 建议已被用户授权时系统通常 1~3 秒内就连上，比 specifier 快且无弹框。
+     * **静默入网**窗口：登记 WiFi 建议后，等系统自己把手机连上车机热点。
+     *
+     * 这是「不用手点」的唯一路径（`WifiNetworkSpecifier` 每次都会弹系统确认框）。
+     * 建议被授权过时系统 1~3 秒就关联好；**没授权过时这段必然白等**，所以由
+     * [SilentJoinPolicy] 限制连续尝试次数，失败几轮后直接降级到确认框路径。
+     *
+     * 12 秒的取值：覆盖参考实现实测的 15.73s 关联+DHCP 里系统侧那一段（我们只等
+     * 「关联完成」那一刻，不等后续握手），又不至于把失败场景拖太久。
      */
-    private const val SUGGESTION_JOIN_WAIT_MS = 8_000L
+    private const val SUGGESTION_SILENT_WAIT_MS = 12_000L
 
     /**
-     * 「系统已连在该热点上，直接绑进程」的等待上限。
+     * 静默入网连续失败多少次后，**不再等**、直接走系统确认框路径。
      *
-     * 只是 `bindProcessToNetwork`，正常情况下毫秒级返回；留 5 秒是为了覆盖系统刚完成
-     * 关联、网络还没上报的那一瞬。超时就退回 specifier 路径，不影响原有流程。
+     * 建议未授权时每轮白等 12 秒，连着几轮就会把「车机只等 27 秒」的窗口吃光。
+     * 所以给两次机会：第一次登记后系统可能正在弹授权通知，第二次接住刚授权的那一下；
+     * 两次都没成，说明这台机器上建议通道不可用，别再耗时间。
      */
-    private const val WIFI_REUSE_BIND_WAIT_MS = 5_000L
+    private const val SILENT_JOIN_MAX_MISSES = 2
+
+    /**
+     * 系统确认框路径失败后的自动重试次数与间隔。
+     *
+     * 旧实现在这里弹「重试 / 打开 WLAN 设置」问用户——车上没人点屏，90 秒后按无人应答
+     * 中止。可「点重试」和「自动再试一次」做的事完全一样，唯一区别是要人点。所以改成
+     * 自动做，用次数兜住（热点不在范围时不至于无限怼）。
+     */
+    private const val SPECIFIER_AUTO_RETRY_TIMES = 2
+    private const val SPECIFIER_RETRY_GAP_MS = 5_000L
 
     /**
      * 同 SSID 入网请求的去重窗口（毫秒）。
@@ -637,6 +655,12 @@ object SessionController {
      * `joinCarPlayNetwork` 第一行就是 `release()`——后发的会把先发的注销掉。
      */
     private val wifiJoinGate = WifiJoinGate(WIFI_JOIN_DEDUPE_MS)
+
+    /**
+     * 静默入网（WiFi 建议自动关联）的尝试预算，见 [SilentJoinPolicy]。
+     * 建议未授权时每轮会白等，用预算把「白等」限制成最多两次。
+     */
+    private val silentJoinPolicy = SilentJoinPolicy(SILENT_JOIN_MAX_MISSES)
 
     /** DCL 双检锁的可发布字段（无 volatile 的双检锁是坏发布——虽然当前仅主线程调用，别留隐患）。 */
     @Volatile
@@ -1905,13 +1929,15 @@ object SessionController {
     }
 
     /**
-     * 校对真实 WiFi 并加入车机热点（Android 10+ NetworkSpecifier，应用专属网络）：
-     *  1. `cmd wifi status` 查当前 SSID——已是车机热点直接绑定（快路径）；
-     *  2. 否则 `cmd wifi connect-network` 保存并切换（免系统弹窗、免输密码；
-     *     网络被系统保存，下次进入热点范围自动重连，契合上车即连）；
-     *  3. 轮询 SSID 确认切换完成后再绑定，各环节检查 [connectCancelled]——
-     *     用户取消后不得继续跑（否则 phaseHint 被覆盖、ctrl 广播被重新拉起，表现为「取消不了」）。
-     * 连接失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
+     * 校对真实 WiFi 并加入车机热点——**全程不要求用户点任何东西**。
+     *
+     * 入网分三层（详见 [WifiCarPlayConnector] 类注释），由 [joinCarWifiOnce] 落地：
+     *  1. 复用它已连上的那条热点（零交互）；
+     *  2. 登记 WiFi 建议后等系统自己关联（零交互，授权过一次后长期有效）；
+     *  3. `WifiNetworkSpecifier` 应用专属网络（唯一会弹系统确认框的一层，只作兜底）。
+     *
+     * 各环节检查 [connectCancelled]——用户取消后不得继续跑（否则 phaseHint 被覆盖、
+     * ctrl 广播被重新拉起，表现为「取消不了」）。
      */
     private fun autoJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
         Bg.run("wifi-auto-join") {
@@ -1920,11 +1946,11 @@ object SessionController {
             // 1) WLAN 开关。shell 不可用时跳过检查——requestNetwork 会以 Unavailable 反馈。
             if (shellReady && shellWifiDisabled() && !waitForWifiEnabled()) return@run
             if (connectCancelled) return@run
-            // 1.5) 登记 WiFi 建议（幂等）：用户授权过一次后，系统会自己把手机连上
-            // 车机热点，后续不再出现「连接到此网络？」确认框——这是无人点屏场景的
+            // 1.5) 先登记 WiFi 建议（幂等，不弹框）：登记越早，系统越可能在我们要用时
+            // 就已经把手机连上热点。授权过一次后系统进范围自动关联，这是无人点屏的
             // 唯一可行路径（BMW iD9 只给 27s，人来不及点就断链）。
             wifiConnector?.registerSuggestion(wifi.ssid, wifi.passphrase, wifi.securityType)
-            // 2) 首选应用专属网络（不影响 4G/5G、不会被系统切回、不需要任何特权）
+            // 2) 入网（复用 → 静默 → 确认框，见 joinCarWifiOnce）
             when (val result = joinCarWifiSpecifier(wifi, shellReady)) {
                 is WifiCarPlayConnector.JoinResult.Joined -> Unit
 
@@ -1933,17 +1959,16 @@ object SessionController {
                     legacyJoinCarWifi(wifi, shellReady)
                 }
 
-                WifiCarPlayConnector.JoinResult.Unavailable -> promptSpecifierFailed(wifi, shellReady)
+                WifiCarPlayConnector.JoinResult.Unavailable -> retryJoinSpecifierSilently(wifi, shellReady)
             }
         }
     }
 
     /**
-     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点，成功后进程网络已绑定。
+     * 入网入口（三层策略见 [joinCarWifiOnce]）：成功后进程网络已绑定、ctrl 广播已重注册。
      *
-     * 先清掉系统里保存的同名热点：旧版本用 `cmd wifi connect-network` 存过它，
-     * 只要还在系统配置里，系统就会自动全局连接——无互联网热点于是被当成默认网络，
-     * 部分 ROM 连带断掉移动数据，正是本次要解决的场景。
+     * 系统里保存过同名热点时**只记日志、不删除、不询问**——保留它对「静默自动连」有利，
+     * 详见 [noteSavedNetworkIfAny]。
      */
     private fun joinCarWifiSpecifier(
         wifi: Iap2SenderSession.WifiConfiguration,
@@ -1951,10 +1976,8 @@ object SessionController {
         force: Boolean = false,
     ): WifiCarPlayConnector.JoinResult {
         val connector = wifiConnector ?: return WifiCarPlayConnector.JoinResult.Unavailable
-        // 已保存到系统配置里才询问是否清除：不擅自删用户网络（有的场景就是要用
-        // 车机流量/互联网，或用户希望系统自动连）。选择保留不影响本轮连接。
         if (shellReady) {
-            promptForgetSavedNetworkIfAny(wifi.ssid)
+            noteSavedNetworkIfAny(wifi.ssid)
             if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
         }
         phaseHint = "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
@@ -2031,32 +2054,18 @@ object SessionController {
             }
 
             is WifiJoinGate.Decision.Run -> {
-                // **先试复用**：断线重连时手机绝大多数时候还在车机热点上（系统那张关联表
-                // 没丢，或上一轮的专属网络还没被拆）。再发一次 specifier 就要弹一次系统
-                // 确认框，而车上没人点屏——等到超时整轮就失败了，现场表现正是「卡在加入热点」。
-                // 复用只是 bindProcessToNetwork，不发请求、不弹框。
-                val adopted =
-                    connector.adoptIfAlreadyConnected(wifi.ssid, WIFI_REUSE_BIND_WAIT_MS) { connectCancelled }
+                // **三层尝试，从「完全不打扰」到「弹一次系统框」**：
+                //  1) 复用：系统已连在该热点上（已保存网络/上轮残留/建议已生效）
+                //     → 只 bindProcessToNetwork，零交互；
+                //  2) 静默：登记 WiFi 建议后等系统自己关联 → 零交互（授权过一次后长期有效）；
+                //  3) specifier：唯一会弹系统确认框的路径，只在前两层确定失败时才用。
+                // 旧顺序是「复用 → specifier」，于是每轮都在弹框，车上没人点屏就整轮失败。
+                val adopted = connector.adoptIfAlreadyConnected(wifi.ssid)
                 val result =
                     if (adopted != null) {
                         WifiCarPlayConnector.JoinResult.Joined(adopted)
                     } else {
-                        appendLog(
-                            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
-                        )
-                        try {
-                            connector.joinCarPlayNetwork(
-                                ssid = wifi.ssid,
-                                passphrase = wifi.passphrase,
-                                securityType = wifi.securityType,
-                                timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
-                                graceMillis = SPECIFIER_JOIN_GRACE_MS,
-                                isCancelled = { connectCancelled },
-                            )
-                        } catch (error: Exception) {
-                            appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
-                            WifiCarPlayConnector.JoinResult.Unavailable
-                        }
+                        joinSilentlyThenSpecifier(connector, wifi)
                     }
                 wifiJoinGate.finish(
                     decision.ticket,
@@ -2069,54 +2078,75 @@ object SessionController {
     }
 
     /**
-     * 系统里已保存同名热点时，询问用户是否清除（**不擅自删除**）。
+     * 第二层（静默）与第三层（系统确认框）之间的取舍。
      *
-     * 为什么要问而不是直接删：保留也有正当用途——用户可能就想让系统自动连车机、
-     * 或车机热点确实带互联网（部分车型提供流量）。删除只影响「系统会不会全局
-     * 自动连它」，与本轮连接无关；选择「保留」时继续正常连接。
-     *
-     * 每个 SSID 每个进程只问一次：配对失败重试、端点交接重入都会再次走到这里，
-     * 重复弹窗会挡住连接（2026-10-18 实测）。用户的选择在本次进程内记忆。
-     *
-     * 阻塞直到用户选择（[JOIN_DIALOG_TIMEOUT_S] 超时按「保留」处理——不做破坏性动作）。
+     * 抽出来只为让 [joinCarWifiOnce] 的主干保持「复用 → 后面交给它」两句话。
      */
-    private fun promptForgetSavedNetworkIfAny(ssid: String) {
+    private fun joinSilentlyThenSpecifier(
+        connector: WifiCarPlayConnector,
+        wifi: Iap2SenderSession.WifiConfiguration,
+    ): WifiCarPlayConnector.JoinResult {
+        val silent =
+            if (silentJoinPolicy.shouldTrySilently(wifi.ssid)) {
+                phaseHint = "正在自动加入车机热点 ${wifi.ssid}…（无需操作）"
+                appendLog(
+                    ">>> 静默入网 \"${wifi.ssid}\"：登记热点建议后由系统自动关联" +
+                        "（不弹确认框，最多 ${SUGGESTION_SILENT_WAIT_MS / 1_000}s）",
+                )
+                connector.joinSilentlyBySuggestion(
+                    ssid = wifi.ssid,
+                    passphrase = wifi.passphrase,
+                    securityType = wifi.securityType,
+                    timeoutMillis = SUGGESTION_SILENT_WAIT_MS,
+                    isCancelled = { connectCancelled },
+                )
+            } else {
+                appendLog(
+                    "WIFI: \"${wifi.ssid}\" 静默入网已连续 ${SILENT_JOIN_MAX_MISSES} 次未成" +
+                        "（建议通道在本机不可用或未授权）——本轮直接走系统确认框路径",
+                )
+                null
+            }
+        silentJoinPolicy.recordResult(wifi.ssid, silent != null)
+        if (silent != null) {
+            appendLog(">>> 静默入网成功：\"${wifi.ssid}\" 已由系统自动连上并绑定（全程无弹框）")
+            return WifiCarPlayConnector.JoinResult.Joined(silent)
+        }
+        appendLog(
+            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
+        )
+        return try {
+            connector.joinCarPlayNetwork(
+                ssid = wifi.ssid,
+                passphrase = wifi.passphrase,
+                securityType = wifi.securityType,
+                timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                graceMillis = SPECIFIER_JOIN_GRACE_MS,
+                isCancelled = { connectCancelled },
+            )
+        } catch (error: Exception) {
+            appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
+            WifiCarPlayConnector.JoinResult.Unavailable
+        }
+    }
+
+    /**
+     * 系统里已保存同名热点时**只记一行日志，不再问用户**（2026-11-08 起）。
+     *
+     * 旧实现弹「清除保存 / 保留」——而「保留」其实对我们更有利：系统保存了它，进入范围
+     * 就会自动连上，`adoptIfAlreadyConnected` 直接复用绑定，正是「静默自动连」最省事的
+     * 一条路。删除只影响「系统会不会全局自动连」，与本轮连接无关，却要人点一下。
+     *
+     * 所以现在一律保留、一律不打扰：问也不问，删也不删。每个 SSID 只记一次日志。
+     */
+    private fun noteSavedNetworkIfAny(ssid: String) {
         if (!forgetPromptHandled.add(ssid)) return
         val ids = savedNetworkIds(ssid)
         if (ids.isEmpty()) return
         appendLog(
             "WIFI: 系统里已保存热点 \"$ssid\"（netId=${ids.joinToString(",")}）" +
-                "——询问用户是否清除（保留也能正常连接）",
+                "——保留它（进范围会自动连上，正好走静默复用），不删除、不再询问",
         )
-        val forget =
-            askWifiJoinChoice(
-                DialogSpec(
-                    title = "已保存该车机热点",
-                    message =
-                        "系统里保存过 \"$ssid\"。保留会让手机在进入范围时自动连接它，" +
-                            "若该热点没有互联网，可能导致手机无法使用移动数据。\n\n" +
-                            "「清除」只是不再自动连接，不影响本次使用；" +
-                            "如果车机热点本身提供网络，选「保留」。",
-                    positive = "清除保存",
-                    negative = "保留",
-                ),
-            )
-        if (connectCancelled) return
-        when (forget) {
-            true -> {
-                ids.forEach { id ->
-                    val result = SysShell.exec("cmd wifi forget-network $id", 5_000L)
-                    appendLog(
-                        "WIFI: 已按用户选择清除系统级保存的热点 \"$ssid\"（netId=$id ok=${result.ok}）",
-                    )
-                }
-            }
-
-            false -> appendLog("WIFI: 用户选择保留系统保存的 \"$ssid\"——继续以应用专属网络连接")
-
-            // 无人应答（UI 不在前台）：按「保留」处理，绝不在用户未确认时删网络
-            null -> appendLog("WIFI: 无人应答是否清除保存的网络——按保留处理（不改用户配置）")
-        }
     }
 
     /** 查系统已保存的、SSID 与目标完全一致的网络 id（`cmd wifi list-networks`）。 */
@@ -2180,83 +2210,62 @@ object SessionController {
         return true
     }
 
-    /** 应用专属网络被系统拒绝/超时：让用户重试或转手动连接。 */
-    private fun promptSpecifierFailed(
+    /**
+     * 应用专属网络被系统拒绝/超时：**不再弹窗问用户**，自己静默再试几轮。
+     *
+     * 旧实现在这里弹「重试 / 打开 WLAN 设置」：车上没人点屏，90 秒后按无人应答中止，
+     * 用户回来只看到「未能加入车机热点」。可「点重试」和「自动再试一次」做的事完全
+     * 一样，唯一区别是要人点——所以直接自动做，用次数兜住（热点不在范围时别无限怼）。
+     *
+     * @return true = 重试中连上了
+     */
+    private fun retryJoinSpecifierSilently(
         wifi: Iap2SenderSession.WifiConfiguration,
         shellReady: Boolean,
-    ) {
-        if (connectCancelled) return
-        val choice =
-            askWifiJoinChoice(
-                DialogSpec(
-                    title = "未能加入车机热点",
-                    message =
-                        "系统没有允许加入 \"${wifi.ssid}\"（可能点了拒绝，或热点不在范围内）。\n\n" +
-                            "「重试」会再次弹出系统确认框。也可以到 WLAN 设置手动连接——" +
-                            "手动连接会把热点保存为系统网络，可能影响移动数据。",
-                    positive = "重试",
-                    negative = "打开 WLAN 设置",
-                ),
+    ): Boolean {
+        for (attempt in 1..SPECIFIER_AUTO_RETRY_TIMES) {
+            if (connectCancelled) return false
+            phaseHint = "正在重试加入车机热点 ${wifi.ssid}…（无需操作）"
+            appendLog(
+                "WIFI: 自动重试加入 \"${wifi.ssid}\"（第 $attempt/${SPECIFIER_AUTO_RETRY_TIMES} 次，无需操作）",
             )
-        if (connectCancelled) return
-        when (choice) {
-            true -> {
-                // force：用户明确点了「重试」——绕过 5 秒去重窗口
-                when (val retry = joinCarWifiSpecifier(wifi, shellReady, force = true)) {
-                    is WifiCarPlayConnector.JoinResult.Joined -> Unit
-                    WifiCarPlayConnector.JoinResult.Unsupported -> legacyJoinCarWifi(wifi, shellReady)
-                    WifiCarPlayConnector.JoinResult.Unavailable -> {
-                        phaseHint = "未能加入车机热点——请到 WLAN 设置手动连接"
-                        appendLog("WIFI: 重试仍未加入 \"${wifi.ssid}\"——请到系统 WLAN 手动连接")
-                    }
+            sleepQuietly(SPECIFIER_RETRY_GAP_MS)
+            if (connectCancelled) return false
+            // force：绕过 5 秒去重窗口——这一轮本来就该重发
+            when (val retry = joinCarWifiSpecifier(wifi, shellReady, force = true)) {
+                is WifiCarPlayConnector.JoinResult.Joined -> return true
+                WifiCarPlayConnector.JoinResult.Unsupported -> {
+                    legacyJoinCarWifi(wifi, shellReady)
+                    return false
                 }
-            }
-
-            false -> manualJoinCarWifi(wifi)
-
-            null -> {
-                phaseHint = "未能加入车机热点——请重新连接"
-                appendLog("WIFI: 弹窗无人应答——自动加入中止")
+                WifiCarPlayConnector.JoinResult.Unavailable -> Unit
             }
         }
-    }
-
-    /** 手动兜底：密码进剪贴板 + 跳 WLAN 设置，轮询用户是否连上。 */
-    private fun manualJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
-        copyHotspotPsk(wifi.passphrase)
-        openWlanSettings()
-        phaseHint = "请在 WLAN 设置中连接 ${wifi.ssid}…"
+        phaseHint = "未能加入车机热点——下一轮连接会自动再试"
         appendLog(
-            "WIFI: 用户选择手动连接——等待 WLAN 连上 \"${wifi.ssid}\"（最长 120 秒）；" +
-                "注意：手动连接会把该热点保存为系统网络，若它没有互联网可能影响移动数据",
+            "WIFI: 自动重试 ${SPECIFIER_AUTO_RETRY_TIMES} 次仍未加入 \"${wifi.ssid}\"——" +
+                "本轮到此为止，不打扰用户（下次连接会重新走静默优先的三层路径）",
         )
-        val manualDeadline = android.os.SystemClock.uptimeMillis() + WLAN_WAIT_TIMEOUT_MS
-        while (android.os.SystemClock.uptimeMillis() < manualDeadline) {
-            if (connectCancelled) return
-            Thread.sleep(5_000)
-            if (shellWifiStatus().second == wifi.ssid) {
-                bindCarWifiAndRegister(wifi.ssid)
-                return
-            }
-        }
-        phaseHint = "尚未连接 ${wifi.ssid}——自动加入已中止"
-        appendLog("WIFI: 手动连接等待超时——自动加入中止")
+        return false
     }
 
     /**
      * 旧路径（WEP 等 specifier 无法表达的安全类型）：`cmd wifi connect-network`
      * 系统级保存并切换。注意这会保存热点为系统网络——无互联网时可能影响移动数据，
      * 只作为兼容兜底。
+     *
+     * 没有 shell 权限时这里**不再跳 WLAN 设置页**（那是纯手动操作，2026-11-08 起取消），
+     * 只把「为什么连不上」写进日志与提示，交给下一轮静默路径重试。
      */
     private fun legacyJoinCarWifi(
         wifi: Iap2SenderSession.WifiConfiguration,
         shellReady: Boolean,
     ) {
         if (!shellReady) {
-            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
+            phaseHint = "热点安全类型较旧，自动加入不可用——下一轮会再试"
             appendLog(
-                ">>> 手机不在车机热点 \"${wifi.ssid}\" 且无法自动加入（需要手动在系统 WLAN 里连一次）——" +
-                    "请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
+                ">>> 热点 \"${wifi.ssid}\" 的安全类型无法用应用专属网络表达，且当前无 shell 权限" +
+                    "（WEP 等旧加密）——本轮不跳设置页、不要求手动操作，等下一轮静默路径重试",
             )
             return
         }
@@ -2267,27 +2276,6 @@ object SessionController {
             return
         }
         if (connectCancelled) return
-        val choice =
-            askWifiJoinChoice(
-                DialogSpec(
-                    title = "连接车机热点",
-                    message =
-                        "将自动加入 \"${wifi.ssid}\" 热点。该热点无互联网，系统可能自动切回原 WiFi。" +
-                            "\n\n出现断连时，请到 WLAN 设置中主动连接 \"${wifi.ssid}\"（手动连接不会被切回）。",
-                    positive = "继续自动加入",
-                    negative = "打开 WLAN 设置",
-                ),
-            )
-        if (connectCancelled) return
-        if (choice == false) {
-            manualJoinCarWifi(wifi)
-            return
-        }
-        if (choice == null) {
-            phaseHint = "未能加入车机热点——请重新连接"
-            appendLog("WIFI: 弹窗无人应答——自动加入中止")
-            return
-        }
         phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
         appendLog(
             ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
@@ -2425,23 +2413,6 @@ object SessionController {
         }
     }
 
-    /** 热点密码复制到剪贴板（手动到 WLAN 页连接时粘贴），并提示用户。 */
-    private fun copyHotspotPsk(passphrase: String) {
-        appContext?.let { ctx ->
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    val cm =
-                        ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                            as android.content.ClipboardManager
-                    cm.setPrimaryClip(
-                        android.content.ClipData.newPlainText("carplay-wifi", passphrase),
-                    )
-                    uiHintSink?.invoke("热点密码已复制（${passphrase.length} 位）——粘贴到密码框即可")
-                }
-            }
-        }
-    }
-
     /** 只记一次「SSID 读不到」，避免 5 秒一次的轮询把日志刷满。 */
     @Volatile
     private var wifiSsidUnreadableLogged = false
@@ -2555,7 +2526,9 @@ object SessionController {
     ): Boolean {
         val connector = wifiConnector ?: return false
         appendLog("PROBE #$attempt: 在 \"$ssid\" 里找车机 _airplay._tcp（最多等 ${PROBE_TIMEOUT_MS / 1000}s）")
-        val bound = connector.bindCurrentWifiBlocking(4_000L) { connectCancelled }
+        // 只绑「确实连在目标 SSID 上」的那条网络：以前这里是 bindCurrentWifiBlocking
+        // （泛匹配 TRANSPORT_WIFI），手机同时挂着家里 WiFi 时会绑错，mDNS 自然什么也发现不了。
+        val bound = connector.awaitAssociation(ssid, 4_000L) { connectCancelled }
         if (bound == null) {
             appendLog("PROBE #$attempt: 绑定当前 WiFi 失败——跳过本轮探测（蓝牙保活不受影响）")
             return false
@@ -2680,25 +2653,16 @@ object SessionController {
                         // 仍保留蓝牙保活，继续等 0x4301 与用户确认。
                     }
                 }
-                // 同一 SSID 只问一次（用户选「继续等待」后不再打扰）；换网络再问。
+                // 手机上挂了某条网络、但车机始终没下发 0x4301 时，**不再弹「是否把它当车机
+                // 热点」问用户**（2026-11-08 起）：上面那轮 mDNS 探测已经在无人工干预的
+                // 情况下把「真车机热点」认出来了并直接放行；探测不到就说明它不是车机热点，
+                // 问了也只是让人点一下「继续等待」。这里只留一行日志。
                 if (ssid.isNullOrEmpty() || promptedSsid == ssid) continue
                 promptedSsid = ssid
-                val choice =
-                    askWifiJoinChoice(
-                        DialogSpec(
-                            title = "检测到已连接 $ssid",
-                            message =
-                                "车机尚未经蓝牙下发连接信息（0x4301）。是否把当前网络 \"$ssid\" 当车机热点，" +
-                                    "直接尝试 mDNS/网关连接？（点「继续等待」则保持蓝牙保活等车机下发）",
-                            positive = "按车机热点继续",
-                            negative = "继续等待",
-                        ),
-                    )
-                if (choice == true && !connectCancelled && !sessionStarting.get()) {
-                    appendLog(">>> [$source] 用户确认当前网络 \"$ssid\" 为车机热点——以合成端点重走连接")
-                    onCarPlayEndpoint(endpoint.copy(ssid = ssid), "$source/手动入网")
-                    return@run
-                }
+                appendLog(
+                    ">>> [$source] 手机当前挂在 \"$ssid\" 上，但里面没有 _airplay._tcp —— " +
+                        "不当作车机热点（不打扰用户），继续蓝牙保活等车机下发 0x4301",
+                )
             }
             if (!connectCancelled && !sessionStarting.get() && pendingWatchGeneration.get() == generation) {
                 pendingWaitGaveUp = true
@@ -5024,39 +4988,18 @@ object SessionController {
                         }
 
                         WifiCarPlayConnector.JoinResult.Unsupported -> {
-                            // WEP 等无法用 specifier 表达：等用户在系统 WLAN 里连上后绑定
-                            waitForManualWifiThenContinue(wifiConfig) { bound ->
+                            // WEP 等无法用 specifier 表达：等系统自己关联上（无人工操作）
+                            waitForAssociationThenContinue(wifiConfig) { bound ->
                                 continueWithNetwork(bound)
                             }
                             return@run
                         }
 
                         WifiCarPlayConnector.JoinResult.Unavailable -> {
-                            // specifier 没进来时，建议网络可能已经在后台把手机连上了
-                            // （用户授权过 suggestion，但系统关联比我们的 15s 窗口慢）。
-                            // 这里再给建议通道一个短窗口：真连上了就直接绑，省掉弹窗。
-                            val bySuggestion =
-                                if (connector != null && !connectCancelled) {
-                                    connector.bindCurrentWifiBlocking(SUGGESTION_JOIN_WAIT_MS) { connectCancelled }
-                                } else {
-                                    null
-                                }
-                            if (bySuggestion != null) {
-                                boundCarSsid = wifiConfig.ssid
-                                phaseHint = "已加入车机热点"
-                                ctrlAdvertiser?.ensureForNetwork(
-                                    wifiConfig.ssid,
-                                    force = true,
-                                    network = connector?.currentNetwork,
-                                )
-                                appendLog(">>> WiFi 由系统自动连上（热点建议生效，无需确认框），ctrl 广播已重新注册")
-                                continueWithNetwork(true)
-                                return@run
-                            }
-                            promptSpecifierFailed(wifiConfig, shellReady)
-                            // promptSpecifierFailed 内部可能已重试/转手动；两者都会
-                            // 通过 joinCarWifiSpecifier → continueWithNetwork 续上流程，
-                            // 这里只在彻底失败时结束本轮
+                            // 三层路径（复用 → 静默建议 → 确认框）都没成：静默再试几轮。
+                            // 旧实现在这里弹「重试 / 打开 WLAN 设置」问用户，车上没人点屏
+                            // 就按无人应答中止——现在改成自动做，只是限次。
+                            retryJoinSpecifierSilently(wifiConfig, shellReady)
                             if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
                                 continueWithNetwork(true)
                             } else {
@@ -5071,8 +5014,14 @@ object SessionController {
         }
     }
 
-    /** specifier 不可用时的手动兜底：轮询系统 WLAN 是否连上目标热点，而后绑定。 */
-    private fun waitForManualWifiThenContinue(
+    /**
+     * specifier 表达不了的安全类型（WEP）时的兜底：**等系统自己关联**上目标热点，而后绑定。
+     *
+     * 2026-11-08 起不再跳 WLAN 设置页、不再提示「请手动加入」——那条路要人点，与「静默
+     * 自动连」相反。这里只安静轮询：手机若已在热点上（手动连过 / 系统自动连）就绑上继续，
+     * 否则超时后交给下一轮。
+     */
+    private fun waitForAssociationThenContinue(
         wifi: Iap2SenderSession.WifiConfiguration,
         onBound: (Boolean) -> Unit,
     ) {
@@ -5086,16 +5035,14 @@ object SessionController {
             }
             if (android.os.SystemClock.uptimeMillis() - lastHintAt > 5_000) {
                 lastHintAt = android.os.SystemClock.uptimeMillis()
-                phaseHint = "等待手机加入车机热点 ${wifi.ssid}…"
-                appendLog("WIFI: 等待用户在系统 WLAN 中加入车机热点（当前 ${current ?: "未连接"}）…")
-                openWlanSettings()
+                phaseHint = "等待手机加入车机热点 ${wifi.ssid}…（无需操作）"
+                appendLog("WIFI: 仍在等手机关联车机热点（当前 ${current ?: "未连接"}）…")
             }
             Thread.sleep(1_000)
         }
         if (!connectCancelled) {
-            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
-            appendLog(">>> 等待车机热点超时——请到 设置>WLAN 加入 \"${wifi.ssid}\" 后重新连接")
-            uiHintSink?.invoke("未连上车机热点 \"${wifi.ssid}\"——请到 WLAN 设置中主动连接")
+            phaseHint = "手机不在车机热点——下一轮连接会自动再试"
+            appendLog(">>> 等待车机热点超时（该热点安全类型较旧，无法主动请求关联）")
         }
         onBound(false)
     }

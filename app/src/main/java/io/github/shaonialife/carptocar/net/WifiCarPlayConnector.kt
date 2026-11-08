@@ -19,18 +19,21 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * 用车机热点承载 CarPlay 流量。
  *
- * **两种入网方式，默认应用专属网络**：
- *  - [joinCarPlayNetwork]：`WifiNetworkSpecifier` 请求「只对本进程可见」的 WiFi。
- *    系统不会把它保存成普通网络、也不会设为默认网络——其它应用（微信/地图/导航）
- *    继续走 4G/5G。这是无互联网车机热点的正确形态：否则系统会把它当成「已连接但
- *    无网络」的默认 WiFi，部分 ROM 会连带关掉移动数据，用户一上车就断网。
- *  - [bindCurrentWifi]：旧路径，绑定「任意已连接的 WiFi」。仅在用户手动到 WLAN
- *    设置连了热点（系统级网络）时兜底用。
+ * **入网按「打扰程度」分三层，永远从最安静的一层开始**（2026-11-08 起）：
+ *  1. [adoptIfAlreadyConnected]：系统已连在该热点上（系统保存的网络 / 上轮残留 /
+ *     建议网络自动关联）→ 只 `bindProcessToNetwork`，**零交互**；
+ *  2. [joinSilentlyBySuggestion]：登记 `WifiNetworkSuggestion` 后等系统自己关联，
+ *     **零交互**——建议被授权一次后长期有效，进范围即连；
+ *  3. [joinCarPlayNetwork]：`WifiNetworkSpecifier`，**每次都会弹系统确认框**，
+ *     只在前两层确定失败时用。
+ *
+ * 前两层合起来就是「静默自动连」：车上没人点屏也不会卡在确认框上。第一层之外还有
+ * [bindCurrentWifi]（旧路径，绑「任意已连接的 WiFi」），只在手动兜底场景使用。
  *
  * 关键点：
  *  - 请求不带 `NET_CAPABILITY_INTERNET`，系统不会因「无互联网」拆连接；
  *  - 应用专属网络必须 `bindProcessToNetwork` 后再建 socket / 注册 mDNS；
- *  - 首次连接会弹系统确认框；SSID 必须精确匹配（热点名可能带空格/中文）。
+ *  - SSID 必须精确匹配（热点名可能带空格/中文），读不到 SSID 时一律当「没连」。
  */
 class WifiCarPlayConnector(
     private val context: Context,
@@ -69,6 +72,15 @@ class WifiCarPlayConnector(
 
     val currentNetwork: Network? get() = boundNetwork.get()
     private val boundNetwork = AtomicReference<Network?>(null)
+
+    /**
+     * 用 [adoptAssociated] 直接绑上去的那条网络，以及为它挂的「只看断线」回调。
+     *
+     * 为什么要单独记：specifier 路径靠 `requestNetwork` 的回调拿 `onLost`；而静默路径
+     * 只是 `bindProcessToNetwork`，不发任何请求——不补这个回调，**被动断开的自动重绑
+     * 整条链路会失效**（热点关闭时日志里连一行「已断开」都没有，只能等下一轮全量连接）。
+     */
+    private val watchedNetwork = AtomicReference<Network?>(null)
 
     /**
      * 应用专属网络被系统断开（热点关闭/离开范围）时回调。会话层据此提示用户；
@@ -384,10 +396,10 @@ class WifiCarPlayConnector(
      * 幂等：已登记过（返回 [WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE]）
      * 视为成功——重复登记不是错误，调用方每轮都可以调。
      *
-     * 首次登记系统会发一条通知请用户「允许连接」，用户点允许后列表才生效；
+     * 首次登记系统会发一条通知请用户「允许连接」，用户点允许后这条建议才生效；
      * 返回值 [WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS] 只代表「已登记」，
-     * 不代表用户已授权——所以本函数**不能**用来判断网络已可用，必须配合
-     * [bindCurrentWifiBlocking] 验证。
+     * 不代表已被授权——所以本函数**不能**用来判断网络已可用，必须配合
+     * [awaitAssociation] / [isAssociatedTo] 验证（见 [joinSilentlyBySuggestion]）。
      *
      * 副作用提示：建议网络一旦生效，系统会把它保存并自动连接（属于系统级网络，
      * 会出现在「已保存的网络」里，不再是应用专属）。无互联网时会由系统决定是否
@@ -408,7 +420,16 @@ class WifiCarPlayConnector(
         }
         val suggestion =
             try {
-                val builder = WifiNetworkSuggestion.Builder().setSsid(ssid)
+                val builder =
+                    WifiNetworkSuggestion
+                        .Builder()
+                        .setSsid(ssid)
+                        // 车机热点没有互联网。系统对「连上但没网」的网络默认按强制门户处理，
+                        // 会挂一条「登录到网络」提示等人点，进而把这条网络判成不可用。
+                        // 这两个开关明确告诉系统：它不需要用户做任何事，连上即可用
+                        // （API 默认值就是 false，显式写出来是为了不被 ROM 默认值带偏）。
+                        .setIsAppInteractionRequired(false)
+                        .setIsUserInteractionRequired(false)
                 when (securityType) {
                     0 -> Unit
                     // WEP 无对应 API，也不该再出现在现代车机上
@@ -478,112 +499,192 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 阻塞版「绑定当前已连接的 WiFi」：等系统给出任意可用 WiFi 网络并绑定进程。
-     *
-     * 用途是接住 [registerSuggestion] 的成果——建议生效后系统会**自己**连上车机热点，
-     * 此时不需要再发 specifier（也不会弹框），直接绑上即可。返回 null = 超时/取消。
-     *
-     * 与 [bindCurrentWifi] 的区别：那个是回调式、永不返回结果（给 UI 用）；
-     * 这个是同步等待，供连接流程在有限窗口内判定成败。
-     */
-    fun bindCurrentWifiBlocking(
-        timeoutMillis: Long,
-        isCancelled: () -> Boolean = { false },
-    ): Network? {
-        release()
-        val request =
-            NetworkRequest
-                .Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-        val latch = CountDownLatch(1)
-        val result = AtomicReference<Network?>(null)
-        val newCallback =
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    val bound = connectivityManager.bindProcessToNetwork(network)
-                    boundNetwork.set(network)
-                    result.set(network)
-                    log("WiFi: 建议网络已生效——绑定当前 WiFi（$network bindProcessToNetwork=$bound）")
-                    latch.countDown()
-                }
-
-                override fun onLost(network: Network) {
-                    if (boundNetwork.compareAndSet(network, null)) {
-                        connectivityManager.bindProcessToNetwork(null)
-                        onNetworkLost?.invoke("")
-                    }
-                }
-            }
-        callback.set(newCallback)
-        val accepted =
-            try {
-                connectivityManager.requestNetwork(request, newCallback)
-                true
-            } catch (error: Exception) {
-                log("WiFi: 绑定当前 WiFi 请求失败（${error.message}）")
-                false
-            }
-        if (!accepted) {
-            release()
-            return null
-        }
-        val deadline = SystemClock.uptimeMillis() + timeoutMillis
-        while (SystemClock.uptimeMillis() < deadline) {
-            if (isCancelled()) {
-                release()
-                return null
-            }
-            try {
-                if (latch.await(200, TimeUnit.MILLISECONDS)) break
-            } catch (_: InterruptedException) {
-                release()
-                return null
-            }
-        }
-        val network = result.get()
-        if (network == null) release()
-        return network
-    }
-
-    /**
-     * 系统当前是不是已经连在 [ssid] 这条热点上。
+     * 找出「系统已连在 [ssid] 上」的那条 WiFi 网络（**不要求它是默认网络**）。
      *
      * 三种来源都算：用户手动在系统 WLAN 里连过、[registerSuggestion] 登记的建议网络被
      * 系统自动关联、上一轮的应用专属网络还没被系统拆掉。
      *
-     * 读不到 SSID 时一律返回 false——Android 11+ 没给定位/附近设备权限时
-     * `connectionInfo.ssid` 是 `<unknown ssid>`，这时**不能**猜，猜错会把进程网络绑到
+     * 读不到 SSID 时一律返回 null——Android 11+ 没给定位/附近设备权限时
+     * `transportInfo.ssid` 是 `<unknown ssid>`，这时**不能**猜，猜错会把进程网络绑到
      * 家里的 WiFi 上（AirPlay 必然连不上，而且其它应用瞬间断网）。
+     *
+     * 为什么不直接用 `wifiManager.connectionInfo`：Android 12+ 上它对**应用专属网络**
+     * （WifiNetworkSpecifier 建出来的那条）常常报 `<unknown ssid>` 或 netId=-1，
+     * 于是「手机其实还挂在车机热点上」被误判成没连——白白再发一次 specifier、
+     * 再等一次系统确认框（2026-11-04 奥迪 4910 第二段实录：16:22:37 判成没连，
+     * 16:22:52 超时 15s，之后才靠建议网络兜回来）。它现在只作备用。
      */
-    fun isAssociatedTo(ssid: String): Boolean {
-        // 主路径：ConnectivityManager 逐条网络的 transportInfo。
-        //
-        // `wifiManager.connectionInfo` 单独用会漏：Android 12+ 上它对**应用专属网络**
-        // （WifiNetworkSpecifier 建出来的那条）常常报 `<unknown ssid>` 或 netId=-1，
-        // 于是「手机其实还挂在车机热点上」被误判成没连——白白再发一次 specifier、
-        // 再等 15 秒系统确认框（2026-11-04 奥迪 4910 第二段实录：16:22:37 判成没连，
-        // 16:22:52 超时 15s，之后才靠建议网络兜回来）。
+    private fun findAssociatedNetwork(ssid: String): Network? {
         val viaConnectivity =
-            runCatching {
-                connectivityManager.allNetworks.any { network ->
-                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@any false
-                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@any false
-                    val info = caps.transportInfo as? WifiInfo ?: return@any false
+            try {
+                connectivityManager.allNetworks.firstOrNull { network ->
+                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@firstOrNull false
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@firstOrNull false
+                    val info = caps.transportInfo as? WifiInfo ?: return@firstOrNull false
                     plainSsid(info.ssid) == ssid
                 }
-            }.getOrDefault(false)
-        if (viaConnectivity) return true
+            } catch (_: Exception) {
+                null
+            }
+        if (viaConnectivity != null) return viaConnectivity
 
         // 备用：老路径。部分机型 transportInfo 不填 SSID，但 connectionInfo 有。
-        val manager = wifiManager ?: return false
+        val manager = wifiManager ?: return null
         val info =
             @Suppress("DEPRECATION")
-            runCatching { manager.connectionInfo }.getOrNull() ?: return false
+            runCatching { manager.connectionInfo }.getOrNull() ?: return null
         @Suppress("DEPRECATION")
-        if (info.networkId < 0) return false
-        return plainSsid(info.ssid) == ssid
+        if (info.networkId < 0) return null
+        if (plainSsid(info.ssid) != ssid) return null
+        // SSID 对上了但没有哪条网络的 transportInfo 带 SSID：退到「wlan0 那条」。
+        return try {
+            connectivityManager.allNetworks.firstOrNull { network ->
+                val caps = connectivityManager.getNetworkCapabilities(network) ?: return@firstOrNull false
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    connectivityManager.getLinkProperties(network)?.interfaceName == WLAN_INTERFACE
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 系统当前是不是已经连在 [ssid] 这条热点上（见 [findAssociatedNetwork]）。 */
+    fun isAssociatedTo(ssid: String): Boolean = findAssociatedNetwork(ssid) != null
+
+    /**
+     * 把进程网络绑到「系统已连在 [ssid] 上」的那条网络。**不发请求、不弹任何框。**
+     *
+     * 与 [bindCurrentWifi] 的区别：那个按「TRANSPORT_WIFI」泛匹配，手机同时
+     * 连着家里 WiFi 时会绑到**错的那条**（AirPlay 必然连不上，其它应用瞬间断网）。
+     * 这里先按 SSID 精确找到网络再绑，把绑错的可能消掉。
+     *
+     * @return 绑定成功返回那条网络；没连在该热点上 / 绑定被系统拒绝返回 null
+     */
+    fun adoptAssociated(ssid: String): Network? {
+        val network = findAssociatedNetwork(ssid) ?: return null
+        // 关联上了不等于能用：DHCP 还没回来的那一瞬网络已经出现在列表里，但没有任何
+        // 地址，这时绑上去建 socket 必然失败。等它有地址再算「就绪」——调用方按 300ms
+        // 轮询，晚一点拿到不影响，早一步拿到反而是错的。
+        if (!linkReady(network)) return null
+        return try {
+            if (!connectivityManager.bindProcessToNetwork(network)) return null
+            boundNetwork.set(network)
+            watchLoss(ssid, network)
+            network
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 这条网络是否已经拿到地址（说明关联 + 地址分配走完了，可以建 socket）。 */
+    private fun linkReady(network: Network): Boolean =
+        try {
+            connectivityManager
+                .getLinkProperties(network)
+                ?.linkAddresses
+                ?.any { it.address?.hostAddress != null }
+                ?: false
+        } catch (_: Exception) {
+            false
+        }
+
+    /**
+     * 给「已经绑上的那条网络」挂一个只看断线的回调（幂等，同一条网络只挂一次）。
+     *
+     * 不在这里 `requestNetwork`：那会按「任意 WiFi」泛匹配，`onAvailable` 可能给到
+     * 家里那条；这里只关心 `onLost`，所以用 `registerNetworkCallback` 纯监听。
+     */
+    private fun watchLoss(
+        ssid: String,
+        network: Network,
+    ) {
+        if (watchedNetwork.get() == network && callback.get() != null) return
+        callback.getAndSet(null)?.let { runCatching { connectivityManager.unregisterNetworkCallback(it) } }
+        val watcher =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(lost: Network) {
+                    if (!boundNetwork.compareAndSet(lost, null)) return
+                    watchedNetwork.compareAndSet(lost, null)
+                    connectivityManager.bindProcessToNetwork(null)
+                    log("WiFi: 车机热点 \"$ssid\" 已断开（$lost）")
+                    onNetworkLost?.invoke(ssid)
+                }
+            }
+        val request =
+            NetworkRequest
+                .Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+        val ok =
+            try {
+                connectivityManager.registerNetworkCallback(request, watcher)
+                true
+            } catch (error: Exception) {
+                log("WiFi: 挂断线监听失败（${error.message}）——热点断开将感知不到")
+                false
+            }
+        if (!ok) return
+        callback.set(watcher)
+        watchedNetwork.set(network)
+    }
+
+    /**
+     * 在 [timeoutMillis] 内等系统把手机关联到 [ssid]，并把进程网络绑上去。
+     *
+     * **全程不弹任何确认框**——这是「静默自动连」唯一能落地的方式。
+     *
+     * @return null = 超时 / 被取消（热点不在范围、建议还没被授权…）
+     */
+    fun awaitAssociation(
+        ssid: String,
+        timeoutMillis: Long,
+        isCancelled: () -> Boolean = { false },
+    ): Network? {
+        adoptAssociated(ssid)?.let { return it }
+        val deadline = SystemClock.uptimeMillis() + timeoutMillis
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (isCancelled()) return null
+            try {
+                Thread.sleep(ASSOCIATION_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+            adoptAssociated(ssid)?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * **静默入网**：登记 WiFi 建议，等系统自己把手机连上车机热点。全程无弹框。
+     *
+     * 为什么这是唯一能做到「不用手点」的路：[joinCarPlayNetwork] 用的
+     * `WifiNetworkSpecifier` **每加入一次都要人在系统确认框上点「连接」**；而 WiFi 建议
+     * 被用户授权**一次**之后，系统进入范围就自动关联，之后再也没有任何提示框——
+     * 正是车上无人点屏时的形态。
+     *
+     * 那一次授权是系统行为，应用绕不过去：首次登记时系统会发一条通知请用户「允许」。
+     * 所以本函数有可能白等到超时（[timeoutMillis] 就是给它的上限），调用方据此降级。
+     *
+     * @return 已绑定好的网络；null = 系统没在窗口内连上（建议未授权 / 热点不在范围）
+     */
+    fun joinSilentlyBySuggestion(
+        ssid: String,
+        passphrase: String,
+        securityType: Int,
+        timeoutMillis: Long,
+        isCancelled: () -> Boolean = { false },
+    ): Network? {
+        adoptAssociated(ssid)?.let {
+            log("WiFi: 系统已连在 \"$ssid\" 上——直接绑定（无确认框）")
+            return it
+        }
+        if (!registerSuggestion(ssid, passphrase, securityType)) return null
+        log(
+            "WiFi: 已登记热点建议 \"$ssid\"——等系统自己关联" +
+                "（不弹确认框，最多 ${timeoutMillis / 1000}s）",
+        )
+        return awaitAssociation(ssid, timeoutMillis, isCancelled)
     }
 
     /** 去掉系统给的双引号，把「读不到」的占位值统一成 null。 */
@@ -593,31 +694,29 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 目标热点已经在系统里连着时，**直接把它绑到本进程**——不发 specifier、不弹确认框。
+     * 目标热点已经在系统里连着时，**直接把它绑到本进程**——不发请求、不弹确认框。
      *
      * 为什么优先于 [joinCarPlayNetwork]：specifier 每发一次，系统就要用户在一个确认框上
      * 点「连接」；车上没人点屏，等到超时（我们 15s / 车机更早）就整轮失败，表现成
      * 「重连时卡在加入热点」。而断线重连的绝大多数场景里，手机本来就还在车机热点上——
-     * 系统这张关联表还在，缺的只是 `bindProcessToNetwork`。
+     * 系统那张关联表还在，缺的只是 `bindProcessToNetwork`。
      *
-     * 不做校验就绑会绑错网，所以先过 [isAssociatedTo]。
+     * 立刻判定、立刻返回：没连上就返回 null 交给静默路径去等，**不在这里白等**——
+     * 它的窗口和 [joinSilentlyBySuggestion] 的窗口叠起来会把首帧拖得太晚。
      *
-     * @return 绑定成功返回网络；未连在该 SSID 上 / 等待超时返回 null（调用方走 specifier）
+     * @return 绑定成功返回网络；未连在该 SSID 上返回 null（调用方走静默/降级路径）
      */
-    fun adoptIfAlreadyConnected(
-        ssid: String,
-        timeoutMillis: Long,
-        isCancelled: () -> Boolean = { false },
-    ): Network? {
-        if (!isAssociatedTo(ssid)) return null
+    fun adoptIfAlreadyConnected(ssid: String): Network? {
+        val network = adoptAssociated(ssid) ?: return null
         log("WiFi: 系统已连在 \"$ssid\" 上——直接复用，不再发 specifier（不弹确认框）")
-        return bindCurrentWifiBlocking(timeoutMillis, isCancelled)
+        return network
     }
 
     fun release() {
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }
         }
+        watchedNetwork.set(null)
         if (boundNetwork.getAndSet(null) != null) {
             connectivityManager.bindProcessToNetwork(null)
         }
@@ -626,5 +725,16 @@ class WifiCarPlayConnector(
     private companion object {
         /** 没权限读 SSID 时系统给的占位值。 */
         const val UNKNOWN_SSID = "<unknown ssid>"
+
+        /** 系统里 WiFi 的接口名：`connectionInfo` 读得到 SSID、但网络列表不带 SSID 时的最后手段。 */
+        const val WLAN_INTERFACE = "wlan0"
+
+        /**
+         * 静默等待「系统把手机连上热点」的轮询间隔。
+         *
+         * 关联 + DHCP 是系统在后台做的，我们只能看结果；300ms 一次既不会让首帧明显
+         * 变慢（比 1s 粒度细），也不至于把 CPU 拉起来（等待窗口最多十几秒）。
+         */
+        const val ASSOCIATION_POLL_MS = 300L
     }
 }
