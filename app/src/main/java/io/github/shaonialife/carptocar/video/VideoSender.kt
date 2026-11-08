@@ -116,6 +116,22 @@ class VideoSender(
      * 只锁写字节仍会让加密时的计数器与落地顺序错位，接收端按到达顺序解密同样失败。
      */
     private val writeLock = Any()
+
+    /**
+     * 「这一笔写还在飞」的起点（uptimeMillis；0 = 当前没有写在进行）。
+     *
+     * 用途只有诊断：`output.write()` 一旦永久阻塞（接收端不读、链路被打满），这一帧
+     * 永远不会返回，既不会进任何「已完成」的统计，也不会触发写失败判定——日志上只剩
+     * 「画面不动了」，看不出是「没发」还是「发了没人收」。停摆看门狗每 2 秒调一次
+     * [noteWriteStall]，靠它把这种情况单独记出来。
+     */
+    @Volatile
+    private var writeStartedAt = 0L
+
+    /** 上一次「写在飞」日志的时刻（限流：同一笔只每 5 秒喊一次）。 */
+    @Volatile
+    private var lastWriteStallLogAt = 0L
+
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
@@ -239,6 +255,34 @@ class VideoSender(
 
     /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
     val framesSentTotal: Long get() = framesSent
+
+    /**
+     * 观测「这一笔写还在飞」的时长（停摆看门狗每 2 秒调一次）。
+     *
+     * 只在超过 [WRITE_STALL_LOG_MILLIS] 时记一行、且同一笔最多每 5 秒喊一次：
+     *
+     * ```
+     * VIDEO: ⚠ 帧写入已阻塞 9.0s（这一笔还没返回）——接收端不读或链路被打满
+     * ```
+     *
+     * 为什么需要单独一条：`output.write()` 永久阻塞时这一帧永远不返回，既不会进
+     * 「已发送 N 帧」，也不会触发任何写失败判定，日志上看起来跟「引擎没出帧」一模一样。
+     * 两者处置相反（一个是链路问题、该重建会话；一个是源问题、该重建引擎）。
+     *
+     * 只观测、不主动关 socket：永久阻塞的写没法安全取消（关 socket 会把好链路一起拆），
+     * 真要处置交给停摆看门狗的分级干预。
+     */
+    fun noteWriteStall() {
+        val startedAt = writeStartedAt
+        if (startedAt == 0L) return
+        val now = android.os.SystemClock.uptimeMillis()
+        val inFlight = now - startedAt
+        if (inFlight < WRITE_STALL_LOG_MILLIS) return
+        if (now - lastWriteStallLogAt < WRITE_STALL_LOG_GAP_MILLIS) return
+        lastWriteStallLogAt = now
+        log("VIDEO: ⚠ 帧写入已阻塞 ${inFlight / 1000}.${(inFlight % 1000) / 100}s（这一笔还没返回）" +
+            "——接收端不读或链路被打满，画面会冻在最后一帧")
+    }
 
     /**
      * 提前建立屏幕数据端口 TCP 连接（幂等）。
@@ -1167,26 +1211,35 @@ class VideoSender(
         // keepAlive/config 帧在两种模式下都不加密。头只能构造一次——ChaCha 的 AAD
         // 必须是最终发出的那 128 字节（重复构造会带不同时间戳，对端解密必然失败）。
         // 构造头 + 加密 + 写字节 + 计数器自增必须整体串行（见 [writeLock]）。
-        synchronized(writeLock) {
-            val header =
-                buildHeader(
-                    OP_FRAME,
-                    if (frameCipher is StreamFrameCipher.ChaCha) plain.size + TAG_SIZE else plain.size,
-                )
-            val sealed =
-                when (val cipher = frameCipher) {
-                    is StreamFrameCipher.ChaCha ->
-                        AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
-                    is StreamFrameCipher.AesCtr -> {
-                        val encrypted = plain.copyOf()
-                        aesStream?.applyKeystream(encrypted)
-                        encrypted
+        //
+        // writeStartedAt 打在**进锁之前**：如果有人在里面卡着（config/keepalive 的写、
+        // 或上一帧的写还没返回），本帧在等锁的时间同样属于「这一笔还没飞出去」，
+        // 看门狗据此才能看出「画面不动」是卡在写路径上。
+        writeStartedAt = android.os.SystemClock.uptimeMillis()
+        try {
+            synchronized(writeLock) {
+                val header =
+                    buildHeader(
+                        OP_FRAME,
+                        if (frameCipher is StreamFrameCipher.ChaCha) plain.size + TAG_SIZE else plain.size,
+                    )
+                val sealed =
+                    when (val cipher = frameCipher) {
+                        is StreamFrameCipher.ChaCha ->
+                            AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
+                        is StreamFrameCipher.AesCtr -> {
+                            val encrypted = plain.copyOf()
+                            aesStream?.applyKeystream(encrypted)
+                            encrypted
+                        }
                     }
-                }
-            frameCounter++
-            output.write(header)
-            output.write(sealed)
-            output.flush()
+                frameCounter++
+                output.write(header)
+                output.write(sealed)
+                output.flush()
+            }
+        } finally {
+            writeStartedAt = 0L
         }
         framesSent++
         framesSinceKeepAlive++
@@ -1274,6 +1327,12 @@ class VideoSender(
 
         /** 视频通道被重置后的重连尝试次数（接收端只等 8s，2s 超时 × 3 次刚好留余量）。 */
         private const val DATA_RECONNECT_ATTEMPTS = 3
+
+        /** 「这一笔写还在飞」多久才值得记一条（ms）：小于它的只是网络抖动。 */
+        private const val WRITE_STALL_LOG_MILLIS = 3_000L
+
+        /** 同一次写阻塞的日志限流间隔（ms）：看门狗每 2 秒来一次，别刷屏。 */
+        private const val WRITE_STALL_LOG_GAP_MILLIS = 5_000L
 
         /**
          * 「等首个 IDR」的最长等待（ms）。

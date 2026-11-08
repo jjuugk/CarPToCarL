@@ -3,6 +3,8 @@ package io.github.shaonialife.carptocar.carlife
 import android.content.Context
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
+import io.github.shaonialife.carptocar.video.StallJudge
+import io.github.shaonialife.carptocar.video.StallRecoveryPrefs
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -111,7 +113,7 @@ object CarLifeHijack {
     private const val MAX_GOP_BYTES = 6 * 1024 * 1024
     private const val MAX_GOP_FRAMES = 240
 
-    /** 画面停摆检查间隔 / 判定阈值（毫秒）。 */
+    /** 画面停摆检查间隔 / 判定阈值（毫秒）。干预阈值见 [StallJudge]。 */
     private const val STALL_POLL_MILLIS = 2_000L
     private const val STALL_LOG_MILLIS = 8_000L
 
@@ -385,6 +387,23 @@ object CarLifeHijack {
     @Volatile
     private var stallSince = 0L
 
+    /** 本次停摆已执行到哪一级：0 = 未干预，1 = 已请求重建编码器，2 = 已强制重建会话。 */
+    @Volatile
+    private var stallInterventions = 0
+
+    /** 最近一次「请求引擎重建编码器」的时刻（uptimeMillis）。 */
+    @Volatile
+    private var lastStallReinitAt = 0L
+
+    /**
+     * 本轮的「强制重建会话」阈值。
+     *
+     * 每强制重建一次翻倍（上限 [StallJudge.RECONNECT_MAX_MILLIS]）：重建本身要 30~45 秒才出
+     * 首个 IDR，阈值不涨就会在引擎热身期反复拆、越拆越黑。
+     */
+    @Volatile
+    private var stallReconnectDelay = StallJudge.RECONNECT_MILLIS
+
     /** 收到的帧序号（看门狗用差分量算帧率，不依赖 wall clock 对齐）。 */
     @Volatile
     private var frameSeq = 0L
@@ -509,6 +528,9 @@ object CarLifeHijack {
         hasVideo = false
         lastSourceFrameAt = 0L
         stallSince = 0L
+        stallInterventions = 0
+        lastStallReinitAt = 0L
+        stallReconnectDelay = StallJudge.RECONNECT_MILLIS
         requestedFps = context
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_FPS, DEFAULT_FPS)
@@ -847,17 +869,32 @@ object CarLifeHijack {
     }
 
     /**
-     * 画面源停摆看门狗（只观测，不干预）。
+     * 画面源停摆看门狗：**观测 + 分级干预**（干预可用开关关掉）。
      *
      * 来电时手机侧画面被通话界面占用（系统安全窗口不可录），CarLife 引擎几乎不出帧，
-     * 车机表现为**黑屏**。这里 8 秒没有新帧就记一条带时长的日志，恢复时再记一条，
-     * 用来区分「引擎真没画面」与「链路/车机侧解码问题」——两者处置完全不同。
-     * 不主动重建编码器：通话期间根本没有画面可编，硬重建只会把水搅浑。
+     * 车机表现为**黑屏**。这里先记一条带时长的日志（区分「引擎真没画面」与「链路/车机侧
+     * 解码问题」——两者处置完全不同），再按级别动手：
+     *
+     * ```
+     *  8s   请求引擎重建编码器（requestVideoReinit，约 1 秒后吐 SPS+IDR）
+     *  每 8s 再轻推一次（引擎常要推两三次才吐 IDR）
+     *  30s  仍未恢复 → 强制重建 CarLife 会话（下一轮阈值翻倍，上限 120s）
+     * ```
+     *
+     * 旧实现「只观测不干预」的理由是「通话期间根本没有画面可编，硬重建只会把水搅浑」。
+     * 这个理由只在**通话期**成立，而且前提是判据正确——旧判据（2 秒窗口 <4 帧 ≈ 2fps）
+     * 会把通话期 0.8fps 的心跳帧必然判成停摆，于是当年确实不该动手。现在判据改成
+     * 「最后一帧距今」（见 [frameAgeMs]）：心跳帧间隔只有 ~1.25 秒，不会触发；真冻住的
+     * 引擎一帧都没有，8 秒后照旧触发。**通话中仍然明确跳过干预**，两条保险都留着。
      */
     private fun startStallWatchdog() {
         Thread {
             var previous = frameSeq
             var lowRateSince = 0L
+            // 判据与开关在轮次开始时读一次：运行中改只在下次引擎重连生效，避免同一次停摆
+            // 前后用两套标准。
+            val byFrameAge = appContext?.let { StallRecoveryPrefs.judgeByFrameAge(it) } ?: true
+            val autoRecover = appContext?.let { StallRecoveryPrefs.recoveryEnabled(it) } ?: true
             while (running.get()) {
                 try {
                     Thread.sleep(STALL_POLL_MILLIS)
@@ -873,28 +910,124 @@ object CarLifeHijack {
                     lowRateSince = 0L
                     continue
                 }
-                // 注意不能按「一帧都没有」判：来电期间引擎仍会发 0.8fps 的心跳帧，
-                // 只是没有新 IDR。这里按窗口帧数判（2 秒内少于 4 帧 ≈ 低于 2fps）。
-                if (delta >= 4) {
+                // 写卡死观测：只记一行，**不关 socket**。永久阻塞的写永远不会进任何
+                // 「已完成」的统计，只能靠「这一笔还在飞」的时长看出来。
+                sender?.noteWriteStall()
+                // 停摆判据。
+                //
+                // 默认（byFrameAge）：只看**最后一帧距今**。来电/语音接管期间引擎会降到
+                //   0.8fps 心跳帧，2 秒里只有约 1.6 帧——旧判据按定义必然把它算成停摆。
+                //   心跳帧距上一帧只有 ~1.25s，不该算停摆；真冻住的编码器一帧都没有，
+                //   8 秒后照旧触发同一套分级干预，阈值与退避都不变。
+                // 旧（开关关掉）：2 秒窗口内 <4 帧（≈2fps），完整保留以便一键回退。
+                if (byFrameAge) {
+                    val age = frameAgeMs(now)
+                    // -1 = 本轮还没收到过帧：不判，否则引擎刚起来就被拆
+                    if (age < 0 || age < STALL_LOG_MILLIS) {
+                        lowRateSince = 0L
+                        continue
+                    }
+                } else if (delta >= 4) {
                     lowRateSince = 0L
                     continue
                 }
                 if (lowRateSince == 0L) {
-                    lowRateSince = now - STALL_POLL_MILLIS
+                    lowRateSince = if (byFrameAge) now - STALL_LOG_MILLIS else now - STALL_POLL_MILLIS
                     continue
                 }
-                if (stallSince > 0 || now - lowRateSince < STALL_LOG_MILLIS) continue
-                stallSince = lowRateSince
-                logSink?.invoke(
-                    "CARLIFE: 画面源停摆 ${(now - lowRateSince) / 1000} 秒（帧率 <2fps，零个新 IDR）" +
-                        "——引擎这段时间几乎不出帧（来电/锁屏时手机侧画面被占用，车机会黑屏；" +
-                        "恢复后会补关键帧）",
-                )
+                if (stallSince == 0L) {
+                    if (now - lowRateSince < STALL_LOG_MILLIS) continue
+                    stallSince = lowRateSince
+                    stallInterventions = 0
+                    lastStallReinitAt = 0L
+                    val age = frameAgeMs(now)
+                    logSink?.invoke(
+                        "CARLIFE: 画面源停摆 ${(now - lowRateSince) / 1000} 秒" +
+                            "（最后一帧 ${if (age < 0) "无" else "${age / 1000}s 前"}，" +
+                            "本窗口 $delta 帧，零个新 IDR）" +
+                            "——引擎这段时间不出帧；${screenStateText()}" +
+                            if (autoRecover) "" else "；自动恢复已关闭，只观测",
+                    )
+                    continue
+                }
+                if (!autoRecover) continue
+                // 通话/语音期不干预：这段时间手机侧确实没有可编码的画面，
+                // 重建只会把黑屏拖得更长（旧注释的结论在这里仍然成立）。
+                if (isPhoneInCall()) continue
+                val stalledMs = now - stallSince
+                val sinceReinit =
+                    if (lastStallReinitAt == 0L) Long.MAX_VALUE else now - lastStallReinitAt
+                when (StallJudge.nextAction(stalledMs, stallInterventions, stallReconnectDelay, sinceReinit)) {
+                    StallJudge.Action.REINIT_ENCODER -> {
+                        stallInterventions = 1
+                        lastStallReinitAt = now
+                        logSink?.invoke(
+                            if (sinceReinit == Long.MAX_VALUE) {
+                                "CARLIFE: 停摆 ${stalledMs / 1000} 秒——请求引擎重建编码器"
+                            } else {
+                                "CARLIFE: 停摆 ${stalledMs / 1000} 秒——再次请求引擎重建编码器"
+                            },
+                        )
+                        client?.requestVideoReinit()
+                    }
+                    StallJudge.Action.REBUILD_SESSION -> {
+                        stallInterventions = 2
+                        val next = StallJudge.nextReconnectDelay(stallReconnectDelay)
+                        logSink?.invoke(
+                            "CARLIFE: 停摆 ${stalledMs / 1000} 秒仍未恢复——强制重建 CarLife 会话" +
+                                "（下次阈值 ${next / 1000}s；引擎冷启动可能要 30–45s 才出首个 IDR，" +
+                                "别在热身期反复拆）",
+                        )
+                        stallReconnectDelay = next
+                        // stop() 让 workerLoop 退出本轮并重新接管，等价于用户手点一次重连。
+                        client?.stop()
+                    }
+                    StallJudge.Action.NONE -> Unit
+                }
             }
         }.apply {
             isDaemon = true
             name = "carlife-stall-watch"
             start()
+        }
+    }
+
+    /** 距上一次收到 CarLife 视频帧过去多少毫秒；-1 = 本轮还一帧都没收到。 */
+    private fun frameAgeMs(now: Long): Long = StallJudge.frameAgeMs(lastSourceFrameAt, now)
+
+    /** 手机是否在通话 / 语音交互中（此时停摆不干预）。 */
+    private fun isPhoneInCall(): Boolean {
+        val context = appContext ?: return false
+        return try {
+            val audio = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            when (audio?.mode) {
+                android.media.AudioManager.MODE_IN_CALL,
+                android.media.AudioManager.MODE_IN_COMMUNICATION,
+                android.media.AudioManager.MODE_RINGTONE,
+                -> true
+                else -> false
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 停摆时的手机屏幕状态（写进日志，用来区分「手机侧画面被占用」与「链路/引擎问题」）。
+     *
+     * 只读三个公开状态，不需要任何权限：屏幕是否点亮、是否锁屏。
+     */
+    private fun screenStateText(): String {
+        val context = appContext ?: return "屏幕状态=未知（无上下文）"
+        return try {
+            val power = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            val keyguard =
+                context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            val interactive = power?.isInteractive == true
+            "屏幕状态=${if (interactive) "点亮" else "熄灭"}/" +
+                (if (keyguard?.isKeyguardLocked == true) "锁屏" else "未锁")
+        } catch (_: Throwable) {
+            "屏幕状态=未知"
         }
     }
 
