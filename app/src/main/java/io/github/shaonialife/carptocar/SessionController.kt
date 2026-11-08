@@ -229,6 +229,42 @@ object SessionController {
     private const val SILENT_JOIN_MAX_MISSES = 2
 
     /**
+     * 车机麦克风上行探针开关（**诊断用，正式发版前关掉**）。
+     *
+     * 背景：车机 `/info` 的四路音频档都声明了输入位图（compatibility `in=0x54`、
+     * default/telephony `in=0x30000050`、speechRecognition `in=0x20000040`），说明它
+     * **声称**愿意把麦克风推给手机；但本项目从未实建过 `input=true` 的流，所以
+     * 「实际推不推」一直是空白。开这个开关后每轮会话跑一次探针（只数数据报），
+     * 结论看日志里 `MIC: 结论——…` 那一行。
+     *
+     * 为什么不能少这一步：车机若不推，后面「解密 → PCM → 灌进 CarLife 9242」全是白工；
+     * 而且输入流的端口方向与下行相反（车机往我们的端口发），参数必须现场试。
+     */
+    private const val MIC_PROBE_ENABLED = true
+
+    /** 探针启动前的等待：音频流刚建好时车机在做资源仲裁，抢跑会被拒。 */
+    private const val MIC_PROBE_DELAY_MS = 12_000L
+
+    /** 每组参数的监听窗口（毫秒）。车机推麦克风是**持续**流的，6 秒足够判断有没有。 */
+    private const val MIC_PROBE_LISTEN_MS = 6_000L
+
+    /**
+     * 探针参数组合（按 `/info` 输入位图里最像语音的三档排序）。
+     *
+     * - `speechRecognition` / `0x40`（bit6）/ 24kHz：Siri 档，输入位图 `0x20000040` 里的低位
+     * - `telephony` / `0x8000`（PCM48k 立体声）/ 48kHz：通话档，`0x30000050` 含 PCM 位
+     * - `default` / `0x8000` / 48kHz：默认档，`0x30000050` 同样含 PCM 位
+     * - `compatibility` / `0x40` / 24kHz：兼容档，`0x54`
+     */
+    private val MIC_PROBE_COMBOS =
+        listOf(
+            MicProbeCombo("speechRecognition", 1L shl 6, 24_000),
+            MicProbeCombo("telephony", 1L shl 15, 48_000),
+            MicProbeCombo("default", 1L shl 15, 48_000),
+            MicProbeCombo("compatibility", 1L shl 6, 24_000),
+        )
+
+    /**
      * 系统确认框路径失败后的自动重试次数与间隔。
      *
      * 旧实现在这里弹「重试 / 打开 WLAN 设置」问用户——车上没人点屏，90 秒后按无人应答
@@ -1195,6 +1231,76 @@ object SessionController {
             isDaemon = true
             start()
         }
+    }
+
+    /**
+     * 车机麦克风上行探针（**诊断**，只在本轮测试包里开）。
+     *
+     * 目的只有一个：搞清「车机到底会不会把麦克风音频推向手机」。`/info` 里四路音频档都
+     * 声明了输入位图，但那只是**声明**，从没实建过 `input=true` 的流（旧
+     * `microphoneCandidates()` 只打日志）。这一步不成立，后面「解密 → PCM → 灌进 CarLife
+     * 的 9242 VR 通道」全是白工。
+     *
+     * 组合按「车机声明里最像语音的三档」排，第一组命中就停（不浪费车机的资源仲裁）。
+     * 监听窗口 6 秒 × 最多 4 组，全程只跑一次、在后台线程，不影响推流。
+     */
+    private fun runMicProbe(client: AirPlayClient) {
+        Thread(
+            {
+                runCatching { Thread.sleep(MIC_PROBE_DELAY_MS) }
+                appendLog("MIC: 开始上行探针（只数数据报，不解密不识别）")
+                var hit = false
+                for (combo in MIC_PROBE_COMBOS) {
+                    val received =
+                        try {
+                            client.probeMicrophoneInput(
+                                audioType = combo.audioType,
+                                formatBit = combo.formatBit,
+                                sampleRate = combo.sampleRate,
+                                listenMillis = MIC_PROBE_LISTEN_MS,
+                            )
+                        } catch (error: Exception) {
+                            appendLog("MIC: 探针异常（${combo.label}）- ${error.message}")
+                            0
+                        }
+                    when {
+                        received > 0 -> {
+                            appendLog(
+                                "MIC: ✓ ${combo.label} 收到 $received 个数据报" +
+                                    "——车机在推麦克风，此路可走",
+                            )
+                            hit = true
+                        }
+
+                        received < 0 -> {
+                            appendLog("MIC: ${combo.label} 被车机拒绝（SETUP 非 200）→ 不再试其它组合")
+                            break
+                        }
+
+                        else -> appendLog("MIC: ${combo.label} ${MIC_PROBE_LISTEN_MS}ms 内无数据报")
+                    }
+                    if (hit) break
+                }
+                appendLog(
+                    if (hit) {
+                        "MIC: 结论——车机愿意把麦克风推给手机；下一步做「解密 + PCM + 9242 注入」"
+                    } else {
+                        "MIC: 结论——本轮所有组合都没数据报（车机不接受输入流 / 或只在语音激活时才推）"
+                    },
+                )
+            },
+            "mic-probe",
+        ).apply { isDaemon = true }.start()
+    }
+
+    /** 一组麦克风上行探针参数（audioType + 车机声明的输入格式位 + 采样率）。 */
+    private data class MicProbeCombo(
+        val audioType: String,
+        val formatBit: Long,
+        val sampleRate: Int,
+    ) {
+        val label: String
+            get() = "$audioType/0x${formatBit.toString(16)}/${sampleRate}Hz"
     }
 
     /** 音频配置守卫是否在跑（一轮 connect 只拉一条线程）。 */
@@ -4892,6 +4998,7 @@ object SessionController {
                                     // 音频包持续发送、采集内容非零，车机无声）。
                                     appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
                                     client.record()
+                                    if (MIC_PROBE_ENABLED) runMicProbe(client)
                                 }
                             } else {
                                 // 屏幕流 SETUP 失败：会话已经死了，但旧实现到这里什么都不说，
