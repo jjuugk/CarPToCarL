@@ -1,6 +1,6 @@
 *.iml
 .gradle/
-# 本机工具链 junction（JDK17/SDK/Gradle，指向 ../cardeck/.tools），不入库
+# 项目内自包含工具链（JDK17/SDK/Gradle/platform-tools），不入库
 .tools/
 .kotlin/
 local.properties

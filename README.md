@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**
-> —— 主线固定直链（当前 1.2.29，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk)**
+> —— 主线固定直链（当前 1.2.30，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.29，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.29.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.30，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.30.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.29`（正式版；**身份对齐两项修复 + 手册对照**：① `0x4E09` 设备信息固定自报 `iPhone`，与蓝牙名彻底解耦——1.2.28 当天为修车机蓝牙列表里的「未知设备」把 `0x4E09` 改成发本机蓝牙名（`BKQ-AN10`），修好了展示却弄偏了「我们是谁」；真机 Frida 抓包（MIB3 隧道同款常量）与市售盒子在这一层发的都是 `iPhone`。构造参数 `deviceName` 直接删除以杜绝再传错，新增单测断言报文体全文都是 `iPhone`；② iAP2 链路初始序号由固定 `99` 改为每条链路 `SecureRandom(0x100)`——myCadillac 13 轮重连的 486 个 SYN 字节完全一致（`seq=99`），做过会话缓存/重放判定的车机会把重复序号按重传帧丢掉，真机与 catplay 取的都是随机初值；③ 新增 `docs/carplay-manual-crosscheck-20261107.md`：把外部《CarPlay 车机开发手册》对发送端主链路的 10 处建议逐条核过，采纳 1 处、明确不采纳 9 处（每处都附本项目实车证据），并指出手册自身的两处硬错误（EIR 两列写反、`0x5702` 角色写反）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.30`（正式版；**按车机声明分派 + 宝马适配 + 精简支线**：① 新增 `AccessoryDeclaration` 跨链路汇入 `0x1D01` 双清单，唯一硬裁宝马/通用系都未声明可收的 `0xA100`/`0xFFF0`（此前整批发 7 条把 iD6 的 AirPlay 服务打崩），其余越权消息照发只留 WARN；② 解析组件声明（语言/无线 CarPlay/导航显示）并把 `0x4E0A` 语言规范化为 ISO 639-1 两字母码；③ 蓝牙侧补齐 `0x4157/0x4154/0x4170/0x5200` 四条订阅应答，导航只回空态不编造报文；④ 并入宝马 fork 三项修复（CarPlay 标记 SDP 常驻、HFP/A2DP 配置守卫、首帧后不补发 RECORD）；⑤ 整体移除 MIB3 EA 车机控制支线（含协议层 EA 会话）。参数 10 的 EA 协议组按要求不解析；单测 525 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -641,8 +641,10 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 ./gradlew :app:lintDebug            # lint 检查
 ```
 
-- `.tools/` 是工具链 junction（JDK 17 + Android SDK 34 + Gradle 8.10.2），  
-  指向 `../cardeck/.tools`（Windows 目录 junction，共享工具链，省 ~870MB）。
+- `.tools/` 是**项目内自包含的工具链**（JDK 17 + Android SDK 34 / build-tools 34.0.0 +
+  Gradle 8.10.2 发行版 zip），不依赖任何外部目录，也不入库（`.gitignore`）。
+  `gradle.properties` 的 `org.gradle.java.home`、`local.properties` 的 `sdk.dir`、
+  `gradle-wrapper.properties` 的 `distributionUrl` 全部指向这个目录。
 - `init-mirror.gradle` 把依赖源指向腾讯云镜像（`google()` / `mavenCentral()` 本机易超时）。
 - 产物：debug → `app/build/outputs/apk/debug/app-debug.apk`；  
   release → `app/build/outputs/apk/release/app-release.apk`（归档到 `dist/`，`dist/` 不入版本库）。
@@ -670,8 +672,8 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 CarPToCarL/
 ├── app/                          # 唯一的 Android 应用模块
 ├── docs/                         # 协议知识库与逆向结论
-├── gradle/wrapper/               # wrapper（已改为本地发行版 zip）
-├── .tools/                       # 工具链 junction → ../cardeck/.tools
+├── gradle/wrapper/               # wrapper（指向项目内 .tools/ 的发行版 zip）
+├── .tools/                       # 自包含工具链：JDK17 / Android SDK34 / Gradle 8.10.2 / platform-tools
 ├── build.gradle.kts              # 根构建脚本
 ├── settings.gradle.kts           # 项目名 + 仓库/镜像源
 ├── gradle.properties             # JVM 参数 + org.gradle.java.home（固定 JDK 17）
@@ -821,6 +823,57 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.30 —— 2026-11-08（按车机 `0x1D01` 声明分派 + 宝马适配 + 移除 EA 支线，正式版）
+
+1.2.29 之后连续三轮改动，主线从「只把车机声明打进日志」推进到「按声明分派」，同时并入
+一份宝马适配 fork 的实测结论、删掉一条用不上的支线。**奥迪 / 通用系既有主链路未动**，
+唯一会直接影响已跑通车型的是「首帧后不再补发 RECORD」（见下）。
+
+**一、车机声明终于参与发送决策**
+
+车机在 `0x1D01` 里声明「会发什么（参 6）/ 可收什么（参 7）/ 支持什么组件（参 12/13/24/30）」，
+运行时还会用 `Start…Updates` 动态点名要手机推状态；此前项目只有 `/info` 与 mDNS 两层驱动行为。
+
+| 改动 | 说明 |
+| --- | --- |
+| `AccessoryDeclaration` | 跨蓝牙 / WiFi 隧道的声明快照单例——蓝牙的 `0x1D01` 比隧道布防早约 5.5 秒，裁突发必须用它；`startConnection()` 每轮 reset，不拿上一台车的清单裁这一台 |
+| 越权取证下沉 | `noteSend()` 装在四个发送出口（蓝牙 `send`/`sendFireAndForget`、隧道 `sendCsmLocked`/`sendRawCsmLocked`），隧道侧此前连 WARN 都不打 |
+| **唯一硬裁** | 只裁 `0xA100` / `0xFFF0`：宝马 NBT Evo / iD6、通用系 Cinemo 都没声明可收，整批发过去 42~116ms 内事件通道 EOF、AirPlay 服务重启（mDNS `pi` 变化）。**只裁这两条，不关整条隧道**——宝马会连发 SYN marker 等会话表，关掉换来的是一直黑屏 |
+| 判据不变 | 清单只能证明「有」不能证明「没有」（奥迪 3315 只列 5 项却完整支持 `0x5702`）→ 其余越权消息照发，只记 `UNSOLICITED_MESSAGE` WARN；清单未到时全部按未知放行 |
+| 组件声明 | 解析语言 / 无线 CarPlay 组件 / 导航显示组件进画像「依据」，暂不参与 `era`/`wifiGen` 硬判定（部分车机走私有编号）；`0x4E0A` 语言按声明规范化为 ISO 639-1 两字母码，无声明时保留原兜底 |
+| 订阅应答 | 新增 `Iap2SubscriptionReplies`，蓝牙侧补 `0x4157→0x4158`、`0x4154→0x4155`、`0x4170→0x4171`、`0x5200→0x5201`，与隧道侧共用同一份空态字节；导航只回 `0x5201` **空体**保住控制通道，没有 maneuver 数据源就不编造报文 |
+
+按用户要求**排除参数 10 的 EA 协议组**：不解析、不恢复 EA 会话。文档同步 `docs/PROTOCOL-NOTES.md` §15、
+规格文档 §2.7 / §2.8 / 附录 E。
+
+**二、并入宝马 fork 三项修复**（`docs/bmw-fork-port-20261108.md`，来源实测 BMW 94841 / G38 NBT EVO
+连续推流 670 秒；用户选择三项全局生效、不做车型开关）
+
+1. **CarPlay 标记 SDP 常驻**：`BtCompatPrefs` 默认值 `false → true`，App 启动即注册
+   `2d8d2466-…` + `02030302-…` 两条占位记录并常开 iAP2 监听。车机把设备判成
+   「不支持 Apple CarPlay」发生在 discovery/配对阶段，等点「启动连接」再注册已经晚了。
+   设置里开关仍在，关掉即回旧行为。
+2. **音频配置守卫**：`BtProfiles.guardAudioProfiles()` 每 1.5 秒复查目标车机的 HFP/A2DP/LE Audio，
+   在线就断开（车机自己会拉回来，一次性 disconnect 不够）；退出条件含 iAP2 bring-up 完成、
+   开始推流、盯满 5 分钟。新增 `AudioProfileGuardPolicy` 纯逻辑与 4 例单测。
+3. **首帧后不再补发 assertModes + RECORD**：这段本是给奥迪 4580「连接成功但黑屏」加的，
+   但宝马 NBT EVO 会在首帧后重发 RECORD 时直接关掉视频通道。原实现留在注释里。
+
+> ⚠️ 已知取舍：奥迪 4580/4910 那层「重建屏激活」兜底随之失效（用户已知情并接受），
+> 若复现「状态栏说在推流、车机黑屏」，按 `installNowPlayingBridge()` 里的注释接回即可。
+
+**三、整体移除 MIB3 EA 车机控制支线**
+
+按用户要求连协议层 EA 会话一起删：删掉整个 `mib3/` 包（控制面板 / viwi 编解码 / EA 隧道）、
+`Iap2SenderSession` 的 EA 解析与 `0xEA00~0xEA04` 收发、相关常量与回调。
+**刻意保留**链路层对车机声明的 `{1:control, 2:EA}` 会话表 ACK 与 2 号会话数据帧的 ACK——
+前者是 iAP2 链路协商硬要求，后者不确认会让对端不停重传拖慢控制会话。
+三份 EA 文档加废弃横幅留作历史取证。
+
+**验证**：`:app:assembleRelease` 通过，单测 **525 例 0 失败**（1.2.29 的 518 例 − 删除 EA/viwi 17 例
++ 音频守卫 4 例 + 声明分派 20 例）。宝马 iD6、奥迪 MIB3 需真机复测：
+现在 `0xAA05` 后的突发会自动少发 `0xA100`/`0xFFF0`，其余 5 条照发。
 
 ### 1.2.29 —— 2026-11-07（身份对齐：`0x4E09` 固定报 iPhone、链路初始序号随机，正式版）
 
