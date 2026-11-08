@@ -208,23 +208,23 @@ object SessionController {
     private const val SPECIFIER_JOIN_GRACE_MS = 20_000L
 
     /**
-     * **静默入网**窗口：登记 WiFi 建议后，等系统自己把手机连上车机热点。
+     * **建议兜底**窗口：specifier 没进来之后，登记 WiFi 建议、等系统自己把手机连上热点。
      *
-     * 这是「不用手点」的唯一路径（`WifiNetworkSpecifier` 每次都会弹系统确认框）。
-     * 建议被授权过时系统 1~3 秒就关联好；**没授权过时这段必然白等**，所以由
-     * [SilentJoinPolicy] 限制连续尝试次数，失败几轮后直接降级到确认框路径。
+     * 只在 specifier 返回 `Unavailable` 后才走这一段——1.0.7 到 1.2.30 一直是用
+     * specifier 直接连的（用户实测**不需要点任何东西**：系统对已有授权/关联记录的热点
+     * 会静默满足请求），所以快路必须先发。建议通道是给「系统确实要人确认」的机型兜底的，
+     * 排在前面会每轮白等这段窗口、把快路挤掉。
      *
-     * 12 秒的取值：覆盖参考实现实测的 15.73s 关联+DHCP 里系统侧那一段（我们只等
-     * 「关联完成」那一刻，不等后续握手），又不至于把失败场景拖太久。
+     * 12 秒的取值：覆盖参考实现实测 15.73s 里「系统侧关联」那一段，又不至于把失败场景拖太久。
      */
     private const val SUGGESTION_SILENT_WAIT_MS = 12_000L
 
     /**
-     * 静默入网连续失败多少次后，**不再等**、直接走系统确认框路径。
+     * 建议兜底连续失败多少次后不再白等。
      *
      * 建议未授权时每轮白等 12 秒，连着几轮就会把「车机只等 27 秒」的窗口吃光。
      * 所以给两次机会：第一次登记后系统可能正在弹授权通知，第二次接住刚授权的那一下；
-     * 两次都没成，说明这台机器上建议通道不可用，别再耗时间。
+     * 两次都没成，说明这台机器上这条通道不可用，别再耗时间——但**也不弹任何框**。
      */
     private const val SILENT_JOIN_MAX_MISSES = 2
 
@@ -2054,18 +2054,18 @@ object SessionController {
             }
 
             is WifiJoinGate.Decision.Run -> {
-                // **三层尝试，从「完全不打扰」到「弹一次系统框」**：
-                //  1) 复用：系统已连在该热点上（已保存网络/上轮残留/建议已生效）
-                //     → 只 bindProcessToNetwork，零交互；
-                //  2) 静默：登记 WiFi 建议后等系统自己关联 → 零交互（授权过一次后长期有效）；
-                //  3) specifier：唯一会弹系统确认框的路径，只在前两层确定失败时才用。
-                // 旧顺序是「复用 → specifier」，于是每轮都在弹框，车上没人点屏就整轮失败。
+                // **顺序与 1.0.7 一致：复用 → specifier → 建议兜底**，全程无弹框。
+                //  1) 复用：系统已连在该热点上 → 只 bindProcessToNetwork，零交互；
+                //  2) specifier：1.0.7 唯一的一条路。既有授权/关联记录还在时系统会
+                //     静默满足、不弹框，实测整车链路 6 秒内完成；
+                //  3) 建议：只有 specifier 真进不来才登记，等系统自己关联（授权过一次
+                //     后长期有效）。排在最后是因为它会让快路先白等一轮。
                 val adopted = connector.adoptIfAlreadyConnected(wifi.ssid)
                 val result =
                     if (adopted != null) {
                         WifiCarPlayConnector.JoinResult.Joined(adopted)
                     } else {
-                        joinSilentlyThenSpecifier(connector, wifi)
+                        joinSpecifierThenSuggestion(connector, wifi)
                     }
                 wifiJoinGate.finish(
                     decision.ticket,
@@ -2078,56 +2078,71 @@ object SessionController {
     }
 
     /**
-     * 第二层（静默）与第三层（系统确认框）之间的取舍。
+     * specifier 与建议通道的先后：**先 specifier（1.0.7 原样），失败才退回建议**。
      *
-     * 抽出来只为让 [joinCarWifiOnce] 的主干保持「复用 → 后面交给它」两句话。
+     * 这条顺序是被实车纠正过一次的：1.2.30/1.2.31 一版曾把「建议」放到 specifier 之前，
+     * 依据是 2026-10-29 宝马 iD9 日志里「specifier 每次都要人在系统确认框上点连接」。
+     * 但用户对 1.0.7 的实测是**纯 specifier 一路静默**（1.0.7 里根本没有建议通道）——
+     * 说明系统对该热点的授权/关联记录还在时，`requestNetwork` 会被**静默满足、不弹框**；
+     * 而建议层排在前面反而每轮先白等 12 秒，把快路挤掉。
+     *
+     * 所以现在：specifier 先上（本机不弹框、有既有授权时毫秒级满足），只有它真的
+     * 进不来（`Unavailable`）才登记建议、等系统自己关联——两种机型都被覆盖，
+     * 且「不需要点」这一点与 1.0.7 完全一致。
      */
-    private fun joinSilentlyThenSpecifier(
+    private fun joinSpecifierThenSuggestion(
         connector: WifiCarPlayConnector,
         wifi: Iap2SenderSession.WifiConfiguration,
     ): WifiCarPlayConnector.JoinResult {
-        val silent =
-            if (silentJoinPolicy.shouldTrySilently(wifi.ssid)) {
-                phaseHint = "正在自动加入车机热点 ${wifi.ssid}…（无需操作）"
-                appendLog(
-                    ">>> 静默入网 \"${wifi.ssid}\"：登记热点建议后由系统自动关联" +
-                        "（不弹确认框，最多 ${SUGGESTION_SILENT_WAIT_MS / 1_000}s）",
-                )
-                connector.joinSilentlyBySuggestion(
+        appendLog(
+            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
+        )
+        val specifier =
+            try {
+                connector.joinCarPlayNetwork(
                     ssid = wifi.ssid,
                     passphrase = wifi.passphrase,
                     securityType = wifi.securityType,
-                    timeoutMillis = SUGGESTION_SILENT_WAIT_MS,
+                    timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                    graceMillis = SPECIFIER_JOIN_GRACE_MS,
                     isCancelled = { connectCancelled },
                 )
-            } else {
-                appendLog(
-                    "WIFI: \"${wifi.ssid}\" 静默入网已连续 ${SILENT_JOIN_MAX_MISSES} 次未成" +
-                        "（建议通道在本机不可用或未授权）——本轮直接走系统确认框路径",
-                )
-                null
+            } catch (error: Exception) {
+                appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
+                WifiCarPlayConnector.JoinResult.Unavailable
             }
+        if (specifier is WifiCarPlayConnector.JoinResult.Joined) return specifier
+        if (specifier is WifiCarPlayConnector.JoinResult.Unsupported) return specifier
+        if (connectCancelled) return specifier
+
+        // specifier 没进来：登记建议（后台生效，系统自己关联，全程不出确认框）。
+        // 连续失败两次就说明本机这条通道不可用/未授权，不再每轮白等。
+        if (!silentJoinPolicy.shouldTrySilently(wifi.ssid)) {
+            appendLog(
+                "WIFI: \"${wifi.ssid}\" 建议通道已连续 ${SILENT_JOIN_MAX_MISSES} 次未成" +
+                    "（本机不可用或未授权）——本轮到此为止，不弹任何框",
+            )
+            return specifier
+        }
+        phaseHint = "正在自动加入车机热点 ${wifi.ssid}…（无需操作）"
+        appendLog(
+            ">>> specifier 未进来，改登记热点建议让系统自己关联" +
+                "（不弹确认框，最多 ${SUGGESTION_SILENT_WAIT_MS / 1_000}s）",
+        )
+        val silent =
+            connector.joinSilentlyBySuggestion(
+                ssid = wifi.ssid,
+                passphrase = wifi.passphrase,
+                securityType = wifi.securityType,
+                timeoutMillis = SUGGESTION_SILENT_WAIT_MS,
+                isCancelled = { connectCancelled },
+            )
         silentJoinPolicy.recordResult(wifi.ssid, silent != null)
         if (silent != null) {
             appendLog(">>> 静默入网成功：\"${wifi.ssid}\" 已由系统自动连上并绑定（全程无弹框）")
             return WifiCarPlayConnector.JoinResult.Joined(silent)
         }
-        appendLog(
-            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
-        )
-        return try {
-            connector.joinCarPlayNetwork(
-                ssid = wifi.ssid,
-                passphrase = wifi.passphrase,
-                securityType = wifi.securityType,
-                timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
-                graceMillis = SPECIFIER_JOIN_GRACE_MS,
-                isCancelled = { connectCancelled },
-            )
-        } catch (error: Exception) {
-            appendLog("WIFI: 入网请求异常 - ${error.message ?: error.javaClass.simpleName}")
-            WifiCarPlayConnector.JoinResult.Unavailable
-        }
+        return specifier
     }
 
     /**
@@ -2244,7 +2259,7 @@ object SessionController {
         phaseHint = "未能加入车机热点——下一轮连接会自动再试"
         appendLog(
             "WIFI: 自动重试 ${SPECIFIER_AUTO_RETRY_TIMES} 次仍未加入 \"${wifi.ssid}\"——" +
-                "本轮到此为止，不打扰用户（下次连接会重新走静默优先的三层路径）",
+                "本轮到此为止，不打扰用户（下次连接会重新走「复用 → specifier → 建议」）",
         )
         return false
     }
