@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk)**
-> —— 主线固定直链（当前 1.2.30，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk)**
+> —— 主线固定直链（当前 1.2.31，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.30，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.30.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.31，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.31.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.30`（正式版；**按车机声明分派 + 宝马适配 + 精简支线**：① 新增 `AccessoryDeclaration` 跨链路汇入 `0x1D01` 双清单，唯一硬裁宝马/通用系都未声明可收的 `0xA100`/`0xFFF0`（此前整批发 7 条把 iD6 的 AirPlay 服务打崩），其余越权消息照发只留 WARN；② 解析组件声明（语言/无线 CarPlay/导航显示）并把 `0x4E0A` 语言规范化为 ISO 639-1 两字母码；③ 蓝牙侧补齐 `0x4157/0x4154/0x4170/0x5200` 四条订阅应答，导航只回空态不编造报文；④ 并入宝马 fork 三项修复（CarPlay 标记 SDP 常驻、HFP/A2DP 配置守卫、首帧后不补发 RECORD）；⑤ 整体移除 MIB3 EA 车机控制支线（含协议层 EA 会话）。参数 10 的 EA 协议组按要求不解析；单测 525 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.30.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.30/CarPToCarL-1.2.30.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.31`（正式版；**WiFi 入网全面改为静默自动连**：① 按打扰程度分三层入网——复用系统已关联的热点（只 `bindProcessToNetwork`）→ 登记 `WifiNetworkSuggestion` 等系统自己关联 → 最后才用 `WifiNetworkSpecifier` 兜底，前两层全程零交互；② 入网超时后不再立刻 `release()` 断掉回调，新增 20 秒宽限窗口（实测同机型入网需 15.73s，而旧窗口只有 15.0s，原先等于每轮都比系统早 0.7 秒放弃）；③ 修掉两处真 bug——旧的「绑定当前 WiFi」按 `TRANSPORT_WIFI` 泛匹配会绑到家里的 WiFi（AirPlay 连不上且其它应用瞬间断网），改为按 SSID 精确匹配；静默绑定不走 `requestNetwork` 会丢 `onLost`，补 `watchLoss()` 恢复被动断线的自动重绑；④ 删除全部手动分支（「重试 / 打开 WLAN 设置」「清除保存 / 保留」「按车机热点继续」等弹窗与复制密码跳设置页），失败改为自动重试 2 次；⑤ 新增 `SilentJoinPolicy`：静默连续失败 2 次才降级，避免在建议未授权时每轮白等 12 秒（车机只等约 27 秒就拆链）。单测 530 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -823,6 +823,66 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.31 —— 2026-11-08（WiFi 入网改「静默自动连」+ 超时宽限，正式版）
+
+一条主线贯穿本版：**车上没人点屏，入网却每一步都在等人点**。这版把整条链路改成能自己走完，
+并顺带修掉两个**会绑错网 / 会丢断线回调**的实质 bug。
+
+**一、为什么以前必须点一下**
+
+入网只有 `WifiNetworkSpecifier` 一条路，而它**每加入一次都要人在系统确认框上点「连接」**。
+车上没人点屏 → 等到超时 → 本轮失败；失败后又弹我们自己的「重试 / 打开 WLAN 设置」框，
+还是要人点。整条链路没有一步能在无人状态下走完，现象就是「卡在连接热点」。
+
+**二、改成按打扰程度分三层，永远从最安静的一层开始**
+
+| 层 | 做法 | 要不要人 |
+| --- | --- | --- |
+| 1 复用 | 系统已连在该热点（已保存网络 / 上轮残留 / 建议已生效）→ 只 `bindProcessToNetwork` | 零交互 |
+| 2 静默 | 登记 `WifiNetworkSuggestion`，等系统自己关联 | 零交互 |
+| 3 兜底 | `WifiNetworkSpecifier`，只在前两层确定失败时用 | 会弹一次系统框 |
+
+> **一句实话**：WiFi 建议**首次登记时系统一定会发一条通知请用户「允许」**，这是 Android 对
+> 普通应用的硬边界，绕不过去（不是没做）。允许一次后长期有效，之后进范围即连、再无提示框。
+
+**三、超时宽限：原先等于每轮都比系统早 0.7 秒放弃**
+
+同一台手机（HONOR WKL-AN20）对同一台车（BMW94841 / NBT EVO）的参考日志里，入网实测耗时
+**15.729 秒**（`13:05:23.407 尝试静默加入` → `13:05:39.136 ✓ 已绑定网络`），而旧窗口是
+`SPECIFIER_JOIN_TIMEOUT_MS = 15_000L`，且**对所有车机通用**。超时分支第一件事是
+`release()`（注销 `NetworkCallback` + `bindProcessToNetwork(null)`）——系统刚建好的网络连带
+回调一起被扔掉，下一轮从零再来，界面永远是「正在加入车机热点…」。
+
+改动：`joinCarPlayNetwork` 新增 `graceMillis`（默认 0，其它调用方行为不变），正式窗口到点后
+**先不解绑**、继续等 20 秒宽限；`onUnavailable`（系统明确判定不可用）不享受宽限，立即返回，
+失败提示不会因此变慢。抽出 `awaitJoin()` 统一「成功/超时/取消」三态，避免两份几乎一样的
+循环在其中一份漏掉取消判断。
+
+**四、顺手修掉的两个真 bug**
+
+| Bug | 后果 | 修法 |
+| --- | --- | --- |
+| 「绑定当前 WiFi」按 `TRANSPORT_WIFI` 泛匹配 | 手机同时挂着家里 WiFi 时绑到**错的那条**：AirPlay 必然连不上，且其它应用瞬间断网 | 删除该函数，统一 `adoptAssociated` **按 SSID 精确**找网络再绑；探针 `probeAirplayOnCurrentWifi` 一并换掉 |
+| 静默绑定不走 `requestNetwork` | 丢掉 `onLost` → **被动断开的自动重绑整条链路失效**（热点关闭时一行日志都没有） | 新增 `watchLoss()`，用 `registerNetworkCallback` 只监听断线 |
+
+另外 `adoptAssociated` 要求 `linkReady()`（网络已拿到地址）：刚关联、DHCP 未回时绑上去建
+socket 必然失败。
+
+**五、删掉的手动路径**
+
+`promptSpecifierFailed`（重试 / 打开 WLAN 设置）→ `retryJoinSpecifierSilently` 自动重试 2 次；
+`promptForgetSavedNetworkIfAny`（清除保存 / 保留）→ 只记日志、**一律保留**（保留反而能让系统
+进范围自动连，正好走第 1 层）；`legacyJoinCarWifi` 的确认框；`manualJoinCarWifi` 与
+`copyHotspotPsk`（复制密码 + 跳 WLAN 设置 = 纯手动）；`waitForManualWifiThenContinue` 里的跳
+设置页；保活期「检测到已连接 X，按车机热点继续？」弹窗。现在**只剩「WiFi 未开启」还会弹框**，
+且该分支因没有 shell 权限实际走不到。
+
+`SilentJoinPolicy`（新增，纯逻辑 + 5 例单测）：建议未授权时静默每轮必白等 12 秒，而车机只等
+约 27 秒就拆链——所以静默**连续失败 2 次**才降级到确认框路径，成功一次即归零。
+
+**验证**：`:app:assembleRelease` + `:app:testReleaseUnitTest` 通过，单测 **530 例 0 失败**。
+真车待验（测试包阶段用 `BUILD_TAG` 做了区分，正式版已清空）。
 
 ### 1.2.30 —— 2026-11-08（按车机 `0x1D01` 声明分派 + 宝马适配 + 移除 EA 支线，正式版）
 
