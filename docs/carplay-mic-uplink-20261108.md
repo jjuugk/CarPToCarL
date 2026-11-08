@@ -99,3 +99,33 @@ CarLife 协议里 `9242` 是 VR 通道（`CarLifeProtocol.PORT_VR`），对应�
 - **资源仲裁**：多开一条输入流可能让车机把通话/媒体档踢掉。探针限制「一次一组、6 秒、只跑一轮」，
   且失败即退出，就是为了把影响面压到最小。
 - **探针本身不该进正式版**：`MIC_PROBE_ENABLED` 是诊断开关，验证完要连同日志一起收掉。
+
+---
+
+## 附：ESP32-P4 接收端项目（songplay / xcertplay 移植）能不能帮上忙
+
+对照过 `github.com/W2215889498/songplay` 的 `esp32p4/STATUS.md`（2026-11-08）。结论分两半：
+
+**对麦克风这条需求：没有帮助。**
+
+- 他们明确把**音频与 HID 排除在范围外**（「明确不做的范围：有线 CarPlay、音频、HID」），
+  麦克风/音频上行标为 ❌ 未实现；
+- 而且他们的音频接收是**坏的**：iPhone 从不下发音频流（SETUP 里没有 type 100/101/102），
+  他们自己也不知道原因（STATUS §9.8），连播放链路都没跑通，自然更没碰上行。
+
+**对发射端其它问题：有 2 条可用的交叉线索。**
+
+1. **资源仲裁（最有价值）**：他们的关键观察是「`modesChanged` 里 audio 资源（resourceID 2）
+   始终不被手机接管，屏幕资源 1 会被接管」——即**谁 take/borrow 了 audio 资源，谁才拿到声音**。
+   我们是手机侧，对应的是「我们有没有 take 车机的 audio 资源」。这条正好对着我们一个老问题：
+   `docs/audio-call-issues.md` 里「通话档在车机上永远没声音」。下一步若再查通话档，
+   **先看 iAP2 的 modes/take/borrow 是否有 audio resource**，不要只盯音频流参数。
+   他们的候选清单可以整条当检查表：`/feedback` 的 stream clock、`0xA100` VehicleStatus、
+   `0x4E0B` device time、HID descriptor、modes take/borrow。
+2. **bplist 的三个硬要求**：插入顺序键、最小偏移表宽度、**恰好 32 字节 trailer**、根对象在偏移 8。
+   他们为此卡了最久。我们的 [BinaryPlist] 早已四项齐备（`makeRootFirst` 就是对齐 catplay 的那次修复），
+   可以当作反向印证——**这里不需要改**。
+
+其余内容对本项目是**方向相反或已覆盖**：控制通道 ChaCha20-Poly1305 帧格式与密钥方向
+（我们用 `AirPlayCrypto.chachaSeal` + `ControlCipher` 已实现）、视频 128 字节头与 nonce 计数器
+（我们是发送端）、ARP 陈旧与随机 MAC（他们是 AP 侧）、iAP2 PSN 99/100 与会话号（我们已跑通）。
