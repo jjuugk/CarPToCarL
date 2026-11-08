@@ -80,6 +80,16 @@ class VideoConfigSizeTest {
     }
 
     @Test
+    fun noViewAreaLeavesGeometryFieldsZero() {
+        // 默认形态（对齐 AMCar：只写解码尺寸、不写视口）：32..48 必须全是 0。
+        // 旧车机不读这些字段，多写反而是「给车机的额外信息」，所以默认不写。
+        val header = VideoSender.buildVideoConfigHeader(bodySize = 33, width = 1280, height = 720)
+        for (offset in 32 until 48) {
+            assertEquals("偏移 $offset 必须为 0", 0, header[offset].toInt())
+        }
+    }
+
+    @Test
     fun viewAreaIsWrittenSeparatelyFromDecoderSize() {
         // 4580：解码尺寸与显示视口是两个字段。码流只能 720p 时，
         // params[1] 报 1280x720、params[4] 报车机画布 1412x654。

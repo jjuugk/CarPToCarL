@@ -84,6 +84,10 @@ class VideoSender(
      * 编码尺寸照实报 1280×720，视口报 1412×654，由车机自己缩放。
      *
      * 传 null = 不写这几个字段（旧行为，保持向后兼容）。
+     *
+     * **默认形态不传**（`VideoCanvasMode` = `raw`，对齐 AMCar `explicitVideoGeometry=false`）：
+     * 只声明解码尺寸、视口整段留 0。视口只是元数据，不改变编码尺寸/帧率，性能无差别；
+     * 少写一个字段就少一处与车机固件理解不一致的风险。
      */
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
 ) {
@@ -969,6 +973,10 @@ class VideoSender(
         // 取值优先级：
         //  **车机画布（[canvasSize]）> 引擎码流（[liveSize]）> 构造值 > SPS**，SPS 仅作诊断。
         //
+        //  默认（`VideoCanvasMode` = raw，对齐 AMCar）**不传 [canvasSize]**，于是实际走
+        //  「引擎码流 → 构造值 → SPS」，与 AMCar `explicitVideoGeometry=false` 那条分支一致：
+        //  只声明一个尺寸、且跟随实际码流，不写视口、不猜画布。
+        //
         //  2026-10-25 曾改成「SPS 优先」（理由：声明应等于码流真实尺寸，否则拉伸），
         //  真机复测出问题已回滚。原因：车机是**按 1412×654 建解码器与 surface** 的，
         //  声明改成 SPS 的 1920×1080 后，车机侧画布/纹理对不上 → 画面异常。
@@ -1485,9 +1493,9 @@ class VideoSender(
          * 拆成纯函数是为了单测：真车（Audi 4851）缺这两项时**会话不断、触摸正常、屏全黑**，
          * 日志里看不出任何错误，极难排查。
          *
-         * **编码尺寸与显示尺寸必须分开**：4580 的解析器在 32/36 读视口原点、40/44 读
-         * 视口宽高；把编码尺寸直接写成画布值会与 SPS 打架（13:48 实测被判 invalid
-         * header）。正确形态是「解码 1280×720 + 视口 1412×654」，缩放交给车机。
+         * 传 `viewArea = null`（默认，见 `VideoCanvasMode` 的 `raw` 档）= 32..48 全 0。
+         * 这是 AMCar 的默认形态：只声明解码尺寸、不写视口，不猜车机画布。
+         * `stream` 档才写「解码 1280×720 + 视口 1412×654」，把缩放交给车机做 A/B。
          */
         internal fun buildVideoConfigHeader(
             bodySize: Int,

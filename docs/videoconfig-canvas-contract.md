@@ -147,3 +147,40 @@ viewArea 内容描述），不是 CarLife VideoConfig 的头字段；`CDeviceDet
    （65544 只回显申请值，会撒谎）。
 4. 只有车机侧进了 `VIDEOSTREAMING_ACTIVE` 却仍黑，才轮到怀疑解码/贴图，那时视口改动才有机会生效。
 
+## 2026-11-08 定案：默认回到「只声明解码尺寸」，对齐 AMCar
+
+把参考实现（AMCar，`cnb.cool/xi_zhu/AuDiCar` 的 `AMCar` 分支）的 `VideoSender` 逐行对照过之后，
+它在这件事上**比我们保守一档**，而保守的方向是对的：
+
+| | AMCar 默认（`explicitVideoGeometry=false`） | 我们此前默认（`stream`） |
+|---|---|---|
+| `params[1]` 解码尺寸 | `liveSize`（引擎上报）→ 构造值 → SPS | 同左（`canvasSize=null`） |
+| `params[3]/[4]` 视口 | **不写**（全 0） | 写车机画布 1412×654 |
+| 车机画布 | 不参与声明 | 只用于视口 |
+| SPS | 只打日志诊断 | 只打日志诊断 |
+
+它的 `explicitVideoGeometry=true`（手工选的 MIB3 兼容档）才写 SPS 尺寸 + 视口——
+也就是说，**我们此前的默认恰好等于它的「非常规兼容档」**，而它把那个档位摆在用户手选里。
+我们的 `stream` 依据只有它 4580 补丁里一句注释（`Encoded dimensions and display view
+dimensions are separate`），属于「多给车机两个字段」，不是协议必需。
+
+因此本版把默认改成 `raw`：
+
+- `raw`（**新默认**）：`params[1]` = 码流尺寸，视口整段留 0 —— AMCar 默认形态；
+- `stream`（原默认，保留 A/B）：`params[1]` = 码流尺寸 + 视口 = 车机画布；
+- `car`：`params[1]` = 车机画布，不写视口 —— 只在码流真等于画布时成立。
+
+**对性能没有任何影响**：视口是头部元数据，不改变编码尺寸、帧率、码率与送帧节奏；
+三种形态下送出去的 H.264 帧完全一样。差别只在车机怎么摆那块画面。
+
+验证点（下次上车看这两行）：
+
+```
+VIDEO: VideoConfig 尺寸声明 = 只声明解码尺寸=码流（不写视口，对齐 AMCar 默认；画布不参与声明）
+VIDEO: ✓ VideoConfig 已发送 … 解码=1280x720 视口=未声明
+```
+
+若这版反而黑了，切 `videoconfig_canvas_mode=stream` 重连做 A/B（`sender_app.xml` 的
+`video_canvas_mode_v1` / `declare` 键），两者都黑 ⇒ 问题不在头部字段，回到上面「下一步顺序」第 3 条。
+
+

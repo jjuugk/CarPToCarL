@@ -4862,7 +4862,7 @@ object SessionController {
                                             streamOutH,
                                         )
                                     }
-                                    appendLog("VIDEO: VideoConfig 画布声明 = ${VideoCanvasMode.describe()}")
+                                    appendLog("VIDEO: VideoConfig 尺寸声明 = ${VideoCanvasMode.describe()}")
                                     // 车机画布（/info 通告值）：既是「声明画布」模式的 params[1]，
                                     // 也是「分离声明」模式的视口（params[3]/params[4]）。
                                     val carCanvas: Pair<Int, Int>? =
@@ -4889,19 +4889,19 @@ object SessionController {
                                             // （2026-11-04 奥迪 3810：画布 1412×654、直通码流
                                             // 被引擎降档成 1280×720，照码流声明 → 整屏黑）。
                                             canvasSize =
-                                                if (VideoCanvasMode.declareStream) {
-                                                    // 分离声明模式：params[1] 交给码流尺寸（见下方 liveSize），
-                                                    // 画布改由 viewAreaSize 走 40/44 那两个字段。
-                                                    null
-                                                } else {
+                                                if (VideoCanvasMode.sizeFromCanvas) {
+                                                    // 只有 car 档把解码尺寸写成车机画布。
                                                     carCanvas?.let { size -> { size } }
+                                                } else {
+                                                    // raw / stream 档：params[1] 交给码流尺寸（下方 liveSize）。
+                                                    null
                                                 },
-                                            // 视口（params[3] 原点 / params[4] 宽高）= 车机画布。
-                                            // 4580 的解析器把「解码尺寸」和「贴图尺寸」分开读，
-                                            // 所以码流只能 720p 时，正确做法是让视口仍是 1412×654
-                                            // 由车机缩放，而不是把解码尺寸改成画布值（会与 SPS 打架）。
+                                            // 视口（params[3] 原点 / params[4] 宽高）。
+                                            // 默认 raw 档**不写**：参考 AMCar（explicitVideoGeometry=false），
+                                            // 只声明解码尺寸、视口整段留 0，少一个字段就少一处与车机固件
+                                            // 理解不一致的风险。stream 档才写车机画布做 A/B。
                                             viewAreaSize =
-                                                if (VideoCanvasMode.declareStream) {
+                                                if (VideoCanvasMode.writeViewport) {
                                                     carCanvas?.let { size -> { size } }
                                                 } else {
                                                     null
