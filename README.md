@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.31`（正式版；**WiFi 入网改「静默自动连」**：① 入网顺序与 1.0.7 一致——复用系统已关联的热点（只 `bindProcessToNetwork`，零交互）→ 直接发 `WifiNetworkSpecifier`（系统对既有授权/关联记录的热点会**静默满足、不弹框**，实测整车链路 6 秒完成）→ 只有它真进不来才登记 `WifiNetworkSuggestion` 让系统自己关联兜底；② 入网超时后不再立刻 `release()` 断掉回调，新增 20 秒宽限窗口（实测同机型入网需 15.73s，而旧窗口只有 15.0s，原先等于每轮都比系统早 0.7 秒放弃）；③ 修掉两处真 bug——旧的「绑定当前 WiFi」按 `TRANSPORT_WIFI` 泛匹配会绑到家里的 WiFi（AirPlay 连不上且其它应用瞬间断网），改为按 SSID 精确匹配；静默绑定不走 `requestNetwork` 会丢 `onLost`，补 `watchLoss()` 恢复被动断线的自动重绑；④ 删除全部手动分支（「重试 / 打开 WLAN 设置」「清除保存 / 保留」「按车机热点继续」等弹窗与复制密码跳设置页），失败改为自动重试 2 次；⑤ 新增 `SilentJoinPolicy`：建议兜底连续失败 2 次不再白等，避免吃掉车机 27 秒的等待窗口。单测 530 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.31`（正式版；**WiFi 入网改「静默自动连」**：① 入网顺序与 1.0.7 一致——复用系统已关联的热点（只 `bindProcessToNetwork`，零交互）→ 直接发 `WifiNetworkSpecifier`（系统对既有授权/关联记录的热点会**静默满足、不弹框**，实测整车链路 6 秒完成）→ 只有它真进不来才登记 `WifiNetworkSuggestion` 让系统自己关联兜底；② 入网超时后不再立刻 `release()` 断掉回调，新增 20 秒宽限窗口（实测同机型入网需 15.73s，而旧窗口只有 15.0s，原先等于每轮都比系统早 0.7 秒放弃）；③ 修掉两处真 bug——旧的「绑定当前 WiFi」按 `TRANSPORT_WIFI` 泛匹配会绑到家里的 WiFi（AirPlay 连不上且其它应用瞬间断网），改为按 SSID 精确匹配；静默绑定不走 `requestNetwork` 会丢 `onLost`，补 `watchLoss()` 恢复被动断线的自动重绑；④ 删除全部手动分支（「重试 / 打开 WLAN 设置」「清除保存 / 保留」「按车机热点继续」等弹窗与复制密码跳设置页），失败改为自动重试 2 次；⑤ 新增 `SilentJoinPolicy`：建议兜底连续失败 2 次不再白等，避免吃掉车机 27 秒的等待窗口；⑥ 系统权限框从最多 4 个降到 **1 个**——`BLUETOOTH_CONNECT` / `NEARBY_WIFI_DEVICES`（12/12L 为定位）本属同一权限组却分成三次申请，系统只能一个个弹（用户看到的就是反复出现「要与 CarPToCarL 配合的设备」），现改为一次 `RequestMultiplePermissions`；打开 App 不再预先索要，被拒后本进程也不再反复弹。单测 530 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -269,6 +269,11 @@ App 侧不需要再改什么：`carlife_fps` 默认就是 **60**，连接建立 
 | `POST_NOTIFICATIONS`                   | 前台服务常驻通知                                | ✅       |
 | 通知使用权（特殊权限）                            | 读取媒体会话：歌名/歌手/歌词/播放状态                    | 要歌词就必需  |
 | `SYSTEM_ALERT_WINDOW`                  | 暗幕（替代息屏）                                | ❌ 可选    |
+
+前四项里 `BLUETOOTH_CONNECT`、`NEARBY_WIFI_DEVICES`（Android 12/12L 的定位）属于**同一个权限组**，
+首次连接会合并成**一个**「要与 CarPToCarL 配合的设备」系统框——这是 Android 的系统级授权，
+标题里带应用名，只能由你点一次「允许」，普通应用无法跳过或隐藏（1.0.7 也一样）。
+点过之后只要不拒绝，之后每次连接都不再弹。
 
 ---
 
@@ -824,7 +829,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ## 十一、版本历史
 
-### 1.2.31 —— 2026-11-08（WiFi 入网改「静默自动连」+ 超时宽限，正式版）
+### 1.2.31 —— 2026-11-08（WiFi 入网改「静默自动连」+ 超时宽限 + 权限一次申请，正式版）
 
 一条主线贯穿本版：**车上没人点屏，入网却每一步都在等人点**。这版把整条链路改成能自己走完，
 并顺带修掉两个**会绑错网 / 会丢断线回调**的实质 bug。
@@ -883,8 +888,44 @@ socket 必然失败。
 `SilentJoinPolicy`（新增，纯逻辑 + 5 例单测）：建议未授权时静默每轮必白等 12 秒，而车机只等
 约 27 秒就拆链——所以静默**连续失败 2 次**才降级到确认框路径，成功一次即归零。
 
+**六、系统权限框 4 次 → 1 次**
+
+装包后仍看到「要与 CarPToCarL 配合的设备」。查证：这句话**不在本仓库**任何代码或资源里
+（`grep 配合` 只命中注释），它是 Android「附近的设备」权限组的**系统**授权框——标题里带应用名，
+由 `BLUETOOTH_CONNECT` / `NEARBY_WIFI_DEVICES` 触发。1.0.7 的权限清单与现在完全一致，
+所以不是这版引入的；**真正的问题是弹得太多**：同一权限组被拆成多次请求，系统只能一个个弹。
+
+| 位置 | 申请什么 | 现场感受 |
+| --- | --- | --- |
+| `onCreate` | `BLUETOOTH_CONNECT` | 每打开一次 App 弹一次 |
+| `ensureBluetoothReady` | `BLUETOOTH_CONNECT` | 与上一条同组，又一个框 |
+| `ensureWifiLocationReady` | `NEARBY_WIFI_DEVICES` | 同组，第三个框 |
+| `startConnectionNow` | `POST_NOTIFICATIONS` | 直到授予为止，每次点连接都问 |
+
+改法：
+
+- 新增 `connectionPermissionLauncher`（`RequestMultiplePermissions`）与 `requiredConnectionPermissions()`：
+  13+ 一次请求 `BLUETOOTH_CONNECT` + `NEARBY_WIFI_DEVICES`，12/12L 请求 `BLUETOOTH_CONNECT` +
+  `ACCESS_FINE_LOCATION`。**同组权限放进同一次请求，系统只显示一个框**。
+- `ensureBluetoothReady` 变成「一次申请 → 位置服务（仅 12/12L）→ 蓝牙开关 → 放行」；
+  删掉 `ensureWifiLocationReady` 及其 `locationPermissionLauncher` / `nearbyWifiPermissionLauncher` /
+  `pendingStartAfterLocationPermission` / `pendingStartAfterBtPermission`（收进 `pendingStartAfterPermission`）。
+- 删掉 `onCreate` 的「启动即申请蓝牙权限」：改成真正要用（点启动连接 / 自动连接）时才问。
+- 被拒后**不再重复弹系统框**（系统从第三次起自己就不显示了，调用只会立刻返回未授权，
+  白白让人觉得程序在反复索要）：`connectionPermissionDenied` 记住本进程已拒，
+  改为一次自家提示（说明缺哪一项 + 「去设置」直达应用详情页），`permissionHintShown` 保证只弹一次。
+- `POST_NOTIFICATIONS` 改成每进程只问一次，拒绝后不再纠缠（它不影响连接）。
+- 「蓝牙兼容模式」开关改用分组申请，且不置 pending（不会误触发连接）。
+
+绕不过的那一次：这是 Android 系统级授权，只能用户点一次「允许」。真要彻底去掉，
+得改用 `WifiNetworkSuggestion` 全量兜底（照样有首次授权）或让用户手工入网，代价都比一次点击大。
+
 **验证**：`:app:assembleRelease` + `:app:testReleaseUnitTest` 通过，单测 **530 例 0 失败**。
 真车待验（测试包阶段用 `BUILD_TAG` 做了区分，正式版已清空）。
+
+> **本版为同日重发**：版本号仍是 `1.2.31`（`versionCode` 10231 不变，可直接覆盖安装同日早先的
+> 1.2.31），Release 资产已整体替换为新包（13,668,873 B，sha256 `42f2640d…`）。
+> 之所以不升号：这一版还没真正上车验收，先把手上这个包修干净再往上加号。
 
 ### 1.2.30 —— 2026-11-08（按车机 `0x1D01` 声明分派 + 宝马适配 + 移除 EA 支线，正式版）
 
