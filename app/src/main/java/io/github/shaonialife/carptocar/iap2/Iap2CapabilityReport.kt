@@ -17,8 +17,8 @@ package io.github.shaonialife.carptocar.iap2
  *  2. 按子系统分组：每类一行——单行几十个 ID 会被日志长度截断，分组后不会；
  *  3. 无目录名的 ID：iAP2 目录里没有名字的，就是完全陌生的新东西，只能靠报文体反推。
  *
- * 注意：**「有名字」不等于「我们实现了处理」**。0x5200 在目录里有名字，但发送端从未发过
- * 导航更新——这正是导航提示要单独说一句的原因。
+ * 注意：**「有名字」不等于「我们实现了处理」**。0x5200 在目录里有名字，但项目目前
+ * 只在订阅到达时回 0x5201 空态，没有 maneuver 数据源，不会主动推导航更新。
  */
 object Iap2CapabilityReport {
 
@@ -134,7 +134,8 @@ object Iap2CapabilityReport {
                 log(
                     "${linePrefix}★ ${kind}声明导航引导(${nav.size})=" +
                         nav.joinToString(" ") { describe(it) } +
-                        " → 车机接受 CarPlay 导航数据（MIB3 4398/CL3B 起）；本程序尚未发送，这就是复现入口",
+                        " → 车机接受 CarPlay 导航数据（MIB3 4398/CL3B 起）；" +
+                        "0x5200 订阅会回 0x5201 空态，maneuver 数据源尚未接入，这就是复现入口",
                 )
             nav.isNotEmpty() ->
                 log(

@@ -175,17 +175,13 @@ class Iap2SenderSession(
     private var silentNudgeSkips = 0
 
     /**
-     * 0x1D01 参数 6：车机声明「它可发送」的消息 ID 清单。
-     * 用它判断 0x6800 (StartHID) / 0x4301 是否真的会来——声明里没有就不该盲等：
-     * 奥迪实测只声明 0x5703/0xea03，旧流程因此在 0x4301 上空等 10s、StartHID 上空等 2s。
+     * 车机声明的**单一事实源**是 [AccessoryDeclaration]：蓝牙与 WiFi 隧道两条链路
+     * 都可能收到 `0x1D01`，而隧道侧的 MIB3 突发裁剪要靠蓝牙侧早到的那份清单。
+     * 这里只留两个薄委托，保持既有调用点与「null = 清单未到」的三态语义。
      */
-    private var accessorySendIds: Set<Int> = emptySet()
+    private fun accessoryDeclaresSend(messageId: Int): Boolean? = AccessoryDeclaration.declaresSend(messageId)
 
-    /** 0x1D01 参数 7：车机声明「它可接收」的消息 ID 清单。 */
-    private var accessoryReceiveIds: Set<Int> = emptySet()
-
-    /** 识别帧是否真的带了接收清单（空清单与「未提供」必须区分）。 */
-    private var receiveListDeclared = false
+    private fun accessoryDeclaresReceive(messageId: Int): Boolean? = AccessoryDeclaration.declaresReceive(messageId)
 
     /**
      * WiFi 凭据交换的代际判定（[ReceiverProfile.classify] 的结果，0x1D01 到达时算一次）。
@@ -198,45 +194,12 @@ class Iap2SenderSession(
      */
     private var wifiGen: ReceiverProfile.WifiGen = ReceiverProfile.WifiGen.UNKNOWN
 
-    /** 车机是否声明会发某消息；null = 未提供清单（未知，按保守策略等待）。 */
-    private fun accessoryDeclaresSend(messageId: Int): Boolean? = if (accessorySendIds.isEmpty()) null else messageId in accessorySendIds
-
-    /** 车机是否声明能收某消息；null = 未提供清单（未知，按保守策略继续）。 */
-    private fun accessoryDeclaresReceive(messageId: Int): Boolean? = if (!receiveListDeclared) null else messageId in accessoryReceiveIds
-
-    /** 「车机没声明能收」的日志去重：同一消息 ID 每轮会话只记一次（催问会反复触发）。 */
-    private val undeclaredReceiveLogged = HashSet<Int>()
-
     /**
-     * 可选消息「车机没声明能收」的**记录**（只记不发拦截，2026-10-27 修正）。
-     *
-     * 曾经的实现（1.0.8 起）把 0x1D01 参数 7 当硬门禁：清单里没有 `0x4E0D`/`0x4E0E`
-     * 就真的不发。上游 cardeck 0.1.28 的真车证据推翻了这条判据——
-     * 奥迪 3315 的可收清单只有 5 项、不含 `0x5702`，但它完整支持 `0x5702→0x5703`；
-     * 同一天的日志里 `0x4e0d/0x4e0b/0x4e0e` 三条不在清单里，车机逐条 ACK 到位。
-     * 结论：**清单只能证明「有」，不能证明「没有」**。
-     *
-     * 别克 E2LB 的日志同样证明裁剪没有换来推进（裁掉之后仍是 ACK 后沉默），
-     * 所以这里退回「只记录」：帧照发，日志留证，将来对某台车复现时还能看出
-     * 它到底声明了什么。
+     * 「车机没声明能收」的处理已收口到 [AccessoryDeclaration.noteSend]：
+     * 绝大多数消息只记 WARN 照发（清单只能证明「有」不能证明「没有」），
+     * 只有 `0xA100` / `0xFFF0` 两条有真机重启证据的 MIB3 专用消息按声明裁掉。
+     * 判据与去重跨蓝牙/隧道两条链路共用，别在这里再写一份。
      */
-    private fun recordUndeclaredReceive(messageId: Int) {
-        if (accessoryDeclaresReceive(messageId) != false) return
-        if (undeclaredReceiveLogged.add(messageId)) {
-            log(
-                "iap2 车机可收清单未声明 0x${messageId.toString(16).padStart(4, '0')} " +
-                    "(${Iap2MessageIds.nameOf(messageId)}) reason=accessory-did-not-advertise" +
-                    "—— 仍照常发送（清单只能证明「有」不能证明「没有」，见上游 0.1.28 奥迪定谳）",
-            )
-            // 审计留档：这一条确实是「越权」（SPEC §2.8 / §7 末行），只是本项目权衡后
-            // 仍然发。清单不完整是常态（奥迪 3315 只列 5 项），所以是 WARN 不是 ERROR。
-            ProtocolAudit.record(
-                ProtocolAudit.Code.UNSOLICITED_MESSAGE,
-                detail = "0x${messageId.toString(16).padStart(4, '0')} ${Iap2MessageIds.nameOf(messageId)}",
-                evidence = "车机可收清单(${accessoryReceiveIds.size} 项)未包含该号",
-            )
-        }
-    }
 
     internal companion object {
         /**
@@ -727,6 +690,45 @@ class Iap2SenderSession(
     }
 
     /**
+     * 车机在**蓝牙链路**上发起的 `Start…Updates` 订阅，就地回一条对应状态。
+     *
+     * 此前这四条应答只存在于 WiFi 隧道的 MIB3 形态，蓝牙 bring-up 阶段收到同样订阅
+     * 只会被丢进「非预期帧暂存区」不回状态；按 SPEC §2.8 发起方约 10 秒后会关掉
+     * 控制通道。`0x4158` 的空态字节与隧道侧共用 [Iap2SubscriptionReplies]，
+     * 避免一侧改了参数布局另一侧还在回旧帧。
+     *
+     * `0x5200` 特判：车机可收清单里**明确没有** 0x52xx 时不回 `0x5201`，
+     * 避免给不接受导航数据的车机塞越权消息；清单未到（null）则照回空态。
+     * 没有 maneuver 数据源，所以只回空体——不编造导航报文。
+     *
+     * @return true = 本帧已作为订阅处理，调用方不必再暂存/记 keep-alive
+     */
+    private fun answerSubscription(frame: Iap2Csm.Frame): Boolean {
+        val replyId = Iap2SubscriptionReplies.replyIdFor(frame.messageId) ?: return false
+        if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE &&
+            AccessoryDeclaration.acceptsRouteGuidance() == false
+        ) {
+            log("iap2 0x5200 订阅但车机可收清单未声明导航引导——不回 0x5201（按声明裁剪）")
+            return true
+        }
+        val body = Iap2SubscriptionReplies.idleBodyFor(replyId) ?: return false
+        send(replyId, body)
+        val detail =
+            if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
+                "空态；无 maneuver 数据源，暂不主动推导航报文"
+            } else if (replyId == Iap2SubscriptionReplies.CALL_STATE_UPDATE) {
+                "空态；蓝牙链路无通话状态源，隧道侧订阅会给真实值"
+            } else {
+                "空态"
+            }
+        log(
+            "iap2 订阅应答 0x${frame.messageId.toString(16).padStart(4, '0')} → " +
+                "0x${replyId.toString(16).padStart(4, '0')}（$detail）",
+        )
+        return true
+    }
+
+    /**
      * Phase 2 过渡：bring-up 完成后保持链路打开，持续记录配件发来的控制消息
      * （如 0x4E0E 后重发的 0x5703、位置请求 0xFFFA 等），直到链路断开。
      * 真实无线 CarPlay 中这条控制通道与 AirPlay 会话并存于整个连接生命周期。
@@ -761,6 +763,8 @@ class Iap2SenderSession(
             if (frame.messageId == Iap2MessageIds.START_NOW_PLAYING_UPDATES) {
                 answerNowPlaying("订阅", retriesLeft = nowPlayingRetryDelaysMs.size)
             }
+            // 车机在蓝牙链路上订阅通讯/通话/列表/导航引导：就地回状态，别让它白等 10s
+            if (answerSubscription(frame)) continue
             if (frame.messageId == lastLoggedId) {
                 repeatCount++
                 if (repeatCount % 100 != 0) continue
@@ -800,9 +804,16 @@ class Iap2SenderSession(
         // 只记一条日志（2026-10-27 起取消裁剪；取证在 [send] 出口统一做）。
         send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
         sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
-        // 语言字段：iAP2 只认 ISO 639 的两字母码。新协议代按参考实现发 `zh`，
-        // 旧代沿用 `zh-CN`（奥迪侧已按这个串跑通，不动）。
-        val language = if (wifiGen == ReceiverProfile.WifiGen.NEW) "zh" else "zh-CN"
+        // 语言字段：iAP2 只认 ISO 639 的两字母码。车机在 0x1D01 参 12 声明语言时
+        // 按声明规范化（zh-CN → zh、en_US → en）；无声明/非法声明时保留原兜底
+        // （新代 zh、旧代 zh-CN，奥迪侧已按这个串跑通，不动）。
+        val fallbackLanguage = if (wifiGen == ReceiverProfile.WifiGen.NEW) "zh" else "zh-CN"
+        val language = AccessoryDeclaration.deviceLanguage(fallbackLanguage)
+        log(
+            "iap2 0x4E0A 语言=$language（车机声明=" +
+                (AccessoryDeclaration.components().currentLanguage ?: "未提供") +
+                " 兜底=$fallbackLanguage；iAP2 只认两字母码）",
+        )
         val epochSeconds = System.currentTimeMillis() / 1000L
         val timezoneMinutes =
             java.util.TimeZone
@@ -1264,9 +1275,9 @@ class Iap2SenderSession(
         messageId: Int,
         vararg body: ByteArray,
     ) {
-        // 越权取证放在**唯一出口**：早先是逐个调用点手加，20+ 种消息只覆盖了 4 种。
-        // 清单未到时 accessoryDeclaresReceive 返回 null，不会误报。
-        recordUndeclaredReceive(messageId)
+        // 越权取证 + 两条 MIB3 专用消息裁剪，统一走跨链路的单一出口。
+        // 清单未到时 noteSend 直接放行，不会误裁。
+        if (!AccessoryDeclaration.noteSend(messageId, "bt", log)) return
         val joined =
             when (body.size) {
                 0 -> ByteArray(0)
@@ -1293,7 +1304,7 @@ class Iap2SenderSession(
         messageId: Int,
         body: ByteArray,
     ) {
-        recordUndeclaredReceive(messageId)
+        if (!AccessoryDeclaration.noteSend(messageId, "bt", log)) return
         val frame = Iap2Csm.encode(messageId, body)
         val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
         var offset = 0
@@ -1370,6 +1381,9 @@ class Iap2SenderSession(
                 )
                 continue
             }
+            // 等待目标帧期间到达的订阅：先回状态（否则车机 ~10s 后关控制通道），
+            // 再继续等目标帧；不要塞进暂存区，催问会把它越堆越多。
+            if (answerSubscription(frame)) continue
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
                     "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
@@ -1589,9 +1603,23 @@ class Iap2SenderSession(
         // 参 7（它可接收）直接告诉我们它是否认可 0x4300 —— 真车排查的关键证据。
         val sends = params[6]?.value?.asU16List()
         val receives = params[7]?.value?.asU16List()
+        // 组件声明（参 12/13 语言、24 无线 CarPlay、30 导航引导显示；不含参 10 EA 组）。
+        // 参数 24/30 才是「这台车支持无线 CarPlay / 能投仪表」的正式声明，
+        // 旧的 logTransportComponents 读的是实车 Cinemo 抓包的 0x11/0x12/0x18 私有槽位，
+        // 两者编号体系不同，别混为一谈。
+        val components = AccessoryDeclaration.parseComponents(frame.body)
+        AccessoryDeclaration.onIdentification(sends?.toSet(), receives?.toSet(), components, "bt")
+        log(AccessoryDeclaration.describe())
+        log(
+            "iap2 0x1d01 组件声明：currentLanguage=${components.currentLanguage ?: "未提供"}" +
+                " supportedLanguages=${components.supportedLanguages}" +
+                " 无线CarPlay组件(参24)=${components.wirelessCarPlayDeclared}" +
+                " ${components.wirelessCarPlayNames}" +
+                " 导航显示组件(参30)=${components.navigationDisplayDeclared}" +
+                " ${components.navigationDisplayNames}",
+        )
         if (sends != null) {
             // 后续可选消息（0x6800/0x4301）按此清单判断是否会来，避免固定窗口空等
-            accessorySendIds = sends.toSet()
             Iap2CapabilityReport.report(log, "iap2 0x1d01 ", "发送清单", sends, isReceiveList = false)
             log(
                 "iap2 0x1d01 可选消息声明：StartHID(0x6800)=" +
@@ -1604,12 +1632,17 @@ class Iap2SenderSession(
             // 可收清单只作**参考与日志**：它能证明「车机有」，不能证明「没有」
             // （BMW iD9 的清单里没有 0x5702 → 画像判 NEW；奥迪 3315 的清单里也没有，
             //  但旧协议完好 → 画像判 UNKNOWN，照样发 0x5702）。
-            accessoryReceiveIds = receives.toSet()
-            receiveListDeclared = true
+            // 清单已汇入 AccessoryDeclaration（跨链路共享），本地不再留第二份状态。
             // 三层输出（原始/分类/陌生 ID）+ 导航专判：MIB3 4398（CL3B）起若车机接受
             // CarPlay 导航数据，会在这里出现 0x52xx —— 那是投仪表/HUD 的唯一入口
             Iap2CapabilityReport.report(log, "iap2 0x1d01 ", "可收清单", receives, isReceiveList = true)
-            // 车机画像（信号收口点）：身份 + 双清单 → era/wifiGen 一行判定，
+            if (AccessoryDeclaration.acceptsRouteGuidance() == true) {
+                log(
+                    "iap2 0x1d01 ★ 车机声明接受导航引导(0x52xx) → 收到 0x5200 订阅会回 " +
+                        "0x5201 空态保住控制通道；maneuver 数据源未接入，暂不主动推导航报文",
+                )
+            }
+            // 车机画像（信号收口点）：身份 + 双清单 + 组件声明 → era/wifiGen 一行判定，
             // 依据随行——判错时从这里回溯是哪条信号误导（铁律：按能力不按品牌）
             val profile =
                 ReceiverProfile.classify(
@@ -1619,6 +1652,9 @@ class Iap2SenderSession(
                         manufacturer = manufacturer,
                         sendIds = sends?.toSet(),
                         receiveIds = receives.toSet(),
+                        currentLanguage = components.currentLanguage,
+                        wirelessCarPlayComponent = components.wirelessCarPlayDeclared,
+                        navigationDisplayComponent = components.navigationDisplayDeclared,
                     ),
                 )
             log(ReceiverProfile.describe(profile))

@@ -60,6 +60,12 @@ object ReceiverProfile {
         val sendIds: Set<Int>? = null,
         /** 0x1D01 参数 7：车机声明「可接收」的消息号清单；null = 未提供。 */
         val receiveIds: Set<Int>? = null,
+        /** 0x1D01 参数 12：车机当前语言（区域串如 `zh-CN` 也照收）。 */
+        val currentLanguage: String? = null,
+        /** 0x1D01 参数 24：无线 CarPlay 传输组件（车机正式声明支持无线 CarPlay）。 */
+        val wirelessCarPlayComponent: Boolean? = null,
+        /** 0x1D01 参数 30：导航引导显示组件（投仪表/HUD 的官方声明）。 */
+        val navigationDisplayComponent: Boolean? = null,
     )
 
     data class Profile(
@@ -77,6 +83,20 @@ object ReceiverProfile {
 
     fun classify(signals: Signals): Profile {
         val reasons = ArrayList<String>()
+        // 0x1D01 组件声明（参 12/24/30）先只进「依据」，不参与 era / wifiGen 判定：
+        // 这些组在部分车机里缺失或走私有编号（Cinemo 把组件写在 0x11/0x12/0x18），
+        // 拿它当硬分支会把已跑通的车型判进未知路径。先积累可解释信号，
+        // 等有跨车型实车证据再升级为判据。参数 10（EA 协议组）按要求不解析。
+        signals.currentLanguage?.let { reasons += "0x1D01 参12 语言=$it" }
+        signals.wirelessCarPlayComponent?.let {
+            reasons += "0x1D01 参24 无线CarPlay组件=${if (it) "已声明" else "未声明"}"
+        }
+        signals.navigationDisplayComponent?.let {
+            reasons += "0x1D01 参30 导航显示组件=${if (it) "已声明" else "未声明"}"
+        }
+        if (signals.receiveIds?.any { it in 0x5200..0x52FF } == true) {
+            reasons += "可收清单声明导航引导 0x52xx"
+        }
         val pairing = AirPlayFeatures.supportsPairing(signals.features)
         val era =
             when {

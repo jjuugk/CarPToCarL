@@ -1,12 +1,14 @@
 package io.github.shaonialife.carptocar.airplay
 
 import android.content.Context
+import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2CapabilityReport
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2SubscriptionReplies
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.input.ConsumerKeys
@@ -574,6 +576,8 @@ class VirtualIap2Link(
         messageId: Int,
         body: ByteArray = ByteArray(0),
     ) {
+        // 与蓝牙侧同一把尺子：越权只记 WARN；0xA100/0xFFF0 按车机可收清单裁掉。
+        if (!AccessoryDeclaration.noteSend(messageId, "tunnel", log)) return
         val frame = Iap2Csm.encode(messageId, body)
         val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
         log(
@@ -585,7 +589,6 @@ class VirtualIap2Link(
 
     /** 直接投递完整 CSM 帧（Frida 抓的逐字节常量，勿重新编码）。 */
     private fun sendRawCsmLocked(frame: ByteArray) {
-        val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
         // 帧头：0..1 起始字、2..3 总长度、4..5 messageId、6.. body。
         // 旧实现从 2..3 取 ID（那是长度），日志里的「隧道 tx 0x0100」全是假 ID。
         val messageId =
@@ -594,6 +597,10 @@ class VirtualIap2Link(
             } else {
                 -1
             }
+        // 必须在写进引擎 backlog **之前**判：MIB3 突发里的 0xFFF0 就是走这条出口，
+        // 车机没声明可收时要整帧丢掉，不能只丢日志。
+        if (messageId >= 0 && !AccessoryDeclaration.noteSend(messageId, "tunnel", log)) return
+        val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
         log(
             "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B raw ok=$ok",
@@ -641,23 +648,36 @@ class VirtualIap2Link(
                 // （原始清单 / 按子系统分组 / 目录里没有的陌生 ID）：
                 //   · 媒体键排查看**发送清单**里有没有 0x6800/0x6802；
                 //   · 投仪表/HUD 看**可收清单**里有没有导航引导 0x52xx（MIB3 4398 起）。
-                params[6]?.value?.let { raw ->
-                    val sends = u16List(raw)
-                    Iap2CapabilityReport.report(log, "IAPLINK: ", "发送清单", sends, isReceiveList = false)
-                    if (!sends.contains(Iap2MessageIds.START_HID)) {
+                // 清单汇入跨链路的 AccessoryDeclaration：MIB3 突发的裁剪判据可能来自
+                // 蓝牙侧早到的那帧 0x1D01，两条链路共用同一把尺子。
+                val sends = params[6]?.value?.let(::u16List)
+                val receives = params[7]?.value?.let(::u16List)
+                val components = AccessoryDeclaration.parseComponents(frame.body)
+                AccessoryDeclaration.onIdentification(sends?.toSet(), receives?.toSet(), components, "tunnel")
+                log(AccessoryDeclaration.describe())
+                sends?.let { ids ->
+                    Iap2CapabilityReport.report(log, "IAPLINK: ", "发送清单", ids, isReceiveList = false)
+                    if (!ids.contains(Iap2MessageIds.START_HID)) {
                         log(
                             "IAPLINK: 发送清单无 0x6800 StartHID → 这台车机不用 iAP2 HID 送按键，" +
                                 "不必在这条通路耗（改查蓝牙/AVRCP 侧）",
                         )
                     }
                 }
-                params[7]?.value?.let { raw ->
+                receives?.let { ids ->
                     Iap2CapabilityReport.report(
                         log,
                         "IAPLINK: ",
                         "可收清单",
-                        u16List(raw),
+                        ids,
                         isReceiveList = true,
+                    )
+                }
+                if (!components.isEmpty) {
+                    log(
+                        "IAPLINK: 0x1d01 组件声明 语言=${components.currentLanguage ?: "未提供"}" +
+                            " 无线CarPlay(参24)=${components.wirelessCarPlayDeclared}" +
+                            " 导航显示(参30)=${components.navigationDisplayDeclared}",
                     )
                 }
                 if (mib3) {
@@ -715,8 +735,25 @@ class VirtualIap2Link(
 
             START_COMMUNICATIONS_UPDATES -> {
                 if (!mib3) return
-                sendRawCsmLocked(MIB3_COMMUNICATIONS_UPDATE_IDLE)
+                sendRawCsmLocked(Iap2SubscriptionReplies.COMMUNICATIONS_UPDATE_IDLE)
                 log("IAPLINK: MIB3 0x4157 → 0x4158（空态）")
+            }
+
+            // 车机点名要 CarPlay 导航引导数据（MIB3 4398/CL3B 投仪表/HUD 的入口）。
+            // 没有 maneuver 数据源，所以只回 0x5201 空态保住控制通道，不编造报文体；
+            // 车机可收清单里明确没有 0x52xx 时不回，避免越权。
+            Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES -> {
+                if (AccessoryDeclaration.acceptsRouteGuidance() == false) {
+                    log("IAPLINK: 0x5200 订阅但可收清单未声明导航引导 → 不回 0x5201（按声明裁剪）")
+                    return
+                }
+                val body = Iap2SubscriptionReplies.idleBodyFor(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE)
+                if (body != null) sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
+                log("IAPLINK: 0x5200 → 0x5201（空态；无 maneuver 数据源，暂不主动推导航报文）")
+            }
+
+            Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES -> {
+                log("IAPLINK: 0x5203 车机停止导航引导订阅")
             }
 
             START_CALL_STATE_UPDATES -> {
@@ -927,7 +964,10 @@ class VirtualIap2Link(
         )
         sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
         sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
-        log("IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅")
+        log(
+            "IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅；" +
+                AccessoryDeclaration.describe(),
+        )
     }
 
     /**
@@ -1130,13 +1170,13 @@ class VirtualIap2Link(
                     "000500000500060000050007000005001000",
             )
 
-        /** 0x4158 CommunicationsUpdate 空态（无 SIM/无信号场景的可用占位）。 */
-        internal val MIB3_COMMUNICATIONS_UPDATE_IDLE: ByteArray =
-            hex(
-                "404000644158000500000100050001060005000200000e0004e697a053494de58da1" +
-                    "00000500050100050006010005000700000500080000050009000005000a000005" +
-                    "000b000005000c010005000d000005000e000005000f0000050010000005001100",
-            )
+        /**
+         * 0x4158 CommunicationsUpdate 空态。字节定义已收口到
+         * [Iap2SubscriptionReplies]（蓝牙与隧道两条链路共用同一份），
+         * 这里只留别名给既有单测，别再复制一份 hex。
+         */
+        internal val MIB3_COMMUNICATIONS_UPDATE_IDLE: ByteArray
+            get() = Iap2SubscriptionReplies.COMMUNICATIONS_UPDATE_IDLE
 
         private fun hex(s: String): ByteArray {
             val clean = s.replace(" ", "")

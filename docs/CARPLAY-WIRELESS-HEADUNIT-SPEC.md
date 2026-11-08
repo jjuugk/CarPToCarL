@@ -266,7 +266,13 @@ B. 车机被动（iPhone 是发起方，常见）
 
 **参数 7 是整条协议里最有用的一条**：iPhone 会据它决定「哪些消息发给这台车机」。  
 但它**只能证明「有」，不能证明「没有」**——本项目实测有车机清单只有 5 项却完整支持  
-0x5702 流程，也有车机清单没写 0x4E0D 但照样逐条 ACK。所以不要用它做硬门禁。
+0x5702 流程，也有车机清单没写 0x4E0D 但照样逐条 ACK。所以不要用它做硬门禁。  
+**唯一例外**：`0xA100`（AUX 状态）与 `0xFFF0`（GPRMC 状态）来自奥迪 MIB3 抓包，
+只有 MIB3 系声明可收；宝马 NBT Evo / iD6 与通用系 Cinemo 都没声明，整批发过去会
+让 AirPlay 服务重启（`pi` 变化）或整链 reset。项目按声明**只裁这两条**，其余越权消息
+照发并记 `UNSOLICITED_MESSAGE`（实现：`iap2/AccessoryDeclaration.noteSend`）。
+不要推广成「凡未声明都不发」，也不要因此关掉整条隧道——宝马会连发 SYN marker
+等我们的会话表，关隧道换来的是一直黑屏。
 
 ### 2.8 车机必须实现的消息集（最小可用）
 
@@ -301,6 +307,7 @@ B. 车机被动（iPhone 是发起方，常见）
 | 0xEA00               | StartExternalAccessoryProtocolSession        | D→A | 开 EA 隧道（param0=协议号，param1=协议名） | 视车机   |
 | 0xEA03               | StatusExternalAccessoryProtocolSession       | A→D | 隧道就绪                           | 视车机   |
 | 0x5000/0x5001        | StartNowPlayingUpdates / Update              | 双向  | 媒体状态（仪表盘歌名）                    | 可选    |
+| 0x5200/0x5201/0x5203 | StartRouteGuidanceUpdates / Update / Stop    | A→D / D→A | 结构化导航引导（投仪表/HUD）              | 可选    |
 | 0xA100/0xA101        | StartVehicleStatusUpdates / Update           | 双向  | 车况                             | 可选    |
 | 0xFFFA/0xFFFB/0xFFFC | StartLocationInformation / 样本 / Stop         | 双向  | 导航定位                           | 可选    |
 
@@ -310,8 +317,13 @@ B. 车机被动（iPhone 是发起方，常见）
 > 表现相同。**注意两个方向不要混**：
 >
 > - **车机（配件）发起订阅 → 手机回状态**：`0x5000→0x5001`（NowPlaying）、  
->   `0x4157→0x4158`（通讯）、`0x4154→0x4155`（通话状态）、`0x4170→0x4171`（列表）
+>   `0x4157→0x4158`（通讯）、`0x4154→0x4155`（通话状态）、`0x4170→0x4171`（列表）、  
+>   `0x5200→0x5201`（导航引导，车机可收清单需含 `0x52xx`；无 maneuver 数据源时回空体）
 > - **手机发起订阅 → 车机回状态**：`0xFFFA→0xFFFB`（定位）、`0xA100→0xA101`（车况）
+>
+> 蓝牙链路与 WiFi 隧道**都可能**收到这些订阅，两条链路必须回同样的字节
+> （实现：`iap2/Iap2SubscriptionReplies`，蓝牙侧 `answerSubscription`、
+> 隧道侧 `maybeRespondControlCsmLocked` 共用一份空态定义）。
 
 完整消息表见**附录 A**（约 150 条，来自 Apple 内部规格档案）；项目代码里的机器可读版是  
 `iap2/Iap2MessageCatalog.kt`（144 条），两者由同一份档案导出。
@@ -907,7 +919,7 @@ byte3-4: Y u16 LE（≤ 屏高）
 | 会话 10s 被 reset | 缺三条心跳之一 | 第 4.8 节 |
 | 有会话但黑屏 | VideoConfig 缺 `params[1]` / `Encrypted` 位 | 5.4 节 |
 | 触摸无反应 | 命令发在控制通道 / 未 `hidSetInputMode` / 没回 200 | 6.4 节 |
-| 车机 AirPlay 服务重启 | 发了它没声明可收的消息（越权） | 按 `0x1D01` 参数 7 裁剪 |
+| 车机 AirPlay 服务重启 | 发了它没声明可收的消息（越权） | 按 `0x1D01` 参数 7 **只裁** `0xA100`/`0xFFF0`，不关隧道 |
 
 ---
 
@@ -1141,7 +1153,7 @@ pair-setup，白等 120 秒窗口）。
 | §3.3 | AirPlay 时代：bit38 `HK_PAIRING_AND_ENCRYPT` 在 → 配对；不在 → `et=NONE` 明文 | `iap2/ReceiverProfile.PairingPolicy`（唯一判定）→ `SessionController` 配对分支 | `PAIRING_POLICY_MISMATCH` |
 | §2.9 | MFi 挑战长度：老车机 20B / 测试台 32B，规范要求「接受任意长度」 | `iap2/MfiLengthMemory` 阶梯 + 按车机记忆 | `MFI_LENGTH_REJECTED` |
 | §3.2 | TXT 的 `deviceid` / `features` 必须与 `/info` 一致 | `airplay/AirPlayClient.logInfoSummary` | `FEATURES_TXT_VS_INFO`、`DEVICE_ID_MISMATCH` |
-| §2.8 / §7 | 不得发对端未声明可收的消息（越权 → 车机重启） | `Iap2SenderSession.recordUndeclaredReceive` | `UNSOLICITED_MESSAGE` |
+| §2.8 / §7 | 不得发对端未声明可收的消息（越权 → 车机重启）；一般越权只记 WARN 照发，两条 MIB3 专用消息按声明裁掉 | `iap2/AccessoryDeclaration.noteSend`（蓝牙 `send`/`sendFireAndForget` 与隧道 `sendCsmLocked`/`sendRawCsmLocked` 四个出口共用） | `UNSOLICITED_MESSAGE` |
 | §3.4 | 端点只能来自 `0x4301` / mDNS（新代没有网关兜底） | `AirPlayClient.connect`（无候选地址分支） | `WIFI_NEW_WITHOUT_AP` |
 | §3.3 | 同一台车换固件 → 代际翻转 | `protocol/ProtocolGeneration`（代际快照 + 作废旧 MFi 档） | `ERA_SWITCHED` |
 
@@ -1209,7 +1221,7 @@ PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_
 | 后果 | `0x4E09/0x4E0A/0x4E0B/0x4E0C`（设备名/语言/时间/UUID，**每天发**）、`0xAA00~0xAA05`（MFi 六条，**每次认证都发**）被列进「陌生 ID」，现场误以为车机冒出新东西 | 这些号正常显示规范名；只有真陌生的号（如 `0x4D00`）才进清单 |
 | 泛化名掩盖精确名 | `in 0xAE00..0xAE03 -> "PowerUpdates(0xAE02)"`，`0x415B/0x415C -> "CallControl"` | 删掉泛化区间，交目录给精确名（`0xAE02` = `StopPowerUpdates`，`0x415C` = `EndCall`） |
 | 分组区间 | `0x4172`（StopListUpdates）、`0x5700/0x5701`（WiFi 信息）、`0x4302/0x4303`（数字车钥匙）、`0x4E01~0x4E05`、`0x4Cxx`（媒体库）、`0x10DA~0x10DD`、`0x0Dxx`、`0xFFF0~0xFFFC`、`0xB1xx`、`0x54xx/0x56xx` 全落到「其他/未知」 | 补齐区间；新增 `ACCESSIBILITY`（辅助功能）组 |
-| 越权取证覆盖 | `recordUndeclaredReceive` 手工挂在 4 种消息上，实际发 20+ 种 | 下沉到 `send()` / `sendFireAndForget()` **唯一出口**，全量覆盖（清单未到达时返回 null，不误报） |
+| 越权取证覆盖 | `recordUndeclaredReceive` 手工挂在 4 种消息上，实际发 20+ 种 | 下沉到 `send()` / `sendFireAndForget()` **唯一出口**，全量覆盖（清单未到达时返回 null，不误报）；2026-11-08 起再收口到跨链路的 `AccessoryDeclaration.noteSend`，隧道侧两个出口也纳入，并按声明裁掉 `0xA100`/`0xFFF0` |
 | 推断号伪装 | `0xEA04` 在 `nameOf` 里叫 `EASessionData`，日志看不出是猜的 | 改名 `0xEA04(推断未确认)`；规范 EA 段只到 `0xEA03`，目录里**禁止**收录它（单测锁定） |
 | 订阅方向表述 | §2.8 写「凡**手机**订阅的消息（含 0x5000/0x4157/0x4154/0x4170）」 | 前四条是**车机订阅手机**、后两条才是手机订阅车机，已按方向拆开 |
 

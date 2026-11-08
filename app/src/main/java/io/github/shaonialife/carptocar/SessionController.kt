@@ -23,6 +23,7 @@ import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
+import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
@@ -1614,6 +1615,9 @@ object SessionController {
         // appendLog（logcat + 文件 + 界面三路都走它，用户导出日志即带走整份清单）。
         ProtocolAudit.reset()
         ProtocolAudit.sink = ::appendLog
+        // 车机声明快照同样按轮清空：上一台车的「可收清单」绝不能拿来裁这一台
+        // （清单是 MIB3 突发两条专用消息的裁剪判据，串轮次会误裁）。
+        AccessoryDeclaration.reset()
         auditSummarizedCount = -1
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
