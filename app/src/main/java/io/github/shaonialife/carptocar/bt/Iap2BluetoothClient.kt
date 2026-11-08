@@ -718,6 +718,8 @@ class Iap2BluetoothClient(
             } catch (_: SecurityException) {
                 null
             }
+        // 真正建链了：登记对端，音频配置守卫据此知道该盯哪台车机。
+        BtSessionGate.notePeerActive(peerAddress)
         try {
             channel.runSenderSession(
                 context,
@@ -727,7 +729,10 @@ class Iap2BluetoothClient(
                 onWifiCredentials,
                 onEndpointUpdate,
                 nowPlayingProvider,
-                onSessionReady = { session -> senderSession = session },
+                onSessionReady = { session ->
+                    senderSession = session
+                    BtSessionGate.iap2Ready = true
+                },
                 onLinkClosed = onLinkClosed,
             )
         } catch (error: IOException) {
@@ -735,6 +740,7 @@ class Iap2BluetoothClient(
         } finally {
             activeChannel = null
             senderSession = null
+            BtSessionGate.iap2Ready = false
             currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
             runCatching { socket.close() }
             channel.close()
@@ -808,6 +814,31 @@ object BtSessionGate {
     /** 入站（车机主动连入）的 iAP2 会话活跃：出站暂停，避免两条 RFCOMM 互相踩。 */
     @Volatile
     var inboundActive: Boolean = false
+
+    /**
+     * 最近一次**真正建链**的对端地址（入站或出站都算，null = 还没连上过）。
+     *
+     * 用途：音频配置守卫（[BtProfiles.guardAudioProfiles]）要知道「盯哪台设备」。
+     * 用户指定了目标时直接用目标地址；没指定时（自动选车机）只能靠这里记下的
+     * 实际对端——否则守卫会盯着一台没连上的设备空转。
+     */
+    @Volatile
+    var activePeerAddress: String? = null
+
+    fun notePeerActive(address: String?) {
+        if (address != null) activePeerAddress = address
+    }
+
+    /**
+     * iAP2 会话已跑通 bring-up（发送端会话就绪）。
+     *
+     * 与 [sessionActive]（CarPlay 端点拿到、画面能上）不同：这个更早，只表示车机
+     * 已经认可这条控制链路。音频配置守卫（[BtProfiles.guardAudioProfiles]）
+     * 就是看它来决定「还要不要继续断 HFP/A2DP」——宝马 fork 的结论是 iAP2 一建立
+     * 车机就不再依赖配置文件状态，继续断只是徒增抖动。
+     */
+    @Volatile
+    var iap2Ready: Boolean = false
 
     /**
      * CarPlay 会话已建立（任一路径成功拿到端点后置位，由 SessionController 维护）：

@@ -202,6 +202,8 @@ class Iap2BluetoothServer(
                 continue
             }
             log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
+            // 登记对端：音频配置守卫（BtProfiles.guardAudioProfiles）据此知道盯哪台设备
+            BtSessionGate.notePeerActive(peerAddress)
             onPeerConnected()
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true
@@ -227,7 +229,10 @@ class Iap2BluetoothServer(
                 onWifiCredentials,
                 onEndpointUpdate,
                 nowPlayingProvider,
-                onSessionReady = { session -> senderSession = session },
+                onSessionReady = { session ->
+                    senderSession = session
+                    BtSessionGate.iap2Ready = true
+                },
                 onLinkClosed = onLinkClosed,
             )
         } catch (error: IOException) {
@@ -235,6 +240,7 @@ class Iap2BluetoothServer(
         } finally {
             activeChannel = null
             senderSession = null
+            BtSessionGate.iap2Ready = false
             BtSessionGate.inboundActive = false
             channel.close()
             // 两条完全不同的撤退路径，日志必须能分辨（否则用户以为「蓝牙连上就断 = App 有 bug」）：

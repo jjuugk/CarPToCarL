@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.bt
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
@@ -31,6 +32,9 @@ import java.util.concurrent.atomic.AtomicReference
  */
 object BtProfiles {
     private const val TAG = "BT-PROFILE"
+
+    /** 守卫一直拿不到对端地址时，空转多久就收工（毫秒）。 */
+    private const val NO_PEER_GIVE_UP_MILLIS = 60_000L
 
     /** 关心的配置文件（按断开优先级排列）。 */
     private val profiles: List<Int> =
@@ -83,19 +87,94 @@ object BtProfiles {
             } catch (_: SecurityException) {
                 return emptyList()
             }
+        return disconnectAddress(context, address, device)
+    }
+
+    /** 同 [disconnect]，只给地址（守卫按地址轮询时用）。 */
+    fun disconnectAddress(
+        context: Context,
+        address: String,
+        deviceHint: BluetoothDevice? = null,
+    ): List<String> {
         val before = connectedNames(context, address)
         if (before.isEmpty()) return emptyList()
+        val device = deviceHint ?: remoteDevice(context, address)
         for (id in profiles) {
             if (profileName(id) !in before) continue
-            proxy(context, id)?.let { disconnectProfile(it, device) }
+            val proxy = proxy(context, id)
+            if (proxy != null && device != null) disconnectProfile(proxy, device)
         }
-        if (!awaitDisconnected(context, address, 1_500L)) {
+        if (!awaitDisconnected(context, address, 1_500L) && device != null) {
             // 配置级断开未生效（个别 ROM 限流）：设备级断开兜底（@hide，同样只要求
             // BLUETOOTH_CONNECT）。车载/耳机当前连接的设备可能被一并断开，属预期。
             runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) }
             awaitDisconnected(context, address, 500L)
         }
         return before
+    }
+
+    /**
+     * 音频配置守卫：**会话期间持续**把该设备的 HFP/A2DP 断开（2026-11-08 按宝马 fork 移植）。
+     *
+     * 为什么一次性 [disconnect] 不够：车机（以及它那一侧的蓝牙栈）会在我们断开后
+     * 自己把配置文件再拉回来——宝马 NBT EVO + 荣耀实测，握手期会有 2~4 分钟的
+     * 「连上又断」循环，期间车机只要看到 HFP/A2DP 在线就不开放 iAP2 窗口。所以要在
+     * 整段建链期反复确认它没被拉起来，iAP2 会话一建立（或用户断开）就收工。
+     *
+     * 跑在独立后台线程上；本方法阻塞到退出为止，返回「实际断开了几次」。
+     */
+    fun guardAudioProfiles(
+        context: Context,
+        addressProvider: () -> String?,
+        shouldStop: () -> Boolean,
+        onEvent: (String) -> Unit,
+    ): Int {
+        val started = SystemClock.uptimeMillis()
+        var drops = 0
+        var idlePolls = 0
+        onEvent(
+            "BT-GUARD: 开始盯音频配置文件（每 ${AudioProfileGuardPolicy.POLL_MILLIS}ms 一次，" +
+                "上限 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s，iAP2 会话建立即收工）",
+        )
+        while (!shouldStop()) {
+            val elapsed = SystemClock.uptimeMillis() - started
+            if (!AudioProfileGuardPolicy.shouldKeepGuarding(elapsed)) {
+                onEvent(
+                    "BT-GUARD: 已盯满 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s，" +
+                        "停止（断开 $drops 次）——仍未建立 iAP2 会话",
+                )
+                return drops
+            }
+            val address = addressProvider()
+            if (address == null) {
+                // 还没有对端（没指定目标、也还没建链）：空转 60 秒就收工，别留一条
+                // 白睡的线程跑到 5 分钟上限。
+                idlePolls++
+                if (idlePolls * AudioProfileGuardPolicy.POLL_MILLIS >= NO_PEER_GIVE_UP_MILLIS) {
+                    onEvent("BT-GUARD: 一直没有对端可盯（未指定目标、也没建链）→ 收工")
+                    return drops
+                }
+            } else {
+                idlePolls = 0
+                val before = connectedNames(context, address)
+                if (before.isNotEmpty()) {
+                    val dropped = disconnectAddress(context, address)
+                    if (dropped.isNotEmpty()) {
+                        drops++
+                        onEvent(
+                            "BT-GUARD: 车机把 ${dropped.joinToString("/")} 拉回来了 → " +
+                                "再次断开（第 $drops 次）",
+                        )
+                    }
+                }
+            }
+            try {
+                Thread.sleep(AudioProfileGuardPolicy.POLL_MILLIS)
+            } catch (_: InterruptedException) {
+                return drops
+            }
+        }
+        return drops
     }
 
     /** 断开后仍在线的配置文件（用于日志判断是否真的断开）。 */
@@ -120,6 +199,19 @@ object BtProfiles {
         }
         return connectedNames(context, address).isEmpty()
     }
+
+    @SuppressLint("MissingPermission")
+    private fun remoteDevice(
+        context: Context,
+        address: String,
+    ): BluetoothDevice? =
+        try {
+            (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+                ?.adapter
+                ?.getRemoteDevice(address)
+        } catch (_: Throwable) {
+            null
+        }
 
     private fun proxy(
         context: Context,
@@ -185,4 +277,25 @@ object BtProfiles {
         } catch (_: Throwable) {
             false
         }
+}
+
+/**
+ * [BtProfiles.guardAudioProfiles] 的节奏与上限（纯逻辑，便于单测）。
+ *
+ * 轮询取 1.5 秒：车机把 HFP 拉回来到它真正听到「在线」之间通常只有几百毫秒，
+ * 间隔再长就会漏掉；再短则每次都要走一遍 `getProfileProxy` 查询，白耗电。
+ *
+ * 上限 5 分钟：宝马 fork 实测的抖动窗口是 2~4 分钟，留 1 分钟余量。到点还在抖
+ * 说明这条路走不通（车机根本不打算开 iAP2 窗口），继续断只会让用户看着蓝牙
+ * 反复连断，不如停下来把控制权交回去。
+ */
+object AudioProfileGuardPolicy {
+    const val POLL_MILLIS = 1_500L
+    const val MAX_MILLIS = 300_000L
+
+    /** 守卫是否还该继续盯：从开始计时起，未到上限就一直盯。 */
+    fun shouldKeepGuarding(
+        elapsedMillis: Long,
+        maxMillis: Long = MAX_MILLIS,
+    ): Boolean = elapsedMillis < maxMillis
 }

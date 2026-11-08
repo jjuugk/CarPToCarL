@@ -269,7 +269,9 @@ object SessionController {
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
         startMediaWatchdog()
-        // 「车机只认苹果设备」兼容模式（默认关）：开了就立刻挂机监听，不等「启动连接」
+        // 「车机只认苹果设备」兼容模式（默认开，2026-11-08 起）：App 一起来就挂上
+        // 占位 SDP 并常开监听——车机是在 discovery/配对阶段就把设备判成「不支持
+        // Apple CarPlay」的，等用户点「启动连接」才注册已经晚了。
         startBtCompatWatchdog()
         if (BtCompatPrefs.enabled(context.applicationContext)) applyBtCompat(true)
     }
@@ -328,21 +330,19 @@ object SessionController {
     private fun installNowPlayingBridge() {
         if (nowPlayingBridgeInstalled) return
         nowPlayingBridgeInstalled = true
-        // 当期首帧真正写进车机通道后再补一次 RECORD：车机让屏要求「解码成功 →
-        // VideoState=active」，若建屏阶段喂过旧帧或长时间无画面，屏幕会话可能已进
-        // 错误态（固件 badFramesThreshold=4）。此时光重发 VideoConfig 不够，需要在
-        // 合法当期帧到达之后重新触发一次让屏仲裁。每轮会话由 CarLifeHijack 置位一次。
-        // 回调跑在 CarLife 读线程，RTSP 不能阻塞它——投递到独立线程执行。
-        CarLifeHijack.onVideoSourceRecovered = {
-            Thread({
-                val client = currentClient
-                if (client != null && !client.cancelled) {
-                    appendLog("REACTIVATE: 当期首帧已送达车机 → 补发 assertModes + RECORD（重建屏激活）")
-                    client.assertModes()
-                    client.record()
-                }
-            }, "screen-reactivate").apply { isDaemon = true }.start()
-        }
+        // 首帧后**不再**补发 assertModes + RECORD（2026-11-08，按宝马 fork 的实车结论）。
+        //
+        // 这段原本是给奥迪 4580 修的（81e75a6「首帧送达后重建屏激活」）：建屏阶段喂过
+        // 旧帧或长时间无画面时，屏幕会话可能已进错误态（固件 badFramesThreshold=4），
+        // 需要在合法当期帧到达后重新触发一次让屏仲裁。
+        //
+        // 但宝马 NBT EVO 上这一步是**反向的**：首帧之后重发 RECORD，车机会直接关掉
+        // 视频通道（fork 实测：补发即 Broken pipe / 通道关闭）。而宝马的画面对它自己的
+        // 建屏时序是够用的，不需要这一脚。
+        //
+        // 取舍：全局关掉（用户 2026-11-08 决定）。代价是奥迪 4580 那种「连接成功但黑屏」
+        // 的老症若复现，需要把下面这段接回去——原始实现见 git show 81e75a6。
+        // CarLifeHijack.onVideoSourceRecovered = { ... assertModes(); record() }
         // 数据源 A：CarLife 内置播放器（0x10035）——兜底，仅其内置播放器会推。
         CarLifeHijack.addMediaInfoListener { info ->
             appendLog(
@@ -1156,6 +1156,55 @@ object SessionController {
         }
     }
 
+    /** 音频配置守卫是否在跑（一轮 connect 只拉一条线程）。 */
+    private val audioGuardRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 音频配置守卫：会话期间**持续**断开目标车机的 HFP/A2DP（2026-11-08 按宝马 fork 移植）。
+     *
+     * 实车依据（fork 在 BMW 94841 / G38 NBT EVO 上验证）：车机在蓝牙配置文件
+     * 在线时不开放 iAP2 窗口；我们一次性断开后，车机那一侧的蓝牙栈会自己把
+     * HFP/A2DP 再拉起来，于是又回到「连得上但车机不理」的状态。表现为握手期
+     * 2~4 分钟的连/断循环——守卫在工作，但用户看着像「蓝牙坏了」，所以日志里
+     * 每次重断都写一行，便于事后区分「守卫在干活」与「真的在抖」。
+     *
+     * 退出条件（任一命中）：用户断开、iAP2 会话建立（[BtSessionGate.sessionActive]）、
+     * 已经开始推流、或盯满 [AudioProfileGuardPolicy.MAX_MILLIS]。
+     */
+    private fun startAudioProfileGuard() {
+        if (!audioGuardRunning.compareAndSet(false, true)) return
+        Thread({
+            val ctx = appContext
+            try {
+                if (ctx == null) return@Thread
+                val appCtx = ctx.applicationContext
+                val drops =
+                    BtProfiles.guardAudioProfiles(
+                        appCtx,
+                        addressProvider = {
+                            BtSessionGate.activePeerAddress
+                                ?: TargetDevicePrefs.get(appCtx)?.address
+                        },
+                        shouldStop = {
+                            !sessionWanted ||
+                                BtSessionGate.iap2Ready ||
+                                BtSessionGate.sessionActive ||
+                                isStreaming()
+                        },
+                        onEvent = { line -> appendLog(line) },
+                    )
+                appendLog("BT-GUARD: 守卫收工（共断开 $drops 次）")
+            } catch (error: Throwable) {
+                appendLog("BT-GUARD: 守卫异常 - ${error.message ?: error.javaClass.simpleName}")
+            } finally {
+                audioGuardRunning.set(false)
+            }
+        }, "bt-audio-guard").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     /**
      * 一轮建链失败后的自动重试（3s / 10s / 30s 三档）。
      *
@@ -1615,6 +1664,10 @@ object SessionController {
                     (connected.takeIf { it.isNotEmpty() }?.joinToString("/") ?: "未连接"),
             )
         }
+        // 音频配置守卫（2026-11-08，按宝马 fork 移植）：车机只要看到 HFP/A2DP 在线就
+        // 不开放 iAP2 窗口，而我们断开之后它自己又会把配置文件拉回来——一次性断不够，
+        // 得在整段建链期反复复查。iAP2 会话一并建立（或用户断开）就收工。
+        startAudioProfileGuard()
     }
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
