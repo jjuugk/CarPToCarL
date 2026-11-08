@@ -191,6 +191,22 @@ object SessionController {
     private const val SPECIFIER_JOIN_TIMEOUT_MS = 15_000L
 
     /**
+     * 入网正式窗口到点后的**宽限**：只继续等，不解绑、不弹失败。
+     *
+     * 由来（2026-11-07，同机型 HONOR WKL-AN20 + BMW94841 / NBT EVO）：一份能连上的参考
+     * 实现日志里「尝试加入 BMW94841 CarPlay 13:05:23.407 → 已绑定 wlan0 13:05:39.136」
+     * = **15.73 秒**；而我们对所有车机只等 15 秒。于是每一轮都恰好差最后半秒：
+     * 15.0s 判定超时并 `release()`（注销回调 + 解绑进程网络），系统在 15.7s 建好的那条
+     * 网络随即被拆掉，现场观感就是「一直卡在加入车机热点」。
+     *
+     * 20 秒是按该实测值留足余量（覆盖 DHCP 慢、系统确认框晚弹的情况），
+     * 对真正的失败（用户点了拒绝、热点不在范围）只是把失败提示推迟 20 秒——
+     * [WifiCarPlayConnector.joinCarPlayNetwork] 收到 `onUnavailable` 时**立即**返回，
+     * 不会白等这段宽限。
+     */
+    private const val SPECIFIER_JOIN_GRACE_MS = 20_000L
+
+    /**
      * 建议网络（[registerSuggestion]）生效后，等系统自动关联车机热点的上限。
      * 建议已被用户授权时系统通常 1~3 秒内就连上，比 specifier 快且无弹框。
      */
@@ -2004,7 +2020,7 @@ object SessionController {
                     "WIFI: \"${wifi.ssid}\" 已有一次入网请求在跑——等它的结果，" +
                         "不重复请求（再发一次会把在跑的那次 release 掉）",
                 )
-                val ok = decision.ticket.await(SPECIFIER_JOIN_TIMEOUT_MS + 5_000L)
+                val ok = decision.ticket.await(SPECIFIER_JOIN_TIMEOUT_MS + SPECIFIER_JOIN_GRACE_MS + 5_000L)
                 val network = connector.currentNetwork
                 if (ok == true && network != null) {
                     appendLog("WIFI: 等到的结果是「已加入」——直接复用那条网络（$network）")
@@ -2034,6 +2050,7 @@ object SessionController {
                                 passphrase = wifi.passphrase,
                                 securityType = wifi.securityType,
                                 timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                                graceMillis = SPECIFIER_JOIN_GRACE_MS,
                                 isCancelled = { connectCancelled },
                             )
                         } catch (error: Exception) {

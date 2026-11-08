@@ -160,12 +160,20 @@ class WifiCarPlayConnector(
      * 安全类型映射按 0x5703（xcertplay Iap2WirelessSecurity）：
      * 0=NONE 1=WEP 2=WPA/WPA2 3=WPA3 过渡 4=WPA3 仅。
      * WEP 无对应 API（返回 [JoinResult.Unsupported]，调用方走旧路径）。
+     *
+     * **超时宽限 [graceMillis]**：无互联网的车机热点在部分机型上「关联 + DHCP」要 15 秒
+     * 以上——2026-11-07 同机型 HONOR WKL-AN20 对 BMW94841 的 AirPlay 参考实现实测
+     * 「尝试加入 13:05:23.407 → 已绑定 13:05:39.136」= **15.73 秒**，而我们只等 15 秒：
+     * 每一次都是在系统即将建好网络的那一刻 `release()`，把已经到手的网络连同回调一起
+     * 扔掉，现场表现正是「一直卡在加入车机热点」。宽限期只延长**等待**，不提前解绑，
+     * 也不改变失败判定——真失败（确认框没人点、热点不在范围）仍会在这段时间后返回。
      */
     fun joinCarPlayNetwork(
         ssid: String,
         passphrase: String,
         securityType: Int,
         timeoutMillis: Long = 120_000L,
+        graceMillis: Long = 0L,
         isCancelled: () -> Boolean = { false },
     ): JoinResult {
         val specifier =
@@ -219,28 +227,57 @@ class WifiCarPlayConnector(
             return JoinResult.Unavailable
         }
         val deadline = SystemClock.uptimeMillis() + timeoutMillis
-        while (SystemClock.uptimeMillis() < deadline) {
-            if (isCancelled()) {
-                release()
-                return JoinResult.Unavailable
-            }
-            try {
-                if (latch.await(200, TimeUnit.MILLISECONDS)) break
-            } catch (_: InterruptedException) {
-                release()
-                return JoinResult.Unavailable
-            }
+        var state = awaitJoin(latch, deadline, isCancelled)
+        // 到点先不解绑：系统常常就在我们放弃之后的几秒内把这条网络建好。
+        // 只有「还没就绪」且「系统没说不可用」时才宽限——onUnavailable 已经是定论。
+        if (state == 0 && result.get() == null && !unavailable.get() && graceMillis > 0) {
+            log(
+                "WiFi: \"$ssid\" ${timeoutMillis / 1000}s 内未就绪——不立刻解绑，" +
+                    "再宽限 ${graceMillis / 1000}s 等系统把关联+DHCP 走完",
+            )
+            state = awaitJoin(latch, SystemClock.uptimeMillis() + graceMillis, isCancelled)
+        }
+        if (state < 0) {
+            release()
+            return JoinResult.Unavailable
         }
         val network = result.get()
         if (network == null) {
-            log(
-                "WiFi: 等待加入 \"$ssid\" 超时（${timeoutMillis / 1000}s）" +
-                    if (unavailable.get()) "——系统已判定不可用" else "——系统确认框可能仍在前台",
-            )
+            val window =
+                if (graceMillis > 0) {
+                    "${timeoutMillis / 1000}s + 宽限 ${graceMillis / 1000}s"
+                } else {
+                    "${timeoutMillis / 1000}s"
+                }
+            val why =
+                if (unavailable.get()) "——系统已判定不可用" else "——系统确认框可能仍在前台"
+            log("WiFi: 等待加入 \"$ssid\" 超时（$window）$why")
             release()
             return JoinResult.Unavailable
         }
         return JoinResult.Joined(network)
+    }
+
+    /**
+     * 等 [latch] 到点或被取消：**1** = 已就绪，**0** = 等到 deadline，**-1** = 被取消/打断。
+     *
+     * 抽出来是为了让「正式窗口」和「宽限期」用同一套 200ms 分片逻辑与取消语义——
+     * 两份几乎一样的循环最容易在其中一份漏掉 `isCancelled()`。
+     */
+    private fun awaitJoin(
+        latch: CountDownLatch,
+        deadline: Long,
+        isCancelled: () -> Boolean,
+    ): Int {
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (isCancelled()) return -1
+            try {
+                if (latch.await(200, TimeUnit.MILLISECONDS)) return 1
+            } catch (_: InterruptedException) {
+                return -1
+            }
+        }
+        return 0
     }
 
     /** 构造 specifier；WEP 或参数不合法返回 null（走旧路径）。 */
