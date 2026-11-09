@@ -979,6 +979,19 @@ object SessionController {
     var connectCancelled: Boolean = false
 
     /**
+     * 本轮会话是否已经被**真实结束**（车机关掉事件通道 / 推流线程收尾）。
+     *
+     * 2026-11-09 宝马 G38：车机在 `EVENT: 通道关闭（EOF）` 之后整机重启，而「等首帧」
+     * 那道 20 秒的门还在跑，到点照样打「20s 内车机未收到本会话任何视频帧…**会话本身
+     * 已建立，不需要重连车机**」——会话 17 秒前就没了，这句话把用户直接引去点重连，
+     * 而这 17 秒里车机正在重启。门必须能被会话结束打断，文案也要分开。
+     *
+     * 由 [startFirstFrameGate] 在进入时置 false，onEnded 回调里置 true。
+     */
+    @Volatile
+    private var videoSessionEnded: Boolean = false
+
+    /**
      * 空端点等待观察者的**代际**：每新起一个就自增，旧观察者看到代际变化即退出。
      *
      * 2026-10-26 别克 E2LB 日志：车机每 ~40 秒把链路掐掉一次（收到 0x4300 后停止 ACK，
@@ -2956,6 +2969,27 @@ object SessionController {
     // ---- 以下方法体自 MainActivity 原样迁入（会话逻辑不依赖 Activity）----
 
     /**
+     * 麦克风上行端口的**唯一出口**：只给「车机会给它自己声明的输入通路」的档位用。
+     *
+     * 2026-11-09 宝马 G38（#norecord 包）实车：我们往 `t102/media` 这条**纯下行媒体流**
+     * 里塞了自己的 UDP 端口当 `dataPort`，车机 `/info` 对同一档写的却是
+     * `audioInputFormats=0x0`（这条流没有输入能力）。SETUP 照常 200、给 dataPort=6000，
+     * 80ms 后车机关掉事件通道（`EVENT: 通道关闭（EOF）`），整机随后重启。
+     *
+     * 同一台车、同一档、同一音频 SETUP，用户的旧构建（不声明麦克风）连发 4 次 RECORD
+     * 仍稳跑 12 分钟（`log-20261107-200015` 19:49 那轮）。两者唯一的差别就是这个
+     * `dataPort`，所以默认不再往 media 档上挂麦：真 iPhone 要麦时走的是
+     * `type=100 default/telephony/speechRecognition` 那些**双向**档，media 永远只有下行。
+     */
+    private fun micPortFor(candidate: AudioProfile): Int {
+        if (!MIC_UPLINK_ENABLED) return 0
+        val uplink = micUplink ?: return 0
+        // "media" 与 AirPlayClient.AUDIO_TYPE_MEDIA 同值；那个 companion 是 private，
+        // 这里按字面量判（大小写不敏感），不为此放开可见性。
+        return if (candidate.audioType.equals("media", ignoreCase = true)) 0 else uplink.localPort
+    }
+
+    /**
      * 音频 SETUP 的**唯一入口**：先等隧道控制会话（MFi）就绪，再真正协商音频。
      *
      * 为什么必须先等（2026-11-06 实车）：抢在 MFi 之前发，车机要 5097ms 才回应，
@@ -3051,9 +3085,18 @@ object SessionController {
                 } else {
                     null
                 }
+            var micSkipLogged = false
             try {
                 for (candidate in ordered) {
-                    val result = client.runAudioStream(sharedSecret, candidate, tuning, micPort = uplink?.localPort ?: 0)
+                    val micPort = micPortFor(candidate)
+                    if (uplink != null && micPort == 0 && !micSkipLogged) {
+                        appendLog(
+                            "MIC: 本档 ${candidate.label} 是纯下行媒体流（车机对 media 档声明的" +
+                                "输入位就是 0x0）——本轮不声明麦克风上行端口",
+                        )
+                        micSkipLogged = true
+                    }
+                    val result = client.runAudioStream(sharedSecret, candidate, tuning, micPort = micPort)
                     if (result != null) {
                         chosen = candidate
                         streamInfo = result
@@ -3154,7 +3197,7 @@ object SessionController {
         val info =
             try {
                 // 重建时把上行端口继续声明进去：不然车机以为手机不要麦了，通话里反而没上行
-                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = micUplink?.localPort ?: 0)
+                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = micPortFor(profile))
             } catch (error: Exception) {
                 appendLog("AUDIO: 重建协商异常 - ${error.message}")
                 null
@@ -3266,7 +3309,7 @@ object SessionController {
         val info =
             try {
                 // 同理：换档（媒体↔通话）也是新流，上行端口继续声明，避免车机当手机不要麦
-                client.runAudioStream(secret, target, AudioTuning.RAW_SPF, micPort = micUplink?.localPort ?: 0)
+                client.runAudioStream(secret, target, AudioTuning.RAW_SPF, micPort = micPortFor(target))
             } catch (error: Exception) {
                 appendLog("AUDIO: 切换协商异常 - ${error.message}")
                 null
@@ -3881,6 +3924,7 @@ object SessionController {
      */
     private fun startFirstFrameGate() {
         Bg.run("first-frame-gate") {
+            videoSessionEnded = false
             // 基准取 attach **之前**的累计送达数（videoSessionFrameBase）：缓存回放成功时
             // framesDelivered 在 attach 里已经涨过，若在这里重新取基准，会把「已经回放了画面」
             // 误判成「20s 没帧」，然后用提示帧把真实画面盖掉。
@@ -3895,6 +3939,15 @@ object SessionController {
                 // 只在「会话被整体收掉」（retireSession 会把 videoSender 置空）或用户取消时退出；
                 // 不用 isRunning 当条件——它在这条通道刚起时可能还是 false，会让门直接失效。
                 if (connectCancelled || videoSender == null) return@run
+                // 会话已经真实结束（车机关通道 / 推流收尾）：再等下去毫无意义，而且到点那句
+                // 「会话本身已建立，不需要重连车机」会把用户引去在车机重启期间点重连。
+                if (videoSessionEnded) {
+                    appendLog(
+                        "STAGE: 车机会话在首帧到达前就结束了——不再等首帧。" +
+                            "若是车机自己关的通道，请等它重启完成、重新广播后再点「启动连接」",
+                    )
+                    return@run
+                }
                 sleepQuietly(250)
             }
             if (CarLifeHijack.framesDelivered > base) {
@@ -5011,6 +5064,7 @@ object SessionController {
                                             onEnded = {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
+                                                videoSessionEnded = true
                                                 BtSessionGate.sessionActive = false
                                                 // 车机掉线类结束（无用户断开操作）：暗幕/常亮必须一起收掉。
                                                 // 这条路径不经过 retireSession（VirtualLauncher 仍挂着），
