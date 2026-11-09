@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <queries>
+        <package android:name="com.oplus.ocar" />
+    </queries>
+
+    <application>
+        <service android:name=".carplus.CarPlusReceiverService"
+            android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
+        <service android:name="com.share.connect.ShareLinkService"
+            android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
+        <service android:name="com.share.connect.ble.BluetoothLeService"
+            android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
+        <service android:name="com.share.connect.wifiap.WifiApService"
+            android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
+        <service android:name="com.share.connect.wifip2p.WifiP2pService"
+            android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
+    </application>
+</manifest>

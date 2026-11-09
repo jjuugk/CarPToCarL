@@ -110,41 +110,13 @@ class Iap2SenderSession(
 
     private val random = SecureRandom()
 
-    // ---- ExternalAccessory（EA）隧道 ----
-    // 奥迪 MIB3 把 EA 会话桥接到车机内部 viwi 总线（127.0.0.1:14751），整车控制
-    // （车门/车窗/空调/灯光…）都从这个入口走。详见 docs/mib3-viwi-control.md。
-
     /** 车机在 0x1D01 里声明的 EA 协议（protocolId to name），bring-up 后填充。 */
     @Volatile
-    var eaProtocols: List<Pair<Int, String>> = emptyList()
-        private set
-
-    /** 承载数据的 EA 协议号（优先 `com.audi.cpp.eadata0`）；null = 车机没声明可用协议。 */
-    @Volatile
-    var eaDataProtocolId: Int? = null
-        private set
+    private var eaProtocols: List<Pair<Int, String>> = emptyList()
 
     /** 最近一次 0xEA03 的原始 body（null = 车机一次都没回会话状态）。 */
     @Volatile
-    var eaStatusRaw: ByteArray? = null
-        private set
-
-    /** EA 隧道双向字节计数（只用于界面上判断「有没有真的通」）。 */
-    @Volatile
-    var eaTxBytes: Int = 0
-        private set
-
-    @Volatile
-    var eaRxBytes: Int = 0
-        private set
-
-    /** 收到 0xEA03（会话状态）时回调，原始 body 交给上层解读。 */
-    @Volatile
-    var onEaStatus: ((ByteArray) -> Unit)? = null
-
-    /** 收到 0xEA04（隧道数据）时回调，参数是裸字节（viwi 报文）。 */
-    @Volatile
-    var onEaData: ((ByteArray) -> Unit)? = null
+    private var eaStatusRaw: ByteArray? = null
 
     /** 0xEA00 的催问是否已经排过（每轮会话只排一次）。 */
     private var eaRetryScheduled = false
@@ -542,16 +514,6 @@ class Iap2SenderSession(
             )
             log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
         }
-        // 数据走哪条 EA 协议：优先 `...eadata0`（奥迪 viwi 数据口），退而取第一条。
-        // 只要车机声明了任一协议就记下来——能不能真通由 0xEA03 与首个往返决定。
-        eaDataProtocolId =
-            declaredEaProtocols.firstOrNull { it.second.endsWith("eadata0") }?.first
-                ?: declaredEaProtocols.firstOrNull()?.first
-        if (eaDataProtocolId != null) {
-            log("EA: 数据通道协议 = ${declaredEaProtocols.first { it.first == eaDataProtocolId }.second}（0xEA04 承载）")
-        } else {
-            log("EA: 车机未声明任何 EA 协议——MIB3 车机控制不可用")
-        }
         scheduleEaSessionRetry(declaredEaProtocols)
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
@@ -875,25 +837,16 @@ class Iap2SenderSession(
         log("SESSION 保活结束（链路断开）")
     }
 
-    // ---- EA（ExternalAccessory）隧道：MIB3 viwi 车机控制的唯一通道 ----
+    // ---- EA（ExternalAccessory）会话 ----
 
     private fun handleEaStatus(frame: Iap2Csm.Frame) {
         eaStatusRaw = frame.body
         val hex = frame.body.joinToString(" ") { "%02x".format(it) }
         log("iap2 rx=0xea03 EASessionStatus bytes=${frame.body.size} [$hex]")
-        runCatching { onEaStatus?.invoke(frame.body) }
-            .onFailure { log("EA: 会话状态回调异常 ${it.message}") }
     }
 
     private fun handleEaData(frame: Iap2Csm.Frame) {
-        eaRxBytes += frame.body.size
-        val sink = onEaData
-        if (sink == null) {
-            log("iap2 rx=0xea04 EA 数据 ${frame.body.size}B（无消费者，丢弃）")
-            return
-        }
-        runCatching { sink(frame.body) }
-            .onFailure { log("EA: 数据处理异常 ${it.message}") }
+        log("iap2 rx=0xea04 EA 数据 ${frame.body.size}B（无消费者，丢弃）")
     }
 
     /**
@@ -929,30 +882,6 @@ class Iap2SenderSession(
             },
             "ea-session-retry",
         ).apply { isDaemon = true }.start()
-    }
-
-    /**
-     * 通过 EA 隧道发一段裸字节（viwi 请求报文）。
-     *
-     * 返回 false 只有两种原因：车机没声明可用的 EA 协议，或链路在写的时候断了。
-     * **载荷形态是推断的**（整段裸字节塞进 body，不加 CSM 参数包装）——见
-     * [Iap2MessageIds.EA_SESSION_DATA] 的注释，首次实车按日志校正。
-     */
-    fun sendEaData(payload: ByteArray): Boolean {
-        if (payload.isEmpty()) return false
-        if (eaDataProtocolId == null) {
-            log("EA: 车机未声明 EA 协议，无法发送（${payload.size}B）")
-            return false
-        }
-        return runCatching {
-            send(Iap2MessageIds.EA_SESSION_DATA, payload)
-            eaTxBytes += payload.size
-            log("EA: tx ${payload.size}B（累计 $eaTxBytes/$eaRxBytes）")
-            true
-        }.getOrElse { error ->
-            log("EA: 发送失败 ${error.message}")
-            false
-        }
     }
 
     /**

@@ -86,6 +86,8 @@ class VideoSender(
      * 传 null = 不写这几个字段（旧行为，保持向后兼容）。
      */
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
+    private val onSurfaceStopped: ((Surface) -> Unit)? = null,
+    private val limitSurfaceFps: Boolean = false,
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -323,6 +325,7 @@ class VideoSender(
      * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
      * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
      */
+    @Synchronized
     fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
         return try {
@@ -341,11 +344,12 @@ class VideoSender(
                 openEncoder(bitrate, requestBaseline = true)
                     ?: openEncoder(bitrate, requestBaseline = false)
                     ?: throw IllegalStateException("没有可用的 H.264 编码器")
-            val surface = codec.createInputSurface()
-            codec.start()
             encoder = codec
+            val surface = codec.createInputSurface()
             inputSurface = surface
+            codec.start()
             ended.set(false)
+            lastFrameAtMs = 0L
             running.set(true)
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
 
@@ -383,6 +387,9 @@ class VideoSender(
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+                    if (limitSurfaceFps) {
+                        setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, targetFps.toFloat())
+                    }
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                     if (requestBaseline) {
                         setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
@@ -436,14 +443,17 @@ class VideoSender(
             else -> "0x%X".format(level)
         }
 
+    @Synchronized
     fun stop() {
         running.set(false)
         passthrough = false
+        val surface = inputSurface
+        inputSurface = null
+        surface?.let { runCatching { onSurfaceStopped?.invoke(it) } }
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
         encoder = null
-        runCatching { inputSurface?.release() }
-        inputSurface = null
+        runCatching { surface?.release() }
         runCatching { socket?.close() }
         socket = null
     }
@@ -806,7 +816,7 @@ class VideoSender(
                     } catch (error: Exception) {
                         // 编码器进错误态（如非法尺寸首帧）：必须留痕——静默 break 曾让
                         // 「零帧推流 4 秒后断开」无从排查（接收端只见 peer EOF）
-                        log("VIDEO: 编码器取帧异常，停止推流 - ${error.message}")
+                        if (running.get()) log("VIDEO: 编码器取帧异常，停止推流 - ${error.message}")
                         break
                     }
                 when {
@@ -816,14 +826,17 @@ class VideoSender(
                     }
 
                     index >= 0 -> {
-                        val buffer = codec.getOutputBuffer(index) ?: continue
-                        val flags = bufferInfo.flags
-                        if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                            sendVideoConfig(buffer, bufferInfo.size, output)
-                        } else if (bufferInfo.size > 0) {
-                            sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
+                        try {
+                            val buffer = codec.getOutputBuffer(index) ?: continue
+                            val flags = bufferInfo.flags
+                            if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                                sendVideoConfig(buffer, bufferInfo.size, output)
+                            } else if (bufferInfo.size > 0) {
+                                sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
+                            }
+                        } finally {
+                            codec.releaseOutputBuffer(index, false)
                         }
-                        codec.releaseOutputBuffer(index, false)
                         maybeSendKeepAlive(output)
                     }
                 }
@@ -1189,6 +1202,7 @@ class VideoSender(
             output.flush()
         }
         framesSent++
+        if (!passthrough) lastFrameAtMs = android.os.SystemClock.uptimeMillis()
         framesSinceKeepAlive++
         bytesSinceKeepAlive += plain.size.toLong()
         if (!suppressFrameLog && (keyFrame || framesSent <= 3 || framesSent % 150 == 0L)) {

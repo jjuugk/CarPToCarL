@@ -36,7 +36,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="CarPToCarL"
+                        android:text="@string/app_name"
                         android:textColor="#EDF3F3"
                         android:textSize="21sp"
                         android:textStyle="bold" />
@@ -62,8 +62,23 @@
                         android:layout_marginTop="4dp"
                         android:textColor="#FFD9A441"
                         android:textSize="11.5sp"
-                        android:text="CarLife+ 未启动" />
+                        android:text="@string/local_video_source_idle" />
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/openSystemCarPlus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:minHeight="48dp"
+                    android:background="@drawable/bg_tbtn"
+                    android:gravity="center"
+                    android:paddingHorizontal="10dp"
+                    android:text="@string/open_system_car_plus"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
 
             </LinearLayout>
 
@@ -148,7 +163,7 @@
                         android:layout_gravity="center_horizontal|bottom"
                         android:layout_marginBottom="10dp"
                         android:letterSpacing="0.22"
-                        android:text="CARPTOCARL"
+                        android:text="@string/app_wordmark"
                         android:textColor="#5C6B6B"
                         android:textSize="10sp"
                         android:textStyle="bold" />
@@ -879,7 +894,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="本地 CarLife 劫持"
+                            android:text="@string/local_video_source_title"
                             android:textColor="@color/m3_on_surface"
                             android:textSize="14sp"
                             android:textStyle="bold" />
@@ -938,7 +953,7 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="车机有定位时把它的坐标转给 CarLife，车内手机信号差时更准；车机只发无坐标样本时自动不发。"
+                            android:text="@string/car_gps_note"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
@@ -1056,84 +1071,6 @@
                     android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
                     android:textColor="@color/m3_on_var"
                     android:textSize="12sp" />
-            </LinearLayout>
-
-            <!-- ==================== MIB3 车机控制（弹窗入口） ====================
-                 入口只做一件事：打开控制面板。真正的状态/按钮都在弹窗里
-                 （mib3/Mib3ControlPanel），因为那些写操作需要「允许写入 + 逐个确认」
-                 两道门槛，不适合平铺在首页。 -->
-            <LinearLayout
-                android:id="@+id/mib3Card"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/bg_card"
-                android:orientation="vertical"
-                android:paddingStart="16dp"
-                android:paddingTop="14dp"
-                android:paddingEnd="16dp"
-                android:paddingBottom="16dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <FrameLayout
-                        android:layout_width="38dp"
-                        android:layout_height="38dp"
-                        android:background="@drawable/bg_icon_tile">
-
-                        <ImageView
-                            android:layout_width="20dp"
-                            android:layout_height="20dp"
-                            android:layout_gravity="center"
-                            android:contentDescription="车机控制"
-                            android:src="@drawable/ic_car" />
-                    </FrameLayout>
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="14dp"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="MIB3 车机控制"
-                            android:textColor="@color/m3_on_surface"
-                            android:textSize="14.5sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/mib3Note"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="车门 / 车窗 / 空调 / 灯光 / 座椅 · 只读车况"
-                            android:textColor="@color/m3_on_var"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/btnMib3Control"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:background="@drawable/bg_btn_tonal"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:gravity="center"
-                    android:paddingTop="10dp"
-                    android:paddingBottom="10dp"
-                    android:text="打开车机控制面板"
-                    android:textColor="@color/m3_on_sec_container"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
             </LinearLayout>
 
             <!-- ==================== 日志（默认折叠） ==================== -->

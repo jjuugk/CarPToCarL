@@ -27,6 +27,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
@@ -40,6 +41,7 @@ import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
 import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -49,8 +51,6 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
-import io.github.shaonialife.carptocar.mib3.Mib3ControlLink
-import io.github.shaonialife.carptocar.mib3.Mib3ControlPanel
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -172,7 +172,6 @@ class MainActivity : AppCompatActivity() {
     private var wifiJoinDialog: androidx.appcompat.app.AlertDialog? = null
 
     /** MIB3 控制链路的首页监听（onDestroy 摘掉，避免单例持有 Activity）。 */
-    private var mib3LinkListener: (() -> Unit)? = null
 
     private val logListener: (String) -> Unit = { line ->
         runOnUiThread {
@@ -194,6 +193,70 @@ class MainActivity : AppCompatActivity() {
                 proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
             }
         }
+
+    private var carPlusStartupAttempted = false
+    private var openCarPlusAfterPermission = false
+
+    private val carPlusPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            val openGuide = openCarPlusAfterPermission
+            openCarPlusAfterPermission = false
+            if (hasCarPlusPermissions()) {
+                CarPlusReceiver.start(this)
+                maybeAutoConnect()
+                if (openGuide) openSystemCarPlus()
+            } else {
+                log("ICCOA: 蓝牙或 WLAN 权限未授予")
+            }
+        }
+
+    private fun carPlusPermissions(): List<String> =
+        listOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+            Manifest.permission.BLUETOOTH_SCAN,
+        ) + if (Build.VERSION.SDK_INT >= 33) {
+            listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+
+    private fun hasCarPlusPermissions(): Boolean =
+        carPlusPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+
+    private fun startCarPlusReceiver(refresh: Boolean = false) {
+        if (!BuildConfig.CAR_PLUS_RUNTIME) {
+            CarPlusReceiver.start(this)
+            return
+        }
+        if (hasCarPlusPermissions()) {
+            CarPlusReceiver.start(this, refresh)
+        } else {
+            carPlusPermissionLauncher.launch(carPlusPermissions().toTypedArray())
+        }
+    }
+
+    private fun startCarPlusOnLaunch() {
+        if (!BuildConfig.CAR_PLUS_RUNTIME || carPlusStartupAttempted || isFinishing || isDestroyed) return
+        if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
+        carPlusStartupAttempted = true
+        startCarPlusReceiver()
+    }
+
+    private fun openSystemCarPlus() {
+        if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
+        if (!hasCarPlusPermissions()) {
+            openCarPlusAfterPermission = true
+            startCarPlusReceiver()
+            return
+        }
+        CarPlusReceiver.start(this)
+        CarPlusReceiver.openSystemCarPlus(this) {
+            runOnUiThread {
+                Toast.makeText(this, R.string.open_system_car_plus_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     /** 蓝牙权限授权后自动继续启动连接。 */
     private val pendingStartAfterBtPermission =
@@ -242,6 +305,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
+        if (BuildConfig.CAR_PLUS && (!BuildConfig.CAR_PLUS_RUNTIME || !hasCarPlusPermissions())) return
         if (startupCheckRunning || pendingResidualDisplays != null) return
         if (SessionController.isSessionRunning() || SessionController.sessionStarting.get()) return
         if (heroState != HeroState.IDLE) return
@@ -521,6 +585,14 @@ class MainActivity : AppCompatActivity() {
      * 蓝牙/位置权限授权后续跑）都汇到这一个函数，改一处即可全覆盖。
      */
     private fun proceedToConnect(onReady: () -> Unit) {
+        if (BuildConfig.CAR_PLUS && !BuildConfig.CAR_PLUS_RUNTIME) {
+            snack(CarPlusReceiver.status)
+            return
+        }
+        if (BuildConfig.CAR_PLUS_RUNTIME && !hasCarPlusPermissions()) {
+            startCarPlusReceiver()
+            return
+        }
         if (!requireBluetoothMac()) return
         onReady()
     }
@@ -597,6 +669,7 @@ class MainActivity : AppCompatActivity() {
     /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
     private fun startConnectionNow() {
         runOnUiThread {
+            if (BuildConfig.CAR_PLUS_RUNTIME) CarPlusReceiver.start(this)
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -628,9 +701,17 @@ class MainActivity : AppCompatActivity() {
 
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
         carLifeStatus = findViewById(R.id.carLifeStatus)
+        findViewById<View>(R.id.openSystemCarPlus).apply {
+            if (CarPlusReceiver.hasSystemCarPlus(this@MainActivity)) {
+                visibility = View.VISIBLE
+                setOnClickListener { openSystemCarPlus() }
+            }
+        }
         // 状态行兼作「重启守候」入口：不拉起任何应用，只是重新开始盯 7240 端口
         carLifeStatus.setOnClickListener {
-            if (!CarLifeHijack.isActive) {
+            if (BuildConfig.CAR_PLUS) {
+                startCarPlusReceiver(refresh = true)
+            } else if (!CarLifeHijack.isActive) {
                 log("CARLIFE: 手动重启守候（等待你打开 CarLife+ 的无线连接）")
                 CarLifeHijack.prewarm(applicationContext) { line -> runOnUiThread { log(line) } }
             }
@@ -842,7 +923,12 @@ class MainActivity : AppCompatActivity() {
                         finishAndRemoveTask()
                     },
                     // 接受后再续上冷启动自动连接（未接受前不能发起任何连接）
-                    onAccept = { mainHandler.postDelayed({ maybeAutoConnect() }, 400L) },
+                    onAccept = {
+                        mainHandler.postDelayed({
+                            startCarPlusOnLaunch()
+                            maybeAutoConnect()
+                        }, 400L)
+                    },
                     onDismiss = { activeDisclaimer = null },
                 )
     }
@@ -1106,8 +1192,9 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-            PackageManager.PERMISSION_GRANTED
+        if (!BuildConfig.CAR_PLUS &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
+                PackageManager.PERMISSION_GRANTED
         ) {
             permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
@@ -1117,8 +1204,6 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 显示设置（原「显示」面板迁移至首页，2026-10-24） ----
         bindDisplayCard()
-        // ---- MIB3 车机控制入口（面板在弹窗里，见 mib3/Mib3ControlPanel） ----
-        bindMib3Card()
 
         // 常亮+暗幕：界面开关已移除，行为固定为「默认开启」，由会话起停驱动
         // （ScreenDimmer 由 VirtualLauncher.attach 在会话启动时挂载）。
@@ -1130,7 +1215,9 @@ class MainActivity : AppCompatActivity() {
 
         // 启动即开始守候 CarLife 端口 —— 车机画面的唯一来源（隐形屏已按用户要求移除）。
         // **不自动拉起 CarLife+**：由用户手动打开它并点「无线连接」，端口一开即接管。
-        if (CarLifeHijack.isEnabled(this)) {
+        if (BuildConfig.CAR_PLUS) {
+            log("ICCOA: 打开应用后自动启动接收端，可点首页画面来源状态行重试")
+        } else if (CarLifeHijack.isEnabled(this)) {
             mainHandler.postDelayed(
                 {
                     CarLifeHijack.prewarm(applicationContext) { line ->
@@ -1145,7 +1232,8 @@ class MainActivity : AppCompatActivity() {
 
         // 版本号走运行时读取：BuildConfig.VERSION_NAME 会被 Kotlin 折叠成字面量，
         // 改版本号后增量编译不重编本类时，日志会印上一版的号（1.2.13 踩过一次）。
-        log("CarPToCarL ${AppVersion.nameWithTag(this)}（画面=本地劫持 CarLife · 音频=PCM 直通）就绪")
+        val source = if (BuildConfig.CAR_PLUS) "ICCOA Car+ 视频" else "本地劫持 CarLife · 音频=PCM 直通"
+        log("${getString(R.string.app_name)} ${AppVersion.nameWithTag(this)}（画面=$source）就绪")
         log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
         // 接收端（WinPlay 等）按真实蓝牙地址过滤设备：解析不到就等于注定 SETUP 403，
@@ -1192,6 +1280,11 @@ class MainActivity : AppCompatActivity() {
     private fun updateCarLifeStatus() {
         val text =
             when {
+                BuildConfig.CAR_PLUS -> if (SessionController.videoSender?.isVideoFlowing == true) {
+                    "CarPlay 正在接收 ICCOA Car+ 画面"
+                } else {
+                    CarPlusReceiver.status
+                }
                 !CarLifeHijack.isEnabled(this) -> "CarLife 劫持已在设置里关闭 —— 不会有车机画面"
                 // 判定一律以「真实视频流」为准（用户明确要求）：帧真正写进车机通道才算在投，
                 // 不认 CarLife 进程/握手状态——否则会出现「显示已劫持、车机却在等视频」的误判。
@@ -1419,7 +1512,7 @@ class MainActivity : AppCompatActivity() {
             }
             HeroState.CONNECTED -> {
                 styleCta(R.drawable.bg_cta_outline_err, R.color.m3_error, R.drawable.ic_power, "断开连接")
-                audioTag.visibility = View.VISIBLE
+                audioTag.visibility = if (BuildConfig.CAR_PLUS) View.GONE else View.VISIBLE
             }
         }
 
@@ -1460,7 +1553,12 @@ class MainActivity : AppCompatActivity() {
                 .toString()
                 .trim()
                 .ifEmpty { "车机热点" }
-        heroSubline.text = String.format(Locale.US, "已连接 · %s · %02d:%02d · 视频推流中", ssid, mm, ss)
+        val videoStatus = if (BuildConfig.CAR_PLUS && SessionController.videoSender?.isVideoFlowing != true) {
+            "等待 ICCOA 画面"
+        } else {
+            "视频推流中"
+        }
+        heroSubline.text = String.format(Locale.US, "已连接 · %s · %02d:%02d · %s", ssid, mm, ss, videoStatus)
     }
 
     private fun bindDisplayCard() {
@@ -1469,12 +1567,15 @@ class MainActivity : AppCompatActivity() {
         // 本地 CarLife 劫持开关：接管手机原生 CarLife 码流（默认开；失败自动回退隐形屏）
         val hijackSwitch = findViewById<SwitchCompat>(R.id.switchCarLifeHijack)
         val hijackNote = findViewById<TextView>(R.id.carLifeHijackNote)
-        hijackSwitch.isChecked = CarLifeHijack.isEnabled(ctx)
+        hijackSwitch.isChecked =
+            if (BuildConfig.CAR_PLUS) BuildConfig.CAR_PLUS_RUNTIME else CarLifeHijack.isEnabled(ctx)
+        hijackSwitch.isEnabled = !BuildConfig.CAR_PLUS
 
         fun refreshHijackNote() {
             val running = CarLifeHijack.isActive
             hijackNote.text =
                 when {
+                    BuildConfig.CAR_PLUS -> "本测试包使用 ICCOA Car+ 视频源。"
                     !hijackSwitch.isChecked ->
                         "开启后每次连接都会优先尝试：需先在荣耀车联里进入「无线 WLAN 连接」并停在" +
                             "「正在连接」；1.5 秒内接管不到会自动回退隐形屏。"
@@ -1495,16 +1596,16 @@ class MainActivity : AppCompatActivity() {
         // 关掉即回到「完全用手机定位」，随时可来回切（下一条定位就按新值走）。
         val gpsSwitch = findViewById<SwitchCompat>(R.id.switchCarGps)
         val gpsNote = findViewById<TextView>(R.id.carGpsNote)
-        gpsSwitch.isChecked = CarGpsOption.enabled
-        if (!CarGpsOption.enabled) {
+        gpsSwitch.isEnabled = !BuildConfig.CAR_PLUS
+        gpsSwitch.isChecked = !BuildConfig.CAR_PLUS && CarGpsOption.enabled
+        if (!BuildConfig.CAR_PLUS && !CarGpsOption.enabled) {
             gpsNote.text = "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
         }
         gpsSwitch.setOnCheckedChangeListener { _, checked ->
             CarGpsOption.save(ctx, checked)
             gpsNote.text =
                 if (checked) {
-                    "车机有定位时把它的坐标转给 CarLife，车内手机信号差时更准；" +
-                        "车机只发无坐标样本时自动不发。"
+                    getString(R.string.car_gps_note)
                 } else {
                     "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
                 }
@@ -1617,37 +1718,6 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
-    }
-
-    /**
-     * 「MIB3 车机控制」入口：一张只显示状态的卡 + 一个打开面板的按钮。
-     *
-     * 卡片不列任何控制按钮——那些写操作要「允许写入 + 逐个确认」，平铺在首页迟早
-     * 被误触（ACL 里 `/door`、`/window` 都是真能动的）。真正的界面在
-     * [Mib3ControlPanel]。
-     */
-    private fun bindMib3Card() {
-        val note = findViewById<TextView>(R.id.mib3Note)
-        val button = findViewById<TextView>(R.id.btnMib3Control)
-        fun render() {
-            val status = Mib3ControlLink.status()
-            note.text =
-                when (status.phase) {
-                    Mib3ControlLink.Phase.READY -> "EA 隧道已建立 · 可读写（接口未实车验证）"
-                    Mib3ControlLink.Phase.WAITING_STATUS -> "已发 0xEA00 · 等车机回 0xEA03（写动作禁用）"
-                    Mib3ControlLink.Phase.NO_PROTOCOL -> "车机未声明 EA 协议 · 本机不支持车机控制"
-                    Mib3ControlLink.Phase.NO_SESSION -> "未连接车机 · 连接后从这里打开控制面板"
-                }
-        }
-        // 监听器存字段：Activity 销毁时要摘掉，单例里攥着一个 Activity 的 lambda 会泄漏
-        val listener: () -> Unit = { runOnUiThread { render() } }
-        mib3LinkListener?.let { Mib3ControlLink.removeListener(it) }
-        mib3LinkListener = listener
-        Mib3ControlLink.addListener(listener)
-        button.setOnClickListener {
-            Mib3ControlPanel.show(this) { line -> log(line) }
-        }
-        render()
     }
 
     private fun updateAudioTag() {
@@ -2684,6 +2754,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             showDisclaimer(requireAcceptance = true)
         }
+        startCarPlusOnLaunch()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -2827,8 +2898,6 @@ class MainActivity : AppCompatActivity() {
         // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
         runCatching { stopTargetScan() }
         targetPicker = null
-        mib3LinkListener?.let { Mib3ControlLink.removeListener(it) }
-        mib3LinkListener = null
         // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
         // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
         if (SessionController.logListener === logListener) SessionController.logListener = null

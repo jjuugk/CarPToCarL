@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "frida-compile": "^19.1.0",
+    "frida-java-bridge": "^7.0.13"
+  }
+}

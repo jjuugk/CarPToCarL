@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="open_system_car_plus">打开系统 Car+</string>
+    <string name="open_system_car_plus_failed">无法打开系统 Car+，请检查本应用的 Root 授权</string>
     <!-- 应用名**不含** CarPlay：它既是 Apple 的商标，用「CarPlay」作产品名会构成
          商标性使用（且容易被误认为官方产品）。兼容关系写在副标题/README 里，
          那属于描述性引用。详见仓库根目录 DISCLAIMER.md 与 README「非官方声明」。 -->
     <string name="app_name">CarPToCarL</string>
+    <string name="app_wordmark">CARPTOCARL</string>
+    <string name="local_video_source_title">本地 CarLife 劫持</string>
+    <string name="local_video_source_idle">CarLife+ 未启动</string>
+    <string name="car_gps_note">车机有定位时把它的坐标转给 CarLife，车内手机信号差时更准；车机只发无坐标样本时自动不发。</string>
     <string name="app_subtitle">非官方实验性 CarPlay 兼容发送端</string>
     <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
 </resources>
