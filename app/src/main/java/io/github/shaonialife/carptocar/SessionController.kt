@@ -7,6 +7,7 @@ import io.github.shaonialife.carptocar.airplay.FreshAuthPolicy
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
 import io.github.shaonialife.carptocar.airplay.PairingGate
 import io.github.shaonialife.carptocar.airplay.PairingMemory
+import io.github.shaonialife.carptocar.airplay.StreamOrderMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
@@ -2955,6 +2956,36 @@ object SessionController {
     // ---- 以下方法体自 MainActivity 原样迁入（会话逻辑不依赖 Activity）----
 
     /**
+     * 音频 SETUP 的**唯一入口**：先等隧道控制会话（MFi）就绪，再真正协商音频。
+     *
+     * 为什么必须先等（2026-11-06 实车）：抢在 MFi 之前发，车机要 5097ms 才回应，
+     * 同期 MFi 20B/32B 挑战连续静默，控制会话晚 6 秒才起来，6011 同步包还被 ICMP 拒。
+     * 同源项目在 CL39 上就是「控制会话就绪——允许音频 SETUP」之后才发，往返只有 172ms。
+     * 等不到也不拆链：照常发，超时兜底。
+     *
+     * 「音频优先」与「RECORD 优先」两条路径都从这里进，保证等待逻辑只有一份。
+     */
+    private fun startAudioChannelAndLog(
+        client: AirPlayClient,
+        sharedSecret: ByteArray?,
+        host: String?,
+        context: Context,
+    ): Boolean {
+        if (sharedSecret != null) {
+            val ready = client.awaitControlSession(AUDIO_CONTROL_SESSION_WAIT_MS)
+            appendLog(
+                if (ready) {
+                    "AUDIO: 控制会话已就绪——开始音频 SETUP（不再抢在 MFi 前）"
+                } else {
+                    "AUDIO: 等控制会话就绪超时（${AUDIO_CONTROL_SESSION_WAIT_MS}ms）" +
+                        "——照常音频 SETUP（不拆链）"
+                },
+            )
+        }
+        return startAudioChannel(context, client, sharedSecret, host)
+    }
+
+    /**
      * 音频通道（手机 → 车机，RTP over UDP）：SETUP type=100 协商 → 直通 PCM → ChaCha 封包推流。
      *
      * 2026-10-24 起画面来源唯一化为 CarLife 本地劫持，音频随之改为**直通**：CarLife 引擎
@@ -4992,7 +5023,38 @@ object SessionController {
                                 // 返回同一毫秒、且 5 次实测全部复现。故顺序改为：
                                 //   屏幕 SETUP → 连数据端口 → RECORD → 起编码器（出帧）→ 音频 SETUP
                                 // 音频 SETUP 失败只丢声音，视频会话保持。
-                                client.record()
+                                //
+                                // 但有一类接收端反着来（issue #14 JYBOX-80 / Magic-Car-Link）：
+                                // 音频流后补 RECORD 直接 500，并顺手关掉自己的 AirPlay 服务，
+                                // 整轮作废。对它们改用「音频优先」——先 SETUP 音频，再一次
+                                // RECORD 同时激活视频+音频。顺序按接收端学，默认不动
+                                // （见 StreamOrderMemory）。
+                                val receiverIdentity = client.receiverIdentity()
+                                val orderLearned = StreamOrderMemory.readLearned(appContext, receiverIdentity)
+                                val streamOrder =
+                                    StreamOrderMemory.resolve(orderLearned, receiverIdentity)
+                                appendLog(
+                                    "STREAM: 顺序 = " +
+                                        StreamOrderMemory.describe(streamOrder, orderLearned, receiverIdentity),
+                                )
+                                var audioStartedBeforeRecord = false
+                                if (streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
+                                    // 音频 SETUP 要 ~2s，这里先做完再把 RECORD 一次发出去。
+                                    // 视频数据端口已在上面 openDataPort() 连上，2s 看门狗
+                                    // 不会因为「没连端口」而拆链（这是奥迪那条结论的前提）。
+                                    audioStartedBeforeRecord = startAudioChannelAndLog(client, sessionKey, host, context)
+                                    if (!audioStartedBeforeRecord) {
+                                        appendLog("AUDIO: 音频优先档未建立音频流——本轮仅推视频（RECORD 照发）")
+                                    }
+                                }
+                                val firstRecordOk = client.record()
+                                if (!firstRecordOk && streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
+                                    // 音频优先时连第一次 RECORD 都非 200：不是「补发 RECORD 过敏」，
+                                    // 记回 RECORD 优先，别把这台接收端永久锁在错误顺序上
+                                    // （已知型号快路径也会被这条压过去）。
+                                    StreamOrderMemory.noteRecordFirstForced(appContext, receiverIdentity)
+                                    appendLog("STREAM: 音频优先下首次 RECORD 也非 200——记住该接收端用 RECORD 优先，下一轮回退")
+                                }
                                 // 4580（AUDI 3810 / DELPHI MIB3）：车机 HMI 要等 iAP2 控制会话
                                 // （链路 NORMAL + MFi 应答）就绪才激活 CarPlay——固件
                                 // `CCarPlayTestController` 在那之前一直是
@@ -5000,7 +5062,18 @@ object SessionController {
                                 // 现场就是「会话全绿、码流在送、屏幕全黑」。
                                 //
                                 // 正常车机走到这里链路早已 NORMAL → 整段跳过，行为零变化。
-                                if (!client.controlSessionReady) {
+                                //
+                                // 「音频优先」档整段跳过：它要防的接收端恰恰怕**任何**第二次
+                                // RECORD（补发即 500）。这台设备不是 MIB3（MIB3 走默认档），
+                                // 为它补激活只会把已经激活好的会话再赌一次。
+                                if (streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
+                                    if (!client.controlSessionReady) {
+                                        appendLog(
+                                            "MIB3: 控制会话未就绪，但本档音频优先——不做补发 RECORD 的二次激活" +
+                                                "（该接收端对重复 RECORD 过敏）",
+                                        )
+                                    }
+                                } else if (!client.controlSessionReady) {
                                     appendLog("MIB3: RECORD 时 iAP2 控制会话尚未就绪——等它就绪后补一次激活")
                                     if (client.awaitControlSession(MIB3_REACTIVATE_WAIT_MS)) {
                                         appendLog("MIB3: 控制会话已就绪 → 重新声明主屏资源并补发 RECORD")
@@ -5073,33 +5146,37 @@ object SessionController {
                                     startScreenHandoverGate(client)
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
-                                // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
-                                //
-                                // **等隧道控制会话（MFi）就绪再 SETUP**（2026-11-06 实车）：
-                                // 抢在 MFi 前发，车机要 5097ms 才回应，同期 MFi 20B/32B 挑战
-                                // 连续静默，控制会话晚 6 秒才起来，6011 同步包还被 ICMP 拒。
-                                // 同源项目在 CL39 上就是「控制会话就绪——允许音频 SETUP」之后
-                                // 才发，往返只有 172ms。等不到也不拆链：照常发，超时兜底。
-                                if (sessionKey != null) {
-                                    val ready = client.awaitControlSession(AUDIO_CONTROL_SESSION_WAIT_MS)
-                                    appendLog(
-                                        if (ready) {
-                                            "AUDIO: 控制会话已就绪——开始音频 SETUP（不再抢在 MFi 前）"
-                                        } else {
-                                            "AUDIO: 等控制会话就绪超时（${AUDIO_CONTROL_SESSION_WAIT_MS}ms）" +
-                                                "——照常音频 SETUP（不拆链）"
-                                        },
-                                    )
-                                }
-                                val audioStarted = startAudioChannel(context, client, sessionKey, host)
-                                if (audioStarted) {
-                                    // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
-                                    // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200
-                                    // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
-                                    // 音频包持续发送、采集内容非零，车机无声）。
-                                    appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
-                                    client.record()
-                                    if (MIC_PROBE_ENABLED) runMicProbe(client)
+                                // 失败不影响视频主链路。
+                                if (streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
+                                    // 音频已在本轮 RECORD 之前 SETUP 完成：那次 RECORD 就是
+                                    // 同时纳入视频+音频的那一次，**绝不能再补发**——JYBOX-80
+                                    // 对「流后补 RECORD」直接 500 并关掉 AirPlay 服务（issue #14）。
+                                    if (audioStartedBeforeRecord) {
+                                        appendLog("AUDIO: 音频已随本次 RECORD 一同激活（未补发 RECORD）")
+                                    }
+                                    if (MIC_PROBE_ENABLED && audioStartedBeforeRecord) runMicProbe(client)
+                                } else {
+                                    val audioStarted =
+                                        startAudioChannelAndLog(client, sessionKey, host, context)
+                                    if (audioStarted) {
+                                        // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
+                                        // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200
+                                        // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
+                                        // 音频包持续发送、采集内容非零，车机无声）。
+                                        appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
+                                        if (!client.record()) {
+                                            // 这台接收端受不了「流后补 RECORD」：记住它，下一轮
+                                            // 改走音频优先（先 SETUP 音频再一次 RECORD）。本轮
+                                            // 已经废了（它多半会顺手关掉 AirPlay 服务），没有
+                                            // 在轮内换序的意义。
+                                            StreamOrderMemory.notePostRecordRejected(appContext, receiverIdentity)
+                                            appendLog(
+                                                "STREAM: 补发 RECORD 被拒——已记住该接收端要用音频优先，" +
+                                                    "下一轮改为「先 SETUP 音频再一次 RECORD」",
+                                            )
+                                        }
+                                        if (MIC_PROBE_ENABLED) runMicProbe(client)
+                                    }
                                 }
                             } else {
                                 // 屏幕流 SETUP 失败：会话已经死了，但旧实现到这里什么都不说，
