@@ -46,7 +46,28 @@ data class AudioProfile(
      * 媒体音频永远只有下行（isInput=false），这是它与通话档的结构性差异。
      */
     val isInput: Boolean = false,
+    /**
+     * 车机 `/info` 对这一档 `(type, audioType)` 声明的 **`audioInputFormats` 位图**。
+     *
+     * 麦克风上行端口能不能挂在这条流上，唯一的判据是它——**不是 `audioType` 的名字**。
+     * 两处实车把它分得很清楚：
+     *  - 宝马 G38 `type=102 media`：`input=0x0`，我们往这条流塞 `dataPort` 后车机关通道、
+     *    整机重启（2026-11-09）；
+     *  - 奥迪 MIB3H（3874/3873）走 `type=100 media`，audioType 同样叫 media，但它自己
+     *    声明了输入位——按名字判会把它一起误杀。
+     *
+     * `null` = `/info` 没给这一档（或没拿到 /info），此时保守不声明。
+     */
+    val inputFormats: Long? = null,
 ) {
+    /**
+     * 这一档有没有麦克风输入能力：`null` 未知、`false` 车机明确说没有、`true` 有。
+     *
+     * 判据只认车机自己写的这张能力表；`media` 这个名字既不是必要条件也不是充分条件。
+     */
+    val micInputDeclared: Boolean?
+        get() = inputFormats?.let { it != 0L }
+
     /**
      * 持久化记忆的键（含流类型与编码：同一 audioType/格式 在不同通路上完全不同）。
      *

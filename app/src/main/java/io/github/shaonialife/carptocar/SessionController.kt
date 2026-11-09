@@ -2969,25 +2969,38 @@ object SessionController {
     // ---- 以下方法体自 MainActivity 原样迁入（会话逻辑不依赖 Activity）----
 
     /**
-     * 麦克风上行端口的**唯一出口**：只给「车机会给它自己声明的输入通路」的档位用。
+     * 麦克风上行端口的**唯一出口**：只给「车机自己对这一档声明了输入位」的流用。
      *
-     * 2026-11-09 宝马 G38（#norecord 包）实车：我们往 `t102/media` 这条**纯下行媒体流**
-     * 里塞了自己的 UDP 端口当 `dataPort`，车机 `/info` 对同一档写的却是
-     * `audioInputFormats=0x0`（这条流没有输入能力）。SETUP 照常 200、给 dataPort=6000，
-     * 80ms 后车机关掉事件通道（`EVENT: 通道关闭（EOF）`），整机随后重启。
+     * 判据是 `/info` 里该 `(type, audioType)` 的 `audioInputFormats`——**不是 `audioType`
+     * 的名字**。这一点被两台实车钉死了：
      *
-     * 同一台车、同一档、同一音频 SETUP，用户的旧构建（不声明麦克风）连发 4 次 RECORD
-     * 仍稳跑 12 分钟（`log-20261107-200015` 19:49 那轮）。两者唯一的差别就是这个
-     * `dataPort`，所以默认不再往 media 档上挂麦：真 iPhone 要麦时走的是
-     * `type=100 default/telephony/speechRecognition` 那些**双向**档，media 永远只有下行。
+     *  - 宝马 G38（2026-11-09，`#norecord` 包）：`t102/media` 声明 `audioInputFormats=0x0`，
+     *    我们仍把本地端口塞进 SETUP，200 之后 17ms 车机关掉事件通道、整机重启；同一台车、
+     *    同一档、同一 SETUP，用户旧构建（不声明麦克风）连发 4 次 RECORD 稳跑 12 分钟。
+     *  - 奥迪 MIB3H（3873/3874）：媒体通路 `t100/media`，`audioType` 同样叫 media，
+     *    但它自己声明了输入位。若按名字判，这条真能用的上行通路会被一起误杀。
+     *
+     * 所以这里只认位图：`0` = 车机明说这条流没有输入（不声明）；`null` = `/info` 没给
+     * （保守不声明）；其余（含非 0）= 车机声明了输入能力，照旧挂端口。
      */
-    private fun micPortFor(candidate: AudioProfile): Int {
+    private fun micPortFor(candidate: AudioProfile, uplink: MicUplink?): Int {
         if (!MIC_UPLINK_ENABLED) return 0
-        val uplink = micUplink ?: return 0
-        // "media" 与 AirPlayClient.AUDIO_TYPE_MEDIA 同值；那个 companion 是 private，
-        // 这里按字面量判（大小写不敏感），不为此放开可见性。
-        return if (candidate.audioType.equals("media", ignoreCase = true)) 0 else uplink.localPort
+        val bound = uplink ?: return 0
+        return when (candidate.micInputDeclared) {
+            true -> bound.localPort
+            false, null -> 0
+        }
     }
+
+    /** `micPortFor` 返回 0 的原因，只用于那一行日志（每个会话最多打一次）。 */
+    private fun micSkipReason(candidate: AudioProfile): String =
+        when (candidate.micInputDeclared) {
+            false ->
+                "车机对这一档声明的 audioInputFormats 就是 0x0（纯下行），塞端口会让它关通道"
+            null ->
+                "车机 /info 没给这一档的 audioInputFormats，保守不声明"
+            true -> ""
+        }
 
     /**
      * 音频 SETUP 的**唯一入口**：先等隧道控制会话（MFi）就绪，再真正协商音频。
@@ -3088,11 +3101,10 @@ object SessionController {
             var micSkipLogged = false
             try {
                 for (candidate in ordered) {
-                    val micPort = micPortFor(candidate)
+                    val micPort = micPortFor(candidate, uplink)
                     if (uplink != null && micPort == 0 && !micSkipLogged) {
                         appendLog(
-                            "MIC: 本档 ${candidate.label} 是纯下行媒体流（车机对 media 档声明的" +
-                                "输入位就是 0x0）——本轮不声明麦克风上行端口",
+                            "MIC: 本档 ${candidate.label} 不声明上行端口——" + micSkipReason(candidate),
                         )
                         micSkipLogged = true
                     }
@@ -3197,7 +3209,7 @@ object SessionController {
         val info =
             try {
                 // 重建时把上行端口继续声明进去：不然车机以为手机不要麦了，通话里反而没上行
-                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = micPortFor(profile))
+                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = micPortFor(profile, micUplink))
             } catch (error: Exception) {
                 appendLog("AUDIO: 重建协商异常 - ${error.message}")
                 null
@@ -3309,7 +3321,7 @@ object SessionController {
         val info =
             try {
                 // 同理：换档（媒体↔通话）也是新流，上行端口继续声明，避免车机当手机不要麦
-                client.runAudioStream(secret, target, AudioTuning.RAW_SPF, micPort = micPortFor(target))
+                client.runAudioStream(secret, target, AudioTuning.RAW_SPF, micPort = micPortFor(target, micUplink))
             } catch (error: Exception) {
                 appendLog("AUDIO: 切换协商异常 - ${error.message}")
                 null

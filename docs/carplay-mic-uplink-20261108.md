@@ -296,15 +296,34 @@ audioFormat[0] type=100 audioType=default output/input=0xc000000    ← 输入�
 
 ### 11.3 代码改动
 
-`SessionController.micPortFor()`：**media 档永不声明麦克风上行端口**。
-真 iPhone 要麦时走的是 `type=100` 的 default / telephony / speechRecognition（那些是双向档），
-media 永远只有下行。日志会打一行
+判据是 `/info` 里**这一档自己的 `audioInputFormats`**，不是 `audioType` 的名字。
+
+第一版（提交 `a3baa2b`）为了最小改动写成了「`audioType == media` 一律不声明」。这在宝马上是
+对的，但会把奥迪一起误杀：奥迪 MIB3H（3873/3874）的媒体通路就是 `t100/media`，`audioType`
+同样叫 media，而它自己声明了输入位（bit26/27）。同一份代码在两台车上给出相反的正确结论，
+说明判据本身选错了——`media` 这个名字既不必要也不充分。
+
+现在的实现：
+
+- `AudioProfile` 增加 `inputFormats: Long?`（`null` = `/info` 没给），并由
+  `audioCandidates()` / `callCandidates()` 逐档带出；
+- `AudioProfile.micInputDeclared`：`0` → 车机明说没有输入、`null` → 未知、非 0 → 有；
+- `SessionController.micPortFor()`：只有 `true` 才声明端口；`false` / `null` 一律不发。
+  未知也保守跳过——拿猜的判据去赌一次整机重启不值得。
+
+日志按原因分开（每个会话最多一行）：
 
 ```
-MIC: 本档 t102/media/0x400000(...) 是纯下行媒体流（车机对 media 档声明的输入位就是 0x0）——本轮不声明麦克风上行端口
+MIC: 本档 t102/media/0x400000(...) 不声明上行端口——车机对这一档声明的 audioInputFormats 就是 0x0（纯下行），塞端口会让它关通道
+MIC: 本档 t102/media/0x400000(...) 不声明上行端口——车机 /info 没给这一档的 audioInputFormats，保守不声明
 ```
 
-`MIC_UPLINK_ENABLED` 仍然留着：只要候选档落在非 media 的双向档上，上行照旧生效。
+`MIC_UPLINK_ENABLED` 仍然留着：只要所选档自己声明了输入位，上行照旧生效。
+
+> **两条实车结论的分界**：`media` 能不能挂麦，各车不同。宝马 G38 的 `t102/media` 是 `0x0`；
+> 奥迪 3873/3874 的 `t100/media` 不是。**别用车系、更别用 audioType 名字判，只读那一行
+> `AIRPLAY: audioFormat[i] … input=0x…`**（3874 的实测值本仓库目前没有记录）。
+
 
 ### 11.4 若还要继续做
 

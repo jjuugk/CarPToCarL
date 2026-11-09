@@ -2498,6 +2498,9 @@ class AirPlayClient(
                             latencyMs = latencyFor(info, audioType, streamType),
                             streamType = streamType,
                             codec = AudioCodec.AAC_LC,
+                            // 把这一档自己声明的输入位图带上：麦克风上行端口该不该挂在这条流上，
+                            // 只有它说了算（宝马 102/media 是 0x0，奥迪 100/media 不是）。
+                            inputFormats = (channel["audioInputFormats"] as? Number)?.toLong(),
                         )
                 }
         }
@@ -2521,7 +2524,15 @@ class AirPlayClient(
                     val output = (channel["audioOutputFormats"] as? Number)?.toLong() ?: 0L
                     if ((output and bit) == 0L) return@forEach
                     val type = (channel["audioType"] as? String)?.lowercase() ?: return@forEach
-                    pcm += AudioProfile(type, bit, rate, latencyFor(info, type, AUDIO_STREAM_TYPE))
+                    pcm +=
+                        AudioProfile(
+                            audioType = type,
+                            formatBit = bit,
+                            sampleRate = rate,
+                            latencyMs = latencyFor(info, type, AUDIO_STREAM_TYPE),
+                            // 同上：输入位图逐档带出，供麦克风上行判断（奥迪 100/media 靠这个才不被误杀）
+                            inputFormats = (channel["audioInputFormats"] as? Number)?.toLong(),
+                        )
                 }
             }
         // 媒体档最优先；其余按 compatibility → default 的熟悉度排序（组内保持 48k 先）
