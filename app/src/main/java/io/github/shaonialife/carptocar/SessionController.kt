@@ -248,6 +248,30 @@ object SessionController {
     private const val MIC_UPLINK_ENABLED = true
 
     /**
+     * 「音频流在 RECORD 之后加入会话」时，是否补发一次 RECORD 把它纳入会话。
+     *
+     * 标准 AirPlay 语义要求补（1.0.x 起一直如此；2026-10-17 奥迪实测：不补则音频包在发、
+     * 采集内容非零，但车机无声）。
+     *
+     * 2026-11-09 暂时关掉做**单变量实验（P1）**：宝马 G38 / F22 的三份日志
+     * （`log-20261109-182418` 三轮 + `log-20261109-171319`）全部是同一形态——
+     *
+     * ```
+     * 音频 SETUP 200 → 「音频流已加入——补发 RECORD」→ RECORD 完成
+     *   → 16 / 25 / 36 / 17ms 后车机关控制通道 + 事件通道 EOF → pi 变了（服务重启）
+     * ```
+     *
+     * 三轮全中，`pi` 每轮都变，不是概率问题。这一版只摘掉这一次发送，其余（音频档、
+     * MIB3 突发、空态回包、`0xFFFA`）一律不动，所以结论唯一：
+     *
+     * - 不崩 → 元凶就是这次重发，接着走音频优先（先 SETUP 音频、只 RECORD 一次）；
+     * - 仍崩 → 与它无关，回到 `assertModes` 缺失 / 视频先于控制会话。
+     *
+     * 代价：车机侧可能没声音（补这一步本来就是为出声）。
+     */
+    private const val POST_RECORD_REACTIVATE_ENABLED = false
+
+    /**
      * 「HID 报告映射不到 usage」最多打几条日志。
      *
      * 释放报文每按一次都会来一条（值为 0，已单独静默），但**越界值**只可能出现在
@@ -5234,7 +5258,7 @@ object SessionController {
                                 } else {
                                     val audioStarted =
                                         startAudioChannelAndLog(client, sessionKey, host, context)
-                                    if (audioStarted) {
+                                    if (audioStarted && POST_RECORD_REACTIVATE_ENABLED) {
                                         // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
                                         // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200
                                         // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
@@ -5251,6 +5275,18 @@ object SessionController {
                                                     "下一轮改为「先 SETUP 音频再一次 RECORD」",
                                             )
                                         }
+                                        if (MIC_PROBE_ENABLED) runMicProbe(client)
+                                    } else if (audioStarted) {
+                                        // P1 单变量实验（2026-11-09）：不补发那一次 RECORD。
+                                        // 宝马 G38/F22 三份日志（18:19 / 18:22 / 18:24）100%
+                                        // 复现同一形态——音频 SETUP 200、补发 RECORD 完成，
+                                        // 16/25/36ms 后车机关掉控制通道并 EOF，pi 每次都变
+                                        // （AirPlay 服务重启）。这一版只摘掉这一次发送，其余
+                                        // （音频档、MIB3 突发、空态回包、0xFFFA）一律不动。
+                                        appendLog(
+                                            "AUDIO: 音频流已加入——本版**不补发 RECORD**（P1 单变量实验：验证崩溃是否" +
+                                                "由这次重发引起）。若车机侧无声，属预期，不是新问题",
+                                        )
                                         if (MIC_PROBE_ENABLED) runMicProbe(client)
                                     }
                                 }
