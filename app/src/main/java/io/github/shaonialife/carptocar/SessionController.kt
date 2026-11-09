@@ -889,15 +889,6 @@ object SessionController {
     private const val AUDIO_PROFILE_PROBE_MS = 20_000L
 
     /**
-     * RECORD 之后等 iAP2 控制会话就绪的上限（ms）。
-     *
-     * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 要等 `required IAP2 information` 齐了
-     * 才激活 CarPlay；在那之前收到的 RECORD 它不认，表现为「会话全绿、屏幕全黑」。
-     * 正常车机走到 RECORD 时链路早已 NORMAL，这条分支根本不会进。
-     */
-    private const val MIB3_REACTIVATE_WAIT_MS = 2_500L
-
-    /**
      * 音频 SETUP 之前等隧道控制会话（MFi）就绪的上限（ms）。
      *
      * 2026-11-06 实车：抢在 MFi 前发音频，车机 5097ms 才回、期间 MFi 20B/32B 挑战
@@ -5078,40 +5069,36 @@ object SessionController {
                                     StreamOrderMemory.noteRecordFirstForced(appContext, receiverIdentity)
                                     appendLog("STREAM: 音频优先下首次 RECORD 也非 200——记住该接收端用 RECORD 优先，下一轮回退")
                                 }
-                                // 4580（AUDI 3810 / DELPHI MIB3）：车机 HMI 要等 iAP2 控制会话
-                                // （链路 NORMAL + MFi 应答）就绪才激活 CarPlay——固件
-                                // `CCarPlayTestController` 在那之前一直是
-                                // "Waiting for required IAP2 information"，此时收到的 RECORD 它不认，
-                                // 现场就是「会话全绿、码流在送、屏幕全黑」。
+                                // 补发 assertModes + RECORD：**整段已移除**（2026-11-09）。
                                 //
-                                // 正常车机走到这里链路早已 NORMAL → 整段跳过，行为零变化。
+                                // 它本是给 4580（AUDI 3810 / DELPHI MIB3）加的：那台固件的
+                                // `CCarPlayTestController` 在 iAP2 控制会话（链路 NORMAL + MFi 应答）
+                                // 就绪前一直停在 "Waiting for required IAP2 information"，此时收到的
+                                // RECORD 它不认，表现是「会话全绿、码流在送、屏幕全黑」。所以当时
+                                // 做成「RECORD 后若控制会话未就绪，等 ≤2.5s 再补一次激活」。
                                 //
-                                // 「音频优先」档整段跳过：它要防的接收端恰恰怕**任何**第二次
-                                // RECORD（补发即 500）。这台设备不是 MIB3（MIB3 走默认档），
-                                // 为它补激活只会把已经激活好的会话再赌一次。
-                                if (streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
-                                    if (!client.controlSessionReady) {
-                                        appendLog(
-                                            "MIB3: 控制会话未就绪，但本档音频优先——不做补发 RECORD 的二次激活" +
-                                                "（该接收端对重复 RECORD 过敏）",
-                                        )
-                                    }
-                                } else if (!client.controlSessionReady) {
-                                    appendLog("MIB3: RECORD 时 iAP2 控制会话尚未就绪——等它就绪后补一次激活")
-                                    if (client.awaitControlSession(MIB3_REACTIVATE_WAIT_MS)) {
-                                        appendLog("MIB3: 控制会话已就绪 → 重新声明主屏资源并补发 RECORD")
-                                        client.assertModes()
-                                        client.record()
-                                        setup.hidDeviceUuids.forEach { uuid ->
-                                            client.sendHidSetInputMode(uuid, mode = 0)
-                                        }
-                                    } else {
-                                        appendLog(
-                                            "MIB3: ${MIB3_REACTIVATE_WAIT_MS}ms 内控制会话仍未就绪" +
-                                                "——保留首次激活，不重复（重复 RECORD 会被车机当噪声）",
-                                        )
-                                    }
-                                }
+                                // 宝马 G38 NBT Evo 上这条分支**每轮必进**（它的隧道控制会话要等车机
+                                // 自己连发 SYN marker 才起来，比 RECORD 晚 1.4~1.9 秒），而它随后就死：
+                                //   16:01:16.610 补发 RECORD 完成 → 16:01:16.613 事件通道 EOF（3ms）
+                                //   11-07 用户版          → 4ms；  15:22 那次 → 2.4 秒后整机掉线
+                                // 三次的共同点是：**首次 RECORD 之后车机一直正常，死的总是第二次**。
+                                // 这与 1.2.29 并入宝马 fork 时删掉「首帧后补发 RECORD」是同一条结论
+                                // （docs/bmw-fork-port-20261108.md 第 3 条）——这台车对重复 RECORD 过敏。
+                                //
+                                // 没有改成「按品牌跳过」的原因有两个：
+                                // ① 1.0.7 从来没有这段（连 `controlSessionReady` 这个概念都不存在），
+                                //    它在这台车上能跑通；
+                                // ② 保留那段 `awaitControlSession` 等待，会把首帧往后推 1.4 秒，
+                                //    而等待期间什么都不做，等于纯粹拖慢出画面。
+                                //
+                                // 原实现（复现即接回）：
+                                //   if (streamOrder != AUDIO_FIRST && !client.controlSessionReady) {
+                                //       if (client.awaitControlSession(2_500L)) {
+                                //           client.assertModes()
+                                //           client.record()
+                                //           setup.hidDeviceUuids.forEach { client.sendHidSetInputMode(it, 0) }
+                                //       }
+                                //   }
                                 // RECORD 成功 = 会话活着。此刻丢弃报文缓冲：用户要的是
                                 // 「连不上」的现场，正常连接不需要快照（省空间也省导出体积）。
                                 SessionTrace.markLinked()
