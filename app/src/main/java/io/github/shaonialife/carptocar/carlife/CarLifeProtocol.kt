@@ -65,6 +65,37 @@ internal object CarLifeProtocol {
     const val HU_MODULE_CONTROL = 98344
 
     /**
+     * 65574 里的模块号（`ModuleStatusManage` 的 7 个 `ModuleStatusModel`，字节码实证）。
+     *
+     * 这是判断「语音键到底有没有被引擎接住」的唯一现成信号：引擎真的起语音时会报
+     * `module=4 status=1`，结束报 `=0`。我们发了 `0x68008 0x21` 之后若一直没有
+     * `module=4`，说明引擎把这条硬键丢了（不是车机没按、也不是我们没发）。
+     *
+     * 名字来自 `ModuleStatusManage.<init>` 里逐个 new 的 `ModuleStatusModel(id, 0)`：
+     * 1 电话 / 2 导航 / 3 音乐 / 4 语音 / 6 麦克风 / 8 巡航 / 9 跟车。
+     */
+    object Module {
+        const val PHONE = 1
+        const val NAVI = 2
+        const val MUSIC = 3
+        const val VR = 4
+        const val MIC = 6
+        const val CRUISE = 8
+        const val CRUISE_FOLLOW = 9
+
+        fun name(id: Int): String = when (id) {
+            PHONE -> "电话"
+            NAVI -> "导航"
+            MUSIC -> "音乐"
+            VR -> "语音"
+            MIC -> "麦克风"
+            CRUISE -> "巡航"
+            CRUISE_FOLLOW -> "跟车"
+            else -> "模块$id"
+        }
+    }
+
+    /**
      * 98386 的确认（0 字节，引擎收到特征配置后回）。
      *
      * 实测时序：发 98386 → 约 0.7s 后收到 65570 → 再发 98311。所以它可以当

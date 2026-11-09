@@ -119,3 +119,107 @@ enhancedSiriInfo={enhancedSiriButton=false, enhancedSiriVoice=false}
 「松手后还要继续说」的语义（即 `VR_STOP` 会提前截断），把
 `VoiceKeyRouter.PTT_HOLD_MILLIS` 调大即可完全关掉自动收尾（改成一个极大值），
 起识别那段不受任何影响。反过来若短按也需要收尾，把阈值调小到 0 即可。
+
+---
+
+## 7. 2026-11-09 复查：语音键**确实到了**，是 CarLife+ 没接住
+
+> **本节 2026-11-09 13:00 更正。** 早先版本写的是「这台车机完全没发语音键」，
+> **那是错的**——判断依据是两份只覆盖 6 分钟的导出。见 7.1。
+
+### 7.1 我第一次判错在哪
+
+用户给的两份导出（`CarPToCarL-log-20261109-093213.txt` / `-094322.txt`，1.2.31 #oneperm，
+Audi_MMI_8349）是**「仅本次启动」**范围：
+
+| 文件 | 实际覆盖 | 里面的 `requestSiri` |
+| --- | --- | --- |
+| `-093213` | 09:26:05 → 09:32:13（约 6 分钟，视频在推） | 0 条 |
+| `-094322` | 09:36:57 → 09:37:52（未建链，蓝牙断开） | 0 条 |
+
+而用户 08:52 那次按语音键的会话**不在这两份文件里**（导出范围之外）。把「这 6 分钟没出现
+requestSiri」推成「这台车机从不发语音键」，是把**采样窗口**当成了**全局事实**。
+
+### 7.2 实际发生了什么（用户 08:52 截图）
+
+```
+[08:52:56.687] EVENT: 车机语音键（requestSiri 按下→requestSiri 松开，按住 7108ms）
+                     → CarLife 0x68008 keycode=0x22 VR_STOP（PTT 收尾）
+[08:52:56.687] CARLIFE: 车机硬键 0x22（语音识别结束）
+[08:52:56.688] CARLIFE: 车机语音键 0x22 → 0x68008 已送达
+```
+
+即：`requestSiri` **到了**，按下时（08:52:49.58）已发 `VR_START=0x21`，按住 7.1 秒后松手补
+`VR_STOP=0x22`。**车机侧、我们这侧的转发都没问题**，断点在第三步：CarLife+ 收到 `0x21` 后
+没有起语音（用户那边看到的就是「按了没反应」）。
+
+### 7.3 引擎侧的判定链（字节码实证，`classes2.dump.txt`）
+
+```
+0x68008 → CarlifeCarHardKeyCodeProto.CarlifeCarHardKeyCode.parseFrom → getKeycode
+        → ReverseHardKeyChannelManager.transferKeyCodeIfNeed(keycode)
+        → CarlifeTouchManager.onHardKeyCodeEvent(keycode, "touchManager")
+```
+
+`onHardKeyCodeEvent` 里要被扣下的几道闸，条条都能让「命令送到了但毫无反应」：
+
+1. `correct()` = `!MixConfig.isMix4Vivo()`（vivo 专用位，与我们无关）；
+2. 同一 keycode **50ms** 内重复 → 直接丢（日志 `hard key too fast`）——
+   所以长按不能连发 `0x21`，现在的边沿判定是对的；
+3. `CommonMsgTransmit.checkCarLifeChannelStatus()` 不过 → `checkPhoneStatus not pass, return`，
+   **整条硬键被丢掉**；
+4. 再经 `handleSpecialHardKey(keycode)` 与 `OnHardKeyCodeEventListener.onHardKeyCodeEvent` 分发。
+
+另外百度按「车机渠道号」开关语音硬键：
+
+- `DisHardKeyVoiceChannelManager` 里硬编码了**禁用**语音硬键的渠道：`20082120`、`20742105`；
+- `VoiceVehicleChannelManager.channelDefault = 20022107`、`defaultWakeUpSoundFromPhoneChannel =
+  20202100 / 21050007`；
+- 渠道号由 `CarlifeUtil.setVehicleChannel` 写入（来自车机下发的特征配置），
+  `onHardKeyCodeEvent` 里也确实拿 `getVehicleChannel()` 与 `20522121` 做比较。
+
+也就是说：**如果引擎认为「这台车机不支持语音硬键」，`0x21` 会被静默忽略**，
+和我们发的包对不对无关。这条目前只是怀疑，还没有证据——所以下一步要拿到 7.4 的判据。
+
+### 7.4 本轮补的判据：引擎自己的模块状态（65574）
+
+引擎真起语音时会回 `0x10026`（`MSG_CMD_MODULE_STATUS`，我们一直在回 98344，但从没打过日志）。
+模块号来自 `ModuleStatusManage.<init>`：**1 电话 / 2 导航 / 3 音乐 / 4 语音 / 6 麦克风 /
+8 巡航 / 9 跟车**。
+
+现在这行只在**变化时**输出，并对语音模块单独点名：
+
+```
+CARLIFE: 引擎模块状态 电话=1 音乐=0 语音=0
+CARLIFE: 语音模块=1——引擎已进入语音态（0x68008 0x21 生效）
+CARLIFE: 语音模块=0——引擎当前没有语音会话（发了 0x21 却一直看到这行，说明 0x68008 被判无效）
+```
+
+判读方法（下次按键后看三行）：
+
+| 日志 | 含义 | 下一步 |
+| --- | --- | --- |
+| `已送达` 后紧接着 `语音模块=1` | 引擎接住了硬键 | 问题在音频：引擎用手机麦克风，查 CarLife+ 的录音权限 |
+| 只有 `已送达`，始终没有 `语音=1` | 引擎把硬键丢了 | 查 7.3 第 3 条（渠道状态/渠道号） |
+| 连 `引擎模块状态` 一行都没有 | 引擎根本没上报模块 | 先确认 `已送达` 是否也缺失（没送出去） |
+
+### 7.5 两个零成本对照实验（不用改代码，优先做）
+
+1. **手机上直接点 CarLife+ 自己的语音按钮**：
+   - 车机屏出现语音界面 → 语音链路本身可用，缺的是「硬键入口」被拒 → 走 7.3 第 3/4 条；
+   - 车机屏毫无变化 → CarLife+ 的语音在这台手机上本身不可用（语音组件/录音权限/被系统限制），
+     与我们的 `0x68008` 无关。
+2. **按键时看车机屏**：CarLife 的语音页是它自己渲染、我们只转发它的 H.264，
+   所以「车机屏有没有变」等价于「引擎有没有起界面」。
+
+### 7.6 另一处已补的诊断（保留）
+
+以前「车机发了 HID 报告、但那个 usage 不在描述符里」是**完全静默**的——症状就是
+「按了键，日志一个字都没有」。现在会打：
+
+```
+EVENT: HID 报告 uuid=0 值=0x0c 映射不到 usage（描述符声明 9 项：0x00 0xb0 …）
+      ——车机按了键但我们没声明这项
+```
+
+限 8 条（`UNKNOWN_CONSUMER_LOG_LIMIT`）。

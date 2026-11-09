@@ -384,6 +384,16 @@ class CarLifeHuClient(
     private val unknownLogged = HashSet<Int>()
 
     /**
+     * 上一次引擎上报的模块状态（65574）。
+     *
+     * 只在**变化时**打一行：这个包每次模块切换都会来，原样转发 98344 就够了，
+     * 但「语音模块（4）有没有从 0 变 1」是判断 `0x68008 0x21` 有没有被引擎接住的
+     * 唯一现成证据——以前这里一句日志都没有，于是「按了键但什么都没发生」既分不清
+     * 是车机没发、我们没发、还是引擎不理，只能靠猜。
+     */
+    private var lastModuleStatus: List<Pair<Int, Int>>? = null
+
+    /**
      * 从 SPS 解析出的**码流真实分辨率**（0 = 还没解析到）。
      *
      * 触摸坐标必须以它为基准：`98311` 申请值、`65544` 回包值都只是「谈好的档位」，
@@ -777,6 +787,27 @@ class CarLifeHuClient(
             CarLifeProtocol.MD_MODULE_STATUS -> {
                 val modules = CarLifeProtocol.parseModuleStatus(payload)
                 if (modules.isEmpty()) return
+                if (modules != lastModuleStatus) {
+                    val before = lastModuleStatus.orEmpty().toMap()
+                    lastModuleStatus = modules
+                    log(
+                        "CARLIFE: 引擎模块状态 " +
+                            modules.joinToString(" ") {
+                                "${CarLifeProtocol.Module.name(it.first)}=${it.second}"
+                            },
+                    )
+                    // 语音模块单独点名：这是「语音键到底有没有被引擎接住」的判据。
+                    val vr = modules.firstOrNull { it.first == CarLifeProtocol.Module.VR }
+                    if (vr != null && before[CarLifeProtocol.Module.VR] != vr.second) {
+                        log(
+                            if (vr.second == 0) {
+                                "CARLIFE: 语音模块=0——引擎当前没有语音会话（发了 0x21 却一直看到这行，说明 0x68008 被判无效）"
+                            } else {
+                                "CARLIFE: 语音模块=${vr.second}——引擎已进入语音态（0x68008 0x21 生效）"
+                            },
+                        )
+                    }
+                }
                 if (modules.any { it.second == 0 }) {
                     send(
                         CarLifeProtocol.HU_MODULE_CONTROL,
@@ -1250,6 +1281,10 @@ class CarLifeHuClient(
     /**
      * 下车机硬键（0x68008）。目前只用于语音键：车机按下方向盘语音键 → 我们发
      * `HardKey.VR_START`，CarLife+ 用**手机自己的麦克风**起语音识别。
+     *
+     * 发完必须往下看一行：引擎真的起语音时会回 65574 且 `语音=1`（见
+     * [CarLifeProtocol.Module]）。只看到这一行 `已送达`、后面没有 `语音=1`，
+     * 就是「命令送到但引擎不理」——别再往车机方向找原因。
      */
     fun sendHardKeyCode(keycode: Int): Boolean {
         if (!running.get()) return false
@@ -1258,7 +1293,8 @@ class CarLifeHuClient(
             "CARLIFE: 车机硬键 0x%02X %s".format(
                 keycode,
                 when (keycode) {
-                    CarLifeProtocol.HardKey.VR_START -> "（语音识别开始）→ CarLife+ 应起小度"
+                    CarLifeProtocol.HardKey.VR_START ->
+                        "（语音识别开始）→ CarLife+ 应起小度；等它的「引擎模块状态 …语音=1」确认"
                     CarLifeProtocol.HardKey.VR_STOP -> "（语音识别结束）"
                     else -> ""
                 },

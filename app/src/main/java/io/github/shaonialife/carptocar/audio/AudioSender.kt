@@ -91,8 +91,13 @@ class AudioSender(
          */
         private const val IDLE_FILL_AFTER_MILLIS = 300L
 
-        /** 单拍最多补几帧（≈[KEEPALIVE_TICK_MILLIS]/帧长，留一点追赶余量，避免卡顿后猛灌）。 */
-        private const val MAX_KEEPALIVE_FRAMES_PER_TICK = 12
+        /**
+         * 单拍最多补几帧（≈[KEEPALIVE_TICK_MILLIS]/帧长，留一点追赶余量，避免卡顿后猛灌）。
+         *
+         * 16 帧 ≈ 117ms > 一拍 100ms：48k/352 样本一帧 7.33ms，一拍需要 13.6 帧，
+         * 卡在 12 会让补帧永远比实时慢一点，时间戳逐步落后（引擎报停后立即补帧时更明显）。
+         */
+        private const val MAX_KEEPALIVE_FRAMES_PER_TICK = 16
 
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
@@ -427,6 +432,16 @@ class AudioSender(
     @Volatile
     private var lastRealFeedAt = 0L
 
+    /**
+     * 「多久没有真实 PCM 就补静音」的当前阈值（默认 [IDLE_FILL_AFTER_MILLIS]）。
+     *
+     * 引擎报「音频停」时由 [beginIdleFill] 临时置 0——**立即**开始补，目的是让 RTP 时间戳
+     * 连续，车机的 jitter buffer 不排空（微信提示音、来电那种 300ms 级中断，就是因为
+     * 前 300ms 没有包，恢复瞬间要重新缓冲，听感是「卡一下」）。
+     */
+    @Volatile
+    private var idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
+
     private var keepAliveThread: Thread? = null
 
     /**
@@ -463,7 +478,7 @@ class AudioSender(
                         }
                         if (!running.get()) break
                         val now = android.os.SystemClock.uptimeMillis()
-                        if (now - lastRealFeedAt < IDLE_FILL_AFTER_MILLIS) {
+                        if (now - lastRealFeedAt < idleFillAfterMillis) {
                             nextFillAt = 0L
                             continue
                         }
@@ -472,7 +487,8 @@ class AudioSender(
                             if (!announced) {
                                 announced = true
                                 log(
-                                    "AUDIO: 无 PCM 超过 ${IDLE_FILL_AFTER_MILLIS}ms——开始补静音帧保活" +
+                                    // 阈值可能是 300ms（常态）或 0（引擎报停后的立即补帧）
+                                    "AUDIO: 无 PCM 超过 ${idleFillAfterMillis}ms——开始补静音帧保活" +
                                         "（避免车机把音频流判空闲，之后第一段音乐被丢）",
                                 )
                             }
@@ -483,7 +499,7 @@ class AudioSender(
                             guard < MAX_KEEPALIVE_FRAMES_PER_TICK
                         ) {
                             if (android.os.SystemClock.uptimeMillis() - lastRealFeedAt <
-                                IDLE_FILL_AFTER_MILLIS
+                                idleFillAfterMillis
                             ) {
                                 break // 真实 PCM 回来了，本拍不再补
                             }
@@ -500,6 +516,31 @@ class AudioSender(
         thread.isDaemon = true
         keepAliveThread = thread
         thread.start()
+    }
+
+    /**
+     * 引擎报「音频停」时调用：**立即**开始补静音帧（把 300ms 阈值临时压到 0）。
+     *
+     * 为什么需要（2026-11-09 实车日志）：微信提示音到达时 CarLife 引擎发 `0x30003`
+     * 停掉媒体通路，311ms 后才 `0x30002` 恢复。这段时间**一个包都不发**，车机的
+     * jitter buffer 被排空，恢复瞬间要重新缓冲——听感就是「音乐卡一下」。
+     * 补静音让 RTP 时间戳保持连续、buffer 不排空，恢复时无缝接上；用户听到的是
+     * 311ms 静音（协议内必然），但不再有「卡」的那一下。
+     *
+     * 真实 PCM 一到，补静音会自动让位（[feedPcm] 更新 [lastRealFeedAt]）。
+     */
+    fun beginIdleFill(reason: String) {
+        if (!running.get()) return
+        if (idleFillAfterMillis == 0L) return
+        idleFillAfterMillis = 0L
+        log("AUDIO: $reason → 立即补静音帧保持 RTP 连续（车机缓冲不排空，恢复不再卡一下）")
+    }
+
+    /** 引擎音频恢复：补静音回到常态阈值（300ms），避免正常播放间隙插入静音。 */
+    fun endIdleFill() {
+        if (idleFillAfterMillis == IDLE_FILL_AFTER_MILLIS) return
+        idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
+        log("AUDIO: 引擎音频恢复 → 补静音回到 ${IDLE_FILL_AFTER_MILLIS}ms 阈值")
     }
 
     /**

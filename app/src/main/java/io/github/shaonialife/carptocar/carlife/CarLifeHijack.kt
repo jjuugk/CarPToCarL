@@ -206,6 +206,16 @@ object CarLifeHijack {
     @Volatile
     private var ttsSink: CarLifeAudioSink? = null
 
+    /**
+     * 引擎最近一次报「音频停」（0x30003）的时刻；0 = 当前没有停。
+     *
+     * 只用来判断恢复时要不要重新对齐车机时钟：短中断（微信提示音那种 300ms）靠补静音
+     * 就能无缝接上，**不需要**补同步包（同步包本来也常被车机 controlPort 的 ICMP 拒绝）；
+     * 只有停得久（来电挂断、路由切走）才值得重对齐。
+     */
+    @Volatile
+    private var engineAudioStopAt = 0L
+
     /** 最近一条 CarLife 媒体信息（0x10035，歌名/歌手/封面）。供 iAP2 0x5001 转发。 */
     @Volatile
     var latestMediaInfo: CarLifeMediaInfo? = null
@@ -854,17 +864,35 @@ object CarLifeHijack {
      * 才发 0x30002。停过一段再恢复时，车机手里的 RTP↔NTP 锚点已经超时，恢复瞬间开头
      * 几百毫秒容易被丢——所以恢复时补发一轮同步包重新对齐。这里**不拦 PCM**：
      * 万一信号语义判断有误，音频照常转发，不会因为猜错把声音弄没。
+     *
+     * 2026-11-09 补充（微信提示音实测）：除了来电，**提示音也会触发这一对信号**，
+     * 但只停 300ms 左右。这种短中断的真正问题不是「锚点超时」，而是「这段时间一个包都不发，
+     * 车机 jitter buffer 排空，恢复时要重新缓冲」——听感是「音乐卡一下」。
+     * 所以停的那一刻就让 [AudioSender.beginIdleFill] 立即补静音，把 RTP 时间戳续上；
+     * 恢复时只有停得久（≥[ENGINE_RESYNC_MIN_GAP_MS]）才重对齐。
      */
     private fun onEngineAudioGate(active: Boolean) {
+        val audio = io.github.shaonialife.carptocar.SessionController.audioSender
         if (!active) {
-            logSink?.invoke("CARLIFE: 引擎音频已停（来电 / 音频路由被切走）——车机侧这一段会静音")
+            engineAudioStopAt = android.os.SystemClock.uptimeMillis()
+            logSink?.invoke("CARLIFE: 引擎音频已停（提示音 / 来电 / 路由切走）——立即补静音保持流连续")
+            audio?.beginIdleFill("引擎音频停止")
             return
         }
-        val audio = io.github.shaonialife.carptocar.SessionController.audioSender
-        if (audio != null && audio.isRunning) {
-            audio.resyncAnchor("引擎音频恢复")
-        } else {
-            logSink?.invoke("CARLIFE: 引擎音频恢复，但音频通道未在运行——跳过重新对齐")
+        val stoppedFor =
+            if (engineAudioStopAt > 0) android.os.SystemClock.uptimeMillis() - engineAudioStopAt else 0L
+        engineAudioStopAt = 0L
+        audio?.endIdleFill()
+        when {
+            audio == null || !audio.isRunning ->
+                logSink?.invoke("CARLIFE: 引擎音频恢复，但音频通道未在运行——跳过重新对齐")
+
+            stoppedFor >= ENGINE_RESYNC_MIN_GAP_MS ->
+                audio.resyncAnchor("引擎音频恢复（停 ${stoppedFor}ms）")
+
+            else ->
+                // 短中断：静音帧已经把时间戳续上，车机侧没有空洞，不必再动锚点
+                logSink?.invoke("CARLIFE: 引擎音频恢复（停 ${stoppedFor}ms，已由静音帧续上，不重对齐）")
         }
     }
 
@@ -1503,6 +1531,15 @@ object CarLifeHijack {
 
     /** 「音频被丢弃」提示的限频（毫秒）。 */
     private const val AUDIO_DROP_LOG_MS = 10_000L
+
+    /**
+     * 引擎音频停了多久才值得「补发同步包重对齐」（毫秒）。
+     *
+     * 低于这个值（微信提示音那种 300ms 级）交给 [AudioSender.beginIdleFill] 补静音续上时间戳，
+     * 车机侧没有空洞，重对齐反而可能让它重算锚点、把刚接上的声音再抖一下。
+     * 来电挂断那种几十秒的中断才真的需要重对齐。
+     */
+    private const val ENGINE_RESYNC_MIN_GAP_MS = 2_000L
 
     private fun portListening(port: Int): Boolean = try {
         Socket().use { socket ->

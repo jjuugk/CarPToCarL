@@ -248,6 +248,15 @@ object SessionController {
     private const val MIC_UPLINK_ENABLED = true
 
     /**
+     * 「HID 报告映射不到 usage」最多打几条日志。
+     *
+     * 释放报文每按一次都会来一条（值为 0，已单独静默），但**越界值**只可能出现在
+     * 「车机按了我们没声明的键」——正是语音键排查要的证据，限 8 条足够看清是哪个 usage，
+     * 又不至于按住不放时刷屏。
+     */
+    private const val UNKNOWN_CONSUMER_LOG_LIMIT = 8
+
+    /**
      * 旧的「独立 `input=true` 流」探针开关（**已停用**，代码先留着）。
      *
      * 2026-11-08 由 xcertplay 的接收端实现纠正：真 iPhone 不这么要麦，车机很可能不认；
@@ -4626,6 +4635,20 @@ object SessionController {
                                             // Consumer 设备的「无按键」/释放报文（值为 0 或下标越界）：
                                             // 静默计数，避免释放事件刷屏
                                             consumerReleaseCount++
+                                            // 但**非 0 的越界值**必须留痕：车机确实按了键、只是这个
+                                            // usage 不在描述符里（语音键 0xCF 常是这种）。以前全静默，
+                                            // 表现是「按了语音键日志一个字都没有」，分不清谁的问题。
+                                            val unmapped = rawValue ?: 0
+                                            if (unmapped != 0 && consumerUnknownCount < UNKNOWN_CONSUMER_LOG_LIMIT) {
+                                                consumerUnknownCount += 1
+                                                appendLog(
+                                                    "EVENT: HID 报告 uuid=$uuid 值=0x%02x 映射不到 usage"
+                                                        .format(unmapped) +
+                                                        "（描述符声明 ${keyMap.usages.size} 项：" +
+                                                        keyMap.usages.joinToString(" ") { "0x%02x".format(it) } +
+                                                        "）——车机按了键但我们没声明这项",
+                                                )
+                                            }
                                             if (lastConsumerUsage?.let(ConsumerKeys::keyCodeFor) ==
                                                 KeyEvent.KEYCODE_VOICE_ASSIST
                                             ) {
@@ -5370,6 +5393,16 @@ object SessionController {
     /** 车机媒体键「释放」报文计数（值为 0 的 1 字节报告，静默丢弃，仅计数备查）。 */
     @Volatile
     private var consumerReleaseCount = 0
+
+    /**
+     * 「车机发了报告、但我们映射不出 usage」的计数（限流打日志用）。
+     *
+     * 语音键排查最需要这条：报告值非 0 却映射不到 usage，只有两种原因——描述符里没声明
+     * 这一项（下标越界），或该设备的报文不是 Array 语义。以前这里完全静默，症状是
+     * 「按了语音键，日志一个字都没有」，既分不清「车机没发」还是「我们没认」。
+     */
+    @Volatile
+    private var consumerUnknownCount = 0
 
     /**
      * `hidSendReport` 通路最近一次按下的 Consumer usage（1.2.22）。
