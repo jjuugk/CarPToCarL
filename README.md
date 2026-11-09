@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk)**
-> —— 主线固定直链（当前 1.2.31，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk)**
+> —— 主线固定直链（当前 1.2.32，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.31，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.31.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.32，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.32.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.31`（正式版；**WiFi 入网改「静默自动连」**：① 入网顺序与 1.0.7 一致——复用系统已关联的热点（只 `bindProcessToNetwork`，零交互）→ 直接发 `WifiNetworkSpecifier`（系统对既有授权/关联记录的热点会**静默满足、不弹框**，实测整车链路 6 秒完成）→ 只有它真进不来才登记 `WifiNetworkSuggestion` 让系统自己关联兜底；② 入网超时后不再立刻 `release()` 断掉回调，新增 20 秒宽限窗口（实测同机型入网需 15.73s，而旧窗口只有 15.0s，原先等于每轮都比系统早 0.7 秒放弃）；③ 修掉两处真 bug——旧的「绑定当前 WiFi」按 `TRANSPORT_WIFI` 泛匹配会绑到家里的 WiFi（AirPlay 连不上且其它应用瞬间断网），改为按 SSID 精确匹配；静默绑定不走 `requestNetwork` 会丢 `onLost`，补 `watchLoss()` 恢复被动断线的自动重绑；④ 删除全部手动分支（「重试 / 打开 WLAN 设置」「清除保存 / 保留」「按车机热点继续」等弹窗与复制密码跳设置页），失败改为自动重试 2 次；⑤ 新增 `SilentJoinPolicy`：建议兜底连续失败 2 次不再白等，避免吃掉车机 27 秒的等待窗口；⑥ 系统权限框从最多 4 个降到 **1 个**——`BLUETOOTH_CONNECT` / `NEARBY_WIFI_DEVICES`（12/12L 为定位）本属同一权限组却分成三次申请，系统只能一个个弹（用户看到的就是反复出现「要与 CarPToCarL 配合的设备」），现改为一次 `RequestMultiplePermissions`；打开 App 不再预先索要，被拒后本进程也不再反复弹。单测 530 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.31.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.31/CarPToCarL-1.2.31.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.32`（正式版；**车机麦克风接进来了，语音键/画面异常也能自己回来**：① 麦克风按真 iPhone 的机制重做——不再另开 `input=true` 独立流，而是把自己的 UDP 端口写进 `type=100` 主音频流的 `dataPort`，车机看到端口就往这里推；新增 `MicUplink` 按 `HKDF-SHA512(shared, "DataStream-Salt<connId>", …-Input-Encryption-Key")` 派密钥，解 `[RTP 头][ChaCha20-Poly1305+16B tag][8B 尾部 nonce]`，首包自动试解 5 种格式假设（tag 命中即锁定），大端 s16 换序后落 `下载/CarPToCarL/CarPToCarL-mic-*.wav`——**本轮只到「收 + 解 + 落盘」，灌进 CarLife 与真车验证是下一步**；② 语音键诊断补 `65574` 引擎模块状态（`语音=1/0`），「命令有没有被引擎接住」终于有现成证据，并在文档里写清此前判错在哪（引擎侧 `checkCarLifeChannelStatus()` + 渠道号白名单两道闸）；③ 微信提示音导致的音乐卡顿：根因是引擎发 `0x30003` 停 **311ms**、而我们的静音保活阈值是 300ms，这段时间几乎一个包都没发、车机 jitter buffer 被排空——引擎停时把阈值压到 0 并提高补帧上限；④ 画面停摆判据从「2 秒窗口帧数」改成「最后一帧距今」（通话期 0.8fps 心跳帧不再被误判），行为从只记日志改成分级干预（8s 请求重建编码器 / 每 8s 轻推 / 30s 翻倍封顶 120s 强制重建会话），通话中不干预、同一次停摆只拆一次；⑤ 音频 SETUP 与 RECORD 的先后不再取全局默认，按接收端**学**（修 issue #14 补发 RECORD 被 500）；⑥ 尺寸声明默认对齐 AMCar——只写解码尺寸、不写视口（`VideoCanvasMode` 改三态，留 A/B 档）；⑦ 认证：网络可复用、认证不继承，同一接收端连续 2 轮没建起会话就强制重做 pair-setup；⑧ 收进社区 PR #20，项目在作者机器之外也能构建。单测 566 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -828,6 +828,105 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.32 —— 2026-11-09（车机麦克风上行 + 语音键判据可读 + 画面停摆分级干预，正式版）
+
+本版四条线：**把车机麦克风接进来**、**让语音键的断点可判读**、**让被提示音打断的音频/停住的画面自己回来**，
+外加社区 PR #20 的构建可移植与 issue #14 的流顺序修复。
+
+**一、车机麦克风上行：方向之前是错的，这版改对**
+
+1.2.31 里的探针假设「另开一路 `input=true` 的流」，这个方向错了。xcertplay 的接收端实现与注释
+确认了真 iPhone 的做法：把**自己的 UDP 端口**写进 `type=100` 主音频流的 `dataPort`，车机看到端口
+就往这里推（"input port, rather than the downlink category, signals that the phone requests a mic"）。
+
+- `runAudioStream` 新增 `micPort`：>0 时才在 stream dict 里写 `dataPort`；默认 0 = 纯下行，
+  与 1.2.31 行为**完全一致**，是可选字段，随时可回退；
+- 新增 `audio/MicUplink`：绑本地 UDP 端口 → 派生
+  `HKDF-SHA512(shared, "DataStream-Salt<connId>", "DataStream-Input-Encryption-Key")` → 收包 →
+  解 `[RTP 头][ChaCha20-Poly1305 + 16B tag][8B 尾部 nonce]`（AAD = 头 `[4..12)`）→
+  大端 s16 换序（LPCM 是大端）→ 缓冲（上限 20 秒）；
+- 首包按 **5 种格式假设**依次试解（尾部 nonce 小端 / 大端、无尾部用计数器、AAD 有无），
+  Poly1305 tag 命中即锁定并打日志——各家实现这三处不一致，验一次要等上车；
+  RTP 头长度按 CC / 扩展位动态算，不硬切 12；
+- PCM 落 `下载/CarPToCarL/CarPToCarL-mic-<时间>.wav`（MediaStore，无需权限）。车机到底推不推、
+  解出来是不是人声，下车听一遍就知道——不用再猜；
+- 流重建 / 换档时新 SETUP 继续带同一端口并 `updateKey()`（盐是 streamConnectionID，换流必换密钥）；
+- 旧的独立 `input=true` 探针停用：它会多建一条同类型流去抢车机资源。
+
+> **边界说清**：本版只完成「收 + 解 + 落盘」。把 PCM 注入 CarLife+ 引擎（9242 通道）留给下一版，
+> 真车也还没验过车机是否真的往这个端口推流。
+
+**二、语音键：从「靠猜」到「有现成证据」**
+
+上一轮我判错了：说「这台车机完全没发语音键」，而用户贴的日志里 08:52:56 的 `requestSiri` 明明按了
+7108ms、松手也发了 `0x22`——我依据的两份导出是「仅本次启动」范围（09:26–09:32 / 09:36–09:37），
+08:52 那次会话根本不在窗口内。**教训：先看导出范围，再下结论。**
+
+真正的断点在 CarLife+ 引擎侧：`0x68008` 送达后引擎没起语音。字节码实证其判定链是
+`CarlifeCarHardKeyCode.parseFrom → ReverseHardKeyChannelManager.transferKeyCodeIfNeed →
+CarlifeTouchManager.onHardKeyCodeEvent`，`checkCarLifeChannelStatus()` 不过就直接丢键；另有按车机
+渠道号禁用语音硬键的白名单（20082120 / 20742105）。
+
+- `CarLifeProtocol` 新增 `Module`（1 电话 / 2 导航 / 3 音乐 / **4 语音** / 6 麦克风 / 8 巡航 / 9 跟车），
+  取自 `ModuleStatusManage.<init>` 的 `ModuleStatusModel(id, 0)`；
+- `65574` 以前只回 `98344`、零日志；现在**变化时**打一行模块状态，并对语音模块单独点名
+  （`=1` 引擎已进语音态 / `=0` 命令被判无效）——这是「`0x21` 有没有被接住」的唯一现成证据；
+- `docs/carlife-voice-siri-20261104.md` 第 7 节整段重写，附两个零成本对照实验
+  （点 CarLife+ 自己的语音按钮，看模块状态变不变）。
+
+**三、微信提示音把音乐卡一下：311ms 的空档没补包**
+
+车机日志里只有一次完整中断（09:29:45）：
+
+```
+45.458  媒体 引擎音频停止（0x30003）——来电或音频路由被切走
+        …311ms、一个音频包都没有…
+45.768  媒体 音频格式宣告 44100Hz 2ch 16bit
+45.769  媒体 引擎音频开始（0x30002）
+```
+
+两条原因叠在一起：CarLife+ 为切换音频路由**自己停掉媒体 PCM**（改不了），而我们在这 311ms 里
+**一个包都不发**——`AudioSender` 的静音保活阈值是 300ms（`IDLE_FILL_AFTER_MILLIS`），几乎刚好
+没赶上。车机 jitter buffer 被排空，恢复瞬间要重新缓冲，听感就是「卡一下」而不是「静音 0.3 秒」。
+现在引擎停时把阈值压到 0（`beginIdleFill`）、补帧上限提到 16 帧 / tick，恢复时不再需要重新对齐
+（`onEngineAudioGate` 只有停 ≥2s 才 `resyncAnchor`）。详见 `docs/wechat-notify-audio-stall-20261109.md`。
+
+**四、画面停住之后，不再只是「等它自己好」**
+
+参考同源项目 AMCar 1.0.48 的 `startStallWatchdog()`，差异只在「冻住之后怎么办」：
+
+- **判据**：从「2 秒窗口帧数 < 4」改成「最后一帧距今」。来电 / 语音接管期引擎降到 0.8fps 心跳帧，
+  24 秒窗口里只有约 1.6 帧，旧判据必然误判；心跳帧间距约 1.25 秒也不该算停摆。真冻住仍是 8 秒触发，
+  「本轮一帧未收到」（-1）继续不判，避免引擎刚起来就被拆。旧判据留在
+  `StallRecoveryPrefs.judgeByFrameAge=false` 后可回退；
+- **行为**：从只观测改成分级干预——8s 请求重建编码器、每 8s 轻推、30s 翻倍封顶 120s 强制重建会话。
+  依据是 AMCar 1.0.15 的真机结论：不干预时停摆最长 128 秒，且每次自然恢复都伴随新会话。
+  通话中（`MODE_IN_CALL` / `IN_COMMUNICATION` / `RINGTONE`）不干预；同一次停摆只拆一次；
+- **写卡死可观测**：`noteWriteStall()` 在进锁前记时间、`finally` 清零，超过 3s 未返回记一行。
+  永久阻塞的写不会进任何「已完成」统计，日志上与「引擎没出帧」完全同形，而两者处置相反；
+- 停摆日志带手机屏幕状态（`isInteractive` / `isKeyguardLocked`，无需权限），用来区分「手机侧画面被
+  占用」与「链路/引擎问题」；
+- 设置页新增「画面停摆自动恢复」开关（默认开），关掉即回到只记日志。
+
+**五、其它**
+
+- **流顺序按接收端学（修 issue #14）**：JYBOX-80 / 沃尔沃 Sensus 上「屏幕 RECORD 成功、音频 SETUP
+  也成功，但为把音频纳入会话而补发的第二次 RECORD 被 500」，接收端随即关掉自己的 AirPlay 服务。
+  两条顺序各有各的死法（RECORD 优先会被 MIB3 的 2s 看门狗拆链，音频优先则是这个新型号唯一能走的），
+  所以不取全局默认：型号快路径（magic-car-link / jybox）+ 默认档那一轮学出来的结论
+  （补发 RECORD 非 200 就记住该接收端用音频优先，连第一次 RECORD 都非 200 则反向纠正），
+  三行日志可判读（`STREAM: 顺序 = …`）；
+- **尺寸声明对齐 AMCar**：默认只写解码尺寸、视口 32..48 整段留 0（原来「解码 + 视口分离声明」只是
+  对方一个非常规档）。`VideoCanvasMode` 由 boolean 改三态（`raw` 新默认 / `stream` 原默认留 A/B / `car`），
+  偏好值向后兼容。视口只是头部元数据，三种形态送出去的 H.264 帧完全一样；
+- **认证：网络可复用、认证不继承**：新增 `FreshAuthPolicy`，同一接收端连续 2 轮未建立会话 → 下一轮
+  清掉 `PairingMemory` 的结论、强制走完整 pair-setup（成功一轮归零，换接收端归零，用户取消不计）；
+  每次发 `VideoConfig` 打一行 `coded / visible / declared` 三值诊断，判据改成 declared vs visible；
+- **构建可移植**（社区 PR #20）：`distributionUrl` 回到官方源、去掉写死的本机路径，fork 者与 CI
+  无需作者环境也能构建；
+- 单测 **566 例 0 失败**（新增 MicUplink 解包 8 例、StallJudge 7 例、StreamOrderMemory 与尺寸声明
+  三态若干），`assembleRelease` 通过。
 
 ### 1.2.31 —— 2026-11-08（WiFi 入网改「静默自动连」+ 超时宽限 + 权限一次申请，正式版）
 
