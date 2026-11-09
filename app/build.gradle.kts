@@ -13,7 +13,7 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.25"
+val appVersionName = "1.2.30"
 val appVersionCode =
     appVersionName
         .split(".")
@@ -32,17 +32,57 @@ val keystoreProps =
         if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
     }
 val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
+val carPlus = providers.gradleProperty("carPlus").map(String::toBoolean).getOrElse(false)
+val carPlusSdk = providers.gradleProperty("carPlusSdk").orNull?.let { rootProject.file(it) }
+val carPlusSdkDex = providers.gradleProperty("carPlusSdkDex").orNull?.let { rootProject.file(it) }
+val carPlusSdkStubs = providers.gradleProperty("carPlusSdkStubs").orNull?.let { rootProject.file(it) }
+val carPlusSdkAssets = providers.gradleProperty("carPlusSdkAssets").orNull?.let { rootProject.file(it) }
+val carPlusSdkJni = providers.gradleProperty("carPlusSdkJni").orNull?.let { rootProject.file(it) }
+val carPlusRelayAssets = providers.gradleProperty("carPlusRelayAssets").orNull?.let { rootProject.file(it) }
+val carPlusAudioRelay = carPlusSdkDex != null && carPlusRelayAssets != null
+val carPlusRuntime = carPlus && (carPlusSdk != null || carPlusSdkDex != null)
+val carPlusApkName = "CarPToCar+ICCOA.apk"
+if (carPlus) {
+    require(carPlusSdk == null || carPlusSdkDex == null) {
+        "Choose one Car+ runtime input: an AAR or a DEX with SDK stubs"
+    }
+    require(carPlusSdk?.let { it.isFile && it.extension == "aar" } ?: (carPlusSdkStubs?.isFile == true)) {
+        "Car+ needs -PcarPlusSdk=/path/to/receiver.aar or -PcarPlusSdkStubs=/path/to/icar-sdk-stubs.jar"
+    }
+    require(carPlusSdkAssets == null || carPlusRuntime && carPlusSdkAssets.resolve("ccd.data").isFile) {
+        "-PcarPlusSdkAssets requires a Car+ runtime and an assets directory containing ccd.data"
+    }
+    if (carPlusSdkDex != null) {
+        require(carPlusSdkDex.isFile && carPlusSdkDex.extension == "dex" && carPlusSdkAssets != null) {
+            "-PcarPlusSdkDex requires a DEX file and -PcarPlusSdkAssets containing ccd.data"
+        }
+    }
+    require(carPlusSdkJni == null || carPlusRuntime && carPlusSdkJni.isDirectory) {
+        "-PcarPlusSdkJni requires a Car+ runtime and a directory with ABI subdirectories"
+    }
+    require(carPlusRelayAssets == null || carPlusRuntime &&
+        listOf("injector", "relay.js", "client.dex", "server.dex", "COPYING").all {
+            carPlusRelayAssets.resolve("iccoa-relay/$it").isFile
+        }) {
+        "-PcarPlusRelayAssets must contain the prepared ICCOA relay assets"
+    }
+    layout.buildDirectory.set(layout.projectDirectory.dir("build/carplus"))
+}
 
 android {
     namespace = "io.github.shaonialife.carptocar"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.shaonialife.carptocar"
+        applicationId = if (carPlus) "io.github.shaonialife.carptocar.carplus" else "io.github.shaonialife.carptocar"
         minSdk = 31
         targetSdk = 34
         versionCode = appVersionCode
         versionName = appVersionName
+        buildConfigField("boolean", "CAR_PLUS", carPlus.toString())
+        buildConfigField("boolean", "CAR_PLUS_RUNTIME", carPlusRuntime.toString())
+        buildConfigField("boolean", "CAR_PLUS_AUDIO_RELAY", carPlusAudioRelay.toString())
+        if (carPlus) manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
     }
 
     signingConfigs {
@@ -67,9 +107,22 @@ android {
         debug {
             // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
             // Shizuku 授权是按包名授予的，改包名会要求重新授权。
-            versionNameSuffix = "-debug"
+            versionNameSuffix = if (carPlus) "-carplus-debug" else "-debug"
         }
     }
+
+    sourceSets["main"].java.srcDir(if (carPlus) "src/carPlus/java" else "src/carLife/java")
+    if (carPlus) {
+        sourceSets["debug"].manifest.srcFile("src/carPlus/AndroidManifest.xml")
+        sourceSets["debug"].res.srcDir("src/carPlus/res")
+        carPlusSdkAssets?.let { sourceSets["debug"].assets.srcDir(it) }
+        carPlusRelayAssets?.let { sourceSets["debug"].assets.srcDir(it) }
+        carPlusSdkJni?.let { sourceSets["debug"].jniLibs.srcDir(it) }
+        sourceSets["androidTest"].java.srcDir("src/carPlusTest/java")
+        sourceSets["androidTest"].assets.srcDir("src/carPlusTest/assets")
+        defaultConfig.testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    if (carPlus && carPlusSdkDex != null) packaging.jniLibs.useLegacyPackaging = true
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -94,6 +147,50 @@ android {
     }
 }
 
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        if (carPlus) variant.enable = false
+    }
+}
+
+if (carPlusRuntime && carPlusSdkDex == null) {
+    tasks.register<Copy>("packageCarPlusRuntime") {
+        group = "build"
+        description = "Builds the installable Car+ debug APK with the supplied ICCOA runtime AAR"
+        dependsOn("assembleDebug")
+        from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+        into(layout.buildDirectory.dir("outputs/apk/carplus-runtime"))
+        rename { carPlusApkName }
+    }
+} else if (carPlusRuntime) {
+    val sdkDirectory = androidComponents.sdkComponents.sdkDirectory
+    val baseApk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+    val packagedApk = layout.buildDirectory.file("outputs/apk/carplus-runtime/$carPlusApkName")
+    val debugKeyStore = checkNotNull(android.signingConfigs.getByName("debug").storeFile)
+    val packagingScript = rootProject.file("scripts/package-carplus-runtime.py")
+    tasks.register<Exec>("packageCarPlusRuntime") {
+        group = "build"
+        description = "Builds the installable Car+ debug APK with the supplied ICCOA runtime DEX"
+        dependsOn("assembleDebug")
+        inputs.files(baseApk, carPlusSdkDex, debugKeyStore, packagingScript)
+        inputs.property("carPlusAudioRelay", carPlusAudioRelay)
+        if (carPlusAudioRelay) inputs.file(rootProject.file("scripts/PatchCarPlusAudio.java"))
+        outputs.file(packagedApk)
+        doFirst {
+            commandLine(
+                "python3",
+                packagingScript,
+                baseApk.get().asFile,
+                carPlusSdkDex,
+                sdkDirectory.get().asFile.resolve("build-tools/34.0.0"),
+                debugKeyStore,
+                packagedApk.get().asFile,
+            )
+            if (carPlusAudioRelay) args("--audio-java", file(System.getProperty("java.home")).resolve("bin/java"))
+        }
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -102,6 +199,17 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     // AirPlay 配对密码学：X25519/Ed25519/ChaCha20-Poly1305/HKDF-SHA512
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
+    if (carPlus) {
+        androidTestImplementation("androidx.test:runner:1.5.2")
+        androidTestImplementation("androidx.test.ext:junit:1.1.5")
+        if (carPlusSdk != null) {
+            implementation(files(carPlusSdk))
+        } else {
+            compileOnly(files(checkNotNull(carPlusSdkStubs)))
+        }
+        if (carPlusRuntime) implementation("androidx.room:room-runtime:2.4.3")
+    }
 
     testImplementation("junit:junit:4.13.2")
 }

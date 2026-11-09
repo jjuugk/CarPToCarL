@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarPToCar+ICCOA</string>
+    <item name="app_wordmark" type="string">@string/app_name</item>
+    <string name="local_video_source_title">本地ICCOA Car+劫持</string>
+    <string name="local_video_source_idle">正在准备 ICCOA Car+ 接收端</string>
+    <string name="car_gps_note">此版本暂未向 ICCOA Car+ 转发车机 GPS，定位由手机提供。</string>
+    <color name="ic_launcher_background">#071421</color>
+</resources>

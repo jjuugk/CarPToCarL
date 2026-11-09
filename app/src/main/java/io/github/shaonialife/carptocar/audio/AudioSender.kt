@@ -385,7 +385,7 @@ class AudioSender(
      * 采样率/声道对齐由注入方负责（[feedPcm] 会按 [sampleRate]/[CHANNELS] 重采样），
      * 但 AAC 通路仍走 [AacLcEncoder]（注入的是 PCM，编码照常）。
      */
-    fun startPassthrough(): Boolean {
+    fun startPassthrough(keepAlive: Boolean = true): Boolean {
         if (running.get()) return true
         stopped.set(false)
         return try {
@@ -411,7 +411,7 @@ class AudioSender(
                     "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声）",
             )
             startSyncLoop()
-            startSilenceKeepAlive()
+            if (keepAlive) startSilenceKeepAlive()
             true
         } catch (error: Exception) {
             log("AUDIO: 直通启动失败 - ${error.message}")
