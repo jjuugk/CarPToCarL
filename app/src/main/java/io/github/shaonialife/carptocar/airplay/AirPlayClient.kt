@@ -911,41 +911,96 @@ class AirPlayClient(
         }
     }
 
+    /**
+     * 资源归属（主屏 / 主音频 / 语音态）。
+     *
+     * 旧实现每次 `modesChanged` 都发同一段写死的常量（手机永久持有主屏+主音频），
+     * 车机发来 `changeModes` 时也无条件照发——等于对「我要接管」「我要归还」都回答
+     * 「屏永远是我的」。真车会发这条：奥迪 2026-11-09 日志 09:38/09:42/09:43 共 7 次
+     * `changeModes`，外加一次 `requestUI`。语义与兜底策略见 [AirPlayResourceState]。
+     */
+    private val resourceState = AirPlayResourceState()
+
+    /** 主屏当前是否归手机（供交接/UI 判定；车机没声明归属时恒为 true）。 */
+    val phoneOwnsScreen: Boolean get() = resourceState.phoneOwnsScreen
+
     fun assertModes(): Boolean {
-        val body =
-            BinaryPlist.encode(
-                linkedMapOf(
-                    "type" to "modesChanged",
-                    "params" to
-                        linkedMapOf(
-                            "appStates" to
-                                listOf(
-                                    linkedMapOf<String, Any?>("appStateID" to 2L, "entity" to 0L),
-                                    linkedMapOf<String, Any?>("appStateID" to 3L, "entity" to 0L),
-                                    linkedMapOf<String, Any?>("appStateID" to 1L, "entity" to 0L, "speechMode" to -1L),
-                                ),
-                            "resources" to
-                                listOf(
-                                    linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
-                                ),
-                        ),
-                ),
-            )
-        return try {
-            val (statusLine, _) =
+        // 真机顺序：先按车机在 /info 里给的初始归属发布，再把主屏要回来——
+        // 而不是一上来就宣称永久持有（在不打算让屏的车机上那就是硬抢）。
+        resourceState.claimAudio()
+        val initial = publishModes("初始归属")
+        if (!initial) {
+            // 车机不接受「按它给的归属复述」→ 这套仲裁在它身上不成立，退回改动前的行为
+            // （主屏+主音频都声明手机永久持有）。保证最坏情况与 1.2.34 一致，不因本条改动退化。
+            log("AIRPLAY: 车机不接受初始归属 → 回退为「声明手机持有主屏/主音频」")
+            resourceState.claimAll()
+            return publishModes("回退：声明手机持有")
+        }
+        val before = resourceState.command().toString()
+        resourceState.requestPhoneScreen()
+        // 状态没变就不重发（/info 未给 modes 时会走这里，报文与改动前逐字节一致）
+        if (resourceState.command().toString() == before) return true
+        return publishModes("申请主屏")
+    }
+
+    /**
+     * 车机的资源仲裁请求（`changeModes` / `requestUI`）→ 更新归属后**如实回报**。
+     *
+     * 关键点：回的是「当前实际归属」，不是「手机接管」。旧实现对这两条一律回
+     * 手机永久持屏，正是 link_plus 注释里点名要避免的反模式。
+     *
+     * @return 车机是否接受了这次回报
+     */
+    fun handleModeCommand(command: Map<*, *>): Boolean {
+        val type = command["type"]?.toString() ?: return false
+        when (type) {
+            "changeModes" -> resourceState.applyCarChange(command["params"] as? Map<*, *>)
+            "requestUI" -> resourceState.requestPhoneScreen()
+            else -> return false
+        }
+        val accepted = publishModes(type)
+        log("EVENT: $type 接受=$accepted ${resourceState.describe()}")
+        return accepted
+    }
+
+    /**
+     * 发布一次 `modesChanged`。
+     *
+     * 成功判定**不只看 RTSP 200**：车机会回 `200 OK` + `{status: -1}` 表示「收到了但不同意」。
+     * 旧实现只看状态行，把这种拒绝当成功继续往下走，现场表现是「都成功了，过一会儿断」。
+     */
+    private fun publishModes(reason: String): Boolean =
+        try {
+            val (statusLine, body) =
                 request(
                     "POST",
                     "/command",
-                    body,
+                    BinaryPlist.encode(resourceState.command()),
                     contentType = "application/x-apple-binary-plist",
                 )
-            log("AIRPLAY: modesChanged（声明持有主屏/主音频资源）[$statusLine]")
-            statusLine.contains("200")
+            val accepted = commandAccepted(statusLine, body)
+            log("AIRPLAY: modesChanged（$reason）${resourceState.describe()} 接受=$accepted [$statusLine]")
+            accepted
         } catch (error: IOException) {
-            log("AIRPLAY: modesChanged 失败 - ${error.message}")
+            log("AIRPLAY: modesChanged（$reason）失败 - ${error.message}")
             false
         }
+
+    /**
+     * RTSP 200 **且**（报文体的 `status == 0`，或报文体没有 status 字段）才算成功。
+     *
+     * 报文体解析失败时按**成功**处理：老固件可能回非 plist 的短答复，此时没有拒绝证据，
+     * 不能因为解析不了就判定车机不同意。
+     */
+    private fun commandAccepted(
+        statusLine: String,
+        body: ByteArray,
+    ): Boolean {
+        if (!Regex("^(?:RTSP|HTTP)/[0-9.]+\\s+200(?:\\s|$)").containsMatchIn(statusLine)) return false
+        if (body.isEmpty()) return true
+        val response = runCatching { BinaryPlist.parseRecovered(body).value as? Map<*, *> }.getOrNull() ?: return true
+        val status = response["status"] as? Number ?: return true
+        return status.toDouble() == 0.0
     }
 
     /**
@@ -1037,6 +1092,12 @@ class AirPlayClient(
         var infoRoot: Map<*, *>? = null
         val infoMap = loadInfoWithDiagnostics()
         infoRoot = infoMap
+        // 资源归属的初始值由**车机**给：`/info.modes` 里就带 resources[].transferType。
+        // 奥迪 4260 实测 `resourceID=1 transferType=1 takeConstraint=100`——即「主屏已被我接管，
+        // 允许你在约束内拿回去」。旧实现无视这一段，上来就声明「主屏永久归手机」。
+        // 语义与兜底见 AirPlayResourceState；车机没给 modes 时状态就是「手机持有」，与旧行为一致。
+        resourceState.initialize(infoMap?.get("modes") as? Map<*, *>)
+        log("AIRPLAY: 资源归属初始 ${resourceState.describe()}")
         // 候选屏全表。旧实现写死 `displays[0]`——多屏车机（大连屏/仪表）若先声明副屏，
         // 画面就被推到那块屏上，比例与触摸坐标全错，而日志里看不出选错了。
         // 选择规则与「只在车机声明 type 时才排序」的兼容性说明见 CarDisplayGeometry。

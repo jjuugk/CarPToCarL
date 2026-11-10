@@ -4816,12 +4816,13 @@ object SessionController {
                                         )
                                     }
 
-                                    "changeModes" -> {
-                                        // 车机请求资源仲裁（如用户在 MMI 上点了手机）：
-                                        // 回 modesChanged 声明手机持有主屏/主音频
-                                        appendLog("EVENT: 车机请求 changeModes → 回 modesChanged 接管资源")
-                                        client.assertModes()
-                                    }
+                                    // 车机请求资源仲裁。回的是**当前实际归属**，不是「手机接管」：
+                                    // 车机接管/归还/借用是三种不同语义，一律回「屏永远是我的」
+                                    // 等于答非所问（旧实现如此）。真车会发：奥迪 4260 在
+                                    // 2026-11-09 09:38/09:42/09:43 共发 7 次 changeModes + 1 次 requestUI。
+                                    // requestUI 是同一套仲裁里的「把界面交回手机」，走同一个出口。
+                                    "changeModes", "requestUI" ->
+                                        client.handleModeCommand(command)
 
                                     else ->
                                         appendLog(

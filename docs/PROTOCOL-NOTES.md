@@ -252,6 +252,42 @@ iAP2 → AirPlay 配对 → 视频推流 → 触摸回传 → 虚拟屏注入，
 NsdManager unregisterService 异步（复用 listener 报 already in use，每次注册新建）；
 ctrl mDNS 注册必须发生在 bindProcessToNetwork **之后**（组播跟随进程绑定网络）。
 
+### 9c-1. 资源归属（`modes`）必须是状态机，不是常量（2026-11-10 修正）
+
+上表那句「SETUP 前发 modesChanged（resourceID 1/2 entity=1）」只解决了「有没有发」，
+**取值一直是写死的常量**：主屏与主音频都声明 `entity=1, permanentEntity=1`（手机持有、
+永久持有）。车机发 `changeModes` 时也无条件照发同一段——等于对「我要接管」「我要归还」
+「我借一下」全部回答「屏永远是我的」。
+
+真车会发这两条，且 `/info.modes` 里就写着初始归属。奥迪 4260（`AUDI 4260`/DELPHI）
+2026-11-09 09:38/09:42/09:43 的日志里：
+
+```
+/info modes={appStates=[{appStateID=2,state=false},{speechMode=-1,appStateID=1},{appStateID=3,state=false}],
+             resources=[{transferPriority=100, takeConstraint=100, resourceID=1, transferType=1, ...}]}
+EVENT: 车机请求 changeModes → 回 modesChanged 接管资源      ×7
+EVENT: 命令 type=requestUI params={url=}                    ×1（旧实现当作未识别命令）
+```
+
+`transferType=1` = **车机已接管主屏**，`takeConstraint=100` = 允许在约束内要回来。
+
+现在的语义（`airplay/AirPlayResourceState.kt`）：
+
+| 来源 | 处理 |
+|---|---|
+| `/info.modes.resources[]` | 初始归属，**车机说了算**；没给就保持「手机持有」（与旧常量一致） |
+| `changeModes.transferType=1` | 车机接管，记 `takeConstraint` |
+| `transferType=2` | 归还给手机 |
+| `transferType=3` / `4` | 开始 / 结束借用（只看 `borrowID`，永久归属不变） |
+| 未知 `transferType` | **什么都不改**（猜错方向比不动更糟） |
+| `requestUI` | 把主屏交回手机（同 `requestPhoneScreen()`） |
+
+发布顺序照真机：**先按车机给的归属复述 → 再申请主屏 → 状态有变才重发**。
+车机若不接受第一次复述，退回旧行为（声明手机永久持有主屏+主音频），保证不因本条退化。
+
+成功判定同时改严：**RTSP 200 且报文体 `status == 0`**（无 status 字段或解析失败仍算成功）。
+旧实现只看状态行，车机回 `200 OK` + `{status:-1}` 时被当成功，现场是「都成功了，过一会儿断」。
+
 ## 9d. WinPlay（Windows 接收端）实测记录（2026-10-19）
 
 WinPlay 是开源 Windows 无线 CarPlay 接收端（`reference/WinPlay`，GPL-3.0，Node + TS，
