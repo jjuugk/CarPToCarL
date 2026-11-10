@@ -46,6 +46,19 @@ class Iap2LinkChannel(
     var peerFrameCount: Int = 0
         private set
 
+    /**
+     * 对端**业务帧**计数（len > 0 的控制帧；纯 ACK 与心跳都不算）。
+     *
+     * 为什么还要这个：判「车机是否还在处理我们的帧」只看 [peerFrameCount] 会**漏判**。
+     * 2026-11-10 别克 BUICK_3138 日志：0x4300 发出去之后车机连回 3 个纯 ACK
+     * （ack=91/92/95，全是我们那串问候的迟到确认），[peerFrameCount] 因此涨了 3，
+     * 于是「0x4300 报文体把车机打停」被误判成「车机还在回帧」，阶梯永远停在第一档，
+     * 每轮都用同一份字节、死在同一处。业务帧计数在这 30 秒里**完全不动**，才是真静默。
+     */
+    @Volatile
+    var peerDataFrameCount: Int = 0
+        private set
+
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
@@ -66,6 +79,7 @@ class Iap2LinkChannel(
         }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             peerFrameCount++
+            if (size > 0) peerDataFrameCount++
             // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
             if (rxFrameLogs < FRAME_LOG_LIMIT) {
                 rxFrameLogs++

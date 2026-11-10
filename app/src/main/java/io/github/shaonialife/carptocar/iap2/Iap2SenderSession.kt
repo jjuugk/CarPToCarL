@@ -462,9 +462,11 @@ class Iap2SenderSession(
         // 提前算：旧协议分支要用它决定「要不要并行发 0x4300」，后面等 0x4301 也要用。
         val declaresStartSession = accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)
         // 0x4300 的发送记账：可能在本段提前并行发出（旧协议兜底），也可能在后面正常发出。
-        // 静默判定要的「发出前对端帧计数」就在**真正发的那一刻**取，别提前取——
-        // 0x5702 的 ACK 会让计数上涨，早取等于把判据稀释掉。
-        var framesBeforeAvailability = 0
+        // 静默判定要的「发出前对端**业务帧**计数」就在**真正发的那一刻**取，别提前取——
+        // 0x5702 的 ACK 会让计数上涨，早取等于把判据稀释掉。用业务帧（len>0）而不是
+        // 全部控制帧：车机对我们那串问候的迟到 ACK 会把「全部帧」计数推上去，
+        // 于是「0x4300 把它打停」永远被判成「还在回帧」（2026-11-10 BUICK_3138 实证）。
+        var dataFramesBeforeAvailability = 0
         var availabilitySent = false
         val legacyWifiExchange = wifiGen != ReceiverProfile.WifiGen.NEW
         val wifiFromExchange: WifiConfiguration? =
@@ -496,8 +498,8 @@ class Iap2SenderSession(
                         "iap2 并行兜底：0x5702 在 ${LEGACY_WIFI_FIRST_WAIT_NANOS / 1_000_000}ms 内无应答" +
                             "（车机不走旧协议）——不再死等 0x5703，同时发出 0x4300",
                     )
-                    framesBeforeAvailability = channel.peerFrameCount
-                    lastNudgePeerFrames = framesBeforeAvailability
+                    dataFramesBeforeAvailability = channel.peerDataFrameCount
+                    lastNudgePeerFrames = channel.peerFrameCount
                     sendAvailability()
                     availabilitySent = true
                     wifiConfiguration =
@@ -549,12 +551,14 @@ class Iap2SenderSession(
         //    超时返回无端点的 CarPlayEndpoint，由主控 mDNS 合成。
         // 0x4300 同样发后不管：2026-10-11 12:52 轮实测车机曾对它停止 ACK
         // （事件通道 SYN 洪水把它打懵的时段），链路看门狗险些再次自杀。
-        // 发之前记一次对端控制帧计数：别克 E2LB 实测它收到这一帧后就**彻底不再 ACK**，
-        // 用这个计数把「对端还在不在处理我们的帧」量出来（见下方 noteAvailabilitySilence）。
+        // 发之前记一次对端**业务帧**计数：别克 E2LB / BUICK_3138 实测它收到这一帧后就
+        // **彻底不再发起任何业务帧**（只剩链路心跳），用这个计数把「对端还在不在处理
+        // 我们的帧」量出来（见下方 noteAvailabilitySilence）。纯 ACK 不算——迟到 ACK 会
+        // 让判据失效，那正是 2026-11-10 那一轮阶梯没前进的原因。
         if (!availabilitySent) {
-            framesBeforeAvailability = channel.peerFrameCount
-            // 催问的静默基线也钉在这一刻：第一次催问（+15s）就能判断车机是否还在回帧。
-            lastNudgePeerFrames = framesBeforeAvailability
+            dataFramesBeforeAvailability = channel.peerDataFrameCount
+            // 催问的静默基线另用全部控制帧：它衡量的是「RFCOMM 上还有没有东西回来」。
+            lastNudgePeerFrames = channel.peerFrameCount
             sendAvailability()
         } else {
             log("iap2 0x4300 已在 0x5702 之后提前发出——此处不重发（0x4301 若早到已在暂存区）")
@@ -580,7 +584,7 @@ class Iap2SenderSession(
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。
         // 老协议车机（Audi 等）对 0x4300 的处置不影响后续流程，不做阶梯，避免回归。
         if (startSession == null && declaresStartSession == true && wifiFromExchange == null) {
-            noteAvailabilitySilence(framesBeforeAvailability, startSessionWindow)
+            noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow)
         } else if (startSession != null) {
             availabilityVariant?.let { AvailabilityBodyMemory.recordSuccess(context, receiverIdentity, it) }
         }
@@ -802,6 +806,9 @@ class Iap2SenderSession(
         val sent = ArrayList<Int>(5)
         // 0x4E0D（无线可用）与 0x4E0C（设备 UUID）：车机可收清单里没声明也照发，
         // 只记一条日志（2026-10-27 起取消裁剪；取证在 [send] 出口统一做）。
+        // 别克 BUICK_3138 与凯迪拉克 CT5 的可收清单是同一份 9 项、都不含 0x4E0D——
+        // 这一族就是 GM/Cinemo，按声明裁等于对它永远不发，是否该发由「0x4300 报文体
+        // 阶梯」去试，不在这里改规则。
         send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
         sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
         // 语言字段：iAP2 只认 ISO 639 的两字母码。车机在 0x1D01 参 12 声明语言时
@@ -924,13 +931,12 @@ class Iap2SenderSession(
             return
         }
         nudgeCount++
-        // 先补一轮设备状态问候（上游 PR #17 的「0x5703 分段救援」用的是同一招：
-        // 车机不推进时重发问候，而不是干等），再告诉它传输方式，最后重新询问可用性。
-        sendDeviceStateGreetings(force = true)
-        // 0x4E0E：告诉车机「这条 iAP2 会话的传输是蓝牙」，再问一次能不能开始 CarPlay。
-        // 车机可收清单里没声明也照发（只记录）——2026-10-27 起取消裁剪：别克 E2LB 与
-        // 上游奥迪 3315 的证据都表明「没声明 ≠ 不能收」，裁掉只换来日志更干净。
-        // **0x4300 本来就不裁**：它是驱动 0x4301 的请求本身，宁可多发一次也不能不发。
+        // 催问**只发发后不管的两条**（0x4e0e + 0x4300），不再补发设备状态问候。
+        // 2026-11-10 BUICK_3138 实测：催问时补一轮问候（7 帧走 send()，ACK 待确认）
+        // 叠在还没被确认的帧上，未确认帧从 1 条涨到 9 条，30 秒后就被重传看门狗
+        // 以 `packet 97 not acknowledged` 拆链——那是**我们自己**把还活着的 RFCOMM
+        // 拆掉的（车机心跳一直没停）。问候在 0xAA05 之后已经发过一轮，重复发不推进
+        // 任何状态机；真需要重发时由 [nudgeCarPlayAvailability] 按需显式调用。
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
@@ -938,7 +944,7 @@ class Iap2SenderSession(
         sendAvailability()
         // 第 1 次必记（确认机制真的跑了），之后每 4 次记一条，避免刷屏。
         if (nudgeCount == 1 || nudgeCount % 4 == 0) {
-            log("iap2 催问第 $nudgeCount 次：重发问候 + 0x4e0e + 0x4300——车机仍未下发 0x4301，链路正常保活中")
+            log("iap2 催问第 $nudgeCount 次：重发 0x4e0e + 0x4300（不补问候）——车机仍未下发 0x4301，链路正常保活中")
         }
     }
 
@@ -1001,18 +1007,22 @@ class Iap2SenderSession(
      * 的证据。所以判到静默就换下一档，而不是断言此路不通。
      */
     private fun noteAvailabilitySilence(
-        framesBefore: Int,
+        dataFramesBefore: Int,
         windowNanos: Long,
     ) {
         val variant = availabilityVariant ?: return
         if (variant == AvailabilityBodyMemory.Variant.NONE) return
-        val framesAfter = channel.peerFrameCount
-        if (framesAfter != framesBefore) return
+        // 只认**业务帧**（len>0）。纯 ACK 会迟到——2026-11-10 BUICK_3138 那轮，0x4300
+        // 发出后车机回了 3 个纯 ACK（都是那串问候的迟到确认），用「全部控制帧」判就
+        // 变成「还在回帧」→ 不记静默 → 阶梯永远停在第一档，每轮死在同一处。
+        val dataFramesAfter = channel.peerDataFrameCount
+        if (dataFramesAfter != dataFramesBefore) return
         val next = AvailabilityBodyMemory.recordSilent(context, receiverIdentity, variant, preferDualAvailability)
         log(
-            "iap2 ⚠ 0x4300（${variant.label}）发出后 ${windowNanos / 1_000_000_000}s 内车机零反馈：" +
-                "连链路层 ACK 都没回（同一份字节在凯迪拉克 CADILLAC_7731 上是正常 ACK 的），" +
-                "疑似该固件不认这个报文体；已记为静默，下一轮改用「${next.label}」",
+            "iap2 ⚠ 0x4300（${variant.label}）发出后 ${windowNanos / 1_000_000_000}s 内车机零**业务**帧" +
+                "（累计控制帧 $dataFramesAfter 条业务 / ${channel.peerFrameCount} 条含纯 ACK，" +
+                "0x4301 与 0x6800 都没发起）——疑似该固件不认这个报文体；" +
+                "已记为静默，下一轮改用「${next.label}」",
         )
     }
 
