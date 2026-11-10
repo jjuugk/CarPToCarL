@@ -176,6 +176,14 @@ class VirtualIap2Link(
 
     init {
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
+        // 非 DETECT 的握手应答（车机侧 sendLackOfBackwardCompatibility 就在这一族）：
+        // 旧实现把它当杂字节丢掉，日志里只剩「协商无进展」，只能等预算耗尽。
+        engine.onPeerHandshake = { handshake ->
+            log(
+                "IAPLINK: 对端握手应答（非 DETECT）raw=${handshake.hex()} " +
+                    "载荷长度=${handshake.declaredPayloadLength}（累计 ${engine.peerHandshakeRejections} 次）",
+            )
+        }
         Thread(
             {
                 while (alive()) {

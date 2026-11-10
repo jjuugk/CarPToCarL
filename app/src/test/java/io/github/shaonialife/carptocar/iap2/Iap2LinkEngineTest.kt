@@ -230,6 +230,121 @@ class Iap2LinkEngineTest {
         }
     }
 
+    // ---- 握手拒绝（车机侧 sendLackOfBackwardCompatibility）----
+
+    /**
+     * 车机用**非 DETECT** 的握手应答拒绝我们时，必须几帧内定性，而不是干等上层 60 秒预算。
+     *
+     * 固件侧（MIB3 SW3874，`iap2::CIAP2LinkHandshake`）的路径是
+     * `sendHandshake → evaluateHandshakeAnswer → 不兼容时 sendLackOfBackwardCompatibility`，
+     * 也就是说「我不支持你」正是以 `FF55` 族里非 marker 的报文出现的。
+     * 旧实现把整族当杂字节逐字节丢弃，日志里只剩「协商无进展」。
+     *
+     * 第一次只记日志（个别车机会先发私有握手包再进入参数协商，一刀切会杀掉可用链路），
+     * 第二次才判拒绝——判据是「反复出现 + 一条 LSP 都没采纳」。
+     */
+    @Test
+    fun repeatedNonDetectHandshakeAnswerKillsNegotiation() {
+        val phone = Iap2LinkEngine()
+        val seen = ArrayList<Iap2LinkEngine.PeerHandshake>()
+        phone.onPeerHandshake = { seen += it }
+        phone.start(0)
+        phone.takeOutput()
+
+        val answer = handshakeAnswer()
+        phone.feed(answer, 1)
+        assertEquals("第一次只记日志、不拆链", Iap2LinkEngine.State.NEGOTIATING, phone.state)
+        assertEquals(1, phone.peerHandshakeRejections)
+        assertEquals("诊断回调必须把原始字节带出来", 1, seen.size)
+        assertTrue("raw 前缀应是 FF 55 02 00，实际=${seen[0].hex()}", seen[0].hex().startsWith("FF 55 02 00"))
+        assertTrue("非 DETECT 必须标注 isDetect=false", !seen[0].isDetect)
+
+        phone.feed(answer, 2)
+        assertEquals("第二次必须判拒绝", Iap2LinkEngine.State.DEAD, phone.state)
+        val reason = deadReason(phone)
+        assertTrue("原因必须点名 sendLackOfBackwardCompatibility，实际=$reason", reason.contains("rejected link"))
+    }
+
+    /**
+     * 标准 marker（`FF 55 02 00 EE 10`）**不是**拒绝：本田/奥迪等车机每秒重发它，
+     * 旧实现靠帧头扫描丢弃，新实现要显式认得出来，绝不能因此拆链、也不该刷日志。
+     */
+    @Test
+    fun standardDetectMarkerIsNotARejection() {
+        val phone = Iap2LinkEngine()
+        phone.enterNegotiating()
+        var callbacks = 0
+        phone.onPeerHandshake = { callbacks++ }
+
+        repeat(5) { index -> phone.feed(Iap2LinkEngine.MARKER, index.toLong()) }
+
+        assertEquals(Iap2LinkEngine.State.NEGOTIATING, phone.state)
+        assertEquals(0, phone.peerHandshakeRejections)
+        assertEquals("marker 每秒重发，不该走诊断回调", 0, callbacks)
+    }
+
+    /** 握手应答被 TCP/RFCOMM 拆成单字节送达时也要能认出来（真实链路上很常见）。 */
+    @Test
+    fun handshakeAnswerSplitAcrossFeedsIsStillRecognised() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        handshakeAnswer().forEachIndexed { index, byte -> phone.feed(byteArrayOf(byte), index.toLong()) }
+
+        assertEquals(1, phone.peerHandshakeRejections)
+        assertEquals(Iap2LinkEngine.State.NEGOTIATING, phone.state)
+    }
+
+    /**
+     * 对端 LSP 的 LinkVersion 与本端不同 → 立即终止（确定性证据，不等第二次）。
+     *
+     * LSP 首字节就是 7 个链路参数里的 `LinkVersion`；`SynchronizationPayload.decode`
+     * 只认 1，别的版本会返回 null——旧实现静默丢弃后继续 500ms 重发本表，直到预算耗尽。
+     */
+    @Test
+    fun unsupportedLspLinkVersionKillsNegotiationImmediately() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        phone.feed(synFrameWithLinkVersion(2), 1)
+
+        assertEquals(Iap2LinkEngine.State.DEAD, phone.state)
+        // 注意：deadReason 会取走 Dead 事件，只能取一次
+        val reason = deadReason(phone)
+        assertTrue("原因必须点名 LinkVersion，实际=$reason", reason.contains("LinkVersion=2"))
+    }
+
+    /** 已经采纳过 LSP（参数协商已开始/已 NORMAL）后，FF55 的怪包只记日志，不许拆链。 */
+    @Test
+    fun handshakeAnswerAfterLspAdoptionDoesNotKillLink() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        repeat(3) { index -> phone.feed(handshakeAnswer(), 100L + index) }
+
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+        assertEquals(3, phone.peerHandshakeRejections)
+    }
+
+    /** 关掉快速失败后行为与改动前一致：只记日志，链路继续等。 */
+    @Test
+    fun failFastOnHandshakeRejectionCanBeDisabled() {
+        val phone = Iap2LinkEngine()
+        phone.failFastOnHandshakeRejection = false
+        phone.start(0)
+        phone.takeOutput()
+
+        repeat(3) { index -> phone.feed(handshakeAnswer(), index.toLong()) }
+
+        assertEquals(Iap2LinkEngine.State.NEGOTIATING, phone.state)
+        assertEquals(3, phone.peerHandshakeRejections)
+    }
+
     // ---- 工具 ----
 
     private class ParsedFrame(
@@ -291,8 +406,38 @@ class Iap2LinkEngineTest {
         return raw
     }
 
-    // ---- EAK / RTO 回归 ----
+    /**
+     * 构造一条 LSP 里 `LinkVersion` 被改过的车机 SYN 帧（含前置 marker）。
+     *
+     * 载荷校验和必须跟着重算，否则引擎会先判校验失败、走不到版本判定。
+     */
+    private fun synFrameWithLinkVersion(version: Int): ByteArray {
+        val raw = synFrame(peerSequence = 33)
+        val synOffset = 6
+        val payloadStart = synOffset + Iap2LinkEngine.HEADER_BYTES
+        raw[payloadStart] = version.toByte()
+        val length = ((raw[synOffset + 2].toInt() and 0xFF) shl 8) or (raw[synOffset + 3].toInt() and 0xFF)
+        var sum = 0
+        for (index in payloadStart until synOffset + length - 1) sum += raw[index].toInt() and 0xFF
+        raw[synOffset + length - 1] = (-sum and 0xFF).toByte()
+        return raw
+    }
 
+    /** 车机侧「非 DETECT 握手应答」的最小样本（`FF 55 | u16LE 载荷长度 | 载荷`）。 */
+    private fun handshakeAnswer(payload: ByteArray = byteArrayOf(0x55, 0xAA.toByte())): ByteArray =
+        byteArrayOf(0xFF.toByte(), 0x55, payload.size.toByte(), 0x00) + payload
+
+    /** 取链路终止原因（没有 Dead 事件就返回空串，断言会直接失败在 contains 上）。 */
+    private fun deadReason(engine: Iap2LinkEngine): String {
+        while (true) {
+            when (val event = engine.pollEvent() ?: return "") {
+                is Iap2LinkEngine.Event.Dead -> return event.reason ?: ""
+                is Iap2LinkEngine.Event.Control -> Unit
+            }
+        }
+    }
+
+    // ---- EAK / RTO 回归 ----
     /**
      * 收到 EAK 必须**立刻**重传，不等本地 RTO。
      *

@@ -168,6 +168,44 @@ class Iap2LinkEngine(
     /** 诊断：每个出向链路帧的摘要（仅链路层帧，用于对照真车协商时序）。 */
     var onFrameSent: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
 
+    /**
+     * 对端握手族（`FF 55` 前缀）报文。
+     *
+     * 只有 [isDetect] = true 的标准 marker（`FF 55 02 00 EE 10`）是「正常」形态；
+     * 其余任何一种都是对端在握手阶段给我们的应答，而本端**没有实现握手应答**。
+     * 车机固件（MIB3 SW3874，`iap2::CIAP2LinkHandshake`）的路径是
+     * `sendHandshake → evaluateHandshakeAnswer → 不兼容时 sendLackOfBackwardCompatibility`，
+     * 也就是说「我不支持你」正是以这种非 marker 的握手报文出现的。
+     */
+    class PeerHandshake(
+        val raw: ByteArray,
+        /** 报文自带的载荷长度字段（能读到时）；读不出为 0（已按「形态未知」处理）。 */
+        val declaredPayloadLength: Int,
+        val isDetect: Boolean,
+    ) {
+        fun hex(): String = raw.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+    }
+
+    /**
+     * 诊断：收到**非 DETECT** 的握手应答时回调（DETECT marker 每秒重发，不回调以免刷屏）。
+     * 上层接进日志即可把「车机拒绝了链路」从 60 秒静默变成一行证据。
+     */
+    var onPeerHandshake: ((PeerHandshake) -> Unit)? = null
+
+    /**
+     * 是否在「对端明显拒绝链路」时立即终止（默认开）。
+     *
+     * 判据不是猜控制字节，而是**两件事**（见 [reportHandshakeAnswer] /
+     * [rejectUnsupportedLinkVersion]）：① 对端 LSP 的 LinkVersion 与本端不同；
+     * ② 反复收到非 DETECT 的握手应答、且一条 LSP 都没采纳（参数协商根本没开始）。
+     * 关掉后只记日志、行为与改动前一致（继续等到上层预算耗尽）。
+     */
+    var failFastOnHandshakeRejection: Boolean = true
+
+    /** 已收到的非 DETECT 握手应答数量（诊断/单测用）。 */
+    var peerHandshakeRejections: Int = 0
+        private set
+
     private var unknownSessionDropped = 0
 
     private val unacknowledged = ArrayList<Packet>()
@@ -376,11 +414,22 @@ class Iap2LinkEngine(
     // ---- 接收解析 ----
 
     private fun parseAvailable(nowMillis: Long): Boolean {
-        // 丢弃帧头前的杂字节（含对端 marker FF55…）
-        while (receive.size >= 2 &&
-            !(receive[0] == 0xFF.toByte() && receive[1] == 0x5A.toByte())
-        ) {
-            receive.discard(1)
+        // 帧头扫描：`FF5A` 是链路帧，`FF55` 是握手族。
+        //
+        // **FF55 必须在这里截住**：旧实现把它当杂字节逐字节丢弃，于是「车机用非 DETECT
+        // 的握手应答拒绝我们」这件事在日志里根本不存在，只能干等到上层预算耗尽
+        // （车机固件侧对应 `sendLackOfBackwardCompatibility`）。
+        while (true) {
+            while (receive.size >= 2 &&
+                !(receive[0] == 0xFF.toByte() &&
+                    (receive[1] == 0x5A.toByte() || receive[1] == HANDSHAKE_PREFIX_SECOND))
+            ) {
+                receive.discard(1)
+            }
+            if (receive.size < 2) break
+            if (receive[1] == 0x5A.toByte()) break
+            if (!consumeHandshakePacket()) return false
+            if (state == State.DEAD) return false
         }
         if (receive.size < HEADER_BYTES) return false
         val header = receive.peek(HEADER_BYTES)
@@ -432,6 +481,9 @@ class Iap2LinkEngine(
         }
         if (control and CONTROL_SYNCHRONIZE != 0) {
             val sync = SynchronizationPayload.decode(payload ?: ByteArray(0))
+            // 解不出来不一定是垃圾帧：也可能是对端用**别的 LinkVersion** 发的 LSP。
+            // 那种情况旧实现静默丢弃、继续 500ms 重发本表，直到预算耗尽。
+            if (sync == null) rejectUnsupportedLinkVersion(payload)
             // echoFirst 模式下即使本引擎已 NORMAL 也继续处理对端 SYN 重发：对端引擎
             // （DiPlay openTunnel）只从 TCP 读，若其 SYN 到达时我方隧道尚未建立，
             // 首次回显会走错通道；其 500ms 的 SYN 重发让我们在隧道就绪后补上回显
@@ -518,6 +570,80 @@ class Iap2LinkEngine(
                 reportUnknownSessionData(sessionId, payload!!.size)
             }
         }
+    }
+
+    /**
+     * 消费一个 `FF 55` 握手族报文。返回 false = 字节不够，等更多输入。
+     *
+     * 处理原则：**先记下来，再定性**。第一次只记日志（个别车机会先发一个私有握手包
+     * 再进入参数协商，一刀切会把本可用的链路杀掉）；同一种应答累计出现
+     * [HANDSHAKE_REJECTION_LIMIT] 次、且此时我们连一条对端 LSP 都还没采纳
+     * （= 参数协商根本没开始），才判「对端拒绝链路」并立即终止。
+     */
+    private fun consumeHandshakePacket(): Boolean {
+        if (receive.size >= MARKER.size &&
+            (0 until MARKER.size).all { receive[it] == MARKER[it] }
+        ) {
+            receive.discard(MARKER.size)
+            return true
+        }
+        if (receive.size < 4) return false
+        val declared = u8(receive[2]) or (u8(receive[3]) shl 8)
+        if (declared == 0 || declared > MAX_HANDSHAKE_PAYLOAD) {
+            // 长度读不出合理值（可能是被截断的 FF5A、或对端用了别的长度端序）：
+            // **只记诊断、不计入拒绝**——连长度都读不出来，拿它拆链太冒险；
+            // 丢 2 字节继续扫描，后面的真帧照常能找回来。
+            onPeerHandshake?.invoke(PeerHandshake(receive.peek(4), 0, isDetect = false))
+            receive.discard(2)
+            return true
+        }
+        val total = 4 + declared
+        if (receive.size < total) return false
+        reportHandshakeAnswer(PeerHandshake(receive.take(total), declared, isDetect = false))
+        return true
+    }
+
+    /**
+     * 非 DETECT 握手应答的定性。
+     *
+     * 只在「还在协商、且一条 LSP 都没采纳」时才算拒绝——那种状态下对端除了 marker
+     * 不该发任何东西；它发了，就说明它在等一个本端没实现的握手应答（或直接拒绝）。
+     * 已经采纳过 LSP（进入参数协商/正常态）后收到的一律只记日志，不动链路。
+     */
+    private fun reportHandshakeAnswer(handshake: PeerHandshake) {
+        peerHandshakeRejections++
+        onPeerHandshake?.invoke(handshake)
+        if (!failFastOnHandshakeRejection) return
+        if (state != State.NEGOTIATING) return
+        if (adoptedSynchronization != null) return
+        if (peerHandshakeRejections < HANDSHAKE_REJECTION_LIMIT) return
+        die(
+            "peer rejected link：收到非 DETECT 的握手应答 ×$peerHandshakeRejections" +
+                "（车机侧 sendLackOfBackwardCompatibility），raw=${handshake.hex()}",
+        )
+    }
+
+    /**
+     * 对端 LSP 的 LinkVersion 与本端不同 → 立即定性。
+     *
+     * LSP 首字节就是 7 个链路参数里的第一项 `LinkVersion`（车机建议值 1）。
+     * [SynchronizationPayload.decode] 只认本端版本，别的版本返回 null——旧实现就此
+     * 把这条 SYN 静默丢掉。这里读出对端版本：这是**确定性证据**（不是猜控制字节），
+     * 所以不等第二次、直接终止，把 60 秒静默变成 1 秒定位。
+     *
+     * 版本字节离谱（> [MAX_PLAUSIBLE_LINK_VERSION]）时不判——那更可能是载荷不是 LSP，
+     * 交给上层当未知帧，别拿它拆链。
+     */
+    private fun rejectUnsupportedLinkVersion(payload: ByteArray?) {
+        if (payload == null || payload.size < LSP_MIN_BYTES) return
+        val version = u8(payload[0])
+        if (version == SYNCHRONIZATION_VERSION) return
+        if (version > MAX_PLAUSIBLE_LINK_VERSION) return
+        if (!failFastOnHandshakeRejection) return
+        die(
+            "peer rejected link：LSP LinkVersion=$version，本端只支持 $SYNCHRONIZATION_VERSION" +
+                "（车机侧 sendLackOfBackwardCompatibility）",
+        )
     }
 
     private fun completeNegotiationIfPending(nowMillis: Long) {
@@ -825,6 +951,26 @@ class Iap2LinkEngine(
         val MARKER = byteArrayOf(0xFF.toByte(), 0x55, 0x02, 0x00, 0xEE.toByte(), 0x10)
         const val HEADER_BYTES = 9
         private const val SYNCHRONIZATION_VERSION = 1
+
+        /** 握手族（`FF 55`）的第二个同步字节；`FF5A` 才是链路帧。 */
+        private const val HANDSHAKE_PREFIX_SECOND: Byte = 0x55
+
+        /** `FF 55 | u16LE 载荷长度 | 载荷` 能接受的最大载荷（防对端给个离谱长度卡住解析）。 */
+        private const val MAX_HANDSHAKE_PAYLOAD = 512
+
+        /** 非 DETECT 握手应答累计到这个次数才判「对端拒绝链路」（一次可能是私有握手包）。 */
+        private const val HANDSHAKE_REJECTION_LIMIT = 2
+
+        /** LSP 最小长度（10 字节定长头）；短于此不可能是同步包，不参与版本判定。 */
+        private const val LSP_MIN_BYTES = 10
+
+        /**
+         * 可当作「就是 LSP 版本号」的最大值。
+         *
+         * 超过它更可能是载荷根本不是 LSP（版本字节是随机内容），那种情况只记日志、
+         * 不拿它拆链。1..15 这一段覆盖所有已知的 LinkVersion 取值（现实里只有 1）。
+         */
+        private const val MAX_PLAUSIBLE_LINK_VERSION = 0x0F
         private const val CONTROL_SYNCHRONIZE = 0x80
         private const val CONTROL_ACKNOWLEDGEMENT = 0x40
         private const val CONTROL_EXTENDED_ACKNOWLEDGEMENT = 0x20

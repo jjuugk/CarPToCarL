@@ -183,7 +183,35 @@ B. 车机被动（iPhone 是发起方，常见）
 3. **只对「纯 SYN（不带 ACK 位）」回 SYN|ACK**。对 SYN|ACK 也回会形成无限乒乓  
    （两个实现互喂时协商永远不收敛，实测把 CPU 打满）。
 
-### 2.4 会话表
+### 2.3.1 握手族（`FF 55`）与「对端拒绝链路」✅
+
+`FF 55` 和 `FF 5A` 是**两族**报文。旧实现只认后者，前者被帧头扫描逐字节丢弃——
+于是「车机明确说我不兼容」这件事在日志里根本不存在，只能干等到上层预算耗尽。
+
+| 报文 | 形态 | 含义 |
+| --- | --- | --- |
+| DETECT marker | `FF 55 02 00 EE 10`（6 字节定长） | 唤醒/探测。车机可能每秒重发上百次（Honda HFT），正常，忽略 |
+| 握手应答 | `FF 55` + u16LE 载荷长度 + 载荷 | 对端对握手的回答。**本端没有实现握手应答** |
+
+车机固件（MIB3 SW3874，`iap2::CIAP2LinkHandshake`，状态机 `UNITIALIZED /
+HANDSHAKING / NEGOTIATING_PARAMETER / INITIALIZED / UNSUPPORTED`）的路径是
+`sendHandshake → evaluateHandshakeAnswer → 不兼容时 sendLackOfBackwardCompatibility`
+（见 `MIB3_CarPlay对端协议材料清点.html` §1.5），**「我不支持你」正是以非 marker 的
+`FF55` 报文出现**；另一条确定性证据是 LSP 首字节 `LinkVersion`（7 个链路参数里的第一项）。
+
+`Iap2LinkEngine` 的处置（2026-11-10）：
+
+1. 认出 marker → 丢弃，**不回调**（每秒重发，回调会刷屏）；
+2. 认出非 marker 且长度字段可读 → 计一次握手应答，回调 `onPeerHandshake` 把原始
+   字节打进日志；**累计 2 次、且一条 LSP 都还没采纳**（参数协商根本没开始）→
+   判 `peer rejected link` 立即终止；
+3. 长度字段读不出合理值（截断的 FF5A / 别的端序）→ 只记诊断、**不计入拒绝**
+   （连长度都读不出来，拿它拆链太冒险），丢 2 字节继续扫描；
+4. 对端 LSP 的 `LinkVersion != 1` → **立即**终止，不等第二次（确定性证据）。
+
+> 目的只有一个：把「协商无进展、等 60 秒预算耗尽」变成 1 秒内一行可定位的原因。
+> `Iap2LinkEngine.failFastOnHandshakeRejection = false` 可退回旧行为（只记日志）。
+
 
 | 会话 ID | type | version | 用途                     |
 | ----- | ---- | ------- | ---------------------- |

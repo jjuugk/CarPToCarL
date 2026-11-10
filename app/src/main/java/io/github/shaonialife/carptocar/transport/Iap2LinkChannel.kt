@@ -56,6 +56,14 @@ class Iap2LinkChannel(
         engine.onUnknownSessionData = { sessionId, size ->
             log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
         }
+        // 非 DETECT 的握手应答（车机侧 sendLackOfBackwardCompatibility 就在这一族）。
+        // 以前这类字节被帧头扫描逐字节丢弃，日志里只能看到「协商无进展」。
+        engine.onPeerHandshake = { handshake ->
+            log(
+                "LINK: 对端握手应答（非 DETECT）raw=${handshake.hex()} " +
+                    "len=${handshake.declaredPayloadLength}（累计 ${engine.peerHandshakeRejections} 次）",
+            )
+        }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             peerFrameCount++
             // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
