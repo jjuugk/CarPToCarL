@@ -123,4 +123,47 @@ class AvailabilityBodyMemoryTest {
         )
         assertEquals("无", AvailabilityBodyMemory.silentDescription(null, key))
     }
+
+    // ---- 2026-11-10 BUICK_3138：声明能收 0x4300 的车机不许被静默记忆堵死 ----
+
+    @Test
+    fun declaringReceiverIsNeverSilencedByHistory() {
+        val key = "buick_3138 b233 saic general motors silent_${System.nanoTime()}"
+        // 这台车的真实状态：三种形态各被判过一次静默 → 旧逻辑每轮都不发 0x4300
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS, preferDual = true)
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.MODERN_NESTED, preferDual = true)
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.LEGACY_FLAT, preferDual = true)
+        assertEquals(
+            "未声明可收时才允许退到「不发」",
+            AvailabilityBodyMemory.Variant.NONE,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+        // 可收清单里有 0x4300 → 必须回到首选形态继续发：不发等于关掉唯一的热点交换入口
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true, acceptsAvailability = true),
+        )
+    }
+
+    @Test
+    fun declaringReceiverWithPartialSilentHistoryStillEscalates() {
+        val key = "buick_3138 b233 saic general motors partial_${System.nanoTime()}"
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS, preferDual = true)
+        // 只有第一档被判过静默 → 仍然往下一档走，不是一律回到首选（否则阶梯白设）
+        assertEquals(
+            AvailabilityBodyMemory.Variant.MODERN_NESTED,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true, acceptsAvailability = true),
+        )
+    }
+
+    @Test
+    fun pinnedNoSendConclusionOutranksDeclaringReceiver() {
+        val key = "audi_mmi_9310 au_d5 saic_${System.nanoTime()}"
+        // 「不发 0x4300 也拿到了 0x4301」是有实证的结论，优先级高于「声明可收」
+        AvailabilityBodyMemory.recordSuccess(null, key, AvailabilityBodyMemory.Variant.NONE)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.NONE,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true, acceptsAvailability = true),
+        )
+    }
 }

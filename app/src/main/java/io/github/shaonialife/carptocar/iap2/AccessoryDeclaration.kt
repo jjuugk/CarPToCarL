@@ -318,16 +318,17 @@ object AccessoryDeclaration {
                 "iap2 车机可收清单未声明 $hex (${Iap2MessageIds.nameOf(messageId)}) " +
                     "$channel reason=accessory-did-not-advertise —— $action",
             )
-            ProtocolAudit.record(
-                ProtocolAudit.Code.UNSOLICITED_MESSAGE,
-                detail = "$hex ${Iap2MessageIds.nameOf(messageId)}（$channel，" +
-                    when {
-                        strictCut -> "严格模式裁剪"
-                        restricted -> "已裁剪"
-                        else -> "照常发送"
-                    } + "）",
-                evidence = "车机可收清单(${snap.receiveIds.size} 项)未包含该号；来源=${snap.source}",
-            )
+            // 只有「照常发送」才是越权，才该进审计。被裁掉的那一帧根本没上线——
+            // 2026-11-10 BUICK_3138 日志里就出现了「裁掉 0x4e0e」紧跟一条
+            // 「发了车机未声明可收的消息 —— 0x4e0e（严格模式裁剪）」的自相矛盾记录，
+            // 审计因此不可信（看起来像我们发了越权帧）。
+            if (!strictCut && !restricted) {
+                ProtocolAudit.record(
+                    ProtocolAudit.Code.UNSOLICITED_MESSAGE,
+                    detail = "$hex ${Iap2MessageIds.nameOf(messageId)}（$channel，照常发送）",
+                    evidence = "车机可收清单(${snap.receiveIds.size} 项)未包含该号；来源=${snap.source}",
+                )
+            }
         }
         if (strictCut || restricted) return false
         return true

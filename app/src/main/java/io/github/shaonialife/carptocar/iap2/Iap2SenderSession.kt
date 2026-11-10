@@ -137,6 +137,14 @@ class Iap2SenderSession(
      */
     private var preferDualAvailability = false
 
+    /**
+     * 车机在 0x1D01「可收清单」里是否声明了 0x4300。
+     *
+     * 声明了就**不允许**因为历史静默记忆而退到「不发」——见
+     * [AvailabilityBodyMemory.nextVariant] 的 `acceptsAvailability`。
+     */
+    private var acceptsAvailability = false
+
     /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
     private var lastLateStartSessionSignature: Int? = null
 
@@ -380,19 +388,32 @@ class Iap2SenderSession(
         receiverIdentity = identityText
         // 通用系（General Motors / Cinemo 组件栈）：0x4300 优先试「双标识体」。
         preferDualAvailability = isCinemoStack(identification, identityText)
+        // 车机自己声明能收 0x4300 时，历史静默记忆不许把它堵死（见 nextVariant 注释）。
+        acceptsAvailability = accessoryDeclaresReceive(Iap2MessageIds.CARPLAY_AVAILABILITY) == true
         // 只有真机（有 Context，可持久化）才启用阶梯；单测/纯 JVM 固定新版嵌套体，
         // 协议时序与改动前完全一致（也让用例之间不会通过进程内记忆互相污染）。
         availabilityVariant =
             if (context == null) {
                 null
             } else {
-                AvailabilityBodyMemory.nextVariant(context, identityText, preferDualAvailability)
+                AvailabilityBodyMemory.nextVariant(
+                    context,
+                    identityText,
+                    preferDualAvailability,
+                    acceptsAvailability,
+                )
             }
         availabilityVariant?.let {
             log(
                 "iap2 0x4300 报文体形态：${it.label}" +
                     "（该车机历史静默档=${AvailabilityBodyMemory.silentDescription(context, identityText)}" +
                     if (preferDualAvailability) " · 通用系 Cinemo：双标识优先）" else "）",
+            )
+        }
+        if (acceptsAvailability && AvailabilityBodyMemory.hasSilent(context, identityText)) {
+            log(
+                "iap2 车机可收清单声明能收 0x4300 —— 静默记忆不再阻断发送" +
+                    "（它说能收；不发等于关掉唯一的热点交换入口，只会一直等 0x4301 等到拆链）",
             )
         }
         val legacyCar = LEGACY_RECEIVER_MARKERS.any { identityText.contains(it) }
@@ -1054,12 +1075,26 @@ class Iap2SenderSession(
         // 变成「还在回帧」→ 不记静默 → 阶梯永远停在第一档，每轮死在同一处。
         val dataFramesAfter = channel.peerDataFrameCount
         if (dataFramesAfter != dataFramesBefore) return
-        val next = AvailabilityBodyMemory.recordSilent(context, receiverIdentity, variant, preferDualAvailability)
+        val next =
+            AvailabilityBodyMemory.recordSilent(
+                context,
+                receiverIdentity,
+                variant,
+                preferDualAvailability,
+                acceptsAvailability,
+            )
+        val nextLabel =
+            if (next == variant) {
+                // 车机声明可收 0x4300 时不会退到「不发」，形态原地不动——措辞别写成"下一轮改用"
+                "仍用「${next.label}」（车机声明可收 0x4300，不退到不发）"
+            } else {
+                "下一轮改用「${next.label}」"
+            }
         log(
             "iap2 ⚠ 0x4300（${variant.label}）发出后 ${windowNanos / 1_000_000_000}s 内车机零**业务**帧" +
                 "（累计控制帧 $dataFramesAfter 条业务 / ${channel.peerFrameCount} 条含纯 ACK，" +
                 "0x4301 与 0x6800 都没发起）——疑似该固件不认这个报文体；" +
-                "已记为静默，下一轮改用「${next.label}」",
+                "已记为静默，$nextLabel",
         )
     }
 

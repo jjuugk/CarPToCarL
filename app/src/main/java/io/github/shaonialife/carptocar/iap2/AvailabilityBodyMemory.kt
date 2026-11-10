@@ -77,21 +77,39 @@ object AvailabilityBodyMemory {
      * 本轮该用哪一种形态。
      *
      * 规则：记住过成功档就直接用；否则取第一个没被判「静默」的档；全被判静默时
-     * 停在 [Variant.NONE]（不再打扰车机，只等它自己开口）。
+     * 停在 [Variant.NONE]（不再打扰车机，只等它自己开口）——**除非车机自己声明
+     * 能收 0x4300**（[acceptsAvailability]），那种情况下静默记忆不再阻断发送。
      *
      * @param preferDual 通用系（Cinemo 栈）优先试 [Variant.DUAL_GROUPS]——见 [GM_ORDER]
+     * @param acceptsAvailability 车机在 0x1D01 的「可收清单」里是否声明了 0x4300。
+     *   声明了却因历史静默记忆而一言不发，等于把**唯一的热点交换入口**关掉：
+     *   2026-11-10 BUICK_3138（Cinemo）就是这样卡死的——三种形态各被判过一次静默，
+     *   此后每轮都不发 0x4300，车机也就永远不发 0x4301，链路每 40 秒被车机关一次。
+     *   而同一份日志里「不发 0x4300」那一轮同样零业务帧，说明「零业务帧」是这台车的
+     *   常态、根本不能证明报文体有错。所以：它说能收，就照发（回到首选形态）。
      */
     fun nextVariant(
         context: Context?,
         identityText: String,
         preferDual: Boolean = false,
+        acceptsAvailability: Boolean = false,
     ): Variant {
         val ok = readOk(context, identityText)
+        // 成功档优先，含 NONE——它意味着「不发 0x4300 也拿到了 0x4301」，是有实证的结论。
         if (ok != null) return ok
         val silent = readSilent(context, identityText)
         val order = if (preferDual) GM_ORDER else ORDER
-        return order.firstOrNull { it.name !in silent } ?: Variant.NONE
+        // 注意：NONE 也在 order 末尾，必须显式排除——否则「全静默」时 firstOrNull 会
+        // 直接返回 NONE，下面那条 acceptsAvailability 的兜底永远走不到。
+        val candidate = order.firstOrNull { it != Variant.NONE && it.name !in silent }
+        return candidate ?: if (acceptsAvailability) order.first() else Variant.NONE
     }
+
+    /** 这台车机是否被判过「某个形态静默」（日志用）。 */
+    fun hasSilent(
+        context: Context?,
+        identityText: String,
+    ): Boolean = readSilent(context, identityText).isNotEmpty()
 
     /** 已经试过哪些档（日志用）。 */
     fun silentDescription(
@@ -107,6 +125,8 @@ object AvailabilityBodyMemory {
      * 记录「该形态发出去后对端零反馈」。
      *
      * @param preferDual 与 [nextVariant] 保持一致，否则日志里「下一轮改用 X」会与实际不符
+     * @param acceptsAvailability 同上——声明可收的车机不会退到 [Variant.NONE]，
+     *   日志必须照实说「下一轮仍是 X」，否则排查时会以为阶梯卡住了
      * @return 下一轮将改用的形态（用于日志：让用户/排查直接看到阶梯走到哪了）
      */
     fun recordSilent(
@@ -114,12 +134,13 @@ object AvailabilityBodyMemory {
         identityText: String,
         variant: Variant,
         preferDual: Boolean = false,
+        acceptsAvailability: Boolean = false,
     ): Variant {
         if (variant == Variant.NONE) return Variant.NONE
         val key = receiverKey(identityText)
         val silent = readSilent(context, identityText) + variant.name
         store(context, key, readOk(context, identityText), silent)
-        return nextVariant(context, identityText, preferDual)
+        return nextVariant(context, identityText, preferDual, acceptsAvailability)
     }
 
     /** 记录「该形态车机正常应答（拿到了 0x4301 / 继续推进）」——成功即定档，清掉旧结论。 */
