@@ -9,9 +9,11 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.transport.DuplexStream
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
-import io.github.shaonialife.carptocar.transport.StreamDuplexStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
@@ -55,6 +57,15 @@ class Iap2BluetoothServer(
         val IPHONE_IAP2_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
         private const val SDP_NAME = "iAP2"
         private const val SESSION_TIMEOUT_MILLIS = 60_000L
+
+        /** 额度不足时 accept 的退让间隔（与 link_plus 一致）。 */
+        private const val BUDGET_POLL_MILLIS = 500L
+
+        /**
+         * 进程级共享：物理关闭额度是**整个进程**的，换一个 server 实例不该重新发一份。
+         * 见 [BtSocketClosePool] 的类注释。
+         */
+        private val closePool = BtSocketClosePool()
     }
 
     private var serverSocket: AtomicReference<BluetoothServerSocket?> = AtomicReference(null)
@@ -157,16 +168,36 @@ class Iap2BluetoothServer(
 
     @SuppressLint("MissingPermission")
     private fun acceptLoop() {
+        var waitingForBudget = false
         while (running) {
+            // 额度优先于 accept：close 在协议栈里是阻塞的，车机反复回连时若继续 accept，
+            // 只会把没关掉的套接字越堆越多，进程级配额吃满后 connect 直接失败。
+            if (!closePool.tryAcquire()) {
+                if (!waitingForBudget) {
+                    log("BT: 上一条套接字尚未关闭完成，暂停接受新连接（并发上限 ${closePool.budget}）")
+                }
+                waitingForBudget = true
+                try {
+                    Thread.sleep(BUDGET_POLL_MILLIS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    running = false
+                    break
+                }
+                continue
+            }
+            waitingForBudget = false
+            val server = serverSocket.get()
+            if (server == null) {
+                closePool.release()
+                running = false
+                break
+            }
             val socket: BluetoothSocket =
                 try {
-                    val server = serverSocket.get()
-                    if (server == null) {
-                        running = false
-                        break
-                    }
                     server.accept()
                 } catch (error: IOException) {
+                    closePool.release()
                     if (running) log("BT: accept 失败 - ${error.message}")
                     // 必须把 running 改回 false：accept 循环是唯一的接收方，循环一退出
                     // 就再没人接连接了。留着 true 会让 isRunning 一直骗人说「在监听」，
@@ -198,7 +229,7 @@ class Iap2BluetoothServer(
                     "BT: 忽略非目标设备连入 name=$peerName addr=${peerAddress ?: "?"}" +
                         "（当前目标：「${target.name}」）",
                 )
-                runCatching { socket.close() }
+                runCatching { closePool.closeAsync(socket) { socket.close() } }
                 continue
             }
             log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
@@ -214,8 +245,16 @@ class Iap2BluetoothServer(
 
     private fun runSession(socket: BluetoothSocket) {
         val stream =
-            StreamDuplexStream(socket.inputStream, socket.outputStream) {
-                runCatching { socket.close() }
+            try {
+                BtSocketStream(socket.inputStream, socket.outputStream) {
+                    closePool.closeAsync(socket) { socket.close() }
+                }
+            } catch (error: Exception) {
+                // 建链途中对端就断了（inputStream/outputStream 抛 IOException）：额度必须还，
+                // 否则每断一次 accept 的并发上限就少一格，最后整个监听停滞。
+                log("SESSION 失败: 无法打开蓝牙流 - ${error.message}")
+                closePool.closeAsync(socket) { socket.close() }
+                return
             }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
         activeChannel = channel
@@ -275,4 +314,29 @@ class Iap2BluetoothServer(
         serverSocket.getAndSet(null)?.let { runCatching { it.close() } }
         log("BT: 监听已停止")
     }
+}
+
+/**
+ * 蓝牙 RFCOMM 专用流：`close()` 只**提交**物理关闭，不在调用线程上阻塞。
+ *
+ * 不能直接用 StreamDuplexStream：它的 `close()` 会先 `input.close()` / `output.close()`，
+ * 而 Android 的 `BluetoothInputStream.close()` 内部就是 `mSocket.close()`——慢的那一步
+ * 依然发生在调用线程上，额度池等于白建（而且会把 socket 关两次）。
+ *
+ * read/write 不能共享一把锁：读线程会阻塞在 `read()` 里持锁等数据，写线程将永久拿不到锁
+ * （真机蓝牙上实际触发过）。写入的并发安全由 [Iap2LinkChannel] 的通道锁保证。
+ */
+private class BtSocketStream(
+    private val input: InputStream,
+    private val output: OutputStream,
+    private val onClose: () -> Unit,
+) : DuplexStream {
+    override fun read(buffer: ByteArray): Int = input.read(buffer)
+
+    override fun write(bytes: ByteArray) {
+        output.write(bytes)
+        output.flush()
+    }
+
+    override fun close() = onClose()
 }
