@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk)**
-> —— 主线固定直链（当前 1.2.33，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk)**
+> —— 主线固定直链（当前 1.2.34，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.33，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.33.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.34，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.34.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.33`（正式版；**车机说「我不支持你」时，1 秒内给结论，不再干等 60 秒**：车机固件（MIB3 SW3874 `iap2::CIAP2LinkHandshake`）在 `evaluateHandshakeAnswer` 判不兼容时会回 `sendLackOfBackwardCompatibility`——它是 `FF 55` 握手族里**非 marker** 的报文，而旧帧头扫描只认 `FF 5A`，整族被逐字节丢掉，日志里只剩「协商无进展」，只能等上层预算耗尽。本版把这一族接起来：① marker（`FF 55 02 00 EE 10`）识别为唤醒/探测，丢弃且**不回调**（车机可能每秒重发上百次，回调会刷屏）；② 非 marker 且长度字段可读 → 计一次握手应答、把原始字节打进日志，**累计 2 次且一条 LSP 都还没采纳**（参数协商根本没开始）就判 `peer rejected link` 立即终止；③ 长度读不出合理值时只记诊断、**不计入拒绝**——截断的 `FF 5A` 或别的端序不能拿来拆链；④ 对端 LSP 的 `LinkVersion != 1` 立即终止（确定性证据，不等第二次）。新增开关 `failFastOnHandshakeRejection`（默认 true，false 退回旧行为）与 `peerHandshakeRejections` 计数，`Iap2LinkChannel` / `VirtualIap2Link` 两条链路都接上 `onPeerHandshake` 诊断日志。单测新增 6 例锁住「拒绝要快」与「marker / 已采纳 LSP 之后不许误杀」，全量 576 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.34`（正式版；**撤掉画面停摆自动干预，看门狗退回「只观测」**：1.2.32 加的那套分级干预（8 秒 `requestVideoReinit`、每 8 秒轻推、30 秒 `client.stop()` 重建会话、阈值翻倍封顶 120 秒）在 2026-11-10 16:34 的实车日志里没有一次救到画面，反而全是副作用——① 引擎退出（7240 未监听）之后请求发出去没有任何接管者，日志却仍按 8 秒节奏刷「请求重建编码器」，把「引擎不在」的空白期写成了「正在恢复」；② 阈值会翻倍（30→60→120），上一轮已顶到 60 秒，第 5 轮停摆到 36 秒时「强制重建会话」根本还没到；③ 它会自己 `client.stop()`，在排障时把「我们主动断」和「引擎自己断」混成一种现象。本版删除 `StallJudge` / `StallRecoveryPrefs` 与其 7 个用例、看门狗里整段干预分支、设置页「画面停摆自动恢复」开关，**不再有任何自动停摆会话重建**。保留的全是纯诊断：停摆/恢复日志、手机屏幕状态、判据仍用「最后一帧距今」（通话期 0.8fps 心跳帧不误报）、`VideoSender.noteWriteStall()` 写卡死观测。顺带把 `BUILD_TAG` 清空，正式包版本行不再带 `#p1` 尾巴。单测 569 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -829,6 +829,56 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.34 —— 2026-11-10（撤掉画面停摆自动干预，看门狗退回「只观测」，正式版）
+
+本版是**减法**：把 1.2.32 加进去的「画面停摆分级干预」整套拿掉。
+
+**一、为什么撤**
+
+1.2.32 的干预逻辑是：画面冻住 8 秒 → `requestVideoReinit()`；每 8 秒再推一次；
+30 秒仍未恢复 → `client.stop()` 强制重建 CarLife 会话（阈值随次数翻倍，30→60→120 秒）。
+
+2026-11-10 16:34 的实车日志（小米 Android 17 + Audi MMI 3232，1.2.33 包）把这三个动作全都跑了一遍，
+**一次都没救到画面**，反而每一处都在误导判断：
+
+- **空转还刷日志**：引擎退出（`7240 未监听`）之后，`requestVideoReinit()` 往一个没人监听的端口发
+  98386+98311，发出去没人接，日志却仍按 8 秒节奏输出「停摆 N 秒——请求引擎重建编码器」。
+  在日志里，「引擎不在」和「正在被我们抢救」长得一模一样。
+- **阈值翻倍让它永远迟到**：上一轮已把阈值顶到 60 秒，第 5 轮停摆到 36 秒时「强制重建会话」
+  还没到点，用户自己手动断了。救火动作比人还慢，就没有存在意义。
+- **它自己会 `client.stop()`**：排障时最忌讳「观察者改变被观察对象」——一旦它动手，
+  「四条通道同时 reset」到底是引擎自己重建，还是我们拆的，就分不清了。
+
+**二、撤掉的范围**
+
+| 位置 | 内容 |
+|---|---|
+| `video/StallJudge.kt` | 8s 重建 / 30s 拆会话 / 阈值翻倍的纯策略，整文件删除 |
+| `video/StallRecoveryPrefs.kt` | `settings/video_stall_recovery`、`video_stall_by_frame_age` 两个偏好键，整文件删除 |
+| `video/StallJudgeTest.kt` | 7 个用例，随策略一起删除 |
+| `carlife/CarLifeHijack.kt` | `stallInterventions` / `lastStallReinitAt` / `stallReconnectDelay`、`isPhoneInCall()`、看门狗里整段 `StallJudge` 分支 |
+| `res/layout/activity_main.xml` | 设置页「画面停摆自动恢复」整块 |
+| `MainActivity.kt` | 该开关的绑定与提示 |
+
+关键一点：**看门狗再也不会调 `client.stop()`**。这条路径现在不存在。
+
+**三、保留的（纯诊断，无副作用）**
+
+- 「画面源停摆 N 秒（最后一帧 Xs 前，本窗口 N 帧，零个新 IDR）……屏幕状态=点亮/锁屏」与
+  「画面源恢复（停摆 N 秒）」；
+- 判据仍是**最后一帧距今**，不是旧的「2 秒窗口帧数」——通话/语音接管期引擎降到 0.8fps 心跳帧时，
+  旧判据按定义必然误报，新判据（心跳帧间隔 ~1.25 秒）不会；
+- `VideoSender.noteWriteStall()`：帧写进锁前打点、`finally` 清零，>3 秒未返回记一行（同一笔 5 秒限流），
+  只记日志、**不关 socket**。
+
+另外把 `BUILD_TAG` 清空——1.2.33 的正式包版本行尾还挂着 `#p1`（上一轮 P1 实验的残留标记），
+本版起正式包不再带尾巴。
+
+**四、验证**
+
+单测 **569 例 0 失败**（较 1.2.33 少 7 例，即删掉的 `StallJudgeTest`）。
+`docs/video-stall-recovery-20261108.md` 顶部已标注「只作历史记录」，当前实现以代码为准。
 
 ### 1.2.33 —— 2026-11-10（链路层认得出「车机拒绝」：`FF 55` 握手族不再被静默丢弃，正式版）
 
