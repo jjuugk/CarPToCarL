@@ -245,7 +245,7 @@ iAP2 → AirPlay 配对 → 视频推流 → 触摸回传 → 虚拟屏注入，
 | 触摸无报文（三） | 事件通道是双向 RTSP | 每条来向请求立即回 RTSP/1.0 200 OK（加密）；不应答→车机塞 3 条就断通道（「能滑一下」） |
 | 触摸坐标 | 奥迪 HID 描述符 | uuid=1 eso_touchScreen：5 字节 `[tip 1bit][X u16LE][Y u16LE]`，X≤1412/Y≤654=屏幕分辨率绝对坐标；uuid=0 是 Consumer 媒体键（非触摸） |
 | 虚拟 iAP2 链路 | iAPSendMessage 语义 | 事件通道 iAPSendMessage.data = 链路层字节流；marker=DETECT，车机（客户端）每 200ms 重发、等服务器回一次 DETECT 后发 SYN；服务器重发 DETECT 会把客户端打回 Detecting |
-| 0x4E0E 杀 BT 链路 | 车机接受但不 ACK | sendControl(awaitAck=false) 发后不管；0x4300 同改 |
+| 0x4E0E 杀 BT 链路 | 车机接受但不 ACK | sendControl(awaitAck=false) 发后不管。**0x4300 例外**：新协议 + 车机声明可收时走「等确认 + 有限重传」，见 §9c-2 |
 | mDNS 抓错目标 | 手机开热点共享 | 按「本机 IP /24 前缀」过滤 _airplay._tcp 结果；mDNS 失败时网关兜底（网关=车机，端口 7000） |
 
 **调试流程坑**：`adb install -r` 不杀旧进程（旧 dex 继续跑，修复「无效」）；
@@ -287,6 +287,36 @@ EVENT: 命令 type=requestUI params={url=}                    ×1（旧实现当
 
 成功判定同时改严：**RTSP 200 且报文体 `status == 0`**（无 status 字段或解析失败仍算成功）。
 旧实现只看状态行，车机回 `200 OK` + `{status:-1}` 时被当成功，现场是「都成功了，过一会儿断」。
+
+### 9c-2. `0x4300` 要走链路确认，但补不上不能拆链（2026-11-10 修正）
+
+`0x4300`（CarPlayAvailability）是无线会话**唯一**的钥匙：车机收到它才会起 AirPlay 服务、
+才会去 WiFi 上找 `_carplay-ctrl._tcp`、才会回 `/ctrl-int/1/connect` 邀请、才肯下发
+`0x4301`（AP 参数）。它丢了，后面每一步都在等一个永远不会来的东西。
+
+旧实现一律 `sendFireAndForget`。原因是历史教训：2026-10-26 别克 E2LB 收到这一帧后
+**整个控制会话不再 ACK 任何帧**，进重传队列会按链路级上限（10 次 ≈ 40 秒）走到
+`packet N not acknowledged` 拆链，把还活着的 RFCOMM 亲手掐掉 → 42 秒一轮的重连死循环。
+
+两件事其实是分开的，现在分开处理：
+
+| 场景 | 送达方式 |
+|---|---|
+| 新协议（`wifiGen=NEW`）**且** 可收清单声明能收 `0x4300` | `sendControl(awaitAck=true, retransmitLimit=2, dropWhenExhausted=true)` |
+| 其余（旧协议车机、清单拒收、`LEGACY_FLAT` 双发） | `sendFireAndForget`（原样不动） |
+
+`dropWhenExhausted` 是引擎级新语义：重传用尽时**只从待确认队列摘掉这一帧**、回调
+`onFrameAbandoned` 打一行 `LINK: ⚠ 帧 seq=N 重传 2 次仍未被确认——已放弃这一帧，链路保持`，
+**不 die**。判据边界很清楚——「车机不认这一帧」该换报文体（静默阶梯），
+「链路坏了」才该拆链；用前者的证据去执行后者的动作，就是那 6 轮死循环。
+
+上限取 2 次（RTO 4s，共 8s）而不是链路级 10 次：车机对它的 ACK 是毫秒级的
+（2026-11-10 BUICK_3138 日志 `ack=198`），8 秒还没确认就是根本不打算认；而这个窗口
+必须落在 `0x4301` 的 8 秒等待窗口之内，否则补包和等待互相打脸。
+
+参考实现 `link_plus` 的 `modernBootstrap` 分支对同类车机用的就是 `send()`（等确认），
+注释记着实车依据：*「buick.2 对照日志中最后一包未被确认，发后不管无法恢复未获确认的
+启动请求」*。我们补上了它缺的那半句：**确认失败要能优雅放弃**。
 
 ## 9d. WinPlay（Windows 接收端）实测记录（2026-10-19）
 

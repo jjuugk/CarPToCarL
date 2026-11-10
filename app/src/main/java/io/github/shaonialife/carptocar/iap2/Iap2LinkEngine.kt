@@ -113,6 +113,17 @@ class Iap2LinkEngine(
         var retransmissions: Int = 0,
         var deadlineMillis: Long = 0,
         val awaitAck: Boolean = true,
+        /**
+         * 这一帧自己的重传上限（null = 用链路级的 [effectiveMaxRetransmissions]）。
+         *
+         * 给「补一次就好、补不上也别为它拆链」的帧用——0x4300 是典型：它是无线会话
+         * 唯一的钥匙，值得等确认；但它也是历史上唯一一类「发出去之后车机整个控制会话
+         * 停摆」的帧，按链路级上限（10 次 ≈ 40 秒）走到头会 die，把还活着的 RFCOMM
+         * 亲手拆掉（2026-10-26 别克 E2LB 那 6 轮 42 秒循环就是这么来的）。
+         */
+        val retransmitLimit: Int? = null,
+        /** 重传到上限后的处置：true = 丢掉这一帧、链路继续；false = 按链路级语义 die。 */
+        val dropWhenExhausted: Boolean = false,
     )
 
     var state: State = State.IDLE
@@ -164,6 +175,15 @@ class Iap2LinkEngine(
 
     /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
+
+    /**
+     * 诊断：「可丢弃」的帧重传到上限、被主动放弃时回调（参数为人类可读说明）。
+     *
+     * 只对 [Packet.dropWhenExhausted] 的帧触发——链路级帧到上限仍然 die，语义不变。
+     * 这条日志必须存在：不然「0x4300 发出去了、车机也收到过，但没回 0x4301」与
+     * 「0x4300 压根没被确认」在日志里长得一模一样，排查时无法区分。
+     */
+    var onFrameAbandoned: ((String) -> Unit)? = null
 
     /**
      * 诊断：**首次**因对端窗口满而停发时回调一次（(对端声明窗口, 实际生效窗口, 还在排队的帧数)）。
@@ -417,6 +437,8 @@ class Iap2LinkEngine(
         bytes: ByteArray,
         nowMillis: Long,
         awaitAck: Boolean = true,
+        retransmitLimit: Int? = null,
+        dropWhenExhausted: Boolean = false,
     ): Boolean {
         if (state == State.DEAD) return false
         val limit = (peerSynchronization?.maxLength ?: 0xFFFF) - HEADER_BYTES - 1
@@ -424,7 +446,14 @@ class Iap2LinkEngine(
             die("control payload ${bytes.size} exceeds negotiated limit $limit")
             return false
         }
-        sendBacklog += Packet(0, bytes.copyOf(), awaitAck = awaitAck)
+        sendBacklog +=
+            Packet(
+                0,
+                bytes.copyOf(),
+                awaitAck = awaitAck,
+                retransmitLimit = retransmitLimit,
+                dropWhenExhausted = dropWhenExhausted,
+            )
         drainSendWindow(nowMillis)
         return true
     }
@@ -755,8 +784,8 @@ class Iap2LinkEngine(
                 ?: unacknowledged.minByOrNull { sequenceDistance(it.sequence, acknowledgement) }
                 ?: return
         target.retransmissions += 1
-        if (target.retransmissions > maxRetransmissions) {
-            die("packet ${target.sequence} not acknowledged")
+        if (exhausted(target, maxRetransmissions)) {
+            if (!abandonIfDisposable(target)) die("packet ${target.sequence} not acknowledged")
             return
         }
         target.deadlineMillis = nowMillis + retransmissionDelayMillis()
@@ -882,12 +911,38 @@ class Iap2LinkEngine(
         val next = unacknowledged.minByOrNull { it.deadlineMillis } ?: return
         next.deadlineMillis = nowMillis + retransmissionDelayMillis()
         next.retransmissions += 1
-        if (next.retransmissions > effectiveMaxRetransmissions()) {
-            die("packet ${next.sequence} not acknowledged")
+        if (exhausted(next, effectiveMaxRetransmissions())) {
+            if (!abandonIfDisposable(next)) die("packet ${next.sequence} not acknowledged")
             return
         }
         writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
         retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
+    }
+
+    /** 这一帧的重传次数是否已到上限（[Packet.retransmitLimit] 优先于链路级上限）。 */
+    private fun exhausted(
+        target: Packet,
+        defaultLimit: Int,
+    ): Boolean = target.retransmissions > (target.retransmitLimit ?: defaultLimit)
+
+    /**
+     * 上限到了但这一帧是「可丢弃」的：把它从待确认队列摘掉，链路继续跑。
+     *
+     * 与 die 的区别只在**责任归属**：走到上限说明对端不认这一帧，不是链路坏了
+     * （RFCOMM 还在收心跳、还在回别的 ACK）。为了一个请求拆掉整条链路，会让车机
+     * 把「手机掉线」重新走一遍配对，代价远大于这一帧本身。
+     *
+     * @return true = 已丢弃、调用方不要再 die；false = 不可丢弃，调用方按原语义 die
+     */
+    private fun abandonIfDisposable(target: Packet): Boolean {
+        if (!target.dropWhenExhausted) return false
+        unacknowledged.remove(target)
+        retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
+        onFrameAbandoned?.invoke(
+            "帧 seq=${target.sequence}（${target.payload.size}B）重传 ${target.retransmissions} 次仍未被确认——" +
+                "已放弃这一帧，链路保持",
+        )
+        return true
     }
 
     private fun sendSynchronization() {

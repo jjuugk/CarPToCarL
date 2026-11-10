@@ -573,6 +573,70 @@ class Iap2LinkEngineTest {
         )
     }
 
+    /**
+     * 「可丢弃」的帧（`0x4300` 现在就走这条）重传到上限后只丢自己，链路必须活着。
+     *
+     * 2026-10-26 别克 E2LB：车机收到 0x4300 后不再 ACK 任何帧，按链路级上限（10 次
+     * ≈ 40 秒）走到头就会 `packet N not acknowledged` 拆链，把还活着的 RFCOMM 亲手
+     * 掐掉——这才是那 6 轮「42 秒重连死循环」的元凶。现在这一帧带
+     * `retransmitLimit=2 + dropWhenExhausted`：补两次就放弃，链路留给下一次。
+     */
+    @Test
+    fun disposableFrameIsAbandonedInsteadOfKillingTheLink() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        val abandoned = mutableListOf<String>()
+        phone.onFrameAbandoned = { abandoned += it }
+        phone.takeOutput()
+        assertTrue(
+            phone.sendControl(
+                Iap2Csm.encode(0x4300),
+                tick(),
+                awaitAck = true,
+                retransmitLimit = 2,
+                dropWhenExhausted = true,
+            ),
+        )
+        phone.takeOutput()
+
+        // 车机此后一帧都不回：RTO 4s，连推到 25s 足够越过「2 次重传」的上限
+        var now = 4_100L
+        repeat(6) {
+            phone.advanceTime(now)
+            now += 4_100
+        }
+        phone.takeOutput()
+
+        assertTrue("可丢弃的帧到上限后必须放弃这一帧，而不是拆链", !phone.isDead)
+        assertEquals("放弃时必须留一条可排查的日志", 1, abandoned.size)
+    }
+
+    /** 反向守卫：不带 dropWhenExhausted 的帧到上限仍然 die（原语义一点没动）。 */
+    @Test
+    fun ordinaryFrameStillDiesWhenNeverAcknowledged() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        phone.takeOutput()
+        assertTrue(phone.sendControl(Iap2Csm.encode(0x1D02), tick()))
+        phone.takeOutput()
+
+        var now = 4_100L
+        repeat(14) {
+            phone.advanceTime(now)
+            now += 4_100
+        }
+
+        assertTrue("普通帧重传到链路级上限仍要 die，否则看门狗就废了", phone.isDead)
+    }
+
     /** 构造车机侧的 EAK 帧（control=0x60 = ACK|EAK，无载荷，长度 9）。 */
     private fun extendedAckFrame(
         ack: Int,

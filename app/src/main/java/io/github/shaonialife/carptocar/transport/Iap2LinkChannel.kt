@@ -69,6 +69,9 @@ class Iap2LinkChannel(
         engine.onUnknownSessionData = { sessionId, size ->
             log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
         }
+        engine.onFrameAbandoned = { detail ->
+            log("LINK: ⚠ $detail（这一帧丢了，但链路没拆——车机不认它不等于链路坏了）")
+        }
         // 对端窗口满而停发（发送窗口按 min(本方 0x7F, 对端声明) 计）。
         // 日志要给到「从第几帧起被卡住、卡了多少帧」，否则现场只能看到「发了没 ACK」。
         engine.onSendWindowHold = { peerMax, effective, backlog ->
@@ -132,10 +135,19 @@ class Iap2LinkChannel(
     fun sendControl(
         bytes: ByteArray,
         awaitAck: Boolean = true,
+        retransmitLimit: Int? = null,
+        dropWhenExhausted: Boolean = false,
     ): Boolean {
         synchronized(lock) {
             if (terminated) return false
-            val accepted = engine.sendControl(bytes, nowMillis(), awaitAck)
+            val accepted =
+                engine.sendControl(
+                    bytes,
+                    nowMillis(),
+                    awaitAck,
+                    retransmitLimit,
+                    dropWhenExhausted,
+                )
             drainOutputLocked()
             return accepted
         }

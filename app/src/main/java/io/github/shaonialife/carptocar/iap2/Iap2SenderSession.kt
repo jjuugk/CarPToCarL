@@ -320,6 +320,16 @@ class Iap2SenderSession(
         /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
         const val START_SESSION_RAW_LOG_BYTES = 1_024
 
+        /**
+         * `0x4300` 走「等确认」时允许的重传次数（不含首发）。
+         *
+         * 只给新协议 + 车机声明可收 0x4300 的情况用。给 2 次而不是链路级 10 次：
+         * 车机对它的 ACK 是毫秒级的（2026-11-10 BUICK_3138 日志 ack=198），RTO 4 秒，
+         * 8 秒内还没确认就说明它根本不打算认这一帧——再补也补不进去，而这个窗口必须
+         * 落在 8 秒的 0x4301 等待窗口之内，否则补包和等待互相打脸。
+         */
+        const val AVAILABILITY_RETRANSMIT_LIMIT = 2
+
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
 
@@ -1019,6 +1029,10 @@ class Iap2SenderSession(
      *
      * 都是发后不管（[sendFireAndForget]）：0x4300 曾被实测「ACK 但有车机从此沉默」，
      * 进重传队列只会让看门狗提前把链路杀掉。
+     *
+     * **例外**（[deliverAvailability]）：新协议车机 **且** 可收清单里声明能收 0x4300 时，
+     * 这一帧改走「等确认 + 有限重传」。见该方法的注释——这是唯一的热点交换入口，
+     * 丢掉它整条链就停在「等 0x4301」上，而车机此时还活得好好的。
      */
     private fun sendAvailability() {
         when (availabilityVariant ?: AvailabilityBodyMemory.Variant.MODERN_NESTED) {
@@ -1028,16 +1042,14 @@ class Iap2SenderSession(
                 // 时只回链路 ACK，一条主动消息都不发（0x6800/0x5000/0x4c00/0x4301 全无）。
                 val wired = legacyDeviceIdentifier()
                 val wireless = bluetoothMac.lowercase()
-                sendFireAndForget(
-                    Iap2MessageIds.CARPLAY_AVAILABILITY,
+                deliverAvailability(
                     Iap2Csm.group(0, Iap2Csm.u8(0, 1), Iap2Csm.string(1, wired)) +
                         Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, wireless)),
                 )
             }
 
             AvailabilityBodyMemory.Variant.MODERN_NESTED ->
-                sendFireAndForget(
-                    Iap2MessageIds.CARPLAY_AVAILABILITY,
+                deliverAvailability(
                     Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, bluetoothMac)),
                 )
 
@@ -1050,6 +1062,36 @@ class Iap2SenderSession(
 
             AvailabilityBodyMemory.Variant.NONE ->
                 log("iap2 0x4300 本轮不发（该车机对两种报文体都无反应——只等它自己发 0x4301）")
+        }
+    }
+
+    /**
+     * `0x4300` 的送达方式：**能确认就确认，确认不到就放弃这一帧，绝不拆链**。
+     *
+     * 为什么值得等确认（对齐 link_plus 的 `modernBootstrap` 分支）：它是无线会话唯一的
+     * 钥匙。车机收到它才会起来 AirPlay 服务、才会去 WiFi 上找 `_carplay-ctrl._tcp`、
+     * 才会回 `/ctrl-int/1/connect` 邀请、才肯下发 0x4301。link_plus 的注释记着实车依据：
+     * *「buick.2 对照日志中最后一包未被确认，发后不管无法恢复未获确认的启动请求」*。
+     *
+     * 为什么限定「新协议 + 声明可收」：老协议车机（Audi MIB3）根本不认 0x4300，
+     * 让它等确认只是白占 8 秒窗口；拒收清单的车机同理。
+     *
+     * 为什么要有重传上限（[AVAILABILITY_RETRANSMIT_LIMIT]）且失败只丢帧不 die：
+     * 2026-10-26 别克 E2LB 实测过反例——车机收到这一帧后整个控制会话不再 ACK 任何帧，
+     * 按链路级上限（10 次 ≈ 40 秒）走到头就会 `packet N not acknowledged` 拆链，
+     * 把还活着的 RFCOMM 亲手掐掉，变成 42 秒一轮的重连死循环。而「车机不认这一帧」
+     * 与「链路坏了」是两件事：前者该换报文体（[noteAvailabilitySilence]），后者才该拆。
+     */
+    @Synchronized
+    private fun deliverAvailability(body: ByteArray) {
+        if (wifiGen == ReceiverProfile.WifiGen.NEW && acceptsAvailability) {
+            sendAwaitingWithBudget(
+                Iap2MessageIds.CARPLAY_AVAILABILITY,
+                body,
+                AVAILABILITY_RETRANSMIT_LIMIT,
+            )
+        } else {
+            sendFireAndForget(Iap2MessageIds.CARPLAY_AVAILABILITY, body)
         }
     }
 
@@ -1399,6 +1441,43 @@ class Iap2SenderSession(
         }
         log("iap2 tx=0x${messageId.toString(16).padStart(4, '0')}（发后不管）")
         SessionTrace.csm(SessionTrace.Dir.TX, "bt", messageId, body, "fire-and-forget")
+    }
+
+    /**
+     * [send] 的第三种变体：**等确认、有重传，但重传用尽只丢这一帧、不拆链**。
+     *
+     * 与 [send] 的唯一差别是重传预算（[retransmitLimit]）和到顶后的处置（丢帧 vs die）。
+     * 只该给「丢了整条链就停摆、但丢了也不代表链路坏了」的帧用——目前只有 `0x4300`：
+     * 车机不认它时该做的是换报文体（[noteAvailabilitySilence]），不是把 RFCOMM 拆掉重来。
+     */
+    @Synchronized
+    private fun sendAwaitingWithBudget(
+        messageId: Int,
+        body: ByteArray,
+        retransmitLimit: Int,
+    ) {
+        if (!AccessoryDeclaration.noteSend(messageId, "bt", log)) return
+        val frame = Iap2Csm.encode(messageId, body)
+        val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
+        var offset = 0
+        while (offset < frame.size) {
+            val end = minOf(offset + limit, frame.size)
+            if (!channel.sendControl(
+                    frame.copyOfRange(offset, end),
+                    awaitAck = true,
+                    retransmitLimit = retransmitLimit,
+                    dropWhenExhausted = true,
+                )
+            ) {
+                throw IOException("iAP2 链路在发送 0x${messageId.toString(16)} 时关闭")
+            }
+            offset = end
+        }
+        log(
+            "iap2 tx=0x${messageId.toString(16).padStart(4, '0')}（等确认，最多重传 $retransmitLimit 次；" +
+                "补不上只丢这一帧，不拆链）",
+        )
+        SessionTrace.csm(SessionTrace.Dir.TX, "bt", messageId, body, "ack-budget=$retransmitLimit")
     }
 
     private fun expect(
