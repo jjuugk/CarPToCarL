@@ -9,11 +9,13 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * 车机 `0x1D01` 声明快照：跨链路合并、越权取证、只裁两条 MIB3 专用消息。
+ * 车机 `0x1D01` 声明快照：跨链路合并、越权取证、宽松/严格两档裁剪。
  *
- * 这些断言锁的是两条真机结论，别「顺手推广」：
- *  - 清单只能证明「有」不能证明「没有」→ 普通消息越权照发；
- *  - 0xA100 / 0xFFF0 是唯一有重启证据的例外 → 按声明硬裁，且不关整条隧道。
+ * 这些断言锁的是真机结论，别「顺手推广」：
+ *  - 宽松模式（老协议 / 清单未到）：清单只能证明「有」不能证明「没有」→ 普通消息越权照发；
+ *  - 0xA100 / 0xFFF0 在任何模式下都按声明硬裁，且不关整条隧道；
+ *  - 严格模式（新协议 [ReceiverProfile.WifiGen.NEW]）：清单之外一律不发，
+ *    但协议骨架（识别/MFi/0x4300）永不裁——裁掉等于不连接。
  */
 class AccessoryDeclarationTest {
 
@@ -156,5 +158,68 @@ class AccessoryDeclarationTest {
         val c = AccessoryDeclaration.Components(currentLanguage = "de_DE")
         identification(setOf(0x4300), components = c)
         assertEquals("de", AccessoryDeclaration.deviceLanguage("zh-CN"))
+    }
+
+    // ---- 严格模式（新协议车机）：清单之外不发 ----
+
+    /** 别克 BUICK_3138 / 凯迪拉克 CT5 的 9 项可收清单（2026-11-10 日志原文）。 */
+    private val gmReceiveList =
+        setOf(0x6801, 0x4C01, 0x4C04, 0x5001, 0x4E09, 0x4E0A, 0x4E0B, 0x4E0C, 0x4300)
+
+    @Test
+    fun strictModeCutsUndeclaredWirelessMessages() {
+        identification(gmReceiveList)
+        AccessoryDeclaration.setStrictDeclaredOnly(true)
+        assertFalse(note(0x4E0D))
+        assertFalse(note(0x4E0E))
+        assertFalse(note(0x4E0E, "tunnel"))
+        assertFalse(AccessoryDeclaration.wouldSend(0x4E0E))
+        assertTrue(
+            "严格模式的日志必须点名是哪一档裁的：" + lines.joinToString(" | "),
+            lines.first().contains("新协议严格模式"),
+        )
+    }
+
+    @Test
+    fun strictModeKeepsDeclaredMessagesSilently() {
+        identification(gmReceiveList)
+        AccessoryDeclaration.setStrictDeclaredOnly(true)
+        assertTrue(note(0x4E09))
+        assertTrue(note(0x4E0C))
+        assertTrue(note(0x4300))
+        assertTrue(lines.isEmpty())
+    }
+
+    @Test
+    fun protocolSkeletonSurvivesStrictMode() {
+        identification(gmReceiveList)
+        AccessoryDeclaration.setStrictDeclaredOnly(true)
+        // 车机清单里没有这四条，但它们是会话下限：裁掉就永远连不上
+        assertTrue(note(0x1D02))
+        assertTrue(note(0xAA00))
+        assertTrue(note(0xAA02))
+        assertTrue(note(0xAA05))
+        assertEquals(4, lines.size)
+        assertTrue(lines.all { it.contains("协议骨架") })
+    }
+
+    @Test
+    fun looseModeKeepsSendingUndeclaredMessages() {
+        identification(gmReceiveList)
+        // 不设严格模式 = 老协议/未知代际的既有行为，必须逐字节保持
+        assertTrue(note(0x4E0D))
+        assertTrue(note(0x4E0E))
+        assertTrue(lines.all { it.contains("仍照常发送") })
+    }
+
+    @Test
+    fun resetClearsStrictMode() {
+        identification(gmReceiveList)
+        AccessoryDeclaration.setStrictDeclaredOnly(true)
+        assertTrue(AccessoryDeclaration.isStrictDeclaredOnly)
+        AccessoryDeclaration.reset()
+        assertFalse(AccessoryDeclaration.isStrictDeclaredOnly)
+        identification(gmReceiveList)
+        assertTrue(note(0x4E0D))
     }
 }

@@ -668,12 +668,13 @@ class Iap2SenderSession(
         // 真机顺序：0x4301 之后回 0x4E0E（传输标识确认）。
         // Audi 实测：车机对该消息**接受但从不 ACK**（其余包毫秒级 ACK）——必须发后不管，
         // 否则重传看门狗在 +20s 把整条蓝牙链路杀掉（会话与触摸载体随之丢失）。
-        // 车机可收清单里没声明也照发（越权取证在 [send]/[sendFireAndForget] 出口统一做）。
+        // 越权取证在 [send]/[sendFireAndForget] 出口统一做；新协议车机没声明可收时，
+        // 这条会在出口被严格模式裁掉（GM/Cinemo 9 项清单里就没有它）。
         sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
         )
-        log("iap2 0x4e0e/0x4300 —— Phase 1 完成：拿到热点凭据与（可能的）AirPlay 端点")
+        log("iap2 0x4300/0x4e0e —— Phase 1 完成：拿到热点凭据与（可能的）AirPlay 端点")
 
         // 后续（Phase 2）：加入热点 → mDNS 解析 _airplay._tcp → AirPlay 主会话。
         // 0x5703 缺席时 AP 信息来自 0x4301（已并入 endpoint）——保活期车机重发
@@ -826,6 +827,8 @@ class Iap2SenderSession(
         // 只有 WinPlay/Roylyl 测试台那 16 项清单没列，而那台是测试台、参考价值低。
         // 没有证据就别动。
         val modernBootstrap = wifiGen == ReceiverProfile.WifiGen.NEW
+        // 严格模式（AccessoryDeclaration.noteSend）已覆盖同一判据；这里保留首道闸，
+        // 是因为它决定 `sent` 计数与「跳过了哪条」的日志措辞——出口那道只会记 WARN。
         val sendWirelessUpdate =
             !modernBootstrap || accessoryDeclaresReceive(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE) != false
         if (sendWirelessUpdate) {
@@ -917,14 +920,18 @@ class Iap2SenderSession(
      */
     fun nudgeCarPlayAvailability(reason: String): Boolean {
         if (!channel.isAlive) return false
-        sendFireAndForget(
-            Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
-            Iap2Csm.string(0, bluetoothMac),
-        )
+        val withTransport = AccessoryDeclaration.wouldSend(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
+        if (withTransport) {
+            sendFireAndForget(
+                Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
+                Iap2Csm.string(0, bluetoothMac),
+            )
+        }
         sendAvailability()
         log(
-            "iap2 叫醒车机（$reason）：重发 0x4e0e + 0x4300——" +
-                "车机没起 AirPlay 服务（7000 拒绝），用可用性请求把它从「等 IAP2 信息」里叫出来",
+            "iap2 叫醒车机（$reason）：重发 ${if (withTransport) "0x4e0e + " else ""}0x4300——" +
+                "车机没起 AirPlay 服务（7000 拒绝），用可用性请求把它从「等 IAP2 信息」里叫出来" +
+                if (withTransport) "" else "（0x4e0e 未被车机声明可收，严格模式已省）",
         )
         return true
     }
@@ -960,14 +967,21 @@ class Iap2SenderSession(
         // 以 `packet 97 not acknowledged` 拆链——那是**我们自己**把还活着的 RFCOMM
         // 拆掉的（车机心跳一直没停）。问候在 0xAA05 之后已经发过一轮，重复发不推进
         // 任何状态机；真需要重发时由 [nudgeCarPlayAvailability] 按需显式调用。
-        sendFireAndForget(
-            Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
-            Iap2Csm.string(0, bluetoothMac),
-        )
+        val withTransport = AccessoryDeclaration.wouldSend(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
+        if (withTransport) {
+            sendFireAndForget(
+                Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
+                Iap2Csm.string(0, bluetoothMac),
+            )
+        }
         sendAvailability()
         // 第 1 次必记（确认机制真的跑了），之后每 4 次记一条，避免刷屏。
         if (nudgeCount == 1 || nudgeCount % 4 == 0) {
-            log("iap2 催问第 $nudgeCount 次：重发 0x4e0e + 0x4300（不补问候）——车机仍未下发 0x4301，链路正常保活中")
+            log(
+                "iap2 催问第 $nudgeCount 次：重发 ${if (withTransport) "0x4e0e + " else ""}0x4300" +
+                    "（不补问候${if (withTransport) "" else "；0x4e0e 未声明可收，已省"}）" +
+                    "——车机仍未下发 0x4301，链路正常保活中",
+            )
         }
     }
 
@@ -1693,6 +1707,19 @@ class Iap2SenderSession(
             log(ReceiverProfile.describe(profile))
             // 画像结论是本轮 WiFi 分派的唯一依据（见 wifiGen 字段注释）
             wifiGen = profile.wifiGen
+            // 新协议车机：可收清单升格为**硬门禁**（清单之外不发，协议骨架除外）。
+            // 依据见 AccessoryDeclaration 类注释第 3 条：GM/Cinemo 三台都是
+            // 「ACK 完我们最后一条 → 只剩 ff550200ee10 心跳」，而奥迪走 LEGACY
+            // 分支、行为逐字节不变。宽松模式仍留给老协议与清单未到的场景。
+            AccessoryDeclaration.setStrictDeclaredOnly(profile.wifiGen == ReceiverProfile.WifiGen.NEW)
+            if (profile.wifiGen == ReceiverProfile.WifiGen.NEW) {
+                log(
+                    "iap2 本轮启用严格模式：车机可收清单之外的消息一律不发（" +
+                        "协议骨架 0x1D00/0x1D02/0xAA00/0xAA02/0xAA04/0xAA05/0x4300 除外）——" +
+                        "清单=${receives.size} 项 " +
+                        receives.sorted().joinToString(" ") { "0x%04x".format(it) },
+                )
+            }
             // 代际快照：这台车上一次是哪个协议档？变了就按新一代重新分派，并作废该车
             // 旧的 MFi 档位记忆——换固件（LEGACY→NEW）是真实场景，旧结论会把新一轮
             // 锁死在上代参数上（详见 protocol/ProtocolGeneration 的类注释）。

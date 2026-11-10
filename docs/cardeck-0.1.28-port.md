@@ -47,6 +47,19 @@
 因此现在：`0x4E0D` 新协议车机不声明就不发；`0x4E0C`（设备 UUID，奥迪清单里也没有
 但 1.0.7 一直发着且连通）与 `0x4E0E`（传输标识）**仍照发**，不动。
 
+### 同日追加：新协议车机整体升格为严格模式
+
+上面那条只处理了 `0x4E0D` 一条。用户随后定案：**新协议车机（`wifiGen=NEW`）在
+可收清单里没有的，一律不发**，不再逐条论证。实现收口在
+`AccessoryDeclaration.setStrictDeclaredOnly()`，由 `Iap2SenderSession` 出画像后设置。
+
+- 放宽的代价只落在「从未连通过」的 GM/Cinemo 一族与宝马 iD9；
+  奥迪走 LEGACY 分支，宽松档行为逐字节不变。
+- 例外是**协议骨架** `0x1D00/0x1D01/0x1D02/0xAA00/0xAA02/0xAA04/0xAA05/0x4300`：
+  真车清单里根本没有它们，裁掉就是「永不连接」，实验也拿不到信息。
+- 于是别克 BUICK_3138 上 `0x4E0D` 与 `0x4E0E` 都不再发；`0x4E09/0x4E0A/0x4E0B/0x4E0C`
+  在清单里，照发。
+
 ## 2. MFi 挑战长度记忆支持「硬拒绝」
 
 **改动**：`MfiLengthMemory.recordHardRejected()` + `orderAttempts()`；`Iap2SenderSession.runMfiChallenge()`
@@ -91,6 +104,7 @@ CarLife 侧（`CarLifeHuClient`）连的是本机端口，不涉及网络闪断�
 - `./gradlew testDebugUnitTest`：**208 用例全绿**（新增 `hardRejectOverturnsSucceededMemory`、
   `contradictorySuccessAndRejectIsDemotedToNormal`；Cadillac mock 的
   「禁止消息断言」改为「必须照发断言」`assertUndeclaredFramesStillSent`）。
+  2026-11-10 起该断言改名为 `assertUndeclaredFramesCut`（严格模式下两条都必须不发）。
 - `./gradlew assembleDebug` → `adb install -r` → 启动无崩溃，界面正常，自动连接已按预期进入
   「蓝牙就绪，等待车机回连…」。
 - **待真车验证**：别克 E2LB 上车看三点——① 日志出现 `车机可收清单未声明 0x4e0d/0x4e0e ……仍照常发送`；

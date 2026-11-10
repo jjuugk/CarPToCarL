@@ -16,6 +16,21 @@ import java.util.concurrent.atomic.AtomicReference
  * 验证 Phase 1 全序列（识别→MFi 跳过→HID→WiFi 配置→CarPlay 启动→通知）。
  */
 class Iap2SenderSessionTest {
+
+    /**
+     * [AccessoryDeclaration] 是**进程内单例**（跨蓝牙/隧道两条链路共享），生产里每轮
+     * `SessionController.startConnection()` 都会 reset 一次。同一个 JVM 里连跑多个用例时
+     * 必须手动清，否则上一个 mock 的清单与严格模式会漏进下一个用例。
+     *
+     * 2026-11-10 加严格模式后这一点变得致命：GM/Cinemo 形态的用例跑在前面会留下
+     * `wifiGen=NEW` 的判定，紧接着的老协议用例**清单是并集**（20 项）→ 判 NEW →
+     * 0x5702 被裁 → 拿不到 0x5703 → 端点为空，用例报「晚到 0x4301 未触发」。
+     */
+    @org.junit.Before
+    fun resetSharedDeclaration() {
+        AccessoryDeclaration.reset()
+    }
+
     @Test
     fun fullBringUpAgainstMockAccessory() {
         val pair = InMemoryStreamPair()
@@ -291,7 +306,7 @@ class Iap2SenderSessionTest {
         /** 早到、但当前脚本还没轮到看的目标帧（如先于 StartHID 到达的 0x4300）。 */
         private val stashed = ArrayDeque<Iap2Csm.Frame>()
 
-        /** 收到过的「车机可收清单未声明」的消息（证明只记录不拦截）。 */
+        /** 收到过的「车机可收清单未声明」的消息（新协议严格模式下应当一条都收不到）。 */
         private val seenUndeclared = HashSet<Int>()
 
         fun run() {
@@ -342,7 +357,7 @@ class Iap2SenderSessionTest {
             // 0x4E0D 是否发，看代际：老协议（奥迪/清单未提供）无条件发；新协议车机
             // （两清单合计 ≥10 项仍无 0x57xx，如 GM/Cinemo）只在它声明能收时才发。
             // 凯迪拉克 CT5 的 9 项可收清单里没有 0x4E0D —— 本 mock 就是那个形态，
-            // 因此这里不该 expect 它，断言在 assertUndeclaredFramesStillSent 里做。
+            // 因此这里不该 expect 它，断言在 assertUndeclaredFramesCut 里做。
             if (!newProtocol) {
                 expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
             }
@@ -395,11 +410,11 @@ class Iap2SenderSessionTest {
 
             if (newProtocol) {
                 // 凯迪拉克的可收清单里没有 0x4E0D（无线可用）与 0x4E0E（传输标识）。
-                // 2026-11-10 起两者分开处置：0x4E0D 按声明裁掉（奥迪清单里有它，
-                // 裁掉对奥迪零影响），0x4E0E 仍照发。判据见 assertUndeclaredFramesStillSent。
+                // 2026-11-10 起新协议车机走严格模式：两条都按声明裁掉。
+                // 判据见 assertUndeclaredFramesCut。
                 // 窗口给够 8.6 秒（> 新协议 0x4301 的 8s 等待窗），期间把收到的帧都记下来，
                 // 窗口过后再补发 0x4301——这样才真正落在「Phase 1 已结束、晚到补发」的时序上。
-                assertUndeclaredFramesStillSent(8_600)
+                assertUndeclaredFramesCut(8_600)
                 sendStartSession()
             } else {
                 expect(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
@@ -412,25 +427,24 @@ class Iap2SenderSessionTest {
         }
 
         /**
-         * 断言「车机没声明能收」的两条消息按代际**分开处置**。
+         * 断言「车机没声明能收」的两条消息在新协议车机上一律**不发**。
          *
          * 来源是凯迪拉克 CT5（GM/Cinemo）的可收清单
          * `0x6801 0x4c01 0x4c04 0x5001 0x4e09 0x4e0a 0x4e0b 0x4e0c 0x4300`——
          * 其中没有 0x4E0D（无线可用）也没有 0x4E0E（传输标识）。
          *
-         * 2026-11-10 起：
-         * - **0x4E0D 裁掉**（新协议车机不声明就不发）。依据是奥迪 MMI 3232——唯一完整
-         *   连通过的那台——它的蓝牙清单 7 项里**有** 0x4e0d，所以裁掉对奥迪零影响；
-         *   而 GM/Cinemo 三台（E2LB / BUICK_3138 / CT5）清单都没有，也全部在
-         *   「ACK 完我们最后一帧」之后只剩链路心跳。旧的「照发」依据是「ACK 逐条
-         *   都回了」，但链路层 ACK 只证明 CRC 通过，不证明业务层认这条消息。
-         * - **0x4E0E 仍然照发**：它只在 Phase 1 结束（0x4301 之后）和催问时才发，
-         *   目前没有任何「把它裁掉后变好」的反证，不动。
+         * 2026-11-10 定案（严格模式）：
+         * - **0x4E0D 裁掉**：奥迪 MMI 3232（唯一完整连通过的那台）蓝牙清单 7 项里
+         *   **有** 0x4e0d，所以裁掉对奥迪零影响；而 GM/Cinemo 三台（E2LB /
+         *   BUICK_3138 / CT5）清单都没有，也全部在「ACK 完我们最后一帧」之后只剩心跳。
+         *   旧的「照发」依据是「ACK 逐条都回了」，但链路层 ACK 只证明 CRC 通过。
+         * - **0x4E0E 一起裁掉**：它同样不在清单里，且只在 Phase 1 结束/催问时发，
+         *   裁掉不影响会话建立（0x4300 才是驱动 0x4301 的请求，属协议骨架，永不裁）。
          *
-         * 另：0x4E0C（设备 UUID）同样不在奥迪清单里，但 1.0.7 一直发着、奥迪也连上了
-         * ——它是真反例，所以也不裁（本断言顺带锁住这一点）。
+         * 老协议（[audiDeclarations] / 清单未到）**不裁**，仍照发——另一条分支的
+         * `expect(DEVICE_TRANSPORT_IDENTIFIER)` 就是锁这一点。
          */
-        private fun assertUndeclaredFramesStillSent(windowMillis: Long) {
+        private fun assertUndeclaredFramesCut(windowMillis: Long) {
             val deadlineAt = System.nanoTime() + windowMillis * 1_000_000L
             while (true) {
                 val remaining = (deadlineAt - System.nanoTime()) / 1_000_000L
@@ -440,8 +454,8 @@ class Iap2SenderSessionTest {
             check(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE !in seenUndeclared) {
                 "新协议车机的可收清单里没有 0x4E0D，应当按声明裁掉，但实际发了"
             }
-            check(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER in seenUndeclared) {
-                "0x4E0E（传输标识）不裁，必须照发；实际收到 " +
+            check(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER !in seenUndeclared) {
+                "新协议严格模式下 0x4E0E（传输标识）也应裁掉，但实际收到 " +
                     seenUndeclared.joinToString(" ") { "0x%04x".format(it) }
             }
         }
@@ -596,10 +610,10 @@ class Iap2SenderSessionTest {
 
         private companion object {
             /**
-             * 凯迪拉克 CT5 可收清单里缺的两条（见 [assertUndeclaredFramesStillSent]）。
+             * 凯迪拉克 CT5 可收清单里缺的两条（见 [assertUndeclaredFramesCut]）。
              *
-             * 只用来「记录有没有出现」，不代表都该发：0x4E0D 现在按声明裁掉，
-             * 0x4E0E 仍照发——两条的处置由断言函数分别检查。
+             * 只用来「记录有没有出现」：新协议严格模式下两条都该被裁掉，
+             * 出现任意一条都会让断言失败。
              */
             val UNDECLARED_FOR_CADILLAC =
                 setOf(

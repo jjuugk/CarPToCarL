@@ -22,6 +22,17 @@ import io.github.shaonialife.carptocar.protocol.ProtocolAudit
  *    **只裁这两条**——不关整条隧道：宝马会主动连发 SYN marker 等我们的会话表，
  *    关掉隧道换来的是一直黑屏（见 docs/bmw-id6-reboot-20261107.md）。
  *
+ * 3. **新协议车机（[ReceiverProfile.WifiGen.NEW]）另有「严格模式」**：可收清单之外
+ *    一律不发（[setStrictDeclaredOnly]）。GM/Cinemo 一族（别克 E2LB / BUICK_3138、
+ *    凯迪拉克 CT5）都是这个形态：清单 9 项，我们把 0x4E0D/0x4E0E 发过去之后，
+ *    车机 ACK 完最后一条就只剩 `ff550200ee10` 心跳，再没有任何业务帧。放宽的代价
+ *    只是在「从未连通过」的车上多试一种假设，而老协议车机（奥迪 / 清单未到）**行为
+ *    逐字节不变**，仍按上面第 1 条「只记录、照发」。
+ *
+ * 协议骨架（识别三连 + MFi + 0x4300）**永不按声明裁**：没有任何一台车机把
+ * 0x1D02/0xAA00/0xAA02/0xAA05 列进可收清单（BUICK_3138 的 9 项就没有），
+ * 裁掉等于「不连接」——那不是实验，是自杀。见 [PROTOCOL_SKELETON]。
+ *
  * 清单没到（纯 WiFi 场景）时 [declaresReceive] 返回 null，全部按未知放行，
  * 不会把「没收到识别帧」误判成「车机声明不收」。
  *
@@ -43,6 +54,29 @@ object AccessoryDeclaration {
 
     /** 唯一允许按清单硬裁的两条；往这里加号之前先拿真机重启证据。 */
     private val RESTRICTED_TO_DECLARED = setOf(MIB3_AUX_STATUS, MIB3_GPRMC_STATUS)
+
+    /**
+     * **协议骨架**：无论车机清单怎么写都必须发的号。
+     *
+     * 判据是「真车清单的形态」而不是「消息重不重要」：BUICK_3138 / 凯迪拉克 CT5 的
+     * 9 项可收清单里**没有** 0x1D02、0xAA00、0xAA02、0xAA05，奥迪 7 项里也没有——
+     * 这类识别/MFi 帧属于 iAP2 会话建立的下限，车机从不把它们当「可选能力」声明。
+     * 裁掉它们的后果是「永远连不上」，任何实验都拿不到信息。
+     *
+     * 0x4300 同在骨架内，理由与 cardeck 0.1.28 记录一致：它是驱动 0x4301 的请求本身，
+     * 裁掉等于放弃本轮连接（且它出现在两代车机的清单里，本来也不会被裁）。
+     */
+    val PROTOCOL_SKELETON: Set<Int> =
+        setOf(
+            Iap2MessageIds.START_IDENTIFICATION, // 0x1D00
+            Iap2MessageIds.IDENTIFICATION_INFORMATION, // 0x1D01（应答，正常不会主动发）
+            Iap2MessageIds.IDENTIFICATION_ACCEPTED, // 0x1D02
+            Iap2MessageIds.MFI_REQUEST_CERTIFICATE, // 0xAA00
+            Iap2MessageIds.MFI_REQUEST_CHALLENGE, // 0xAA02
+            Iap2MessageIds.MFI_AUTHENTICATION_FAILED, // 0xAA04
+            Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED, // 0xAA05
+            Iap2MessageIds.CARPLAY_AVAILABILITY, // 0x4300
+        )
 
     /** 导航引导段：可收清单出现这些号 = 车机接受 CarPlay 结构化导航数据。 */
     private val ROUTE_GUIDANCE_RANGE = 0x5200..0x52FF
@@ -80,11 +114,29 @@ object AccessoryDeclaration {
     /** 每条「链路 + 消息号」本轮只留一条越权日志（催问会反复触发）。 */
     private val logged = HashSet<String>()
 
+    /**
+     * 本轮是否按可收清单**硬裁**（新协议车机专用）。
+     *
+     * 由 [Iap2SenderSession] 在 `0x1D01` 算出 [ReceiverProfile.wifiGen] 后设置一次，
+     * 跨链路生效（隧道侧的越权发送也要受同一把尺子）。老协议 / 清单未到 = false。
+     */
+    @Volatile
+    private var strictDeclaredOnly = false
+
+    /** 新协议车机：清单之外一律不发（[PROTOCOL_SKELETON] 除外）。 */
+    fun setStrictDeclaredOnly(enabled: Boolean) {
+        strictDeclaredOnly = enabled
+    }
+
+    val isStrictDeclaredOnly: Boolean
+        get() = strictDeclaredOnly
+
     /** 新一轮「启动连接」时清空——别拿上一台车的声明判断这一台。 */
     fun reset() {
         synchronized(lock) {
             snapshot = Snapshot()
             logged.clear()
+            strictDeclaredOnly = false
         }
     }
 
@@ -137,10 +189,16 @@ object AccessoryDeclaration {
     /** 排障用：一行说明本轮判据。 */
     fun describe(): String {
         val snap = snapshot
-        if (!snap.declared) return "车机声明：清单未到（全部按未知放行）· 来源=${snap.source}"
+        val mode =
+            if (strictDeclaredOnly) {
+                "严格模式（清单之外不发，骨架除外）"
+            } else {
+                "宽松模式（越权只记录，A100/FFF0 例外）"
+            }
+        if (!snap.declared) return "车机声明：清单未到（全部按未知放行）· $mode · 来源=${snap.source}"
         return "车机声明：可收 ${snap.receiveIds.size} 项 / 会发 ${snap.sendIds.size} 项" +
             " · 0xA100=${0xA100 in snap.receiveIds} 0xFFF0=${0xFFF0 in snap.receiveIds}" +
-            " · 导航引导=${acceptsRouteGuidance() == true} · 来源=${snap.source}"
+            " · 导航引导=${acceptsRouteGuidance() == true} · $mode · 来源=${snap.source}"
     }
 
     /**
@@ -199,7 +257,27 @@ object AccessoryDeclaration {
     }
 
     /**
-     * 所有 CSM 发送出口的统一守卫：越权取证 + 两条专用消息的裁剪。
+     * 只查不发：与 [noteSend] 同一把尺子，但不写审计、不去重。
+     *
+     * 用途仅限「日志文案要说实话」——催问会说「重发 0x4e0e + 0x4300」，
+     * 而严格模式下 0x4e0e 可能根本不会发出去，日志必须能对上真实帧序列。
+     */
+    fun wouldSend(messageId: Int): Boolean {
+        val snap = snapshot
+        if (!snap.declared || messageId in snap.receiveIds) return true
+        if (messageId in PROTOCOL_SKELETON) return true
+        return !(strictDeclaredOnly || messageId in RESTRICTED_TO_DECLARED)
+    }
+
+    /**
+     * 所有 CSM 发送出口的统一守卫：越权取证 + 按车机声明裁剪。
+     *
+     * 三档裁定（闸门顺序即优先级）：
+     *  1. 清单未到 / 车机声明可收 → 放行；
+     *  2. [PROTOCOL_SKELETON] 里的协议骨架 → 放行（车机从不声明它们）；
+     *  3. 车机没声明可收：
+     *     - **严格模式（新协议车机）** → 裁掉，本条不进 backlog；
+     *     - 否则只有 [RESTRICTED_TO_DECLARED] 两条（0xA100/0xFFF0）裁掉，其余照发。
      *
      * @param channel `"bt"` / `"tunnel"`，只进日志与去重键
      * @return true = 允许发送；false = 本条已按车机声明裁掉
@@ -211,16 +289,30 @@ object AccessoryDeclaration {
     ): Boolean {
         val snap = snapshot
         if (!snap.declared || messageId in snap.receiveIds) return true
+        if (messageId in PROTOCOL_SKELETON) {
+            // 骨架帧不裁，但也不静默：清单里真的没有它时留一条（每轮一条），
+            // 便于回答「这台车到底把哪些号当可选能力声明」。
+            val key = "skeleton|$channel|$messageId"
+            if (synchronized(lock) { logged.add(key) }) {
+                log(
+                    "iap2 车机可收清单未声明 0x${messageId.toString(16).padStart(4, '0')} " +
+                        "(${Iap2MessageIds.nameOf(messageId)}) $channel —— " +
+                        "属协议骨架，不裁（识别/MFi/0x4300 是会话下限，车机从不把它们列入清单）",
+                )
+            }
+            return true
+        }
         val restricted = messageId in RESTRICTED_TO_DECLARED
+        val strictCut = strictDeclaredOnly
         val key = "$channel|$messageId"
         val first = synchronized(lock) { logged.add(key) }
         if (first) {
             val hex = "0x${messageId.toString(16).padStart(4, '0')}"
             val action =
-                if (restricted) {
-                    "按真机重启证据裁掉（0xA100/0xFFF0 仅 MIB3 系声明）"
-                } else {
-                    "仍照常发送（清单只能证明「有」不能证明「没有」）"
+                when {
+                    strictCut -> "新协议严格模式：按可收清单裁掉，本条不发"
+                    restricted -> "按真机重启证据裁掉（0xA100/0xFFF0 仅 MIB3 系声明）"
+                    else -> "仍照常发送（清单只能证明「有」不能证明「没有」）"
                 }
             log(
                 "iap2 车机可收清单未声明 $hex (${Iap2MessageIds.nameOf(messageId)}) " +
@@ -228,10 +320,16 @@ object AccessoryDeclaration {
             )
             ProtocolAudit.record(
                 ProtocolAudit.Code.UNSOLICITED_MESSAGE,
-                detail = "$hex ${Iap2MessageIds.nameOf(messageId)}（$channel，${if (restricted) "已裁剪" else "照常发送"}）",
+                detail = "$hex ${Iap2MessageIds.nameOf(messageId)}（$channel，" +
+                    when {
+                        strictCut -> "严格模式裁剪"
+                        restricted -> "已裁剪"
+                        else -> "照常发送"
+                    } + "）",
                 evidence = "车机可收清单(${snap.receiveIds.size} 项)未包含该号；来源=${snap.source}",
             )
         }
-        return !restricted
+        if (strictCut || restricted) return false
+        return true
     }
 }
