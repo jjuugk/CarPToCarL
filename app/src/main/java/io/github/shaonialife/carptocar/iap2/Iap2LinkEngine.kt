@@ -168,9 +168,8 @@ class Iap2LinkEngine(
     /**
      * 诊断：**首次**因对端窗口满而停发时回调一次（(对端声明窗口, 实际生效窗口, 还在排队的帧数)）。
      *
-     * 只在 [respectPeerSendWindow] 生效、且对端窗口**小于**本方声明时触发；
-     * 同一段停发只回调一次，重新开闸时由 [onSendWindowReleased] 收尾——否则每次 ACK
-     * 都会再触发一遍，日志会被刷满。
+     * 只在对端窗口**小于**本方声明时触发；同一段停发只回调一次，重新开闸时由
+     * [onSendWindowReleased] 收尾——否则每次 ACK 都会再触发一遍，日志会被刷满。
      */
     var onSendWindowHold: ((peerMax: Int, effective: Int, backlog: Int) -> Unit)? = null
 
@@ -243,25 +242,12 @@ class Iap2LinkEngine(
     private var originatedSyn = false
 
     /**
-     * **本方声明的发送窗口**（LSP maxOutgoing 语义 = 声明方自己的未确认包上限）：
-     * 发送窗口按此计，而非对端声明值——回显时我们会声明 0x7F（ownSyncOf），
-     * 按对端值计窗会把突发消息卡死在对端的小窗口里（MIB3 突发 8 条 × 对端 4）。
+     * **本方声明的发送窗口**（LSP maxOutgoing 语义 = 声明方自己的未确认包上限）。
+     *
+     * 回显时我们声明 0x7F（ownSyncOf），但**实际发帧按 `min(本方, 对端)` 计**
+     * ——见 [effectiveSendWindow]。对端没声明、或声明得更大时，等价于本方值。
      */
     private var declaredMaxOutgoing = maxOutgoing
-
-    /**
-     * 是否**把对端声明的发送窗口当上限**（`min(本方声明, 对端声明)`）。
-     *
-     * 默认关（老协议行为逐字节不变）。只有画像判 `wifiGen=NEW` 的新协议车机才打开，
-     * 由会话层在 0x1D01 出画像后设置（见 [Iap2LinkChannel.respectPeerSendWindow]）。
-     *
-     * 为什么不一刀切：**奥迪 MMI 4260（唯一完整连通过的车）自己也声明 maxOutgoing=5**，
-     * 而它连通的那些轮次里我们一直是 7 帧连发（2026-11-09 09:26:09 日志 seq 77~83、
-     * seq 89~95，ack=5），车机照单 ACK 并完成握手——说明「超窗 2 帧」在奥迪上并不致死。
-     * 若对所有车收紧，奥迪唯一可复现的成功时序就被改掉了，这是最不能拿来赌的一台。
-     * 而 GM/Cinemo（别克 E2LB/BUICK_3138、CT5）在「超窗 7 帧」之后一条 ACK 都没有。
-     */
-    var respectPeerSendWindow: Boolean = false
 
     /** 本方当前声明的发送窗口（0x7F；仅诊断日志用）。 */
     val declaredSendWindow: Int get() = declaredMaxOutgoing
@@ -814,15 +800,21 @@ class Iap2LinkEngine(
     // ---- 发送 ----
 
     /**
-     * 实际生效的发送窗口（未确认帧上限）。
+     * 实际生效的发送窗口（未确认帧上限）= **`min(本方声明, 对端声明)`**。
      *
-     * 只有 [respectPeerSendWindow] 打开时才对端值参与取小（`min(本方, 对端)`）；
-     * 且**必须要求 `peer.maxRetransmissions > 0`**——零重传对端（隧道侧隐式确认）
-     * 根本不会回 ACK，套上小窗口会让 backlog 永久卡死。这一条守卫不能省：
-     * 2026-11-10 我按 maxOutgoing 限流时漏了它，把 MIB3 隧道突发整段削掉、7 个用例挂掉。
+     * 对端声明多少就收多少单：别克 BUICK_3138 声明 5，我们回显 0x7F 后一次连发 7 帧
+     * （2026-11-10 18:34 日志 seq 97~103），车机对这 7 帧一条 ACK 都没回。
+     *
+     * 唯一例外是**零重传对端**（`maxRetransmissions=0`，隧道侧隐式确认）：它根本不回
+     * ACK，套小窗口会让 backlog 永久卡死，所以仍按本方值。这条守卫不能省——2026-11-10
+     * 早上按 maxOutgoing 限流时漏了它，MIB3 隧道突发整段被削、7 个用例挂掉。
+     *
+     * 已知风险：**奥迪 MMI 4260 也声明 5**，而它 2026-11-09 两轮是 7 帧连发
+     * （seq 77~83、89~95）连上的；改成按 5 发之后，那 7 帧会切成 5+2、中间要等车机
+     * ACK。若哪天「奥迪忽然连不上」，先回到这里看是不是这一步引起的。
      */
     private fun effectiveSendWindow(peer: SynchronizationPayload?): Int =
-        if (respectPeerSendWindow && peer != null && peer.maxRetransmissions > 0) {
+        if (peer != null && peer.maxRetransmissions > 0) {
             minOf(declaredMaxOutgoing, peer.maxOutgoing.coerceAtLeast(1))
         } else {
             declaredMaxOutgoing

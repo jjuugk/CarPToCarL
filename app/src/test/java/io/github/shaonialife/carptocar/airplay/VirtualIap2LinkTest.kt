@@ -106,6 +106,23 @@ class VirtualIap2LinkTest {
             }
         }
 
+        /**
+         * 一直跑到出站不再增长为止。
+         *
+         * 发送窗口按**对端声明的 maxOutgoing** 计（本 harness 的车机用引擎默认 4），
+         * 所以一次突发（MFi 之后那 8 条）会分成几批发：先发满窗口，等车机 ACK 再放下一批。
+         * 生产环境由 ACK + 节拍线程驱动，测试里没有线程，必须显式多跑几轮——
+         * 否则只能看到第一批，断言会误判成「后面几条没发」。
+         */
+        fun settle(maxRounds: Int = 8) {
+            var last = -1
+            var rounds = 0
+            while (rounds++ < maxRounds && allControl.size != last) {
+                last = allControl.size
+                exchange()
+            }
+        }
+
         /** 车机发一条 CSM，返回手机随后经控制通道发出的 CSM 消息号序列。 */
         fun carSends(
             messageId: Int,
@@ -229,9 +246,13 @@ class VirtualIap2LinkTest {
         assertEquals(20, challengeBody.value.size)
 
         // 0xAA03（签名应答）→ 0xAA05 + 突发（0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0）
+        // 窗口按对端声明的 4 计：这 8 条会分成 4+4 两批，靠车机 ACK 放行；顺序不变。
+        val burstFrom = h.controlFrames().size
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        h.settle()
         assertEquals(
             listOf(0xAA05, 0x4E0C, 0xA100, 0x4E0A, 0x4E0B, 0x4E09, 0xFFFA, 0xFFF0),
-            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96))),
+            h.controlFrames().drop(burstFrom).map { it.second },
         )
 
         // 订阅应答：0x5000 → 0x5001 空态；0x4157 → 0x4158；0x4154 → 0x4155；0x4170 → 0x4171
@@ -250,6 +271,7 @@ class VirtualIap2LinkTest {
         h.carSends(0x1D01, Iap2Csm.string(0, "x"))
         h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
         h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        h.settle() // 突发先走完（窗口只放 4 条），否则订阅应答会排在它后面
         h.carSends(0x5000)
         // 逐字节等于 Frida 抓包常量——字段布局只存在于真机行为里，重新编码极易走样
         assertEquals(
@@ -273,6 +295,7 @@ class VirtualIap2LinkTest {
         carSends(0x1D01, Iap2Csm.string(0, "Audi") + Iap2Csm.string(1, "MMI"))
         carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
         carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        settle() // 突发按对端窗口分批发，先走完再让车机订阅
     }
 
     private fun song(
@@ -384,14 +407,9 @@ class VirtualIap2LinkTest {
         // 32B 得到应答 → 0xAA05 + 突发照常
         val after = h.controlFrames().size
         h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
-        assertTrue(
-            "frames=${h.controlFrames().drop(after).map { it.second }}",
-            h
-                .controlFrames()
-                .drop(after)
-                .map { it.second }
-                .containsAll(listOf(0xAA05, 0x4E0C, 0xFFFA)),
-        )
+        h.settle() // 突发分两批，0xFFFA 在第二批
+        val emitted = h.controlFrames().drop(after).map { it.second }
+        assertTrue("frames=$emitted", emitted.containsAll(listOf(0xAA05, 0x4E0C, 0xFFFA)))
     }
 
     /**

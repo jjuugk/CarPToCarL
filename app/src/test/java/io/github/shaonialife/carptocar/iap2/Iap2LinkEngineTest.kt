@@ -141,7 +141,7 @@ class Iap2LinkEngineTest {
     }
 
     /**
-     * 新协议车机：按**对端声明的发送窗口**发帧，超出的先 hold 住等 ACK。
+     * 发送窗口按**对端声明的 maxOutgoing** 截断，超出的先 hold 住等 ACK。
      *
      * 别克 BUICK_3138 声明 `maxOutgoing=5`，我们旧逻辑回显 0x7F 后一次连发 7 帧
      * （2026-11-10 18:34 日志 seq 97~103），车机对这 7 帧一条 ACK 都没回，
@@ -149,7 +149,7 @@ class Iap2LinkEngineTest {
      * 注释直指「启动帧可能超出接收窗口」——本用例锁住这条行为。
      */
     @Test
-    fun strictWindowModeCapsBurstToPeerWindow() {
+    fun burstIsCappedToPeerDeclaredWindow() {
         val phone = Iap2LinkEngine()
         val accessory = Iap2LinkEngine(maxOutgoing = 5)
         phone.start(0)
@@ -157,7 +157,6 @@ class Iap2LinkEngineTest {
         exchangeUntilNormal(phone, accessory)
         phone.takeOutput() // 协商残留（ACK/SYN）不算数据帧
 
-        phone.respectPeerSendWindow = true
         val holds = ArrayList<Triple<Int, Int, Int>>()
         val releases = ArrayList<Long>()
         phone.onSendWindowHold = { peerMax, effective, backlog -> holds += Triple(peerMax, effective, backlog) }
@@ -184,16 +183,15 @@ class Iap2LinkEngineTest {
     }
 
     /**
-     * 老协议（奥迪）：**不开**严格窗口，7 帧照旧一次发完——1.0.7 的时序不能动。
+     * 对端声明的窗口**不小于本方**时不做任何截断——等价于改动前的 1.0.7 时序。
      *
-     * 奥迪 MMI 4260 自己也声明 `maxOutgoing=5`，但它 09:26/09:31 两轮 7 帧连发
-     * （seq 77~83、89~95）被逐条 ACK 后完整连上。它是唯一可复现的成功样本，
-     * 这里锁住「不开开关时发送窗口仍是本端 0x7F」。
+     * 这条是「别把新规则用错方向」的护栏：真机 iPhone / AADisplay 都声明 0x7F，
+     * 与我们的 0x7F 取小后仍是 0x7F，突发照旧一口气发完。
      */
     @Test
-    fun legacyModeStillBurstsPastSmallPeerWindow() {
+    fun peerDeclaringLargeWindowDoesNotCapAnything() {
         val phone = Iap2LinkEngine()
-        val accessory = Iap2LinkEngine(maxOutgoing = 5)
+        val accessory = Iap2LinkEngine(maxOutgoing = 0x7F)
         phone.start(0)
         accessory.start(0)
         exchangeUntilNormal(phone, accessory)
@@ -202,7 +200,7 @@ class Iap2LinkEngineTest {
         val frames = (0 until 7).map { Iap2Csm.encode(0x5000 + it) }
         frames.forEachIndexed { index, bytes -> assertTrue(phone.sendControl(bytes, 10L + index)) }
 
-        assertEquals("老协议不该被对端窗口卡住", 7, parseFrames(phone.takeOutput()).size)
+        assertEquals("对端也声明 0x7F 时不该截断", 7, parseFrames(phone.takeOutput()).size)
     }
 
     /**
@@ -220,7 +218,6 @@ class Iap2LinkEngineTest {
         exchangeUntilNormal(phone, accessory)
         phone.takeOutput()
 
-        phone.respectPeerSendWindow = true
         val holds = ArrayList<Int>()
         phone.onSendWindowHold = { _, _, backlog -> holds += backlog }
 

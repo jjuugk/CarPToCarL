@@ -1712,11 +1712,6 @@ class Iap2SenderSession(
             // 「ACK 完我们最后一条 → 只剩 ff550200ee10 心跳」，而奥迪走 LEGACY
             // 分支、行为逐字节不变。宽松模式仍留给老协议与清单未到的场景。
             AccessoryDeclaration.setStrictDeclaredOnly(profile.wifiGen == ReceiverProfile.WifiGen.NEW)
-            // 新协议车机同时收紧链路层发送窗口：别克声明 maxOutgoing=5，我们旧逻辑回显
-            // 0x7F 后一次连发 7 帧（18:34 日志 seq 97~103），车机对此一条 ACK 都没回。
-            // 只在 NEW 打开——奥迪 MMI 4260 也声明 5，但它 7 帧连发能连上（09:26/09:31
-            // 两轮 seq 77~83、89~95 均被逐条 ACK），那是唯一可复现的成功时序，不能赌。
-            channel.respectPeerSendWindow = profile.wifiGen == ReceiverProfile.WifiGen.NEW
             if (profile.wifiGen == ReceiverProfile.WifiGen.NEW) {
                 log(
                     "iap2 本轮启用严格模式：车机可收清单之外的消息一律不发（" +
