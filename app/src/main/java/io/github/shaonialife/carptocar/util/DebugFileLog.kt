@@ -22,7 +22,7 @@ object DebugFileLog {
      * 历史轮次的日志会把真正有用的部分淹没——导出默认只取最后一条标记之后的内容。
      * 标记本身写进文件而不是只记内存偏移：文件可能被 2MB 截断，偏移会失效。
      */
-    const val SESSION_MARKER = "===== CarPToCarL 进程启动（本次日志起点）====="
+    const val SESSION_MARKER = "===== CarPToCar+ICCOA 进程启动（本次日志起点）====="
 
     /**
      * 改名前的标记（应用曾叫 CarDeck）。**故意保留旧字符串**：设备上可能存着旧版本写的

@@ -130,7 +130,7 @@ object SessionTrace {
         val dir = appDir ?: return
         val header =
             buildString {
-                appendLine("# CarPToCarL 连接失败报文快照")
+                appendLine("# CarPToCar+ICCOA 连接失败报文快照")
                 appendLine("# 时间: " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
                 appendLine("# 触发: $note")
                 appendLine("# 结束: $reason")

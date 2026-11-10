@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "CarPToCarL"
+rootProject.name = "CarPToCar+ICCOA"
 include(":app")

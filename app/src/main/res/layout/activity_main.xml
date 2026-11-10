@@ -162,7 +162,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center_horizontal|bottom"
-                        android:layout_marginBottom="7dp"
+                        android:layout_marginBottom="22dp"
                         android:gravity="center"
                         android:includeFontPadding="false"
                         android:letterSpacing="0.22"
@@ -701,39 +701,48 @@
                             android:gravity="center_vertical"
                             android:orientation="horizontal">
 
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="本机蓝牙地址"
-                                android:textColor="@color/m3_on_surface"
-                                android:textSize="14.5sp"
-                                android:textStyle="bold" />
-
-                            <TextView
+                            <LinearLayout
                                 android:layout_width="0dp"
                                 android:layout_height="wrap_content"
-                                android:layout_marginHorizontal="6dp"
                                 android:layout_weight="1"
-                                android:text="ColorOS 系统在设置—关于本机—状态信息里面查找"
-                                android:textColor="@color/m3_on_var"
-                                android:textSize="11.5sp" />
+                                android:orientation="vertical">
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="本机蓝牙地址"
+                                    android:textColor="@color/m3_on_surface"
+                                    android:textSize="14.5sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="3dp"
+                                    android:text="ColorOS 系统在设置—关于本机—状态信息里面查找"
+                                    android:textColor="@color/m3_on_var"
+                                    android:textSize="11.5sp" />
+                            </LinearLayout>
 
                             <androidx.appcompat.widget.AppCompatButton
                                 android:id="@+id/btnViewMac"
                                 android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:minWidth="48dp"
-                                android:minHeight="48dp"
-                                android:background="@drawable/bg_count"
+                                android:layout_height="36dp"
+                                android:layout_marginStart="8dp"
+                                android:minWidth="60dp"
+                                android:minHeight="36dp"
+                                android:paddingHorizontal="14dp"
+                                android:background="@drawable/bg_action_btn"
                                 android:text="查看"
                                 android:textColor="@color/m3_primary"
-                                android:textSize="12sp" />
+                                android:textSize="12.5sp"
+                                android:textStyle="bold" />
                         </LinearLayout>
 
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
+                            android:layout_marginTop="8dp"
                             android:gravity="center_vertical"
                             android:orientation="horizontal">
 
@@ -756,14 +765,16 @@
                             <androidx.appcompat.widget.AppCompatButton
                                 android:id="@+id/btnSaveMac"
                                 android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
+                                android:layout_height="38dp"
                                 android:layout_marginStart="8dp"
-                                android:minWidth="48dp"
-                                android:minHeight="48dp"
-                                android:background="@drawable/bg_count"
+                                android:minWidth="60dp"
+                                android:minHeight="38dp"
+                                android:paddingHorizontal="14dp"
+                                android:background="@drawable/bg_action_btn"
                                 android:text="保存"
                                 android:textColor="@color/m3_primary"
-                                android:textSize="12sp" />
+                                android:textSize="12.5sp"
+                                android:textStyle="bold" />
                         </LinearLayout>
 
                         <TextView
@@ -1106,14 +1117,16 @@
                     <androidx.appcompat.widget.AppCompatButton
                         android:id="@+id/btnSaveDisplaySize"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
+                        android:layout_height="38dp"
                         android:layout_marginStart="8dp"
-                        android:minWidth="52dp"
-                        android:minHeight="48dp"
-                        android:background="@drawable/bg_count"
+                        android:minWidth="60dp"
+                        android:minHeight="38dp"
+                        android:paddingHorizontal="14dp"
+                        android:background="@drawable/bg_action_btn"
                         android:text="保存"
                         android:textColor="@color/m3_primary"
-                        android:textSize="12sp" />
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
                 </LinearLayout>
 
                 <TextView

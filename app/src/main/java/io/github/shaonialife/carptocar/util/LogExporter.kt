@@ -41,8 +41,8 @@ object LogExporter {
         val scope: Scope,
     )
 
-    /** 导出目录（相对外部存储根）：下载/CarPToCarL。 */
-    private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarPToCarL"
+    /** 导出目录（相对外部存储根）：下载/CarPToCar+ICCOA。 */
+    private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarPToCar+ICCOA"
 
     /** 文件管理器里展示的绝对路径前缀（主用户外部存储；分区存储下即 /sdcard）。 */
     private const val DISPLAY_ROOT = "/storage/emulated/0"
@@ -55,7 +55,7 @@ object LogExporter {
     ): Result? {
         val body = buildContent(context, fallbackText, scope)
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val fileName = "CarPToCarL-log-$stamp${scope.fileNameTag}.txt"
+        val fileName = "CarPToCar+ICCOA-log-$stamp${scope.fileNameTag}.txt"
         val resolver = context.contentResolver
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val values =
@@ -86,7 +86,7 @@ object LogExporter {
         scope: Scope,
     ): String =
         buildString {
-            appendLine("CarPToCarL 运行日志")
+            appendLine("CarPToCar+ICCOA 运行日志")
             appendLine("导出时间: " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
             appendLine("应用版本: " + AppVersion.nameWithTag(context))
             appendLine("导出范围: " + scope.label)

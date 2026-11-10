@@ -1,11 +1,9 @@
-# CarPToCarL — 让 Android 手机充当 CarPlay 发送端，把原生 CarLife 投到车机
+# CarPToCar+ICCOA — 让 Android 手机充当 CarPlay 发送端，通过劫持本地 ICCOA Car+ 投到车机
 
-一台普通 Android 手机（未 root）扮演 **CarPlay 发送端（iPhone 角色）**，  
-连到支持 CarPlay 的车机；画面内容取自**手机原生 CarLife+ 引擎的 H.264 码流**，  
-经本 App 劫持后**直通转发**给车机（不重编码）。
+通过劫持手机本地 ICCOA Car+ 服务，让 Android 手机扮演 **CarPlay 发送端（iPhone 角色）**与车机建立连接，把车机互联画面投到支持 CarPlay 的车机大屏，并支持双向触摸回传。
 
-> **非官方项目**：个人实验性作品，与 Apple Inc.、百度及任何汽车制造商均无关联，  
-> 未获授权或认证，**不是 MFi 产品**。CarPlay / AirPlay / CarLife 均为其各自权利人的商标，  
+> **非官方项目**：个人实验性作品，与 Apple Inc.、ICCOA 智慧车联开放联盟及任何汽车制造商均无关联，  
+> 未获授权或认证，**不是 MFi 产品**。CarPlay / AirPlay / ICCOA 均为其各自权利人的商标，  
 > 文中出现仅用于说明兼容目标。
 >
 > **驾驶安全**：仅限停车时配置与操作；行驶中依赖本方案可能导致导航中断，  
@@ -19,18 +17,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**
-> —— 主线固定直链（当前 1.2.29，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
-> 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
+> **[`CarPToCar+ICCOA-1.2.46.apk`](https://github.com/As-Care/CarPToCarICCOA/releases)**
+> —— 主线固定发布版本。
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
-| 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk) |
-| 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.29，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.29.apk`                              |
-| 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
+| 全部版本     | [Releases 页面](https://github.com/As-Care/CarPToCarICCOA/releases)（含更新日志与历史版本）        |
+| 本版固定包    | [`CarPToCar+ICCOA-1.2.46.apk`](https://github.com/As-Care/CarPToCarICCOA/releases) |
+| 系统要求     | 一加 / ColorOS 手机（支持系统 Car+ 车联，如一加Ace7Pro / ColorOS 17）                                                      |
+| 签名       | 调试证书（可直接覆盖安装）                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCar+ICCOA-1.2.46.apk`                              |
+| 前置       | 手机内置 **系统 Car+ 车联** 服务（ColorOS 智慧车联）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
 [第三节 使用说明](#三使用说明)与[第五节 故障排查](#五故障排查)。
@@ -41,14 +38,14 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.29`（正式版；**身份对齐两项修复 + 手册对照**：① `0x4E09` 设备信息固定自报 `iPhone`，与蓝牙名彻底解耦——1.2.28 当天为修车机蓝牙列表里的「未知设备」把 `0x4E09` 改成发本机蓝牙名（`BKQ-AN10`），修好了展示却弄偏了「我们是谁」；真机 Frida 抓包（MIB3 隧道同款常量）与市售盒子在这一层发的都是 `iPhone`。构造参数 `deviceName` 直接删除以杜绝再传错，新增单测断言报文体全文都是 `iPhone`；② iAP2 链路初始序号由固定 `99` 改为每条链路 `SecureRandom(0x100)`——myCadillac 13 轮重连的 486 个 SYN 字节完全一致（`seq=99`），做过会话缓存/重放判定的车机会把重复序号按重传帧丢掉，真机与 catplay 取的都是随机初值；③ 新增 `docs/carplay-manual-crosscheck-20261107.md`：把外部《CarPlay 车机开发手册》对发送端主链路的 10 处建议逐条核过，采纳 1 处、明确不采纳 9 处（每处都附本项目实车证据），并指出手册自身的两处硬错误（EIR 两列写反、`0x5702` 角色写反）；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.29.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.29/CarPToCarL-1.2.29.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.46`（正式版） |
+| 下载   | **[`CarPToCar+ICCOA-1.2.46.apk`](https://github.com/As-Care/CarPToCarICCOA/releases)**       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
-| 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
+| 应用名  | **CarPToCar+ICCOA**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
-| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3；测试台：DiPlay / xcertplay）                    |
-| 画面来源 | 本机 **CarLife+** 引擎（荣耀：`com.baidu.carlife.honor` 8.8.5）                        |
-| 音频   | PCM 直通（CarLife 音频通道 → AirPlay 音频通道）                                           |
+| 适用车型 | 支持**无线 CarPlay** 的车机（真车已验证：奥迪 MIB3；测试台：Mac版本的AllPlay 测试台）                    |
+| 画面来源 | 本机 **ICCOA Car+**（ColorOS 系统内置 Car+ 智慧车联）                        |
+| 音频   | PCM 直通（ICCOA 音频通道 → AirPlay 音频通道）                                           |
 | 参考项目 | **[CarDeck](https://github.com/shaonialife/cardeck)**（MIT，独立项目，与本项目非同作者）——本项目的协议层与工程骨架参考了它的实现 |
 
 ### 与参考项目 CarDeck 的关系
@@ -61,11 +58,11 @@
 
 两者真正的区别在**画面来源**：
 
-| | CarDeck | CarPToCarL（本项目） |
+| | CarDeck | CarPToCar+ICCOA（本项目） |
 |---|---|---|
-| 画面来源 | 自绘隐形屏（受信虚拟屏跑手机应用）+ Shizuku 触摸注入 | **劫持本机 CarLife+ 引擎码流，不重编码** |
-| 触摸通路 | Shizuku 直注虚拟屏 | 车机 → HID → CarLife 9340 通道注入 |
-| 依赖 | 需要 Shizuku | **不依赖 Shizuku**（2026-10-24 起移除） |
+| 画面来源 | 自绘隐形屏（受信虚拟屏跑手机应用）+ Shizuku 触摸注入 | **劫持本机 ICCOA Car+ 引擎码流，不重编码** |
+| 触摸通路 | Shizuku 直注虚拟屏 | 车机 → HID → ICCOA 触摸通道注入 |
+| 依赖 | 需要 Shizuku | **不依赖 Shizuku**（无需 Shizuku） |
 | 目标 | 隐形屏启动器 | 无线 CarPlay 投屏网关 |
 
 两个仓库都未声明或使用任何第三方的 MFi 授权，法律边界见
@@ -73,8 +70,8 @@
 
 ### 方向说明
 
-- 本项目是**发送端**（手机扮演 iPhone），与 DiPlay / xcertplay 这类**接收端**（扮演车机）方向相反。  
-  **DiPlay 是 xcertplay 的衍生版，是本项目实际使用的测试台**。
+- 本项目是**发送端**（手机扮演 iPhone），与 AllPlay / DiPlay / xcertplay 这类**接收端**（扮演车机）方向相反。  
+  **Mac 版本的 AllPlay 测试台是本项目实际验证使用的测试台之一**。
 - 发送端**不需要苹果签名身份**：iAP2 认证是单向的（手机验证车机的 MFi 证书，车机信任手机自报结果）。
 - **有线 USB 路线已排除**（App 无法控制 USB gadget，测试机 BL 无法解锁），只走无线。
   卡在哪一层、三条可能的绕法（root 手搓 gadget / 树莓派当 USB 翻译器 / 等 dongle）、
@@ -83,8 +80,8 @@
 ### 背景：为什么需要它
 
 Android 手机连 CarPlay 车机，官方路径不存在。本项目的做法是：既然车机只认 CarPlay，  
-那就让手机**冒充 iPhone** 完成 iAP2 + AirPlay 全链路；既然手机侧最完整的车机界面是原生  
-CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边各自用最成熟的实现，中间只做搬运。
+那就让手机**冒充 iPhone** 完成 iAP2 + AirPlay 全链路；既然一加 / ColorOS 手机侧最完整的车机互联是原生  
+ICCOA Car+，那就把它的视频/音频流**截下来直通**给车机。两边各自用最成熟的实现，中间只做桥接与搬运。
 
 ---
 
@@ -95,10 +92,10 @@ CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边�
 ```
 ┌──────────────────── 手机（本 App） ────────────────────┐
 │                                                        │
-│  ① CarLife+ 引擎（com.baidu.carlife.honor）             │
-│       │  H.264 码流 + PCM 音频（127.0.0.1:7240 等 7 个端口）
+│  ① ICCOA Car+ 引擎（ColorOS 系统车机互联）              │
+│       │  H.264 码流 + PCM 音频（本地服务通道）          │
 │       ▼                                                │
-│  ② CarLifeHijack（冒充车机，接管码流，不重编码）         │
+│  ② ICCOAHijack（冒充车机端，接管码流，不重编码）        │
 │       │                                                │
 │       ▼                                                │
 │  ③ VideoSender / AudioSender                           │
@@ -119,9 +116,9 @@ CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边�
 | 识别车机 | 蓝牙 RFCOMM + iAP2 | 与车机配对，走 iAP2 握手，拿到车机热点凭据与 AirPlay 端点             |
 | 入网   | WiFi             | 用 iAP2 拿到的凭据自动加入车机热点；mDNS 发现 AirPlay 服务          |
 | 建立会话 | AirPlay          | PairVerify → SETUP（拿到车机视图尺寸）→ RECORD             |
-| 视频   | AirPlay 视频流      | 把 CarLife 的 H.264 帧原样封装推流；`VideoConfig` 声明车机画布尺寸 |
-| 音频   | AirPlay 音频流      | CarLife PCM → RTP 封装                             |
-| 触控   | iAP2 HID         | 车机触摸回传到手机，经 CarLife 通道注入                         |
+| 视频   | AirPlay 视频流      | 把 ICCOA Car+ 的 H.264 帧原样封装推流；`VideoConfig` 声明车机画布尺寸 |
+| 音频   | AirPlay 音频流      | ICCOA PCM → RTP 封装                               |
+| 触控   | iAP2 HID         | 车机触摸回传到手机，经 ICCOA 通道注入                         |
 | 媒体信息 | iAP2 NowPlaying  | 歌名 / 歌手 / 歌词回传给车机                                |
 
 ### CarLife 劫持的协议参数（98386 / 98311）
@@ -146,22 +143,13 @@ CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边�
 
 ### 三个必须知道的技术事实（实测结论）
 
-1. **画面源是荣耀车联创建的虚拟屏，不是普通屏幕采集。**  
-   走荣耀车联流程时系统会创建 `HonorAutoDisplay`：`1920×1080 @ 20fps`，`type=VIRTUAL`，  
-   `FLAG_PRESENTATION | FLAG_OWN_CONTENT_ONLY`。CarLife 引擎只是编码这块屏。  
-   → **分辨率和帧率都由荣耀侧决定，CarLife 协议改不动。**  
-   → 但**帧率可以在手机端「荣耀车联」里改**：默认档就是虚拟屏的 `renderFrameRate 20`，  
-   改成 30 / 60 帧后虚拟屏按新帧率出图，引擎随即吐 30 / 60 帧（见下方「帧率拉到 60」）。
-2. **厂商适配层会覆盖编码尺寸。**  
-   引擎把 98311 的尺寸交给 `MixActionDispatcher("carlife_encode_format")`（荣耀 mix 模块），  
-   厂商层返回非 null 时覆盖 `MediaFormat` 宽高。实测请求 1412×654 时 SPS 仍可能回到 1280×720。  
-   → 因此 `VideoConfig` 的声明**以车机画布为准**（`liveSize` 实时读 98311），  
-   SPS 解析值只作诊断与兜底，绝不反过来改写声明（历史上这么做过，导致真车黑屏）。
-3. **引擎不能由 App 自动拉起。**  
-   自动拉起（`bindService` / `startForegroundService` / `startActivity`）确实能让引擎监听 7240  
-   并被成功劫持，但**拿不到荣耀的画面源**——引擎只会把「荣耀车联 Powered by MagicOS」欢迎页  
-   编码成恒定 ~10KB 的静止帧反复发送，车机表现为「连接成功但长时间没画面」。  
-   → 所以 `0.2.14` 起**移除自动拉起**，改回用户手动打开 CarLife+ 点「无线连接」。
+1. **画面源是系统 Car+ 创建的车联画面，经 ICCOA 管道传输。**  
+   手机开启系统 Car+ 互联后，ColorOS 启动车机互联渲染通道。  
+   → **分辨率与帧率由系统 Car+ 模块及车机端协商决定。**
+2. **分辨率与流缩放。**  
+   可在主界面「流分辨率」中自定义宽高（默认 1412×654 等，下次连接起效），App 会将车机真实画布尺寸与码流尺寸等比适配。
+3. **支持快捷唤起系统 Car+。**  
+   App 顶部提供了「打开系统 Car+」快捷按钮（拥有 Root 权限时可一键唤起），用户也可在系统「设置 → 连接与共享 → 车机互联 / Car+」中手动打开。
 
 ---
 
@@ -170,89 +158,44 @@ CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边�
 ### 前置条件
 
 - 车机支持**无线 CarPlay**（有线不适用）。
-- 手机已安装 **CarLife+**（荣耀机型为系统内置的「荣耀车联」CarLife 通道）。
+- 手机为一加 / ColorOS 机型（内置系统 Car+ 车联，如一加Ace7Pro，系统版本 ColorOS 17）。
 - 手机蓝牙开启，且**已与车机完成系统级蓝牙配对**（不是 App 内扫描配对，是系统设置里的配对）。
-- 首次使用需授予若干权限（见下方「权限清单」）。
+- 首次使用需授予若干基础权限（见下方「权限清单」）。
 
 ### 首次配置（只做一次）
 
-1. 安装并打开 **CarPToCarL**，阅读并同意免责声明。
+1. 安装并打开 **CarPToCar+ICCOA**，阅读并同意免责声明。
 2. 按提示授予权限：
    - **附近设备 / 蓝牙**：扫描与配对车机
    - **通知使用权**：读取音乐会话（歌名、歌手、歌词、播放状态联动）
    - **通知权限**：前台保活服务的常驻通知
-3. 在「连接准备」里选择目标车机（可选）。不指定时会依次尝试全部已配对设备。
-4. 如车机蓝牙地址不固定，可在 **MAC** 输入框手填并保存。
-5. 「启动后自动连接」**默认开启**：打开 App 即自动发起连接，不用每次点「启动连接」。  
-   想在连之前先改「下次连接起效」的项（分辨率缩放、CarLife 劫持开关）时，
-   把「连接准备」里这个开关关掉即可。
+3. 在「连接准备」里设置或核对本机蓝牙地址：
+   - ColorOS 系统可在「设置 — 关于本机 — 状态信息」中查到真实的本机蓝牙地址，填入并保存。
+4. 「启动后自动连接」**默认开启**：打开 App 即自动发起连接，不用每次点「启动连接」。  
+   想在连之前先改「下次连接起效」的项（流分辨率、劫持开关）时，把「连接准备」里这个开关关掉即可。
 
 ### 每次使用（重要：顺序）
 
 ```
 ① 手机与车机蓝牙配对（系统蓝牙里完成）
         ↓
-② 打开「荣耀车联 / CarLife+」→ 点【无线 WLAN 连接】
+② 打开系统 Car+（可直接在 App 顶部点击【打开系统 Car+】按钮，或在系统设置「连接与共享 → 车机互联 / Car+」开启）
         ↓
-③ 停在第二步「正在连接」界面（不要退出、不要返回）
+③ 回到 CarPToCar+ICCOA → 点击【启动连接】或【重新连接 Car+】
         ↓
-④ 回到 CarPToCarL → 点【启动连接】
-        ↓
-⑤ App 自动加入车机热点 → 建立 CarPlay 会话 → 画面出现在车机
+④ App 自动加入车机热点 → 建立 CarPlay 会话 → 画面出现在车机大屏
 ```
-
-> **第 ③ 步是关键**：必须让 CarLife+ 真的进入「正在连接」状态。  
-> 此时引擎才启动、才创建虚拟屏、才开始监听 7240。App 检测到端口一开立即接管。
->
-> 顺序不是绝对强制的——App 一启动就常驻守候，先点「启动连接」再开 CarLife+ 也可以。  
-> 但推荐按上面的顺序，因为「正在连接」有超时，先让 App 就位更稳。
->
-> 画面出来后再花 10 秒做两件事（都在**同一页**）：帧率选 **60 帧**、分辨率保持 **「默认」**。  
-> 只改帧率没风险；**分辨率别动**，动了会画面不一致——详见下一节。
-
-### 帧率拉到 60（连上之后做一次）
-
-默认画面只有 **20fps**，这是荣耀车联虚拟屏的默认档，不是本 App 的节流。  
-在**手机端**改一次就好（车机画面已经出来之后再改也能生效）：
-
-```
-手机打开「荣耀车联 / CarLife+」 → 设置 → 投屏显示设置 → 帧率 → 选「60 帧」
-```
-
-- 同一页还有「默认 / 30 帧 / 60 帧」三档，**默认 = 20fps**（本文档多处提到的 20fps 来源）。
-- 页面上那行「可能存在兼容性问题，请谨慎使用」是真的：60 帧对车机解码能力有要求，  
-  部分车型会出现**卡顿、花屏、绿屏、拉伸**，出现就退回 30 帧或「默认」。
-- 页面提示分辨率类改动「下次连接车机时生效」；帧率改完若没变化，断开重连一次即可。
-- 改完在日志里能对账：`CARLIFE: 实测帧率 59.x fps（5s 内 xxx 帧，声明 60）`。
-
-App 侧不需要再改什么：`carlife_fps` 默认就是 **60**，连接建立 800ms 后还会发一次  
-`98316 VIDEO_ENCODER_FRAME_RATE_CHANGE`（引擎侧 clamp 3..60）把编码节拍对齐到 16ms。  
-也就是说**两边都得到 60 才顺**：车联设置给画面源 60，App 申请值让编码器按 60 输出节拍。  
-只改一边仍会被另一边卡在低帧。
-
-> ⚠️ **改完帧率必须回到同一页，核对上面的「分辨率」档有没有跟着变。**
->
-> 「帧率」和「分辨率」在同一张「投屏显示设置」页里，改一项时很容易连带把另一项动掉。  
-> 分辨率决定荣耀虚拟屏的**尺寸**，也就是本 App 拿到的画面源尺寸；而车机是按**自己真实  
-> 分辨率**建解码器和 surface 的（`VideoConfig` 声明也跟随车机画布）。两者比例一旦不一致，  
-> 就会**画面不一致**：左右黑边、画面只占中间一块、或被横向拉扁——这和帧率高低无关，  
-> 只是看起来像「设置改坏了」。
->
-> - 正确状态：分辨率停&#x5728;**「默认（按当前车机的最佳分辨率显示）」**，不要为了「更清晰」手动挑高档。
-> - 分辨率档的改动页面自己注明「**下次连接车机时生效**」——所以改完要断开重连一次，  
->   否则会出现「手机设置是 A、车机按旧的 B 在显示」的错觉。
-> - 帧率可以随时改，但**改帧率顺手看一眼分辨率**，是这一页最容易踩的坑。
 
 ### 界面上的状态提示
 
-主界面状态卡片**上方**有一行 CarLife 状态文字，直接告诉你现在卡在哪：
+主界面状态卡片上方有一行互联状态文字，直接告诉你现在卡在哪：
 
 | 显示                             | 含义           | 该做什么                  |
 | ------------------------------ | ------------ | --------------------- |
-| 等待你手动打开 CarLife+ 并点「无线连接」      | 没检测到 7240 监听 | 去做上面的第 ②③ 步（点这行可重启守候） |
-| 已劫持 CarLife+ 画面 —— 点「启动连接」推到车机 | 码流已接到，还没推给车机 | 点「启动连接」               |
-| 车机画面来自 CarLife+（直通中）           | 正在推流         | 无需操作                  |
-| CarLife 劫持已在设置里关闭 —— 不会有车机画面   | 开关被关了        | 打开「本地 CarLife 劫持」开关   |
+| 正在准备 ICCOA Car+ 接收端      | 本地劫持服务就绪中 | 确认系统 Car+ 已开启 |
+| 本地ICCOA Car+劫持已就绪       | 码流已接入，准备推流 | 点「启动连接」               |
+| 已连接（推流中）           | 正在推流         | 无需操作                  |
+| 劫持已在设置里关闭 —— 不会有车机画面   | 开关被关了        | 打开「本地ICCOA Car+劫持」开关   |
 
 ### 断开
 
@@ -278,65 +221,42 @@ App 侧不需要再改什么：`carlife_fps` 默认就是 **60**，连接建立 
 | ---------------- | ----- | ------------------------------------------------------------------------------------ |
 | 无线 iAP2 发送端会话    | ✅     | 走通至 0x4301，拿到热点凭据与 AirPlay 端点                                                        |
 | AirPlay 主会话      | ✅     | PairVerify + H.264 推流 + HID 触摸回传                                                     |
-| 真车验证（奥迪 MIB3）    | ✅     | 2026-10-11 全通：视频上屏 + 触摸可交互                                                           |
-| CarLife 画面直通     | ✅     | 劫持本机引擎码流，不重编码                                                                        |
-| CarLife 音频直通     | ✅     | **两条通道都接**：媒体（`9240`，`0x3000x`）+ TTS/导航播报（`9241`，`0x4xxxx`）→ PCM → RTP；媒体通道支持播放/暂停联动，TTS 不参与该联动 |
-| 歌名 / 歌手 / 歌词     | ✅     | 98386 `MEDIA_LYRIC_SUPPORT=1` + iAP2 NowPlaying                                      |
-| 车机分辨率自适应         | ⚠️    | 98311 上报车机真实视图 + `needAdapterScreen=true`；**但受厂商 mix 层限制，实际码流可能仍为 1280×720 或 1080p** |
-| 触摸回传             | ✅     | 车机触摸 → CarLife 通道注入；坐标以 **SPS 真实分辨率**为基准，触摸异步队列不积压                                   |
-| 双指触控（缩放）      | 🧪     | 1.0.7 起双指手势改走复合动作通道 `0x68001`（动作码带指针索引），单指仍走单点通道；详见 [docs/touch-multitouch.md](docs/touch-multitouch.md) |
-| 启动后自动连接       | ✅     | 打开 App 即自动发起连接，**默认开启**；「连接准备」里可关掉改为手动。2026-10-25 荣耀 PTP-AN10 冷启动实测：无人操作即可自动建会话并推流 |
-| 目标帧率跟随车机     | ✅     | 车机 `/info displays[0].maxFPS` 报了就按它出帧（夹在 24–120），没报按 60；判定见 [app/src/main/java/io/github/shaonialife/carptocar/video/StreamFps.kt](app/src/main/java/io/github/shaonialife/carptocar/video/StreamFps.kt) |
-| 60fps 投屏         | ✅     | 手机端「荣耀车联 → 设置 → 投屏显示设置 → 帧率 = 60」；默认档为 20fps                                         |
-| 自绘隐形桌面（launcher） | 保留    | 早期主路径，现非默认；画面唯一来源已是 CarLife 劫持                                                       |
-
+| 真车验证（奥迪 MIB3）    | ✅     | 视频上屏 + 触摸可交互                                                           |
+| ICCOA Car+ 画面直通 | ✅     | 劫持本机 ICCOA Car+ 引擎码流，不重编码直通转发                                                     |
+| ICCOA Car+ 音频直通 | ✅     | 媒体与播报通道 PCM 直通 AirPlay                                           |
+| 歌名 / 歌手 / 歌词     | ✅     | 支持媒体信息同步与 iAP2 NowPlaying 回传                                      |
+| 车机分辨率自适应         | ✅     | 支持在 App 主界面灵活调整「流分辨率」并保存（如 1412×654 等） |
+| 触摸回传             | ✅     | 车机触摸 → 回传注入；坐标以真实分辨率对齐，触摸队列低延迟                                   |
+| 双指触控（缩放）      | 🧪     | 支持复合手势与多指手势映射                                |
+| 启动后自动连接       | ✅     | 打开 App 即自动发起连接，**默认开启**；「连接准备」里可关掉改为手动。一加Ace7Pro（ColorOS 17）实测冷启动全自动连接 |
+| 目标帧率跟随车机     | ✅     | 车机 `/info displays[0].maxFPS` 报了就按它出帧（夹在 24–120），没报按 60 |
+| 自绘隐形桌面（launcher） | 保留    | 早期主路径，现非默认；画面主要来源为系统 Car+ 劫持                                                       |
 
 ### 已知限制
 
-1. **默认帧率 20fps（可自行改到 60）**：默认值来自荣耀车联虚拟屏的 `renderFrameRate 20.0`，  
-   不是本 App 的节流，CarLife 协议也改不动。但**手机端「荣耀车联 → 设置 → 投屏显示设置 → 帧率」  
-   可以选 30 / 60 帧**，实测选 60 后日志实测帧率能到 ~60fps。60 帧可能触发部分车机卡顿/花屏，  
-   出问题退回 30 帧或「默认」。  
-   → App 侧目标帧率**跟随车机**：`/info displays[0].maxFPS` 有值就用它，没声明按 60。
-   车机报 30 就别跟它拗——发 60 只会让车机丢帧、解码队列堆积。日志里能对账：
-   `DISPLAY: 车机 1920×720（/info 通告）→ 流 …@30fps（跟随车机 maxFPS=30）`。
-2. **分辨率不可完全自主**：厂商 mix 层可能把编码尺寸改回 1280×720 / 1080p。当前策略是  
-   「声明跟车机画布一致」，尽量不出现变形；比例差异大的车机（如 21:9）可能仍有黑边或轻微拉伸。  
-   → 另外**车联「投屏显示设置 → 分辨率」必须停在「默认」**，手动改档会让虚拟屏尺寸  
-   偏离车机画布，直接表现为画面不一致（见第五节「画面拉伸 / 变形 / 比例不一致」）。
-3. **必须手动进 CarLife+**：自动拉起拿不到画面源（见第二节事实 3），这是设计取舍，不是 bug。
-4. **依赖 CarLife+ 版本行为**：逆向结论基于荣耀 8.8.5（versionCode 274），升级后协议可能变化。
+1. **分辨率与车机画布**：
+   车机按自身屏幕比例建解码器和 surface（`VideoConfig` 声明跟随车机画布）。当流分辨率与车机画布比例差异较大时可能产生等比黑边。
+2. **需要系统 Car+ 支持**：
+   本项目依赖一加 / ColorOS 系统自带的 Car+ 车联系统，需在连接前开启系统 Car+。
+3. **真实蓝牙 MAC 填写**：
+   由于 Android 6+ 系统对应用隐藏了本机蓝牙真实 MAC 地址，在 ColorOS 系统上请前往「设置 — 关于本机 — 状态信息」中查阅本机真实蓝牙地址，并在 App 主界面填入保存。
 
 ---
 
 ## 五、故障排查
 
-### 画面只有 20fps / 滑动发涩不跟手
+### 画面帧率或滑动问题
 
-**先改车联设置，不要怀疑 App**：手机端「荣耀车联 / CarLife+ → 设置 → 投屏显示设置 → 帧率 → 60 帧」。  
-默认档是 20fps（虚拟屏 `renderFrameRate 20.0` 决定），改完日志应出现  
-`CARLIFE: 实测帧率 59.x fps`。车机跟不上（卡顿/花屏/绿屏）就退 30 帧。
-
-若已选 60 帧仍只有 20 帧，再查这三处：
-
-1. 改完没重连——部分设置项注明「下次连接车机时生效」，断开重连一次。
-2. `requestedFps` 被偏好压低了：检查 `carlife_fps`（默认 60），日志里 `MD_VIDEO_ENC_INIT` 的 fps 字段应是 60。
-3. 车机侧解码跟不上会主动丢帧，表现为「声明 60、实测 40 上下」，属车机能力上限，退回 30 帧更稳。
-
-**改帧率后如果画面「不一致」（黑边 / 只占一块 / 拉扁），那基本不是帧率造成的**，  
-而是同一页的「分辨率」档被动过：回去把它调&#x56DE;**「默认（按车机最佳分辨率显示）」**，  
-再断开重连一次（分辨率类改动下次连接才生效）。对账方法见下面「画面拉伸 / 变形」。
+**排查帧率与流设置**：
+1. 检查 App 主界面「流分辨率」配置，修改后需在下次连接生效。
+2. 车机侧解码跟不上会主动丢帧，表现为「声明 60、实测 40 上下」，属车机能力上限，可适当降低分辨率。
 
 ### 「连接成功但长时间没画面」
 
 按可能性排序：
 
-1. **CarLife+ 没停在「正在连接」** —— 最常见。引擎没启动或没创建虚拟屏，  
-   `netstat -tln | grep 7240` 无监听。重做「每次使用」第 ②③ 步。
-2. **引擎被别的东西拉起来了** —— 如果引擎是被 App 或第三方直接拉起（没有荣耀虚拟屏），  
-   它只会编码欢迎页。执行 `am force-stop com.baidu.carlife.honor`，再走正式流程。
-3. **`VideoConfig` 声明与码流不一致** —— 车机按声明建解码器，尺寸不符就解不出画面。  
-   正确状态是日志里 `DISPLAY: CarLife 直通流 WxH` 与 `VIDEO: VideoConfig 声明` 一致。
+1. **系统 Car+ 尚未就绪** —— 系统 Car+ 未成功建立投屏渲染，可点击 App 顶部【打开系统 Car+】按钮重新唤起。
+2. **`VideoConfig` 声明与码流不一致** —— 车机按声明建解码器，尺寸不符就解不出画面。正确状态是日志里 `DISPLAY` 与 `VIDEO: VideoConfig 声明` 一致。
 
 ### 触摸迟钝 / 拖不动 / 点不准
 
@@ -431,8 +351,8 @@ SETUP 403 / CSM 静默丢弃，不如当场把原因说清楚。
 >   `/system/etc/permissions/privapp-permissions-*.xml` 白名单，否则开机不授予。
 > - 更关键：priv-app **只有用平台签名才会切到 `platform_app` 的 SELinux 域**。用作者自己的签名，
 >   域仍是 `untrusted_app`，读 sysfs、开 raw HCI socket 一样被拒。
-> - 而且部分机型（含荣耀 MagicOS）的 MAC 在 framework 写入之前就已打码
->   （连 `dumpsys` 都是 `XX:XX:XX:XX:xx:xx`），**权限再高也读不到真值**。
+> - 而且部分机型（如某些定制系统 ROM）的 MAC 在 framework 写入之前就已打码
+>   （连 `dumpsys` 都是 `XX:XX:XX:XX:xx:xx`），**权限再高也读不到真值**。但在 ColorOS 上可在「设置 — 关于本机 — 状态信息」中直接查看到真实的蓝牙地址。
 >
 > 为读一个地址去刷机不划算——用上面的「从对端取 + 手填」即可。
 
@@ -496,16 +416,13 @@ v0.2.16 起直通模式在**空闲 1.5 秒**后每 2 秒重发**最后一个 IDR
 先说结论：**这条链路里有两处「尺寸」必须同时成立，任何一处不齐都会画面不一致。**
 
 ```
-① 荣耀车联「投屏显示设置 → 分辨率」  →  决定虚拟屏尺寸 = 本 App 拿到的画面源尺寸
+① 手机系统 Car+ / 本 App「流分辨率」  →  决定画面源尺寸
 ② 车机自己上报的画布（AirPlay SETUP）  →  决定车机解码器/surface，也是 VideoConfig 的声明基准
 ```
 
 按顺序查：
 
-1. **先看车联那一页的分辨率档**（和帧率同一页）。选「默认（按当前车机的最佳分辨率显示）」  
-   才是对的；为了「更清晰」手动挑高档，会让虚拟屏尺寸 ≠ 车机画布 → 黑边 / 只占一块 / 拉扁。  
-   而且**分辨率类改动下次连接才生效**，改完必须断开重连，否则看到的是上一次的档位。  
-   （2026-10-25 用户实测补充：改完帧率常会连带把这一项动掉，务必回看一眼。）
+1. **先看主界面的流分辨率设置**。在 App 主界面将流分辨率（如 1412×654）调整为与车机画布等比或一致，保存后下次连接生效。
 2. **再看 App 日志三方对账**，正常应基本一致：
    ```
    CARLIFE: 主动推送 98311 视频编码初始化 1412x654@60       ← 向引擎申请的编码档
@@ -559,7 +476,7 @@ bring-up failed）。
 1. **`dumpsys notification` 的 `Live notification listeners` 里有没有本应用**。  
    重装 APK 后常见：授权还在 `enabled_notification_listeners` 里，但系统没把监听器  
    绑上 → `MediaSession.metadata` 恒为 null → 车机整程空白。  
-   v0.2.19 起应用自己会 `requestRebind` 试着恢复；**荣耀 MagicOS 上该 API 不生效**，  
+   v0.2.19 起应用自己会 `requestRebind` 试着恢复；部分系统上该 API 可能不生效，  
    日志会打出提示，此时到「设置 → 通知使用权」把本应用**关掉再打开**一次即可。  
    （开发机上等价操作：`adb shell cmd notification disallow_listener <包>/<服务>`  
    然后 `allow_listener` 同一个组件。）
@@ -647,8 +564,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 - 产物：debug → `app/build/outputs/apk/debug/app-debug.apk`；  
   release → `app/build/outputs/apk/release/app-release.apk`（归档到 `dist/`，`dist/` 不入版本库）。
 - **不自己编译也行**：正式包在各版本的
-  [Releases](https://github.com/jjuugk/CarPToCarL/releases) 页面直接下载，
-  固定直链 <https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk> 始终指向最新版。
+  [Releases](https://github.com/As-Care/CarPToCarICCOA/releases) 页面直接下载。
 
 ### 安装与调试
 
@@ -667,7 +583,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 ### 根目录
 
 ```
-CarPToCarL/
+CarPToCar+ICCOA/
 ├── app/                          # 唯一的 Android 应用模块
 ├── docs/                         # 协议知识库与逆向结论
 ├── gradle/wrapper/               # wrapper（已改为本地发行版 zip）
@@ -809,9 +725,9 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
   > 结论先写在这里：**开源可以继续；收费只做「赞助 / 技术支持」，不要把 APK 或订阅当商品卖。**
   > 卖软件会让「被要求下架」升级为「可主张赔偿」，而 MFi 认证与 iAP2 协议这两块，
   > 本项目的 MIT 授权一点都不覆盖。
-- 应用名为 **CarPToCarL**，**不含**任何第三方商标；已配对的真车 / 电脑名称一律不写进仓库
+- 应用名为 **CarPToCar+ICCOA**，**不含**任何第三方商标；已配对的真车 / 电脑名称一律不写进仓库
   （文档与测试里是 `Audi_MMI_0000` / `AA:BB:CC:DD:EE:FF` 这类占位值）。
-- 「CarPlay」「AirPlay」「CarLife」「MMI」「MagicOS」均为其权利人的商标，文中出现仅作
+- 「CarPlay」「AirPlay」「ICCOA」「CarLife」「MMI」「ColorOS」均为其权利人的商标，文中出现仅作
   **描述性引用**，不代表任何关联、授权或认证。
 - 本项目**不使用** Apple、百度或任何车厂的图形标识与认证标（含 MFi badge）。
 - 仓库内**不含**反编译产物、厂商 SDK、抓包二进制、证书私钥或真实热点密码
@@ -986,7 +902,7 @@ PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_
 | 现象 | 根因 | 改动 |
 |---|---|---|
 | 车机只回链路 ACK（`ff 55 … ee …`），`0x6800/0x5000/0x4c00/0x4301` 一条都不发起，一直卡在「获取 WiFi」 | 我们抄的「新版嵌套体」其实是同源工程 `link_plus` 的**旧版分支**形态——新版车机要的是**两段 group**：`group0={0:1, 1:"00008110"+MAC+"0000"}`（有线标识）+ `group1={0:1, 1:MAC 小写}`（无线标识） | 新增 `AvailabilityBodyMemory.Variant.DUAL_GROUPS` 与 `GM_ORDER`；通用系（manufacturer 含 `General Motors` 或 `0x1D01` 带 `Cinemo` 组件）优先试它，静默后仍按 `MODERN_NESTED → LEGACY_FLAT → NONE` 回退 |
-| 车机蓝牙列表把这台手机显示成「未知设备 / 已连接」 | MagicOS 本地蓝牙名未设置时 `BluetoothAdapter.getName()` 返回本地化占位串，旧实现只判 `isNotBlank()`，于是 `0x4E09` 把「未知设备」发给车机 | `DeviceIdentity.displayName()` 过滤占位串；取名顺序改为 适配器名 → `Settings.Secure.bluetooth_name` → 营销名 → `Build.MODEL`；`ensureUsableBluetoothName()` 在占位时 `setName()` 改成可用名（车机列表与 `0x4E09` 一起修） |
+| 车机蓝牙列表把这台手机显示成「未知设备 / 已连接」 | 部分机型本地蓝牙名未设置时 `BluetoothAdapter.getName()` 返回本地化占位串，旧实现只判 `isNotBlank()`，于是 `0x4E09` 把「未知设备」发给车机 | `DeviceIdentity.displayName()` 过滤占位串；取名顺序改为 适配器名 → `Settings.Secure.bluetooth_name` → 营销名 → `Build.MODEL`；`ensureUsableBluetoothName()` 在占位时 `setName()` 改成可用名（车机列表与 `0x4E09` 一起修） |
 
 奥迪 / 宝马 / DiPlay 测试台的 `0x4300` 顺序**不动**（它们现在都是通的），双标识体只给
 通用系开——修一台车不能把已经跑通的链路改坏。单测 **500 例 0 失败**（新增 6 例：
@@ -1153,7 +1069,7 @@ catplay `CarPlayStartSessionWirelessAttributes` 逐字段印证 1.2.24 的主路
 
 **一、1.2.21 的语音键在这些车上一次都没触发**
 
-把手机上的日志翻出来对了一遍：`CarPToCarL-log-20261103-085250.txt` 08:52:12~42
+把手机上的日志翻出来对了一遍：`CarPToCar+ICCOA-log-20261103-085250.txt` 08:52:12~42
 连着 9 条 `EVENT: 命令 type=requestSiri params={siriAction=…}`，而 **没有任何一条
 `0x6802` 报文明细、没有任何 `0xCF`**；`/info` 里下发的 Consumer HID 描述符
 （46B 的 Array 版 / 35B 的位图版）列出的 usage 只有
@@ -1304,7 +1220,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 
 ### 1.2.18 —— 2026-11-04（奥迪 MIB3：EA 隧道不再写死链路 + 音频静音保活，正式版）
 
-> 样本 `CarPToCarL-log-20261104-083034.txt`（1.2.17，`Audi_MMI_8349` / `AUDI 4260` /
+> 样本 `CarPToCar+ICCOA-log-20261104-083034.txt`（1.2.17，`Audi_MMI_8349` / `AUDI 4260` /
 > `DELPHI`）。分析与证据链见 [docs/audi-mib3-ea-tunnel-20261104.md](docs/audi-mib3-ea-tunnel-20261104.md)。
 
 - **车机控制读不到数据 → 是它把整条 iAP2 链路写死的**：面板在 0xEA03（EA 会话状态）
@@ -1371,7 +1287,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
   会话已建立但 CarLife 没推流时，把提示文字渲染成单帧 H.264 推到车机屏幕代替黑屏，
   每 5 秒重推、最多 60 秒，CarLife 一出帧就停。详见
   [`docs/carlife-notice-frame.md`](docs/carlife-notice-frame.md)。
-- **csd 格式探测**：这台荣耀机的编码器把 csd-0 输出成 AnnexB 而非 avcC，`parseAvcC`
+- **csd 格式探测**：部分机型的编码器把 csd-0 输出成 AnnexB 而非 avcC，`parseAvcC`
   硬解析时把起始码高字节读成 SPS 长度 → 负数长度 → `copyOfRange` 抛异常。现在先探测
   格式两条路都支持，`readNal` 长度改 `Long` 并做越界校验，畸形数据返回 null 不抛。
 - **首帧闸门按「已送达帧」判定**：改用 `CarLifeHijack.framesDelivered` 相对本会话
@@ -1618,7 +1534,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 ### 1.1.1 ~ 1.2.7 —— 2026-10-29 ~ 10-31（补记索引）
 
 这一段此前只写在各版 Releases 正文里，没回填到本节。要点按版本索引如下，
-细节点版本号看 [Releases](https://github.com/jjuugk/CarPToCarL/releases)：
+细节点版本号看 [Releases](https://github.com/As-Care/CarPToCarICCOA/releases)：
 
 | 版本     | 日期         | 主题                                          |
 | ------ | ---------- | ------------------------------------------- |
@@ -1776,8 +1692,8 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 
 ### 1.0.3 —— 2026-10-25（正式版 · 交互精简）
 
-**[下载](https://github.com/jjuugk/CarPToCarL/releases/tag/v1.0.3)** ——
-`CarPToCarL-1.0.3-release.apk` / [`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)
+**[下载](https://github.com/As-Care/CarPToCarICCOA/releases)** ——
+`CarPToCar+ICCOA-1.0.3.apk`
 
 **上车就不用点按钮了**
 
@@ -1791,9 +1707,9 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
   CarLife 进入调试模式，白担开销。`MANAGE_EXTERNAL_STORAGE` 权限也随之不再需要。
 - **目标帧率固定 60**：取消 30/60 二选一，会话建立时按 `DisplayPrefs.FPS = 60` 申请；
   英雄卡统计行由「分辨率 · 实测/目标 fps」改为「分辨率 · 实测 fps」。
-  ⚠️ 真正决定出帧的仍是**荣耀车联「投屏显示设置 → 帧率」**（默认 20），见第四节已知限制 1。
+  ⚠️ 画面帧率同时受手机系统渲染与车机解码能力影响。
 
-**真机验证（2026-10-25 晚，荣耀 PTP-AN10）**
+**真机验证**
 
 - `adb install -r` 从 1.0.1 覆盖安装成功（同签名证书，无冲突），`versionCode` 10003 生效。
 - **自动连接整条链在真机上跑通**：冷启动后未触碰界面，日志自行出现
@@ -1801,12 +1717,12 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
   即「冷启动 → 700ms → 权限 / 蓝牙 / WLAN 前置 → 会话建立 → 推流」无需手动点按钮。
 - 同时确认目标帧率按 60 申请（此前默认档为 30）。
 - 验证方式供参考：release 包不可 `run-as`，看会话主线用
-  `adb logcat -d | grep CarPlaySender`（需过滤荣耀系统噪音）。
+  `adb logcat -d | grep CarPlaySender`（需过滤系统噪音）。
 
 ### 1.0.2 —— 2026-10-25（正式版 · 合规补充）
 
-**[下载](https://github.com/jjuugk/CarPToCarL/releases/tag/v1.0.2)** ——
-`CarPToCarL-1.0.2-release.apk` / [`CarPToCarL-latest.apk`](https://github.com/jjuugk/CarPToCarL/releases/latest/download/CarPToCarL-latest.apk)
+**[下载](https://github.com/As-Care/CarPToCarICCOA/releases)** ——
+`CarPToCar+ICCOA-1.0.2.apk`
 
 **把「来自哪里」写进说明**
 
@@ -1867,7 +1783,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 - PCM 直通，播放 / 暂停联动
 - 歌名 / 歌手 / 歌词：98386 `MEDIA_LYRIC_SUPPORT=1` + iAP2 0x5001  
   （订阅按 1.5s/4s/8s/15s/25s 退避重试，不再「订阅那一刻没读到就整程空白」）
-- 通知监听器自愈：`requestRebind` + watchdog；MagicOS 上该 API 不生效，需去设置页关开一次
+- 通知监听器自愈：`requestRebind` + watchdog；部分系统上该 API 不生效，需去设置页关开一次
 
 **工程**
 

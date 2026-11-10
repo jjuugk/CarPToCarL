@@ -1198,7 +1198,7 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("CarPToCarL 日志", text))
+            clipboard.setPrimaryClip(ClipData.newPlainText("CarPToCar+ICCOA 日志", text))
             snack("已复制 ${text.length} 字符日志")
         }
         findViewById<ImageView>(R.id.btnExportLog).setOnClickListener { exportLogFile() }
@@ -2422,7 +2422,7 @@ class MainActivity : AppCompatActivity() {
                     message =
                         "文件位置：\n${result.displayPath}\n\n" +
                             "大小：${formatBytes(result.bytes)}\n$scopeNote\n\n" +
-                            "可在「文件管理 → 下载 → CarPToCarL」中找到，也可直接分享给开发者排查问题。",
+                            "可在「文件管理 → 下载 → CarPToCar+ICCOA」中找到，也可直接分享给开发者排查问题。",
                     actions =
                         listOf(
                             DarkMessageDialog.Action("打开文件", DarkMessageDialog.Emphasis.PRIMARY) {
@@ -2494,7 +2494,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        snack("请到「文件管理 → 下载 → CarPToCarL」查看", 5_000L)
+        snack("请到「文件管理 → 下载 → CarPToCar+ICCOA」查看", 5_000L)
     }
 
     /** 用系统默认应用打开（多数 ROM 会落到文件管理器 / 文本查看器预览）。 */

@@ -219,7 +219,7 @@ object DeviceIdentity {
     private fun fallbackDeviceName(): String =
         marketingName()?.takeIf { it.isNotBlank() }
             ?: Build.MODEL?.takeIf { it.isNotBlank() }
-            ?: "CarPToCarL"
+            ?: "CarPToCar+ICCOA"
 
     /** 营销名（`ro.product.marketname`），取不到返回 null。 */
     fun marketingName(): String? =

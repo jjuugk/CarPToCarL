@@ -95,8 +95,13 @@ class DisclaimerContentTest {
         val text = DisclaimerContent.sections.joinToString("\n") { it.title + "\n" + it.body }
         // 分享出去必须讲清的三类内容：测试范围、驾驶风险、系统权限
         assertTrue(text.contains("已经测试过的组合只有"))
+        assertTrue(text.contains("一加Ace7Pro"))
+        assertTrue(text.contains("ColorOS 17"))
+        assertTrue(text.contains("Mac版本的AllPlay 测试台"))
         assertTrue(text.contains("驾驶安全"))
-        assertTrue(text.contains("Shizuku"))
+        assertTrue(text.contains("蓝牙权限"))
+        assertTrue(text.contains("CarPToCar+ICCOA"))
+        assertFalse(text.contains("CarPToCarL"))
         // 非官方声明（避免被误认为与 Apple 有关联）
         assertTrue(text.contains("非官方"))
         assertTrue(text.contains("商标"))
