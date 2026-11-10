@@ -812,7 +812,8 @@ class Iap2SenderSession(
         // **链路层 ACK 只证明 CRC 校验通过，跟业务层认不认这条消息无关**。
         //
         // 决定性对照（同一份代码、同一个入口）：
-        // - 奥迪 3874（1.0.7 完整连通的那台）可收清单 16 项里**有** 0x4e0d/0x4e0e；
+        // - 奥迪 MMI 3232（model AUDI 4930 / DELPHI，1.0.7 完整连通的那台）的蓝牙可收
+        //   清单 7 项 `0x4e0c 0x4e09 0x4e0d 0x4e0e 0x5702 0xea00 0xea01` 里**有**它；
         // - 别克 E2LB / BUICK_3138 / 凯迪拉克 CT5 的 9 项清单**都没有**，三台全部
         //   「ACK 到最后一条我们自己发的帧，然后只剩 ff550200ee10 心跳」。
         // 所以按声明裁对唯一验证过的奥迪**零影响**（它 wifiGen=LEGACY，走 !modern 分支
@@ -820,8 +821,10 @@ class Iap2SenderSession(
         // 同源 link_plus 别克分支的条件与此一致：
         // `if (!modernBootstrap || declaresReceive(0x4E0D) == true)`。
         //
-        // 0x4E0C（设备 UUID）**不裁**：奥迪 16 项清单里恰恰没有 0x4e0c，而 1.0.7
-        // 一直发着、奥迪也连上了——它对这条消息是真反例，动了才是拿奥迪冒险。
+        // 0x4E0C（设备 UUID）**不裁**：奥迪（7 项）、别克 E2LB/BUICK_3138（9 项）、
+        // 凯迪拉克 CT5（9 项）三台真车的清单里**都声明了它**，裁不裁对它们无差别；
+        // 只有 WinPlay/Roylyl 测试台那 16 项清单没列，而那台是测试台、参考价值低。
+        // 没有证据就别动。
         val modernBootstrap = wifiGen == ReceiverProfile.WifiGen.NEW
         val sendWirelessUpdate =
             !modernBootstrap || accessoryDeclaresReceive(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE) != false
