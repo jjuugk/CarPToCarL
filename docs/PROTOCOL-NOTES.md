@@ -584,6 +584,12 @@ down in ~12s with no picture."
 - 发起方收到 SYN|ACK（非纯 SYN）也采纳会话表并推进有序水位（只采纳不回显）；
 - 响应方回显 SYN|ACK 即视为协商完成（真机不等 ACK 就发 0x1D00）；
 - 回显用 ownSyncOf（maxOutgoing=0x7F），发送窗口按**本方声明值**计。
+  例外（2026-11-10 加，仅 `wifiGen=NEW`）：`Iap2LinkEngine.respectPeerSendWindow=true`
+  时按 `min(本方, 对端)` 发，超窗的帧 hold 住等 ACK。**不按品牌、按画像**：
+  奥迪 MMI 4260 也声明 `maxOutgoing=5`，但它 7 帧连发（seq 77~83、89~95）被逐条 ACK
+  并完整连上，所以老协议保持原时序；别克 BUICK_3138 声明 5，超窗 7 帧后一条 ACK 都没有。
+  零重传对端（`maxRetransmissions=0`，隧道侧隐式确认）**永不**受此约束——它不回 ACK，
+  套小窗口会把 backlog 永久卡死。
 
 **AADisplay 参考索引**：`carplay/protocol/WifiIap2Link.kt`（时序+常量）、
 `CarPlayRtspSession.kt:642`（控制通道 POST /command 写法）、`docs/AUDI_CARPLAY_CONNECT_ANALYSIS.md`。

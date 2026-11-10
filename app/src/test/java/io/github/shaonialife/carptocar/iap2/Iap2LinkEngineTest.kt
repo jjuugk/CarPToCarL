@@ -140,6 +140,97 @@ class Iap2LinkEngineTest {
         }
     }
 
+    /**
+     * 新协议车机：按**对端声明的发送窗口**发帧，超出的先 hold 住等 ACK。
+     *
+     * 别克 BUICK_3138 声明 `maxOutgoing=5`，我们旧逻辑回显 0x7F 后一次连发 7 帧
+     * （2026-11-10 18:34 日志 seq 97~103），车机对这 7 帧一条 ACK 都没回，
+     * 此后只剩 `ff550200ee10` 心跳。link_plus 的同源实现在这里取 `min(本方, 对端)`，
+     * 注释直指「启动帧可能超出接收窗口」——本用例锁住这条行为。
+     */
+    @Test
+    fun strictWindowModeCapsBurstToPeerWindow() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(maxOutgoing = 5)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput() // 协商残留（ACK/SYN）不算数据帧
+
+        phone.respectPeerSendWindow = true
+        val holds = ArrayList<Triple<Int, Int, Int>>()
+        val releases = ArrayList<Long>()
+        phone.onSendWindowHold = { peerMax, effective, backlog -> holds += Triple(peerMax, effective, backlog) }
+        phone.onSendWindowReleased = { _, heldMillis -> releases += heldMillis }
+
+        val frames = (0 until 7).map { Iap2Csm.encode(0x5000 + it) }
+        frames.forEachIndexed { index, bytes -> assertTrue(phone.sendControl(bytes, 10L + index)) }
+
+        val burst = phone.takeOutput()
+        val sentFirst = parseFrames(burst).size
+        assertTrue("对端声明 5，不该一口气发完 7 帧（实际 $sentFirst）", sentFirst < 7)
+        assertEquals("停发只回调一次", 1, holds.size)
+        assertEquals("回调里带对端声明的窗口", 5, holds[0].first)
+        assertEquals("实际生效窗口 = min(本端, 对端)", 5, holds[0].second)
+        assertTrue("回调时还有帧在排队（快照，之后还会继续入队）", holds[0].third > 0)
+
+        // 车机 ACK 掉已发出的帧 → 积压的帧放行（这一段只由 ACK 驱动，不靠定时器）
+        accessory.feed(burst, tick())
+        phone.feed(accessory.takeOutput(), tick())
+        val rest = parseFrames(phone.takeOutput()).size
+        assertEquals("ACK 之后积压帧应全部放出去", 7 - sentFirst, rest)
+        // 车机是逐条 ACK 的：每放行一帧就可能再次顶满窗口，因此放行可能回调多次
+        assertTrue("停发结束后应回调放行", releases.isNotEmpty())
+    }
+
+    /**
+     * 老协议（奥迪）：**不开**严格窗口，7 帧照旧一次发完——1.0.7 的时序不能动。
+     *
+     * 奥迪 MMI 4260 自己也声明 `maxOutgoing=5`，但它 09:26/09:31 两轮 7 帧连发
+     * （seq 77~83、89~95）被逐条 ACK 后完整连上。它是唯一可复现的成功样本，
+     * 这里锁住「不开开关时发送窗口仍是本端 0x7F」。
+     */
+    @Test
+    fun legacyModeStillBurstsPastSmallPeerWindow() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(maxOutgoing = 5)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+
+        val frames = (0 until 7).map { Iap2Csm.encode(0x5000 + it) }
+        frames.forEachIndexed { index, bytes -> assertTrue(phone.sendControl(bytes, 10L + index)) }
+
+        assertEquals("老协议不该被对端窗口卡住", 7, parseFrames(phone.takeOutput()).size)
+    }
+
+    /**
+     * 零重传对端（隧道侧隐式确认）**永不**受对端窗口约束。
+     *
+     * 这条守卫是血泪：它对端根本不回 ACK，套上小窗口会让 backlog 永久卡死。
+     * 2026-11-10 按 maxOutgoing 限流时漏了它，把 MIB3 隧道突发整段削掉、7 个用例挂掉。
+     */
+    @Test
+    fun zeroRetransmissionPeerIsNeverCapped() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(maxOutgoing = 5, maxRetransmissions = 0)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+
+        phone.respectPeerSendWindow = true
+        val holds = ArrayList<Int>()
+        phone.onSendWindowHold = { _, _, backlog -> holds += backlog }
+
+        val frames = (0 until 7).map { Iap2Csm.encode(0x5000 + it) }
+        frames.forEachIndexed { index, bytes -> assertTrue(phone.sendControl(bytes, 10L + index)) }
+
+        assertEquals("零重传对端不参与窗口收紧", 7, parseFrames(phone.takeOutput()).size)
+        assertTrue("不该出现停发", holds.isEmpty())
+    }
+
     // ---- 协商细节回归 ----
 
     /**

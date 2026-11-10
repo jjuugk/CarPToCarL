@@ -59,6 +59,24 @@ class Iap2LinkChannel(
     var peerDataFrameCount: Int = 0
         private set
 
+    /**
+     * 是否把对端声明的发送窗口当上限（见 [Iap2LinkEngine.respectPeerSendWindow]）。
+     *
+     * 会话层在 0x1D01 出画像后按 `wifiGen==NEW` 设置一次；默认关，老协议（奥迪）
+     * 的发送时序与 1.0.7 逐字节相同。
+     */
+    var respectPeerSendWindow: Boolean
+        get() = engine.respectPeerSendWindow
+        set(value) {
+            engine.respectPeerSendWindow = value
+            if (value) {
+                log(
+                    "LINK: 本轮按对端窗口发帧（本端声明 ${engine.declaredSendWindow}，" +
+                        "对端声明 ${engine.peerSynchronization?.maxOutgoing ?: "未知"}）",
+                )
+            }
+        }
+
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(
@@ -68,6 +86,17 @@ class Iap2LinkChannel(
         }
         engine.onUnknownSessionData = { sessionId, size ->
             log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
+        }
+        // 对端窗口满而停发（只在 wifiGen=NEW 的严格窗口模式下出现）。
+        // 日志要给到「从第几帧起被卡住、卡了多少帧」，否则现场只能看到「发了没 ACK」。
+        engine.onSendWindowHold = { peerMax, effective, backlog ->
+            log(
+                "LINK: 对端窗口 $peerMax 帧（本端声明 ${engine.declaredSendWindow}）→ 按 $effective 发，" +
+                    "其余 $backlog 帧 holding 等 ACK——未确认帧已占满车机接收窗口",
+            )
+        }
+        engine.onSendWindowReleased = { effective, heldMillis ->
+            log("LINK: 对端窗口放行（窗口 $effective，停发 ${heldMillis}ms）——继续发积压帧")
         }
         // 非 DETECT 的握手应答（车机侧 sendLackOfBackwardCompatibility 就在这一族）。
         // 以前这类字节被帧头扫描逐字节丢弃，日志里只能看到「协商无进展」。

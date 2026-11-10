@@ -133,6 +133,9 @@ class Iap2LinkEngine(
     private var lastSentAcknowledged: Int? = null
     private var lastReceivedInOrder = 0
 
+    /** 本轮「窗口满、停发等 ACK」的起始时刻（null = 没在停）；只用于诊断日志去重。 */
+    private var heldSinceMillis: Long? = null
+
     /**
      * 采纳的对端控制会话 ID（收到对端 sync 载荷时确定）。
      * Audi 真车字节级实测（2026-10-09）：车机（MIB3）以发起方姿态发 SYN，声明
@@ -161,6 +164,18 @@ class Iap2LinkEngine(
 
     /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
+
+    /**
+     * 诊断：**首次**因对端窗口满而停发时回调一次（(对端声明窗口, 实际生效窗口, 还在排队的帧数)）。
+     *
+     * 只在 [respectPeerSendWindow] 生效、且对端窗口**小于**本方声明时触发；
+     * 同一段停发只回调一次，重新开闸时由 [onSendWindowReleased] 收尾——否则每次 ACK
+     * 都会再触发一遍，日志会被刷满。
+     */
+    var onSendWindowHold: ((peerMax: Int, effective: Int, backlog: Int) -> Unit)? = null
+
+    /** 诊断：停发结束（重新开闸）时回调一次，带这段停发的持续时间（毫秒）。 */
+    var onSendWindowReleased: ((effective: Int, heldMillis: Long) -> Unit)? = null
 
     /** 诊断：每个入向链路帧的摘要（control/seq/ack/sessionId/载荷长度），真车排查用。 */
     var onFrameReceived: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
@@ -233,6 +248,23 @@ class Iap2LinkEngine(
      * 按对端值计窗会把突发消息卡死在对端的小窗口里（MIB3 突发 8 条 × 对端 4）。
      */
     private var declaredMaxOutgoing = maxOutgoing
+
+    /**
+     * 是否**把对端声明的发送窗口当上限**（`min(本方声明, 对端声明)`）。
+     *
+     * 默认关（老协议行为逐字节不变）。只有画像判 `wifiGen=NEW` 的新协议车机才打开，
+     * 由会话层在 0x1D01 出画像后设置（见 [Iap2LinkChannel.respectPeerSendWindow]）。
+     *
+     * 为什么不一刀切：**奥迪 MMI 4260（唯一完整连通过的车）自己也声明 maxOutgoing=5**，
+     * 而它连通的那些轮次里我们一直是 7 帧连发（2026-11-09 09:26:09 日志 seq 77~83、
+     * seq 89~95，ack=5），车机照单 ACK 并完成握手——说明「超窗 2 帧」在奥迪上并不致死。
+     * 若对所有车收紧，奥迪唯一可复现的成功时序就被改掉了，这是最不能拿来赌的一台。
+     * 而 GM/Cinemo（别克 E2LB/BUICK_3138、CT5）在「超窗 7 帧」之后一条 ACK 都没有。
+     */
+    var respectPeerSendWindow: Boolean = false
+
+    /** 本方当前声明的发送窗口（0x7F；仅诊断日志用）。 */
+    val declaredSendWindow: Int get() = declaredMaxOutgoing
 
     /**
      * 对端在 sync 里声明的 RTO（毫秒）。采纳后**用它当本地重传节拍**，不再用构造默认值。
@@ -781,17 +813,61 @@ class Iap2LinkEngine(
 
     // ---- 发送 ----
 
+    /**
+     * 实际生效的发送窗口（未确认帧上限）。
+     *
+     * 只有 [respectPeerSendWindow] 打开时才对端值参与取小（`min(本方, 对端)`）；
+     * 且**必须要求 `peer.maxRetransmissions > 0`**——零重传对端（隧道侧隐式确认）
+     * 根本不会回 ACK，套上小窗口会让 backlog 永久卡死。这一条守卫不能省：
+     * 2026-11-10 我按 maxOutgoing 限流时漏了它，把 MIB3 隧道突发整段削掉、7 个用例挂掉。
+     */
+    private fun effectiveSendWindow(peer: SynchronizationPayload?): Int =
+        if (respectPeerSendWindow && peer != null && peer.maxRetransmissions > 0) {
+            minOf(declaredMaxOutgoing, peer.maxOutgoing.coerceAtLeast(1))
+        } else {
+            declaredMaxOutgoing
+        }
+
+    /**
+     * 记录「窗口满 → 停发等 ACK」的起点，同一段停发只回调一次。
+     *
+     * 只在窗口确实被对端收紧（`< 本方声明`）时记：本方 0x7F 自身上限被顶到是另一回事
+     * （真车从未出现），不该混进这条日志里误导读日志的人。
+     */
+    private fun noteWindowHold(
+        window: Int,
+        peer: SynchronizationPayload?,
+        nowMillis: Long,
+    ) {
+        if (window >= declaredMaxOutgoing) return
+        if (heldSinceMillis != null) return
+        heldSinceMillis = nowMillis
+        onSendWindowHold?.invoke(peer?.maxOutgoing ?: 0, window, sendBacklog.size)
+    }
+
+    /** 重新开闸：有积压的帧要发了，收尾这段停发（没有停发就直接返回）。 */
+    private fun noteWindowRelease(
+        window: Int,
+        nowMillis: Long,
+    ) {
+        val since = heldSinceMillis ?: return
+        heldSinceMillis = null
+        onSendWindowReleased?.invoke(window, nowMillis - since)
+    }
+
     private fun drainSendWindow(nowMillis: Long) {
         if (state != State.NORMAL) return
         while (sendBacklog.isNotEmpty()) {
             val packet = sendBacklog.first()
             val peer = peerSynchronization
-            val window = declaredMaxOutgoing
+            val window = effectiveSendWindow(peer)
             if (lastSentAcknowledged != null &&
                 sequenceDistance(sentSequence, lastSentAcknowledged!!) >= window
             ) {
+                noteWindowHold(window, peer, nowMillis)
                 return
             }
+            noteWindowRelease(window, nowMillis)
             sendBacklog.removeFirst()
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
