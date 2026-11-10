@@ -158,7 +158,7 @@ iap2 催问共 N 次后收到可用 0x4301——停止催问        ← 若催�
 
 ### 9.1 PR #10（BMW iD9，新代协议）——已全部在本仓库，无需再移
 
-逐项核对，CarPToCarL 现有代码与 PR #10 一致：`0x1D01` 能力清单分派（`accessoryReceiveIds`
+本项目当时已实现 PR #10 的处理，包括 `0x1D01` 能力清单分派（`accessoryReceiveIds`
 + `receiveListDeclared`）、`0x5703` 改 `expectOrNull`、新协议 8s 窗口、`parseStartSession`
 接受 `wifi=null`、`BinaryPlist` 无符号长度 / `parseRecovered` 裁尾 / `0x3 日期` / `0x7 UTF-8`
 / `0xB UUID` / UID 长度按 `info+1`、`/info` 诊断 + `scheduleSideProbe` + `uuidText`、

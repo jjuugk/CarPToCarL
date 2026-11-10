@@ -22,8 +22,8 @@
 `bridge/`（Hook CarWith 拿画面/按键）、`desktop/`（自建 Compose 桌面）、`hook/`（LSPosed 模块）、
 `provider/`（CT5 专用 UI/启动策略）、`video/`（H.264 编码与触摸 HID）。
 
-它**和我们 CarPToCarL 是同一侧**：都演"iPhone/device"角色，蓝牙 iAP2 拿 Wi-Fi 凭据 → 连车机
-AirPlay 收屏。所以下面的差异可以直接对照 `Iap2SenderSession` / `Iap2BluetoothClient`。
+它与 **CarPToCar+ICCOA** 都是发送端，扮演 iPhone 角色，通过蓝牙 iAP2 获取 Wi-Fi 凭据后连接
+车机的 AirPlay 接收端。下面的差异可以直接对照 `Iap2SenderSession` 和 `Iap2BluetoothClient`。
 
 ## 1. 车型/连接配置（"连接车型里面配置了什么"）
 

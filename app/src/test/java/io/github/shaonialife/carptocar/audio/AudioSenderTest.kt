@@ -1,8 +1,10 @@
 package io.github.shaonialife.carptocar.audio
 
+import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -19,6 +21,14 @@ class AudioSenderTest {
             streamKey = key,
             log = {},
         )
+
+    @Test
+    fun iccoaPcmPacketFitsMinimumIpv6MtuWithAllHeaders() {
+        if (!BuildConfig.CAR_PLUS_AUDIO_RELAY) return
+        val pcm = ByteArray(AudioSender.PACKET_BYTES)
+        val wire = sender().sealPacket(pcm, sequence = 0, timestamp = 0, nonceCounter = 0)
+        assertTrue(wire.size + 8 + 40 <= 1280)
+    }
 
     @Test
     fun headerFieldsMatchCarPlayRtpConvention() {

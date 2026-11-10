@@ -1,7 +1,7 @@
 # 无线 CarPlay：DiPlay（车机侧）与我们（手机侧）的逐层对照
 
 对照对象：`shihabal3amri/DiPlay`（GPL-3.0，Kotlin，Android 车机上的 CarPlay **接收端**）。
-我们 `CarPToCarL` 是**发送端**（手机假冒 iPhone）。两端互为对端，所以 DiPlay 的代码就是一份
+`CarPToCar+ICCOA` 是**发送端**（手机扮演 iPhone）。两端互为对端，所以 DiPlay 的代码就是一份
 「车机期望手机做什么」的现成说明书 —— 比任何文档都硬。
 
 结论先说：**控制面时序逐条对上了，而且本项目已经拿 DiPlay 当过测试台**（代码里三处实测痕迹：

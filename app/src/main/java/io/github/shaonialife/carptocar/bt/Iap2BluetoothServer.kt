@@ -229,6 +229,7 @@ class Iap2BluetoothServer(
                 nowPlayingProvider,
                 onSessionReady = { session -> senderSession = session },
                 onLinkClosed = onLinkClosed,
+                remoteDevice = socket.remoteDevice,
             )
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")

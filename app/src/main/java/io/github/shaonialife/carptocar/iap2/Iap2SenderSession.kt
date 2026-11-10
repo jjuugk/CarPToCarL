@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.iap2
 
+import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
@@ -73,6 +74,7 @@ class Iap2SenderSession(
          * 强制配对（现代）。2026-10-19 奥迪 4xxx（4851）连不上与这条分类直接相关。
          */
         val advertisedFeatures: Long? = null,
+        val bluetoothPeer: TargetDevicePrefs.Target? = null,
     )
 
     /**

@@ -94,7 +94,7 @@ MainActivity.bindMib3Card()         首页卡 → 只显示状态，按钮开面
 ### 步骤 0 · 准备
 
 ```bash
-cd /c/Users/jjuugk/Desktop/CarPToCarL
+# 在仓库根目录运行
 .tools/android-sdk/platform-tools/adb.exe devices            # 确认 PTP-AN10 在线
 .tools/android-sdk/platform-tools/adb.exe install -r app/build/outputs/apk/release/app-release.apk
 ```
@@ -184,7 +184,7 @@ iap2 rx=0xea03 EASessionStatus bytes=N [..]
 ### 构建
 
 ```bash
-cd /c/Users/jjuugk/Desktop/CarPToCarL
+# 在仓库根目录运行
 ./gradlew :app:clean              # 改版本号或切分支后**必须**先 clean，否则会报假失败
 ./gradlew :app:testReleaseUnitTest
 ./gradlew :app:assembleRelease
@@ -210,8 +210,8 @@ $ADB shell dumpsys package io.github.shaonialife.carptocar | grep -E "versionCod
 ### 日志（三条路，release 包没有 `run-as`）
 
 1. **app 内实时**：首页日志卡 / 控制面板不显示日志，但日志卡里能看到 `EA:` 开头的行。
-2. **导出**（推荐）：点「导出日志」→ 手机 `下载/CarPToCarL/CarPToCarL-log-<时间>.txt`，
-   再 `adb pull /sdcard/Download/CarPToCarL/ .tmp/logs/`。
+2. **导出**（推荐）。点「导出日志」后，以弹窗显示的路径为准。当前 ICCOA 版导出至
+   `下载/CarPToCar+ICCOA`，可用 `adb pull '/sdcard/Download/CarPToCar+ICCOA/' .tmp/logs/` 取回。
 3. **debug 包**（临时排查用）：`$ADB shell "run-as io.github.shaonialife.carptocar tail -n 400 files/main_debug.log"`
 
 **关键 grep 词**：`EA:`、`ea00`、`ea03`、`ea04`、`0x1d01 EA 组件`、`数据通道协议`。

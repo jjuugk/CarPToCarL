@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -48,6 +49,7 @@ import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
+import io.github.shaonialife.carptocar.launcher.settings.CarPlusResolutionHistory
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
@@ -109,6 +111,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var heroStats: TextView
     /** 「显示」卡片里的分辨率行（车机通告值 + 本次码流尺寸）。 */
     private lateinit var displayResolutionNote: TextView
+    private val displayHistoryListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        renderDisplayHistory()
+    }
     private lateinit var heroProgress: View
     private lateinit var ctaButton: LinearLayout
     private lateinit var reconnectCarPlusButton: View
@@ -1422,6 +1427,11 @@ class MainActivity : AppCompatActivity() {
     private fun updateDisplayResolutionNote() {
         val target = displayResolutionNote
         val running = SessionController.videoSender?.isRunning == true
+        if (BuildConfig.CAR_PLUS) {
+            val showCurrent = running && SessionController.activeCarWidth > 0
+            target.visibility = if (showCurrent) View.VISIBLE else View.GONE
+            if (!showCurrent) return
+        }
         val text =
             if (running && SessionController.activeCarWidth > 0) {
                 val carW = SessionController.activeCarWidth
@@ -1449,14 +1459,11 @@ class MainActivity : AppCompatActivity() {
                         (last.streamWidth != last.carWidth || last.streamHeight != last.carHeight)
                 when {
                     last == null -> "连接后自动读取车机分辨率"
-                    !last.carFromCar && BuildConfig.CAR_PLUS ->
-                        "上次：车机未通告分辨率 · 码流 ${last.streamWidth}×${last.streamHeight}"
                     !last.carFromCar ->
                         "上次：车机未通告 · 按手机横屏 ${last.carWidth}×${last.carHeight} 兜底"
                     streamDiffers ->
                         "上次：车机 ${last.carWidth}×${last.carHeight} · " +
-                            "码流 ${last.streamWidth}×${last.streamHeight}" +
-                            if (BuildConfig.CAR_PLUS) "" else "（引擎按档位编码）"
+                            "码流 ${last.streamWidth}×${last.streamHeight}（引擎按档位编码）"
                     else -> "上次：车机 ${last.carWidth}×${last.carHeight}"
                 }
             }
@@ -1651,12 +1658,11 @@ class MainActivity : AppCompatActivity() {
     private fun bindCarPlusStreamSize() {
         findViewById<View>(R.id.displayScaleControls).visibility = View.GONE
         findViewById<View>(R.id.displaySizeControls).visibility = View.VISIBLE
+        findViewById<View>(R.id.displayHistoryPanel).visibility = View.VISIBLE
         val width = findViewById<EditText>(R.id.displayWidthInput)
         val height = findViewById<EditText>(R.id.displayHeightInput)
         val note = findViewById<TextView>(R.id.displayScaleNote)
-        val saved = DisplayPrefs.carPlusStreamSize(this)
-        width.setText(saved?.width?.toString().orEmpty())
-        height.setText(saved?.height?.toString().orEmpty())
+        fillCarPlusStreamSize(DisplayPrefs.carPlusStreamSize(this))
         note.text = "留空并保存可恢复自动读取 · 下次连接生效"
         findViewById<View>(R.id.btnSaveDisplaySize).setOnClickListener {
             val w = width.text.toString().trim()
@@ -1668,6 +1674,44 @@ class MainActivity : AppCompatActivity() {
                 DisplayPrefs.setCarPlusStreamSize(this, size)
                 snack(if (size == null) "已设为自动 · 下次连接生效" else "已保存 ${size.width}×${size.height} · 下次连接生效")
             }
+        }
+    }
+
+    private fun fillCarPlusStreamSize(size: CarPlusVideo.Size?) {
+        findViewById<EditText>(R.id.displayWidthInput).setText(size?.width?.toString().orEmpty())
+        findViewById<EditText>(R.id.displayHeightInput).setText(size?.height?.toString().orEmpty())
+    }
+
+    private fun renderDisplayHistory() {
+        val entries = CarPlusResolutionHistory.entries(this)
+        val list = findViewById<LinearLayout>(R.id.displayHistoryList)
+        val empty = findViewById<TextView>(R.id.displayHistoryEmpty)
+        list.visibility = if (entries.isEmpty()) View.GONE else View.VISIBLE
+        empty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
+        list.removeAllViews()
+        if (entries.isEmpty()) {
+            val last = DisplayPrefs.lastSession(this)?.takeIf { it.carFromCar }
+            empty.text = if (last == null) getString(R.string.display_history_empty)
+            else getString(R.string.display_history_legacy, last.carWidth, last.carHeight)
+        }
+        entries.forEachIndexed { index, entry ->
+            val row = layoutInflater.inflate(R.layout.item_display_history, list, false)
+            row.findViewById<View>(R.id.displayHistoryDivider).visibility = if (index == 0) View.GONE else View.VISIBLE
+            row.findViewById<TextView>(R.id.displayHistoryDevice).text =
+                getString(R.string.display_history_device, entry.name)
+            row.findViewById<TextView>(R.id.displayHistoryResolution).text =
+                getString(R.string.display_history_resolution, entry.width, entry.height)
+            val size = entry.inputSize
+            row.findViewById<View>(R.id.displayHistoryFill).apply {
+                contentDescription = getString(R.string.display_history_fill_device, entry.name)
+                isEnabled = size != null
+                alpha = if (size == null) 0.45f else 1f
+                if (size != null) setOnClickListener {
+                    fillCarPlusStreamSize(size)
+                    snack(getString(R.string.display_history_filled, size.width, size.height))
+                }
+            }
+            list.addView(row)
         }
     }
 
@@ -2322,7 +2366,13 @@ class MainActivity : AppCompatActivity() {
                     ""
                 },
         )
-        snack("目标已设为「$name」——只向该设备发请求")
+        val historySize = if (BuildConfig.CAR_PLUS) CarPlusResolutionHistory.get(this, device.address)?.inputSize else null
+        if (historySize != null) {
+            fillCarPlusStreamSize(historySize)
+            snack(getString(R.string.display_history_filled, historySize.width, historySize.height))
+        } else {
+            snack("目标已设为「$name」——只向该设备发请求")
+        }
         updateReadyRow()
     }
 
@@ -2798,6 +2848,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (BuildConfig.CAR_PLUS) {
+            CarPlusResolutionHistory.preferences(this).registerOnSharedPreferenceChangeListener(displayHistoryListener)
+            renderDisplayHistory()
+        }
         // 界面在前台 = 用户正看着：车机远离 30 秒后的收摊要让路（别把正在看的界面掐掉）
         AppUiPresence.markResumed()
         mainHandler.post(heroTick)
@@ -2944,6 +2998,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (BuildConfig.CAR_PLUS) {
+            CarPlusResolutionHistory.preferences(this).unregisterOnSharedPreferenceChangeListener(displayHistoryListener)
+        }
         AppUiPresence.markPaused()
         mainHandler.removeCallbacks(heroTick)
     }

@@ -67,15 +67,13 @@ class AudioSender(
         const val CHANNELS = 2
 
         /**
-         * 每包样本帧数 = AirPlay 标准 SPF 352（catplay `MAX_FRAMES_PER_PACKET_PCM`，
-         * 真车验证）。48000/352 ≈ 136 包/秒（7.33ms/包）。
-         * 2026-10-17 实测：此前用 512 帧（10.67ms/包），奥迪接收端无声音——
-         * 与真 iPhone 的包长不一致时接收端可能按固定 SPF 缓冲而丢弃。
+         * 旧版使用 352 帧。ICCOA 在奥迪实测收到 EMSGSIZE，改为每包 288 帧。
+         * 16 位立体声负载 1152 字节，加上 RTP、加密、UDP 和 IPv6 头共 1236 字节。
          */
-        const val SAMPLES_PER_PACKET = 352
+        val SAMPLES_PER_PACKET = if (BuildConfig.CAR_PLUS_AUDIO_RELAY) 288 else 352
 
         /** 一包负载字节数（16bit 立体声）。 */
-        const val PACKET_BYTES = SAMPLES_PER_PACKET * CHANNELS * 2
+        val PACKET_BYTES = SAMPLES_PER_PACKET * CHANNELS * 2
 
         /** 同步包发送间隔（规范：每秒一个）。 */
         const val SYNC_INTERVAL_MILLIS = 1_000L
@@ -139,6 +137,10 @@ class AudioSender(
 
     private val running = AtomicBoolean(false)
 
+    @Volatile
+    var hadSendFailure = false
+        private set
+
     /** stop() 幂等闸门（多条收尾路径都会调 stop）。 */
     private val stopped = AtomicBoolean(false)
     private var socket: DatagramSocket? = null
@@ -183,7 +185,7 @@ class AudioSender(
     private val framePcmBytes: Int
         get() = if (codec == AudioCodec.AAC_LC) AacLcEncoder.pcmBytes(CHANNELS) else PACKET_BYTES
 
-    /** 每包推进的样本数（AAC 一帧 1024，PCM 一包 352）。 */
+    /** 每包推进的样本数，与音频 SETUP 的 spf 一致。 */
     private val samplesPerPacket: Long
         get() = if (codec == AudioCodec.AAC_LC) AacLcEncoder.FRAME_SAMPLES.toLong() else SAMPLES_PER_PACKET.toLong()
 
@@ -421,7 +423,7 @@ class AudioSender(
             // 静音 STREAM_MUSIC 可能破坏引擎的采集源（采集点不确定，不能赌是 REMOTE_SUBMIX）。
             log(
                 "AUDIO: 已启动直通模式（外部注入 PCM → $host:$dataPort，" +
-                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声）",
+                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声，spf=$samplesPerPacket）",
             )
             startSyncLoop()
             if (keepAlive) startSilenceKeepAlive()
@@ -944,7 +946,10 @@ class AudioSender(
             bytesSent += wire.size
             true
         } catch (error: IOException) {
-            log("AUDIO: UDP 发送失败 - ${error.message}")
+            if (running.get()) {
+                hadSendFailure = true
+                log("AUDIO: UDP 发送失败（${wire.size} 字节，spf=$samplesPerPacket） - ${error.message}")
+            }
             false
         }
     }

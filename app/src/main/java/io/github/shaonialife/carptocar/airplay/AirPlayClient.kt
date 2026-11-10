@@ -909,6 +909,18 @@ class AirPlayClient(
         }
     }
 
+    @Volatile private var mainAudioMode = MainAudioMode()
+
+    /** Reports only ownership changes so repeated requests cannot replay media keys. */
+    internal fun updateMainAudioMode(params: Map<*, *>?): Boolean? {
+        val resources = params?.get("resources") as? List<*> ?: emptyList<Any>()
+        val previous = mainAudioMode
+        val next = previous.applyRequest(resources)
+        mainAudioMode = next
+        log("EVENT: changeModes resources=$resources reason=${params?.get("reasonStr")} mainAudio=${next.resource()}")
+        return next.carOwnsAudio.takeIf { it != previous.carOwnsAudio }
+    }
+
     fun assertModes(): Boolean {
         val body =
             BinaryPlist.encode(
@@ -925,7 +937,7 @@ class AirPlayClient(
                             "resources" to
                                 listOf(
                                     linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
+                                    mainAudioMode.resource(),
                                 ),
                         ),
                 ),
@@ -938,7 +950,7 @@ class AirPlayClient(
                     body,
                     contentType = "application/x-apple-binary-plist",
                 )
-            log("AIRPLAY: modesChanged（声明持有主屏/主音频资源）[$statusLine]")
+            log("AIRPLAY: modesChanged（主音频归属=${mainAudioMode.resource()["entity"]}）[$statusLine]")
             statusLine.contains("200")
         } catch (error: IOException) {
             log("AIRPLAY: modesChanged 失败 - ${error.message}")
@@ -2166,7 +2178,7 @@ class AirPlayClient(
         val negotiation = profile
         // 随机正 i64：BinaryPlist 按有符号整数编码，掩掉符号位避免负数
         val connectionId = (SecureRandom().nextLong() and Long.MAX_VALUE).coerceAtLeast(1L)
-        // spf 取值：AAC 一帧 1024 采样；PCM 与发送端每包 352 帧保持一致
+        // PCM 的 spf 与发送端每包样本数保持一致。
         val spfValue =
             tuning.spf?.let {
                 if (profile.codec == AudioCodec.AAC_LC) it.toLong() else AudioSender.SAMPLES_PER_PACKET.toLong()
@@ -2175,9 +2187,7 @@ class AirPlayClient(
             "AIRPLAY: 音频协商 → audioType=${profile.audioType} " +
                 "format=0x${profile.formatBit.toString(16)} ${profile.sampleRate}Hz " +
                 "latency=${profile.latencyMs}ms（档位=${profile.label}，" +
-                "封装=${tuning.detail}，codec=${profile.codec.name}，" +
-                // 实际发出去的 spf：以前只打 tuning.detail（写死 1024），PCM 档其实发的是
-                // 352，日志里看着像"PCM 也用 1024"，排障时误导过。
+                "封装=${if (profile.codec == AudioCodec.PCM) "PCM 直传" else tuning.detail}，" +
                 "实际 spf=${spfValue ?: "不声明"}）",
         )
         // 请求体做两版（差别只在末尾的 ct/sr）。**默认发不带的那版**：
@@ -2203,7 +2213,7 @@ class AirPlayClient(
                                 put("input", negotiation.isInput)
                                 put("supportsRTPPacketRedundancy", false)
                                 put("supportsHighAccuracyTimestamps", tuning.highAccuracyTimestamps)
-                                // spf = 每包样本帧数：AAC 一帧 1024，PCM 走 352。
+                                // spf = 每包样本帧数。
                                 // 2026-10-20 Honda 实测：不声明 spf 时车机照样收包并按 44.1k
                                 // 实时消费，但喇叭无声——「按固定 SPF 排播」的实现需要这个值。
                                 spfValue?.let { put("spf", it) }

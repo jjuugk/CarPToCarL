@@ -1164,7 +1164,7 @@ PROTO! WARN [WIFI_GEN_MISMATCH] 新旧 WiFi 凭据代际判错 —— 画像判 
 PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_MISMATCH ERA_SWITCHED
 ```
 
-排查入口：`grep "PROTO" CarPToCarL-log-*.txt`。一行干净时是
+在导出目录运行 `grep "PROTO" 'CarPToCar+ICCOA-log-'*.txt`。一行干净时是
 `PROTO 一致性审计通过：未发现与本规范不一致的现象`。
 
 ### D.3 审计码表（`protocol/ProtocolAudit.kt`）

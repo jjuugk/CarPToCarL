@@ -1148,6 +1148,43 @@
                     android:textColor="@color/m3_primary"
                     android:textSize="12.5sp" />
 
+                <LinearLayout
+                    android:id="@+id/displayHistoryPanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:accessibilityHeading="true"
+                        android:text="@string/display_history_title"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/displayHistoryEmpty"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/display_history_empty"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:id="@+id/displayHistoryList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:background="@drawable/bg_console"
+                        android:orientation="vertical"
+                        android:paddingHorizontal="12dp"
+                        android:visibility="gone" />
+                </LinearLayout>
+
                 <!-- 触摸注入节流 -->
                 <TextView
                     android:layout_width="wrap_content"

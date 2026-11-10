@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.bt
 
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
@@ -22,26 +23,35 @@ internal fun Iap2LinkChannel.runSenderSession(
     onSessionReady: (Iap2SenderSession) -> Unit = {},
     /** 保活泵退出（链路断开）回调——用于释放主控的「会话处理中」互斥，见调用处注释。 */
     onLinkClosed: () -> Unit = {},
+    remoteDevice: BluetoothDevice?,
 ) {
     // 蓝牙列表里的名字先修一遍：MagicOS 在本地蓝牙名未设置时会把「未知设备」当成
     // 适配器名，车机屏幕上就出现「未知设备 / 已连接」。
     // 注意这只修**蓝牙名**；iAP2 的 0x4E09 自报身份固定是 iPhone（见 Iap2SenderSession），
     // 两者不能混用——把本地蓝牙名塞进 0x4E09 会让车机把我们归类成普通蓝牙设备。
     DeviceIdentity.ensureUsableBluetoothName(context, log)
+    val peer = remoteDevice?.let { device ->
+        try {
+            val address = device.address
+            TargetDevicePrefs.Target(address, device.name?.takeIf(String::isNotBlank) ?: address)
+        } catch (_: SecurityException) {
+            null
+        }
+    }
     val session =
         Iap2SenderSession(
             this,
             { line -> log(line) },
             resolveBluetoothMac(context, log),
             onWifiCredentials,
-            onEndpointUpdate,
+            { onEndpointUpdate(it.copy(bluetoothPeer = peer)) },
             // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
             context.applicationContext,
             nowPlayingProvider,
         )
     try {
         val endpoint = session.run(timeoutMillis)
-        onEndpoint(endpoint)
+        onEndpoint(endpoint.copy(bluetoothPeer = peer))
         // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
         onSessionReady(session)
         session.pumpIncomingForever()

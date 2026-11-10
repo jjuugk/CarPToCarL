@@ -112,7 +112,7 @@ internal class CarPlusAudio(context: Context?) {
     private val cameraManager = context?.getSystemService(CameraManager::class.java)
     private val cameraRecovery = CarPlusCameraRecovery(
         handler,
-        hasMusic = { MediaSessionsState.nowPlaying?.playing == true || music.hasRecentAudio(SystemClock.uptimeMillis()) },
+        hasMusic = { MediaSessionsState.nowPlaying?.playing == true || hasRecentMusic() },
         recover = {
             val session = client
             val sender = SessionController.audioSender
@@ -135,6 +135,8 @@ internal class CarPlusAudio(context: Context?) {
         runCatching { cameraManager?.unregisterAvailabilityCallback(cameraRecovery) }
         worker.quit()
     }
+
+    fun hasRecentMusic(): Boolean = music.hasRecentAudio(SystemClock.uptimeMillis())
 
     private fun scheduleTick() {
         handler.postAtTime(::mix, nextTick)
@@ -161,7 +163,7 @@ internal class CarPlusAudio(context: Context?) {
     private class PcmQueue {
         private val samples = ShortArray(SAMPLE_RATE / 4 * 2)
         private var head = 0
-        private var lastAudibleAt = 0L
+        @Volatile private var lastAudibleAt = 0L
         private var size = 0
         private var playing = false
         private var readyAt = 0L

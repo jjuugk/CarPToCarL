@@ -3,6 +3,14 @@
     <string name="open_system_car_plus">打开系统 Car+</string>
     <string name="open_system_car_plus_failed">无法打开系统 Car+，请检查本应用的 Root 授权</string>
     <string name="display_card_subtitle">分辨率缩放 · 触摸节流 · 劫持开关</string>
+    <string name="display_history_title">历史连接</string>
+    <string name="display_history_empty">连接设备并读取分辨率后会在这里保存记录</string>
+    <string name="display_history_legacy">上次读取 %1$d×%2$d · 连接设备后将按蓝牙目标记录</string>
+    <string name="display_history_device">蓝牙目标 · %1$s</string>
+    <string name="display_history_resolution">分辨率 · %1$d×%2$d</string>
+    <string name="display_history_fill">一键输入</string>
+    <string name="display_history_fill_device">填入 %1$s 的分辨率</string>
+    <string name="display_history_filled">已填入 %1$d×%2$d · 保存后下次连接生效</string>
     <!-- 应用名**不含** CarPlay：它既是 Apple 的商标，用「CarPlay」作产品名会构成
          商标性使用（且容易被误认为官方产品）。兼容关系写在副标题/README 里，
          那属于描述性引用。详见仓库根目录 DISCLAIMER.md 与 README「非官方声明」。 -->

@@ -1,5 +1,5 @@
-CarPToCarL — Third-Party Notices
-================================
+CarPToCar+ICCOA — Third-Party Notices
+=====================================
 
 This file lists the third-party components distributed inside the application
 binary (APK), together with their copyright notices and licenses.
@@ -15,15 +15,15 @@ does not apply to them.
   Copyright (c) 2026 lizhihua, released under the MIT License.
 
   CarDeck is an independent third-party project. It is NOT written by the
-  author of CarPToCarL. CarPToCarL's iAP2 / AirPlay protocol implementation, its
-  cryptography wrappers, its Bluetooth link layer and its project skeleton were
+  author of CarPToCar+ICCOA. This project's iAP2 / AirPlay implementation,
+  cryptography wrappers, Bluetooth link layer and project skeleton were
   developed with reference to CarDeck. CarDeck's MIT license requires that its
   copyright notice and permission notice be retained, and both are reproduced
   above; no other condition applies.
 
-  Historical naming that remains visible at runtime (log directory
-  "Download/CarDeck", the "CarDeck" process-start line) is inherited from the
-  reference project; it does not indicate a runtime dependency on CarDeck.
+  Older builds used names inherited from the reference project, such as
+  "Download/CarDeck". CarPToCar+ICCOA exports logs to "Download/CarPToCar+ICCOA".
+  The project runs independently of the CarDeck application.
 
 --------------------------------------------------------------------------------
 1. AndroidX / Jetpack  (Apache License 2.0)

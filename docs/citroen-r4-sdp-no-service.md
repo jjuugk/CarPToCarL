@@ -1,6 +1,6 @@
 # 雪铁龙 R4（My Citroen R4010543）连不上：车机 SDP 里没有 iAP2 服务
 
-日志 `CarDeck-log-20261026-185730.txt`（HONOR BVL-AN16 / Android 16，CarPToCarL **1.0.7**），
+日志 `CarDeck-log-20261026-185730.txt`（HONOR BVL-AN16 / Android 16，本项目早期的 **1.0.7** 版），
 目标车机 `My Citroen R4010543`（`00:14:09:B7:0A:C0`）。
 
 ## 1. 时间线

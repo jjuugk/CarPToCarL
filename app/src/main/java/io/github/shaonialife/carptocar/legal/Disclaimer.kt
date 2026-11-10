@@ -15,8 +15,9 @@ object DisclaimerPrefs {
      *
      * v2（2026-10-18）：应用改名 CarPToCarL，补「非官方」「非 MFi」与 MIT 开源说明。
      * v3（2026-11-10）：适配 ICCOA Car+ 劫持，更名为 CarPToCar+ICCOA，更新测试机型（一加Ace7Pro / ColorOS 17），移除 Shizuku 权限说明。
+     * v4（2026-11-10）：说明一加单机 Car+ 的 Root 要求与音频授权范围。
      */
-    const val CURRENT_VERSION = 3
+    const val CURRENT_VERSION = 4
 
     private const val PREFS = "disclaimer"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"

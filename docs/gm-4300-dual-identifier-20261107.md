@@ -78,14 +78,14 @@ MagicOS 在「本地蓝牙名未设置」时 `BluetoothAdapter.getName()` 返回
 | # | 改动 |
 | --- | --- |
 | 1 | `DeviceIdentity.displayName()` 过滤占位串（`未知设备 / 未知 / 未命名 / unknown / null / N/A`…） |
-| 2 | 取名顺序：适配器名 → `Settings.Secure.bluetooth_name` → `ro.product.marketname` → `Build.MODEL` → `CarPToCarL` |
+| 2 | 依次尝试适配器名、`Settings.Secure.bluetooth_name`、`ro.product.marketname`、`Build.MODEL`，最后用应用名兜底（现为 `CarPToCar+ICCOA`） |
 | 3 | `ensureUsableBluetoothName()`：适配器名是占位时 `setName()` 改成可用名（进程内一次），让车机列表也能更新 |
 
 `Android` 不算占位串（AOSP 默认名），不做改动。
 
 ## 4. 复测怎么判读
 
-装 `dist/CarPToCarL-1.2.28-test-1.apk` 后连车，日志里应出现：
+使用当时的测试包 `dist/CarPToCarL-1.2.28-test-1.apk` 连车时，预期日志如下。
 
 ```
 BT: 本机蓝牙名是占位「未知设备」——已改名为「XXX」          ← 改名生效

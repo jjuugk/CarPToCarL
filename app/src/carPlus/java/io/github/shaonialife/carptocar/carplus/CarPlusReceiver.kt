@@ -34,7 +34,7 @@ internal object CarPlusReceiver {
     private var encodedSize = CarPlusVideo.defaultSize
     private var encodedVideo: CarPlusEncodedVideo? = null
     private var allowOtherProfiles = false
-    private var audio: CarPlusAudio? = null
+    @Volatile private var audio: CarPlusAudio? = null
     private var refreshPending = false
     private var bindingGeneration = 0
     private val replies = Messenger(Handler(main.looper) { message ->
@@ -263,6 +263,8 @@ internal object CarPlusReceiver {
         audio = null
         sendAudioTarget()
     }
+
+    fun hasRecentMusic(): Boolean = audio?.hasRecentMusic() == true
 
     private fun sendAudioTarget() {
         send(Message.obtain(null, CarPlusReceiverService.AUDIO_TARGET).apply { replyTo = audio?.endpoint })

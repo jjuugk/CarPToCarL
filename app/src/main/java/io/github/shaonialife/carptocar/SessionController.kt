@@ -1,6 +1,9 @@
 package io.github.shaonialife.carptocar
 
 import android.content.Context
+import android.media.AudioManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
@@ -38,6 +41,7 @@ import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
+import io.github.shaonialife.carptocar.launcher.settings.CarPlusResolutionHistory
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
@@ -3280,6 +3284,10 @@ object SessionController {
         activeAudioProfile = null
         activeAudioStartedAt = 0L
         if (startedAt == 0L || identity.isBlank()) return
+        if (audioSender?.hadSendFailure == true) {
+            appendLog("AUDIO: 本地 UDP 发送失败，保留 ${profile.label} 的车机兼容记录")
+            return
+        }
         val ctx = appContext?.applicationContext
         if (lived >= AUDIO_PROFILE_PROBE_MS) {
             AudioProfileMemory.recordWorking(ctx, identity, profile.key)
@@ -3538,6 +3546,7 @@ object SessionController {
             deviceIdentifier = late.deviceIdentifier ?: fallback.deviceIdentifier,
             sourceVersion = late.sourceVersion ?: fallback.sourceVersion,
             advertisedFeatures = late.advertisedFeatures ?: fallback.advertisedFeatures,
+            bluetoothPeer = late.bluetoothPeer ?: fallback.bluetoothPeer,
         )
 
     /**
@@ -4303,6 +4312,8 @@ object SessionController {
                             currentSharedSecret = sessionKey
                             currentAudioHost =
                                 client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
+                            var resumeAfterCarAudio = false
+                            var pausedMediaSession: MediaSession.Token? = null
                             val eventChannelOk =
                                 client.connectEventChannel(sessionKey, setup) { command ->
                                 // 车机侧「有反应」计数：屏幕接管门（startScreenHandoverGate）用它
@@ -4466,9 +4477,36 @@ object SessionController {
                                     }
 
                                     "changeModes" -> {
-                                        // 车机请求资源仲裁（如用户在 MMI 上点了手机）：
-                                        // 回 modesChanged 声明手机持有主屏/主音频
-                                        appendLog("EVENT: 车机请求 changeModes → 回 modesChanged 接管资源")
+                                        if (BuildConfig.CAR_PLUS && currentClient === client) {
+                                            val carOwnsAudio = client.updateMainAudioMode(command["params"] as? Map<*, *>)
+                                            if (carOwnsAudio != null && videoSender?.isRunning == true) {
+                                                val controller = MediaSessionsState.activeController
+                                                if (carOwnsAudio) {
+                                                    val playbackState = controller?.playbackState?.state
+                                                    resumeAfterCarAudio = if (playbackState != null && playbackState != PlaybackState.STATE_NONE) {
+                                                        playbackState == PlaybackState.STATE_PLAYING ||
+                                                            playbackState == PlaybackState.STATE_BUFFERING
+                                                    } else {
+                                                        CarPlusReceiver.hasRecentMusic() ||
+                                                            context.getSystemService(AudioManager::class.java)?.isMusicActive == true
+                                                    }
+                                                    pausedMediaSession = controller?.sessionToken.takeIf { resumeAfterCarAudio }
+                                                    if (resumeAfterCarAudio) {
+                                                        appendLog("EVENT: 车机接管主音频 → 暂停媒体播放")
+                                                        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
+                                                    }
+                                                } else {
+                                                    if (resumeAfterCarAudio &&
+                                                        (pausedMediaSession == null || pausedMediaSession == controller?.sessionToken)
+                                                    ) {
+                                                        appendLog("EVENT: 车机归还主音频 → 恢复媒体播放")
+                                                        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+                                                    }
+                                                    resumeAfterCarAudio = false
+                                                    pausedMediaSession = null
+                                                }
+                                            }
+                                        }
                                         client.assertModes()
                                     }
 
@@ -4813,6 +4851,10 @@ object SessionController {
                                             it, client.receiverIdentity(), activeStreamWidth, activeStreamHeight,
                                         )
                                     } == true
+                                    val peer = client.currentEndpoint.bluetoothPeer
+                                    if (started && setup.displayFromCar && peer != null) {
+                                        CarPlusResolutionHistory.record(context, peer, setup.displayWidth, setup.displayHeight)
+                                    }
                                     appendLog(
                                         if (started) "ICCOA: CarPlay 视频通道已就绪，等待 Car+ 画面"
                                         else "ICCOA: CarPlay 视频通道启动失败",

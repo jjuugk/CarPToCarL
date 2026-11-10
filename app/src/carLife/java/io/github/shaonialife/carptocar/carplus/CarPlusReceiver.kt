@@ -33,5 +33,7 @@ internal object CarPlusReceiver {
 
     fun stopAudio() = Unit
 
+    fun hasRecentMusic() = false
+
     fun stop() = Unit
 }
