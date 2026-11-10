@@ -910,55 +910,6 @@
                     android:layout_marginTop="12dp"
                     android:layout_marginStart="52dp"
                     android:background="#5A394444" />
-
-                <!-- 画面停摆自动恢复（引擎不出帧时的分级干预） -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="画面停摆自动恢复"
-                            android:textColor="@color/m3_on_surface"
-                            android:textSize="14sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/stallRecoveryNote"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="默认开启。画面冻住 8 秒请求引擎重建编码器，30 秒仍未恢复则自动重建 CarLife 会话（通话中不干预）；关闭后只在日志里记录"
-                            android:textColor="@color/m3_on_var"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchStallRecovery"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:thumb="@drawable/sw_thumb"
-                        app:track="@drawable/sw_track" />
-                </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginTop="12dp"
-                    android:layout_marginStart="52dp"
-                    android:background="#5A394444" />
                 <!-- 使用车机 GPS（0x18010 车机 → CarLife） -->
                 <LinearLayout
                     android:layout_width="match_parent"
