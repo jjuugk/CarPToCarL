@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk)**
-> —— 主线固定直链（当前 1.2.32，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk)**
+> —— 主线固定直链（当前 1.2.33，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.32，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.32.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.33，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.33.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.32`（正式版；**车机麦克风接进来了，语音键/画面异常也能自己回来**：① 麦克风按真 iPhone 的机制重做——不再另开 `input=true` 独立流，而是把自己的 UDP 端口写进 `type=100` 主音频流的 `dataPort`，车机看到端口就往这里推；新增 `MicUplink` 按 `HKDF-SHA512(shared, "DataStream-Salt<connId>", …-Input-Encryption-Key")` 派密钥，解 `[RTP 头][ChaCha20-Poly1305+16B tag][8B 尾部 nonce]`，首包自动试解 5 种格式假设（tag 命中即锁定），大端 s16 换序后落 `下载/CarPToCarL/CarPToCarL-mic-*.wav`——**本轮只到「收 + 解 + 落盘」，灌进 CarLife 与真车验证是下一步**；② 语音键诊断补 `65574` 引擎模块状态（`语音=1/0`），「命令有没有被引擎接住」终于有现成证据，并在文档里写清此前判错在哪（引擎侧 `checkCarLifeChannelStatus()` + 渠道号白名单两道闸）；③ 微信提示音导致的音乐卡顿：根因是引擎发 `0x30003` 停 **311ms**、而我们的静音保活阈值是 300ms，这段时间几乎一个包都没发、车机 jitter buffer 被排空——引擎停时把阈值压到 0 并提高补帧上限；④ 画面停摆判据从「2 秒窗口帧数」改成「最后一帧距今」（通话期 0.8fps 心跳帧不再被误判），行为从只记日志改成分级干预（8s 请求重建编码器 / 每 8s 轻推 / 30s 翻倍封顶 120s 强制重建会话），通话中不干预、同一次停摆只拆一次；⑤ 音频 SETUP 与 RECORD 的先后不再取全局默认，按接收端**学**（修 issue #14 补发 RECORD 被 500）；⑥ 尺寸声明默认对齐 AMCar——只写解码尺寸、不写视口（`VideoCanvasMode` 改三态，留 A/B 档）；⑦ 认证：网络可复用、认证不继承，同一接收端连续 2 轮没建起会话就强制重做 pair-setup；⑧ 收进社区 PR #20，项目在作者机器之外也能构建。单测 566 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.32.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.32/CarPToCarL-1.2.32.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.33`（正式版；**车机说「我不支持你」时，1 秒内给结论，不再干等 60 秒**：车机固件（MIB3 SW3874 `iap2::CIAP2LinkHandshake`）在 `evaluateHandshakeAnswer` 判不兼容时会回 `sendLackOfBackwardCompatibility`——它是 `FF 55` 握手族里**非 marker** 的报文，而旧帧头扫描只认 `FF 5A`，整族被逐字节丢掉，日志里只剩「协商无进展」，只能等上层预算耗尽。本版把这一族接起来：① marker（`FF 55 02 00 EE 10`）识别为唤醒/探测，丢弃且**不回调**（车机可能每秒重发上百次，回调会刷屏）；② 非 marker 且长度字段可读 → 计一次握手应答、把原始字节打进日志，**累计 2 次且一条 LSP 都还没采纳**（参数协商根本没开始）就判 `peer rejected link` 立即终止；③ 长度读不出合理值时只记诊断、**不计入拒绝**——截断的 `FF 5A` 或别的端序不能拿来拆链；④ 对端 LSP 的 `LinkVersion != 1` 立即终止（确定性证据，不等第二次）。新增开关 `failFastOnHandshakeRejection`（默认 true，false 退回旧行为）与 `peerHandshakeRejections` 计数，`Iap2LinkChannel` / `VirtualIap2Link` 两条链路都接上 `onPeerHandshake` 诊断日志。单测新增 6 例锁住「拒绝要快」与「marker / 已采纳 LSP 之后不许误杀」，全量 576 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.33.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.33/CarPToCarL-1.2.33.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -829,6 +829,52 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.33 —— 2026-11-10（链路层认得出「车机拒绝」：`FF 55` 握手族不再被静默丢弃，正式版）
+
+只改一件事，但改的是排查体验：**把「车机明确说不兼容」从「日志里根本不存在」变成 1 秒内一行原因。**
+
+**一、症状：等 60 秒，然后什么都不知道**
+
+在某些车机上连上去后没有画面、没有报错，日志从头到尾只有「协商无进展」，然后等上层 60 秒预算耗尽、
+拆链、重连、再来一遍。原因不在我们的超时，而在**我们把车机的回答整个丢掉了**：
+读帧头只认 `FF 5A`，`FF 55` 那一族被帧头扫描逐字节跳过，一个字节都没进过状态机。
+
+**二、`FF 55` 和 `FF 5A` 是两族报文，不是同一族的变体**
+
+`FF 5A` 是链路数据帧；`FF 55` 是握手/探测族，其中：
+
+| 报文 | 形态 | 含义 |
+| --- | --- | --- |
+| DETECT marker | `FF 55 02 00 EE 10`（6 字节定长） | 唤醒/探测，车机可能每秒重发上百次，正常，忽略 |
+| 握手应答 | `FF 55` + u16LE 载荷长度 + 载荷 | 对端对握手的回答——**「我不支持你」就在这里** |
+
+车机侧路径（MIB3 SW3874，`iap2::CIAP2LinkHandshake`，状态机 `UNITIALIZED / HANDSHAKING /
+NEGOTIATING_PARAMETER / INITIALIZED / UNSUPPORTED`）是 `sendHandshake → evaluateHandshakeAnswer →
+不兼容时 sendLackOfBackwardCompatibility`，那句「不兼容」正是以**非 marker 的 `FF55`** 发出。
+另一条确定性证据是 LSP 首字节 `LinkVersion`（7 个链路参数里的第一项）。
+
+**三、这版怎么处置**
+
+1. 认出 marker → 丢弃、**不回调**。它每秒重发，回调只会刷屏；
+2. 非 marker 且长度字段可读 → 计一次握手应答，`onPeerHandshake` 把原始字节打进日志；
+   **累计 2 次、且一条 LSP 都还没采纳**（说明参数协商根本没开始）→ 判 `peer rejected link` 立即终止；
+3. 长度读不出合理值（截断的 `FF5A`、别的端序）→ 只记诊断、**不计入拒绝**，丢 2 字节继续扫描；
+4. 对端 LSP 的 `LinkVersion != 1` → **立即**终止，不等第二次（这是确定性证据）。
+
+**四、为什么不「见一个怪包就拆链」**
+
+链路层最怕误杀：正常链路里也有截断、粘连、别的端序的字节序列。所以判据是「**两次 + 参数协商尚未开始**」
+两个条件同时成立，而不是见到 `FF 55` 就断。真要退回旧行为，`Iap2LinkEngine.failFastOnHandshakeRejection
+= false` 即可——只记日志、不终止。
+
+**五、验证**
+
+- 新增 6 个单测：一次拒绝不算、两次拒绝要断、`LinkVersion=2` 立即断、marker 连发 5 个不杀、
+  已采纳 LSP 之后怪包不杀、单字节拆包也能认出；全量 **576 例 0 失败**。
+- `Iap2LinkChannel`（真实蓝牙链路）与 `VirtualIap2Link`（测试台）两条链路都接了诊断日志，
+  两个入口行为一致。
+- 规格与证据记入 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md` §2.3.1。
 
 ### 1.2.32 —— 2026-11-09（车机麦克风上行 + 语音键判据可读 + 画面停摆分级干预，正式版）
 
