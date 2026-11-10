@@ -250,8 +250,7 @@ class VirtualIap2Link(
      * 0x5001 内容键：**排除 elapsedMs**（播放进度每拍都在变，算进去等于每 1.5s 重推一次）。
      *
      * 只要歌名/歌手/专辑/来源/状态/时长/播放模式任一变化就认为该重推；逐行歌词被
-     * 某些播放器写进 title，也属于「内容变化」，与宿主 `pushNowPlayingAll` 的
-     * `title|artist` 去重语义一致。
+     * 某些播放器写进 title，也属于「内容变化」。
      */
     internal fun nowPlayingKey(np: CarPlayNowPlaying): String =
         listOf(
@@ -892,7 +891,7 @@ class VirtualIap2Link(
         if (fresh.isNotEmpty()) hidHoldStartedAtMs = now
         if (fresh.isEmpty() && !repeat) return
         if (repeat) hidHoldStartedAtMs = now
-        val firing = if (fresh.isNotEmpty()) fresh else usages
+        val firing = if (fresh.isNotEmpty()) fresh else usages.filterNot(ConsumerKeys::isPlaybackPress)
         for (usage in firing) {
             val keyCode = ConsumerKeys.keyCodeFor(usage)
             log(

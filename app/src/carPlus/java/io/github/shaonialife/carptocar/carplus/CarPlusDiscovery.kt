@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteDatabase
 import android.os.Process
 import android.util.AtomicFile
 import android.util.Log
@@ -17,7 +18,9 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
     private val ready = AtomicFile(File(filesDir, "iccoa-discovery.ready"))
     private val lock = Any()
     private var generation = 0
-    private var starting = false
+    private var watchRequestedAt = 0L
+    private var watcherActive = false
+    private var reconnectQueued = false
     private var watcher: java.lang.Process? = null
 
     override fun getApplicationContext(): Context = this
@@ -68,12 +71,17 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
 
     fun watch() {
         if (!isAvailable(this)) return
-        val startedAt = System.currentTimeMillis()
-        val run = synchronized(lock) {
-            if (starting || watcher?.isAlive == true) return
-            starting = true
-            ++generation
+        synchronized(lock) {
+            if (watchRequestedAt == 0L) watchRequestedAt = System.currentTimeMillis()
+            startWatcherLocked()
         }
+    }
+
+    private fun startWatcherLocked() {
+        if (watcherActive || watchRequestedAt == 0L) return
+        watcherActive = true
+        val startedAt = watchRequestedAt
+        val run = generation
         Bg.run("iccoa-discovery") {
             var child: java.lang.Process? = null
             try {
@@ -85,7 +93,10 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
                 synchronized(lock) {
                     if (generation != run) return@run
                     watcher = process
-                    starting = false
+                    if (reconnectQueued) {
+                        reconnectQueued = false
+                        sendReconnect(process)
+                    }
                 }
                 process.inputStream.bufferedReader().useLines { lines ->
                     lines.forEach { Log.i(TAG, it) }
@@ -94,12 +105,19 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
                 Log.w(TAG, "Unable to run the rooted ColorOS discovery helper", error)
             } finally {
                 runCatching { child?.outputStream?.close() }
-                runCatching { if (child?.waitFor(5, TimeUnit.SECONDS) == false) child.destroy() }
+                runCatching {
+                    if (child?.waitFor(5, TimeUnit.SECONDS) == false) {
+                        child.destroyForcibly()
+                        child.waitFor()
+                    }
+                }
                 synchronized(lock) {
                     if (generation == run) {
                         watcher = null
-                        starting = false
+                        if (child == null) reconnectQueued = false
                     }
+                    watcherActive = false
+                    if (generation != run || reconnectQueued) startWatcherLocked()
                 }
             }
         }
@@ -107,12 +125,44 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
 
     fun stopWatching() = synchronized(lock) {
         generation++
-        starting = false
+        watchRequestedAt = 0L
+        reconnectQueued = false
         watcher?.let { process ->
             runCatching { process.outputStream.close() }.onFailure { process.destroy() }
         }
         watcher = null
     }
+
+    /** The bundled receiver SDK stores authenticated ICCOA peers in this database. */
+    fun hasPairedPeer(): Boolean {
+        val database = getDatabasePath("peer.db")
+        if (!database.isFile) return false
+        return runCatching {
+            SQLiteDatabase.openDatabase(database.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                db.rawQuery("SELECT 1 FROM Peer WHERE length(auth_key) > 0 LIMIT 1", null).use { it.moveToFirst() }
+            }
+        }.getOrDefault(false)
+    }
+
+    fun requestReconnect(): Boolean = synchronized(lock) {
+        if (watchRequestedAt == 0L) return@synchronized false
+        val process = watcher
+        if (process?.isAlive == true) return@synchronized sendReconnect(process)
+        reconnectQueued = true
+        startWatcherLocked()
+        true
+    }
+
+    fun cancelQueuedReconnect() = synchronized(lock) {
+        reconnectQueued = false
+    }
+
+    private fun sendReconnect(process: java.lang.Process): Boolean =
+        runCatching {
+            process.outputStream.write("reconnect\n".toByteArray(Charsets.US_ASCII))
+            process.outputStream.flush()
+            true
+        }.getOrDefault(false)
 
     companion object {
         private const val TAG = "CarPlusDiscovery"

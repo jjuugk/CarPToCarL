@@ -78,8 +78,11 @@ public final class ColorOsDiscovery {
             "-v", "epoch", "-T", "350", "-s", "CarConnect:I", "CarPlusBle:I",
             "UCar_BLEService:I", "easylog_BLEService:I").redirectErrorStream(true).start();
         Thread shutdown = new Thread(() -> {
-            try {
-                System.in.read();
+            try (BufferedReader control = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.US_ASCII))) {
+                String command;
+                while ((command = control.readLine()) != null) {
+                    if ("reconnect".equals(command)) requests.execute(() -> reconnectInBackground(0));
+                }
             } catch (Exception ignored) {
                 // The app closed the control pipe.
             } finally {
@@ -134,15 +137,15 @@ public final class ColorOsDiscovery {
 
     private void forwardIfVisible(int nativePid, int scanSequence) {
         try {
-            long epoch = activeEpoch();
+            long epoch = activeEpoch(true);
             if (epoch == 0 || !guideIsVisible()) return;
             byte[] data = Files.readAllBytes(packetPath);
             if (data.length != PACKET_LENGTH) return;
             if (!NATIVE_PROCESS.equals(processName(nativePid))) return;
             if (!relay.prepare(receiverPid, nativePid, epoch, receiverAddress(data))) return;
-            if (activeEpoch() != epoch || !guideIsVisible()) return;
+            if (activeEpoch(true) != epoch || !guideIsVisible()) return;
             data[SEQUENCE_OFFSET] = (byte) scanSequence;
-            System.out.println("ColorOS discovery provider returned " + forward(data));
+            System.out.println("ColorOS discovery provider returned " + forward(data, 0));
         } catch (Exception error) {
             System.out.println("ColorOS discovery request failed: " + error.getClass().getSimpleName());
         } catch (LinkageError error) {
@@ -150,7 +153,25 @@ public final class ColorOsDiscovery {
         }
     }
 
-    private long activeEpoch() {
+    private void reconnectInBackground(long retryEpoch) {
+        try {
+            long epoch = activeEpoch(false);
+            if (closing || epoch == 0 || (retryEpoch != 0 && epoch != retryEpoch)) return;
+            byte[] data = Files.readAllBytes(packetPath);
+            if (data.length != PACKET_LENGTH) return;
+            data[SEQUENCE_OFFSET] = (byte) (++sequence & 255);
+            int result = forward(data, epoch);
+            System.out.println("ColorOS background reconnect provider returned " + result);
+            // The SDK can have queued advertising while its GATT server is still opening.
+            if (result == -1 && retryEpoch == 0 && !closing && activeEpoch(false) == epoch) {
+                requests.schedule(() -> reconnectInBackground(epoch), 500, TimeUnit.MILLISECONDS);
+            }
+        } catch (Exception | LinkageError error) {
+            System.out.println("ColorOS background reconnect failed: " + error.getClass().getSimpleName());
+        }
+    }
+
+    private long activeEpoch(boolean allowLogFallback) {
         try {
             String[] state = new String(Files.readAllBytes(packetPath.resolveSibling("iccoa-discovery.ready")),
                 StandardCharsets.US_ASCII).trim().split(" ");
@@ -161,7 +182,7 @@ public final class ColorOsDiscovery {
         } catch (Exception ignored) {
             // The receiver may have stopped advertising.
         }
-        return advertising ? advertisementEpoch : 0;
+        return allowLogFallback && advertising ? advertisementEpoch : 0;
     }
 
     private static boolean guideIsVisible() throws Exception {
@@ -195,7 +216,7 @@ public final class ColorOsDiscovery {
         return address.toString();
     }
 
-    private static int forward(byte[] data) throws Exception {
+    private int forward(byte[] data, long backgroundEpoch) throws Exception {
         BluetoothDevice device = device(receiverAddress(data));
         ScanRecord record = (ScanRecord) ScanRecord.class.getMethod("parseFromBytes", byte[].class)
             .invoke(null, (Object) data);
@@ -210,6 +231,13 @@ public final class ColorOsDiscovery {
             .invoke(manager, PROVIDER, 0, token, "carptocar-iccoa-discovery");
         if (holder == null) return -1;
         try {
+            if (backgroundEpoch != 0) {
+                // Acquiring the provider starts the native :connect process without opening an Activity.
+                int nativePid = nativeProcessId();
+                if (closing || nativePid == 0 || activeEpoch(false) != backgroundEpoch ||
+                    !relay.prepare(receiverPid, nativePid, backgroundEpoch, receiverAddress(data)) ||
+                    closing || activeEpoch(false) != backgroundEpoch) return -1;
+            }
             Object provider = holder.getClass().getField("provider").get(holder);
             Bundle extras = new Bundle();
             extras.putParcelable("ocar_plugin_key_scan_result", scan);
@@ -221,6 +249,22 @@ public final class ColorOsDiscovery {
         } finally {
             managerType.getMethod("removeContentProviderExternalAsUser", String.class, IBinder.class, int.class)
                 .invoke(manager, PROVIDER, token, 0);
+        }
+    }
+
+    private static int nativeProcessId() throws Exception {
+        Process process = new ProcessBuilder("/system/bin/pidof", NATIVE_PROCESS).start();
+        try {
+            if (!process.waitFor(2, TimeUnit.SECONDS) || process.exitValue() != 0) return 0;
+            String ids = new String(process.getInputStream().readAllBytes(), StandardCharsets.US_ASCII).trim();
+            if (ids.isEmpty()) return 0;
+            for (String id : ids.split("\\s+")) {
+                int pid = Integer.parseInt(id);
+                if (NATIVE_PROCESS.equals(processName(pid))) return pid;
+            }
+            return 0;
+        } finally {
+            process.destroy();
         }
     }
 

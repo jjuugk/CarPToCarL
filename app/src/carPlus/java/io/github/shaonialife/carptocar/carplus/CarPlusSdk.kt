@@ -25,6 +25,8 @@ import java.util.Locale
 internal object CarPlusSdk {
     private const val BLE_TRACE_TAG = "CarPlusBle"
     private const val BLE_CALLBACK_WAIT_MS = 5_000L
+    private const val RECONNECT_TIMEOUT_MS = 15_000L
+    private const val RECONNECT_RETRY_MS = 500L
     private val advertisingStatus = Regex("""^onAdvertisingSetStarted status (\d+)\b""")
 
     private val main = Handler(Looper.getMainLooper())
@@ -38,8 +40,15 @@ internal object CarPlusSdk {
     private var advertising = false
     private var advertisingAttempt = 0
     private var connected = false
+    private var autoReconnectPending = false
+    private var reconnectDeadline: Runnable? = null
+    private var reconnectAfterDisconnect = false
+    private var reconnectRequested = false
+    private var reconnectRetryAvailable = false
+    private val reconnectRetry = Runnable { requestBackgroundReconnect() }
     private var casting = false
     private var surface: Surface? = null
+    private var encodedOutput = false
     private var touchDown = false
     private var touchX = 0
     private var touchY = 0
@@ -55,17 +64,27 @@ internal object CarPlusSdk {
             if (wanted) {
                 report?.invoke(null, "会话状态 $state ($parameter)")
                 when (state) {
-                    UCarConnectState.UCAR_DEVICE_DISCONNECT -> if (connected) {
-                        connected = false
-                        pauseCast()
-                        advertise()
+                    UCarConnectState.UCAR_DEVICE_DISCONNECT -> {
+                        if (connected) {
+                            connected = false
+                            pauseCast()
+                            advertise()
+                            if (reconnectAfterDisconnect) {
+                                reconnectAfterDisconnect = false
+                                requestBackgroundReconnect()
+                            }
+                        } else {
+                            retryReconnect()
+                        }
                     }
+                    UCarConnectState.UCAR_DEVICE_CONNECT_FAILED -> if (!connected) retryReconnect()
                     UCarConnectState.UCAR_DEVICE_CONNECTED -> {
+                        finishReconnect()
                         connected = true
                         discovery?.advertiseReady(false)
                         Log.i(BLE_TRACE_TAG, "ICCOA BLE idle")
                         startCast()
-                        if (surface == null) updateStatus("ICCOA 已连接 · 等待 CarPlay 视频通道")
+                        if (surface == null && !encodedOutput) updateStatus("ICCOA 已连接 · 等待 CarPlay 视频通道")
                     }
                 }
             }
@@ -81,7 +100,7 @@ internal object CarPlusSdk {
             if (supported?.isSupportNormalCast == true) WorkMode.NORMAL_CAST else WorkMode.NONE
     }
 
-    fun start(context: Context, refresh: Boolean) {
+    fun start(context: Context, refresh: Boolean, canvas: CarPlusVideo.Size) {
         if (connected || initializing || advertising && !refresh) return
         wanted = true
         try {
@@ -93,7 +112,7 @@ internal object CarPlusSdk {
                 return
             }
             context.assets.open("ccd.data").close()
-            val config = config(context)
+            val config = config(context, canvas)
             sdk.registerCarConnectListener(connection)
             initializing = true
             updateStatus("正在初始化 ICCOA 接收端")
@@ -125,32 +144,119 @@ internal object CarPlusSdk {
         }
     }
 
-    fun setSurface(newSurface: Surface?) {
+    fun reconnectIfPaired(restartCurrent: Boolean) {
+        if (!wanted || !hasVideoOutput() || reconnectDeadline != null) return
+        if (connected && !restartCurrent || !connected && !advertising) return
+        val sdkContext = discovery ?: return
+        val deadline = Runnable {
+            finishReconnect()
+            updateStatus("ICCOA 重连超时 · 可重试或打开系统 Car+")
+        }
+        reconnectDeadline = deadline
+        reconnectRetryAvailable = true
+        main.postDelayed(deadline, RECONNECT_TIMEOUT_MS)
+        Bg.run("iccoa-background-reconnect") {
+            val paired = sdkContext.hasPairedPeer()
+            main.post {
+                if (reconnectDeadline !== deadline) return@post
+                if (!paired) {
+                    finishReconnect()
+                    if (restartCurrent) updateStatus("ICCOA 尚未配对 · 请先打开系统 Car+")
+                } else if (restartCurrent && connected) {
+                    reconnectAfterDisconnect = true
+                    updateStatus("正在重新连接 ICCOA Car+")
+                    // A false result can mean the SDK's short acknowledgement window elapsed.
+                    // Wait for UCAR_DEVICE_DISCONNECT before advertising a new session.
+                    runCatching { adapter?.disconnect() }
+                        .onFailure { report?.invoke(null, "断开 ICCOA 会话失败：${it.message}") }
+                } else {
+                    requestBackgroundReconnect()
+                }
+            }
+        }
+    }
+
+    private fun hasVideoOutput(): Boolean = surface != null || encodedOutput
+
+    private fun reconnectWhenReady() {
+        if (!autoReconnectPending || !wanted || !hasVideoOutput() || !connected && !advertising) return
+        autoReconnectPending = false
+        if (!connected) reconnectIfPaired(restartCurrent = false)
+    }
+
+    private fun requestBackgroundReconnect() {
+        if (!wanted || !hasVideoOutput() || connected || !advertising || discovery?.requestReconnect() != true) {
+            finishReconnect()
+            report?.invoke(null, "原生 Car+ 后台重连暂不可用")
+        } else {
+            reconnectRequested = true
+            updateStatus("正在等待原生 Car+ 后台重连")
+            report?.invoke(null, "已请求原生 Car+ 后台重连")
+        }
+    }
+
+    private fun retryReconnect() {
+        if (!reconnectRequested) return
+        reconnectRequested = false
+        discovery?.cancelQueuedReconnect()
+        if (!reconnectRetryAvailable) {
+            finishReconnect()
+            updateStatus("ICCOA 重连未成功 · 可重试或打开系统 Car+")
+            return
+        }
+        reconnectRetryAvailable = false
+        advertise()
+        report?.invoke(null, "ICCOA 首次重连中断，重新广播并重试一次")
+        main.postDelayed(reconnectRetry, RECONNECT_RETRY_MS)
+    }
+
+    private fun finishReconnect() {
+        reconnectDeadline?.let(main::removeCallbacks)
+        main.removeCallbacks(reconnectRetry)
+        discovery?.cancelQueuedReconnect()
+        reconnectDeadline = null
+        reconnectAfterDisconnect = false
+        reconnectRequested = false
+        reconnectRetryAvailable = false
+    }
+
+    fun setVideoOutput(newSurface: Surface?, encoded: Boolean) {
+        val hadOutput = hasVideoOutput()
         val previous = surface
         surface = null
         pauseCast()
         previous?.release()
         surface = newSurface?.takeIf { it.isValid }
-        if (surface == null) {
+        encodedOutput = encoded
+        if (surface == null && !encodedOutput) {
+            autoReconnectPending = false
+            finishReconnect()
             newSurface?.release()
             if (connected) updateStatus("ICCOA 已连接 · 等待 CarPlay 视频通道")
         } else {
+            if (!hadOutput) autoReconnectPending = true
             startCast()
+            reconnectWhenReady()
         }
     }
 
     fun stop() {
+        if (!wanted && !hasVideoOutput()) return
         wanted = false
+        autoReconnectPending = false
+        finishReconnect()
         Log.i(BLE_TRACE_TAG, "ICCOA BLE idle")
         discovery?.advertiseReady(false)
-        discovery?.stopWatching()
         advertisingAttempt++
-        connected = false
         pauseCast()
         surface?.release()
         surface = null
-        runCatching { adapter?.stopAdvertise() }
+        encodedOutput = false
+        // Keep the local relay alive for the SDK's disconnect handshake.
         runCatching { adapter?.disconnect() }
+        runCatching { adapter?.stopAdvertise() }
+        discovery?.stopWatching()
+        connected = false
         advertising = false
         updateStatus("ICCOA 接收端已停止 · 点此启动")
     }
@@ -171,6 +277,7 @@ internal object CarPlusSdk {
         )
         if (advertising) readAdvertisingCallback(attempt, since, marker)
         startCast()
+        reconnectWhenReady()
     }
 
     /** The SDK exposes its Android advertising callback through its own process logs. */
@@ -209,7 +316,8 @@ internal object CarPlusSdk {
 
     private fun startCast() {
         if (!wanted || !initialized || !connected) return
-        val target = surface?.takeIf { it.isValid } ?: return
+        val target = surface?.takeIf { it.isValid }
+        if (target == null && !encodedOutput) return
         if (!casting) {
             casting = runCatching {
                 adapter?.startCast(target, CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT) == true
@@ -217,7 +325,8 @@ internal object CarPlusSdk {
         }
         if (connected) {
             updateStatus(
-                if (casting) "ICCOA 已接入编码器 · 等待画面"
+                if (casting && encodedOutput) "ICCOA H.264 直通 · 等待画面"
+                else if (casting) "ICCOA 已接入编码器 · 等待画面"
                 else "ICCOA SDK 未接受视频 Surface",
             )
         }
@@ -256,7 +365,7 @@ internal object CarPlusSdk {
         adapter?.sendTouchEvent(action, 1, intArrayOf(0), intArrayOf(touchX), intArrayOf(touchY)) == true
     }.getOrDefault(false)
 
-    private fun config(context: Context): UCarConfig {
+    private fun config(context: Context, canvas: CarPlusVideo.Size): UCarConfig {
         val prefs = context.getSharedPreferences("iccoa", Context.MODE_PRIVATE)
         val identity = prefs.getString("receiver_id", null)?.let { saved ->
             runCatching { Base64.decode(saved, Base64.NO_WRAP) }.getOrNull()?.takeIf { it.size == 6 }
@@ -272,10 +381,10 @@ internal object CarPlusSdk {
             .setDpi(320)
             .setRealDpi(context.resources.displayMetrics.densityDpi.coerceIn(120, 640))
             .setFps(CarPlusVideo.FPS)
-            .setScreenWidth(CarPlusVideo.WIDTH)
-            .setScreenHeight(CarPlusVideo.HEIGHT)
-            .setVideoDisplayWidth(CarPlusVideo.WIDTH)
-            .setVideoDisplayHeight(CarPlusVideo.HEIGHT)
+            .setScreenWidth(canvas.width)
+            .setScreenHeight(canvas.height)
+            .setVideoDisplayWidth(canvas.width)
+            .setVideoDisplayHeight(canvas.height)
             .setSupportP2P(true)
             .setSupportSoftAP(true)
             .setSupportHevc(false)

@@ -1,6 +1,7 @@
 package io.github.shaonialife.carptocar.launcher.settings
 
 import android.content.Context
+import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 
 /**
  * 「显示」面板偏好：视频流/虚拟屏的分辨率缩放与目标帧率。
@@ -29,6 +30,8 @@ object DisplayPrefs {
 
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
+    private const val KEY_ICCOA_WIDTH = "iccoa_stream_width"
+    private const val KEY_ICCOA_HEIGHT = "iccoa_stream_height"
     private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
@@ -130,6 +133,24 @@ object DisplayPrefs {
             .edit()
             .putInt(KEY_SCALE, percent.coerceIn(SCALE_MIN, SCALE_MAX))
             .apply()
+    }
+
+    internal fun carPlusStreamSize(context: Context): CarPlusVideo.Size? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return CarPlusVideo.manualSize(
+            prefs.getInt(KEY_ICCOA_WIDTH, 0),
+            prefs.getInt(KEY_ICCOA_HEIGHT, 0),
+        )
+    }
+
+    internal fun setCarPlusStreamSize(context: Context, size: CarPlusVideo.Size?) {
+        val edit = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+        if (size == null) {
+            edit.remove(KEY_ICCOA_WIDTH).remove(KEY_ICCOA_HEIGHT)
+        } else {
+            edit.putInt(KEY_ICCOA_WIDTH, size.width).putInt(KEY_ICCOA_HEIGHT, size.height)
+        }
+        edit.apply()
     }
 
     /** 触摸 move 注入节流（ms；0=关闭）。 */

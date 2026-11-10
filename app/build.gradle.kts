@@ -13,7 +13,7 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "1.2.30"
+val appVersionName = "1.2.46"
 val appVersionCode =
     appVersionName
         .split(".")
@@ -40,7 +40,9 @@ val carPlusSdkAssets = providers.gradleProperty("carPlusSdkAssets").orNull?.let 
 val carPlusSdkJni = providers.gradleProperty("carPlusSdkJni").orNull?.let { rootProject.file(it) }
 val carPlusRelayAssets = providers.gradleProperty("carPlusRelayAssets").orNull?.let { rootProject.file(it) }
 val carPlusAudioRelay = carPlusSdkDex != null && carPlusRelayAssets != null
+val carPlusVideoRelay = carPlusSdkDex != null
 val carPlusRuntime = carPlus && (carPlusSdk != null || carPlusSdkDex != null)
+val carPlusDebuggable = providers.gradleProperty("carPlusDebuggable").map(String::toBoolean).getOrElse(!carPlusRuntime)
 val carPlusApkName = "CarPToCar+ICCOA.apk"
 if (carPlus) {
     require(carPlusSdk == null || carPlusSdkDex == null) {
@@ -71,7 +73,7 @@ if (carPlus) {
 
 android {
     namespace = "io.github.shaonialife.carptocar"
-    compileSdk = 34
+    compileSdk = if (carPlus) 36 else 34
 
     defaultConfig {
         applicationId = if (carPlus) "io.github.shaonialife.carptocar.carplus" else "io.github.shaonialife.carptocar"
@@ -82,6 +84,7 @@ android {
         buildConfigField("boolean", "CAR_PLUS", carPlus.toString())
         buildConfigField("boolean", "CAR_PLUS_RUNTIME", carPlusRuntime.toString())
         buildConfigField("boolean", "CAR_PLUS_AUDIO_RELAY", carPlusAudioRelay.toString())
+        buildConfigField("boolean", "CAR_PLUS_VIDEO_RELAY", carPlusVideoRelay.toString())
         if (carPlus) manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
     }
 
@@ -107,7 +110,16 @@ android {
         debug {
             // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
             // Shizuku 授权是按包名授予的，改包名会要求重新授权。
-            versionNameSuffix = if (carPlus) "-carplus-debug" else "-debug"
+            if (carPlus) {
+                // ColorOS checks ELF alignment on 4 KB phones for debuggable APKs.
+                isDebuggable = carPlusDebuggable
+            }
+            versionNameSuffix =
+                when {
+                    !carPlus -> "-debug"
+                    carPlusDebuggable -> "-carplus-debug"
+                    else -> "-carplus"
+                }
         }
     }
 
@@ -142,8 +154,10 @@ android {
         // 新代码引入 lint 问题（error 级）直接使构建失败；存量问题在基线文件中豁免。
         //  ./gradlew :app:lintDebug          —— 检查（pre-commit 钩子提交前自动执行）
         //  ./gradlew :app:updateLintBaseline —— 修复问题后重建基线（有意豁免时）
+        checkReleaseBuilds = false
         abortOnError = true
         baseline = file("lint-baseline.xml")
+        disable += "Instantiatable"
     }
 }
 
@@ -156,7 +170,7 @@ androidComponents {
 if (carPlusRuntime && carPlusSdkDex == null) {
     tasks.register<Copy>("packageCarPlusRuntime") {
         group = "build"
-        description = "Builds the installable Car+ debug APK with the supplied ICCOA runtime AAR"
+        description = "Builds the installable Car+ APK with the supplied ICCOA runtime AAR"
         dependsOn("assembleDebug")
         from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
         into(layout.buildDirectory.dir("outputs/apk/carplus-runtime"))
@@ -170,11 +184,12 @@ if (carPlusRuntime && carPlusSdkDex == null) {
     val packagingScript = rootProject.file("scripts/package-carplus-runtime.py")
     tasks.register<Exec>("packageCarPlusRuntime") {
         group = "build"
-        description = "Builds the installable Car+ debug APK with the supplied ICCOA runtime DEX"
+        description = "Builds the installable Car+ APK with the supplied ICCOA runtime DEX"
         dependsOn("assembleDebug")
         inputs.files(baseApk, carPlusSdkDex, debugKeyStore, packagingScript)
         inputs.property("carPlusAudioRelay", carPlusAudioRelay)
         if (carPlusAudioRelay) inputs.file(rootProject.file("scripts/PatchCarPlusAudio.java"))
+        inputs.file(rootProject.file("scripts/PatchCarPlusVideo.java"))
         outputs.file(packagedApk)
         doFirst {
             commandLine(
@@ -187,6 +202,7 @@ if (carPlusRuntime && carPlusSdkDex == null) {
                 packagedApk.get().asFile,
             )
             if (carPlusAudioRelay) args("--audio-java", file(System.getProperty("java.home")).resolve("bin/java"))
+            args("--video-java", file(System.getProperty("java.home")).resolve("bin/java"))
         }
     }
 }

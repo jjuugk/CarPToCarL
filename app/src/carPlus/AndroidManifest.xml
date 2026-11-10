@@ -5,7 +5,7 @@
         <package android:name="com.oplus.ocar" />
     </queries>
 
-    <application>
+    <application android:pageSizeCompat="enabled">
         <service android:name=".carplus.CarPlusReceiverService"
             android:enabled="${carPlusRuntime}" android:exported="false" android:process=":iccoa" />
         <service android:name="com.share.connect.ShareLinkService"

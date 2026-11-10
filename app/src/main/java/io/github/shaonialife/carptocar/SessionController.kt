@@ -364,15 +364,15 @@ object SessionController {
     }
 
     /**
-     * 歌名变化：同时补推 WiFi 隧道（currentClient）与蓝牙链路（server/client）。
+     * 歌名或播放状态变化时，同时补推 WiFi 隧道与蓝牙链路。
      *
      * 去重保护：部分播放器（荣耀音乐等）会把「逐行歌词」写进 MediaSession title，
      * 导致每秒多次内容变化、且同一行会因多触发源（1s 轮询 + 会话回调 + metadata 回调）
-     * 重复 publish。这里按 title+artist 去重，只在真正切歌/切歌词行时推一次。
+     * 重复 publish。按歌名、歌手和播放状态去重，播放进度变化不触发补推。
      */
     private fun pushNowPlayingAll() {
         val np = buildNowPlaying() ?: return
-        val key = "${np.title}|${np.artist}"
+        val key = Triple(np.title, np.artist, np.status)
         if (key == lastPushedNowPlayingKey) return
         lastPushedNowPlayingKey = key
         currentClient?.pushNowPlaying()
@@ -380,8 +380,7 @@ object SessionController {
         bluetoothClient?.pushNowPlaying()
     }
 
-    /** 上次推送的 0x5001 内容键（title|artist），用于去重。 */
-    private var lastPushedNowPlayingKey: String? = null
+    private var lastPushedNowPlayingKey: Triple<String?, String?, Int>? = null
 
     /**
      * 新一轮连接开始：清掉 0x5001 去重键。
@@ -470,15 +469,18 @@ object SessionController {
      * 直投失败再回退到 AudioManager 全局路由。
      */
     fun dispatchMediaKey(keyCode: Int) {
-        val action = MediaSessionsState.transportActionFor(keyCode)
+        val playbackKey = ConsumerKeys.playbackKeyFor(keyCode, toggleOnMute = BuildConfig.CAR_PLUS)
+        if (playbackKey == 0) return
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) appendLog("EVENT: 车机媒体静音键 → 切换播放/暂停")
+        val action = MediaSessionsState.transportActionFor(playbackKey)
         if (action >= 0 && MediaSessionsState.dispatchTransport(action)) {
             return
         }
         // 回退：无活跃会话 / 动作不受支持时走系统焦点路由
         val ctx = appContext ?: return
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, playbackKey))
+        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, playbackKey))
     }
 
     /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
@@ -700,6 +702,7 @@ object SessionController {
 
     @Volatile
     var audioSender: AudioSender? = null
+    private val audioSenderLock = Any()
 
     @Volatile
     var currentClient: AirPlayClient? = null
@@ -716,10 +719,6 @@ object SessionController {
 
     @Volatile
     var currentAudioHost: String? = null
-
-    /** 本次会话是否在车机侧播放声音（2026-10-24 起默认恒 true，不再有开关）。 */
-    @Volatile
-    var audioEnabledForSession: Boolean = true
 
     /**
      * 「开启声音（兼容档）」：候选里把非 media 档（compatibility 等）排前面。
@@ -1704,13 +1703,19 @@ object SessionController {
         CarLifeHijack.detach()
         // 回调属于上一轮会话（捕获了旧的 appendLog 语境），退役时一并摘掉。
         CarLifeHijack.onActualStreamSize = null
+        lastConsumerUsage = null
+        if (BuildConfig.CAR_PLUS) CarPlusReceiver.stopVideo(videoSender)
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
         ScreenDimmer.setSessionActive(false)
         if (BuildConfig.CAR_PLUS_AUDIO_RELAY) CarPlusReceiver.stopAudio()
-        audioSender?.stop()
-        audioSender = null
+        val retiredAudio = synchronized(audioSenderLock) {
+            val sender = audioSender
+            audioSender = null
+            sender
+        }
+        retiredAudio?.stop()
         // 通话场景标记必须随会话清掉：留着的话下一轮会被当成「已经在通话档」，
         // 进入通话时 switchAudioScene 直接返回 true，一条通话流都不会建。
         audioInCallMode = false
@@ -2795,7 +2800,12 @@ object SessionController {
                 appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
             }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
-            val ordered = AudioProfileMemory.order(candidates, entry)
+            val ordered =
+                AudioProfileMemory.order(
+                    candidates,
+                    entry,
+                    preferPcm48Media = BuildConfig.CAR_PLUS_AUDIO_RELAY && !audioPreferCompat,
+                )
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
                 return false
@@ -2805,9 +2815,8 @@ object SessionController {
                     "（本车机记忆：${AudioProfileMemory.describe(entry)}；" +
                     "封装=${tuning.detail}）",
             )
-            // SETUP 失败不会扰动会话（车机只是不接这条流的请求），所以本会话内就把候选
-            // 试完，不必等下一次连接。这一点对当前场景很关键：102/AAC-LC 与 100/PCM 是
-            // 两条完全不同的通路，前者不被接受时应当立刻退到后者，而不是让用户白连一次。
+            // SETUP 被拒就在同一会话内试下一档。Car+ 的 48k PCM 被拒时，优先尝试
+            // 本车机已验证过的档位，其次按原有候选顺序尝试。
             var chosen: AudioProfile? = null
             var streamInfo: AirPlayClient.AudioStreamInfo? = null
             for (candidate in ordered) {
@@ -2871,6 +2880,23 @@ object SessionController {
         }
     }
 
+    @Synchronized
+    internal fun recoverCarPlusAudioAfterCamera(
+        client: AirPlayClient,
+        sender: AudioSender,
+        hasRecentMusicPcm: Boolean,
+    ) {
+        if (currentClient !== client || audioSender !== sender || videoSender?.isRunning != true) return
+        val manager = appContext?.getSystemService(android.media.AudioManager::class.java) ?: return
+        if (audioInCallMode || isCallMode(manager.mode)) return
+        val source = if (hasRecentMusicPcm) "仍有音乐 PCM" else "最近 2 秒未收到非静音音乐 PCM"
+        appendLog("AUDIO: 相机释放后检查音频，Car+ $source")
+        if (!rebuildAudioChannel("相机退出") && currentClient === client && audioSender === sender) {
+            client.refreshVolume("相机退出")
+            sender.resyncAnchor("相机退出")
+        }
+    }
+
     /**
      * 通话结束后**重建整条音频流**（新的 streamConnectionID / 新端口 / 新编码器）。
      *
@@ -2897,7 +2923,7 @@ object SessionController {
         val context = appContext?.applicationContext ?: return false
         val old = audioSender ?: return false
         if (!old.isRunning) return false
-        appendLog("AUDIO: $reason → 重建音频流（接收端音频输出在通话期间被释放，需新建流才会重开）")
+        appendLog("AUDIO: $reason → 重建媒体音频流（${profile.label}）")
         val info =
             try {
                 client.runAudioStream(secret, profile, AudioTuning.RAW_SPF)
@@ -2909,12 +2935,6 @@ object SessionController {
             appendLog("AUDIO: 重建协商失败——保持原音频流继续推（不降级成无声）")
             return false
         }
-        // 新流已就绪：停旧发送端。旧流不再有包，接收端会在超时后自行回收。
-        old.stop()
-        audioSender = null
-        // 看门狗线程跟随 audioSender 字段：换流后自动续上，所以这里**不该**置
-        // callWatcher = null —— 那只丢引用、旧线程仍在跑，紧接着 startCallWatcher()
-        // 再起一个就成双线程（两边同时切音频流）。startCallWatcher 自己有 isAlive 检查。
         val sender =
             AudioSender(
                 host = host,
@@ -2928,21 +2948,29 @@ object SessionController {
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
             )
-        audioSender = sender
-        if (!sender.startPassthrough(keepAlive = !BuildConfig.CAR_PLUS_AUDIO_RELAY)) {
-            audioSender = null
-            activeAudioStartedAt = 0L
-            appendLog("AUDIO: 音频流重建后启动失败——本次仅推视频（重连可恢复）")
+        // SETUP 后补 RECORD 激活新流。旧发送端继续工作，直到新流成功接管。
+        if (!sender.startPassthrough(keepAlive = !BuildConfig.CAR_PLUS_AUDIO_RELAY) || !client.record()) {
+            sender.stop()
+            appendLog("AUDIO: 新音频流启动或激活失败，保留原发送端")
             return false
         }
-        activeAudioStartedAt = android.os.SystemClock.uptimeMillis()
+        val replaced = synchronized(audioSenderLock) {
+            if (currentClient !== client || audioSender !== old || !old.isRunning) {
+                false
+            } else {
+                audioSender = sender
+                true
+            }
+        }
+        if (!replaced) {
+            sender.stop()
+            return false
+        }
+        old.stop()
         startCallWatcher()
-        // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
-        // 否则车机对 SETUP 回 200、给端口，但不排播（见 startAudioChannel 同名注释）。
-        client.record()
         appendLog(
             "AUDIO: 音频流重建完成（新 dataPort=${info.dataPort} " +
-                "controlPort=${info.controlPort}）——若仍无声，说明卡在车机音源选择而非本机",
+                "controlPort=${info.controlPort}）",
         )
         return true
     }
@@ -4194,8 +4222,6 @@ object SessionController {
                         )
                         if (client.pairingTerminal) {
                             // 把「画面能用、但为什么没声音」写在连接当场，而不是等用户来问。
-                            // 旧日志对这类会话的说法是「加密 SETUP 被拒（403）」/「弹窗里没勾声音」，
-                            // 两条都是假线索（1.1.2 起 `audioEnabledForSession` 默认就是 true）。
                             appendLog(
                                 "AIRPLAY: ⚠ 本会话无共享密钥（车机拒绝配对）：画面正常，**音频与触摸不可用**。" +
                                     "要恢复声音需在车机侧删掉本机的配对记录后重连",
@@ -4266,6 +4292,9 @@ object SessionController {
                         }
                         if (setup != null) {
                             connectBudget.enter(ConnectStage.FIRST_FRAME)
+                            val manualCarPlusSize = if (BuildConfig.CAR_PLUS) DisplayPrefs.carPlusStreamSize(context) else null
+                            val carPlusTouchWidth = if (setup.displayFromCar) setup.displayWidth else manualCarPlusSize?.width ?: setup.displayWidth
+                            val carPlusTouchHeight = if (setup.displayFromCar) setup.displayHeight else manualCarPlusSize?.height ?: setup.displayHeight
                             // 记录会话凭据：投影授权晚于连接时用于动态补启音频。
                             // 用 client.currentEndpoint 而非 effectiveEndpoint：配对期间
                             // mDNS 刷新过端点时，真正连上的是 client 里的地址（2026-10-18：
@@ -4304,7 +4333,7 @@ object SessionController {
                                         val consumerUsage =
                                             when {
                                                 // 有描述符：只有 Consumer 设备才解析（非 Consumer → null）
-                                                descriptor != null -> keyMap?.let { rawValue?.let(it::usageFor) }
+                                                descriptor != null -> report?.let { keyMap?.usagesFor(it)?.firstOrNull() }
                                                 // 描述符缺失（未知车机）：保守回退——仅 1 字节报告，
                                                 // 值当 Usage ID 直读
                                                 report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
@@ -4322,7 +4351,9 @@ object SessionController {
                                             }
                                         if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
+                                            val held = consumerUsage == lastConsumerUsage
                                             lastConsumerUsage = consumerUsage
+                                            if (held && ConsumerKeys.isPlaybackPress(consumerUsage)) return@connectEventChannel
                                             if (keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
                                                 // 1.2.21 漏了这条通路：事件通道 hidSendReport
                                                 // 直接调 dispatchMediaKey，语音键会被当成系统键
@@ -4342,7 +4373,7 @@ object SessionController {
                                                             .format(consumerUsage),
                                                 )
                                             }
-                                        } else if (keyMap != null && report != null) {
+                                        } else if (report != null && (keyMap != null || descriptor == null && report.size == 1)) {
                                             // Consumer 设备的「无按键」/释放报文（值为 0 或下标越界）：
                                             // 静默计数，避免释放事件刷屏
                                             consumerReleaseCount++
@@ -4381,7 +4412,7 @@ object SessionController {
                                             touchLogCount++
                                             if (BuildConfig.CAR_PLUS) {
                                                 contacts.firstOrNull { it.slot == 0 }?.let { contact ->
-                                                    CarPlusReceiver.onTouch(contact, setup.displayWidth, setup.displayHeight)
+                                                    CarPlusReceiver.onTouch(contact, carPlusTouchWidth, carPlusTouchHeight)
                                                 }
                                             } else {
                                                 contacts.forEach { TouchRouter.onContact(context.applicationContext, it) }
@@ -4552,19 +4583,14 @@ object SessionController {
                                     // 「显示」偏好：流画布/虚拟屏按车机分辨率百分比生成。
                                     // 只在会话建立时生效——编码器与虚拟屏尺寸此时定型；
                                     // 密度同步缩放，逻辑布局（dp）与 100% 完全一致。
-                                    val scalePct =
-                                        appContext
-                                            ?.let {
-                                                DisplayPrefs
-                                                    .scalePercent(it)
-                                            } ?: 100
+                                    val scalePct = if (BuildConfig.CAR_PLUS) 100 else DisplayPrefs.scalePercent(context)
                                     val scale = scalePct / 100f
                                     // 缩放后向下对齐偶数（H.264 要求）：虚拟屏/合成器/编码器
                                     // 三方必须同一尺寸，故在源头对齐（VideoSender 内另有兜底）
                                     val streamW =
-                                        ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
+                                        manualCarPlusSize?.width ?: ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
                                     val streamH =
-                                        ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
+                                        manualCarPlusSize?.height ?: ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
                                     // 目标帧率：车机 `/info displays[0].maxFPS` 说了算，
                                     // 车机没声明按 60（判定见 video/StreamFps.kt）。
                                     val sessionTargetFps =
@@ -4597,11 +4623,17 @@ object SessionController {
                                     // 只转「车机真正通告过」的画布：displayFromCar=false 是手机
                                     // 横屏兜底的假画布，转过去会让引擎按手机尺寸编码，还会被
                                     // CarCanvasMemory 当成车机画布记下来，越记越偏。
-                                    if (setup.displayFromCar) {
-                                        CarLifeHijack.setRequestedResolution(
-                                            setup.displayWidth,
-                                            setup.displayHeight,
-                                        )
+                                    if (BuildConfig.CAR_PLUS) {
+                                        val reported = if (setup.displayFromCar) {
+                                            CarPlusVideo.displaySize(setup.displayWidth, setup.displayHeight)
+                                        } else null
+                                        val canvas = manualCarPlusSize ?: reported ?: CarPlusVideo.defaultSize
+                                        CarPlusReceiver.setCanvas(canvas.width, canvas.height)
+                                        if (manualCarPlusSize != null) {
+                                            appendLog("ICCOA: 使用手动流分辨率 ${canvas.width}×${canvas.height}")
+                                        }
+                                    } else if (setup.displayFromCar) {
+                                        CarLifeHijack.setRequestedResolution(setup.displayWidth, setup.displayHeight)
                                     }
                                     pendingVideoW = streamW
                                     pendingVideoH = streamH
@@ -4623,10 +4655,7 @@ object SessionController {
                                         CarLifeHijack.isEnabled(context)
                                     val streamOutW: Int
                                     val streamOutH: Int
-                                    if (BuildConfig.CAR_PLUS) {
-                                        streamOutW = CarPlusVideo.WIDTH
-                                        streamOutH = CarPlusVideo.HEIGHT
-                                    } else if (hijackMode) {
+                                    if (hijackMode) {
                                         val (carW, carH) = CarLifeHijack.videoSize
                                         streamOutW = ((carW.coerceAtLeast(320)) / 2) * 2
                                         streamOutH = ((carH.coerceAtLeast(180)) / 2) * 2
@@ -4677,7 +4706,7 @@ object SessionController {
                                         ) {
                                             setup.displayWidth to setup.displayHeight
                                         } else {
-                                            null
+                                            manualCarPlusSize?.let { it.width to it.height }
                                         }
                                     videoSender =
                                         VideoSender(
@@ -4779,10 +4808,14 @@ object SessionController {
                                 // 「连不上」的现场，正常连接不需要快照（省空间也省导出体积）。
                                 SessionTrace.markLinked()
                                 if (BuildConfig.CAR_PLUS) {
-                                    val started = videoSender?.start(CarPlusReceiver::attach) == true
+                                    val started = videoSender?.let {
+                                        CarPlusReceiver.startVideo(
+                                            it, client.receiverIdentity(), activeStreamWidth, activeStreamHeight,
+                                        )
+                                    } == true
                                     appendLog(
-                                        if (started) "ICCOA: CarPlay 编码器已就绪，等待 Car+ 画面"
-                                        else "ICCOA: CarPlay 视频编码器启动失败",
+                                        if (started) "ICCOA: CarPlay 视频通道已就绪，等待 Car+ 画面"
+                                        else "ICCOA: CarPlay 视频通道启动失败",
                                     )
                                 } else if (host != null) {
                                     // 原版使用 CarLife 本地劫持（2026-10-24 用户要求

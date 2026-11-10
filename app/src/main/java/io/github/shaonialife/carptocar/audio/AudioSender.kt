@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
+import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.TimingServer
 import java.io.IOException
@@ -81,6 +82,9 @@ class AudioSender(
 
         /** 静音保活的检查节拍。 */
         private const val KEEPALIVE_TICK_MILLIS = 100L
+        private const val AUDIO_TRAFFIC_CLASS = 46 shl 2 // DSCP EF in the IP traffic class byte.
+        private const val AUDIO_SEND_GAP_MS = 80L
+        private const val AUDIO_GAP_LOG_INTERVAL_MS = 3_000L
 
         /**
          * 多久没有真实 PCM 就开始补静音帧。
@@ -194,6 +198,8 @@ class AudioSender(
     private var packetsSent = 0L
     private var bytesSent = 0L
     private var lastLogAt = 0L
+    private var lastPacketSentAt = 0L
+    private var lastSendGapLoggedAt = 0L
     private var readFailures = 0
 
     val isRunning: Boolean get() = running.get()
@@ -390,8 +396,15 @@ class AudioSender(
         stopped.set(false)
         return try {
             val client = DatagramSocket()
-            client.connect(InetAddress.getByName(host), dataPort)
             socket = client
+            if (BuildConfig.CAR_PLUS_AUDIO_RELAY) {
+                runCatching { client.trafficClass = AUDIO_TRAFFIC_CLASS }
+                    .onFailure { log("AUDIO: 无法设置 UDP 音频优先级，继续使用默认优先级") }
+            }
+            client.connect(InetAddress.getByName(host), dataPort)
+            pendingPcmBytes = 0
+            lastPacketSentAt = 0L
+            lastSendGapLoggedAt = 0L
 
             if (codec == AudioCodec.AAC_LC) {
                 val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
@@ -420,8 +433,9 @@ class AudioSender(
         }
     }
 
-    /** 直通模式下的帧对齐累积缓冲（把任意大小的注入 PCM 切成固定帧长）。 */
-    private val passthroughBuffer = java.io.ByteArrayOutputStream()
+    /** 保留不足一帧的尾部，下一次注入时继续填充。由 feedPcm 的锁保护。 */
+    private val passthroughFrame by lazy { ByteArray(framePcmBytes) }
+    private var pendingPcmBytes = 0
 
     /** 最近一次收到**真实** PCM 的时刻（uptimeMillis）；静音保活据此判断要不要补帧。 */
     @Volatile
@@ -519,8 +533,7 @@ class AudioSender(
      * 外部注入 PCM（CarLife 直通）。
      *
      * **必须同步**：媒体（9240）与 TTS（9241）是两条独立读线程，2026-10-27 接入导航播报
-     * 后两路会同时进来；[passthroughBuffer] 是非线程安全的 ByteArrayOutputStream，
-     * 不加锁会出现半帧交错（爆音/破音）甚至丢数据。
+     * 后两路会同时进来，帧缓冲和写入位置必须一起保护，避免半帧交错。
      */
     @Synchronized
     fun feedPcm(
@@ -536,14 +549,17 @@ class AudioSender(
         lastRealFeedAt = android.os.SystemClock.uptimeMillis()
         val resampled = alignPcm(srcPcm, size, srcRate, srcChannels) ?: return
         // 累积到固定帧长，凑满一帧才发（PCM 通路逐包、AAC 通路逐帧）
-        val frameBytes = framePcmBytes
-        passthroughBuffer.write(resampled, 0, resampled.size)
-        while (passthroughBuffer.size() >= frameBytes) {
-            val frame = passthroughBuffer.toByteArray().copyOf(frameBytes)
-            val rest = passthroughBuffer.toByteArray()
-            passthroughBuffer.reset()
-            passthroughBuffer.write(rest, frameBytes, rest.size - frameBytes)
-            dispatchPcm(frame)
+        val frame = passthroughFrame
+        var offset = 0
+        while (offset < resampled.size && running.get()) {
+            val count = minOf(frame.size - pendingPcmBytes, resampled.size - offset)
+            resampled.copyInto(frame, pendingPcmBytes, offset, offset + count)
+            offset += count
+            pendingPcmBytes += count
+            if (pendingPcmBytes == frame.size) {
+                pendingPcmBytes = 0
+                dispatchPcm(frame)
+            }
         }
     }
 
@@ -655,7 +671,6 @@ class AudioSender(
         keepAliveThread?.interrupt()
         keepAliveThread = null
         thread = null
-        passthroughBuffer.reset()
         restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
             log(
@@ -914,6 +929,17 @@ class AudioSender(
         val client = socket ?: return false
         return try {
             client.send(DatagramPacket(wire, wire.size))
+            if (BuildConfig.CAR_PLUS_AUDIO_RELAY) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                val gap = now - lastPacketSentAt
+                if (lastPacketSentAt != 0L && gap > AUDIO_SEND_GAP_MS &&
+                    now - lastSendGapLoggedAt >= AUDIO_GAP_LOG_INTERVAL_MS
+                ) {
+                    log("AUDIO: UDP 发包间隔 ${gap}ms（seq=${(sequence - 1) and 0xFFFF}）")
+                    lastSendGapLoggedAt = now
+                }
+                lastPacketSentAt = now
+            }
             packetsSent++
             bytesSent += wire.size
             true

@@ -10,10 +10,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
+import io.github.shaonialife.carptocar.carlife.H264Sps
+import io.github.shaonialife.carptocar.carplus.CarPlusSurfaceScaler
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 import java.io.DataInputStream
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
@@ -25,6 +28,15 @@ import org.junit.runner.RunWith
 class CarPlusVideoTransportTest {
     @Test
     fun decodedSampleReachesCarPlaySocketAsH264() {
+        assertEncodedSize(CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT)
+    }
+
+    @Test
+    fun decodedSampleIsResizedToAudiCanvas() {
+        assertEncodedSize(1412, 654)
+    }
+
+    private fun assertEncodedSize(width: Int, height: Int) {
         val address = InetAddress.getByName("127.0.0.1")
         val key = ByteArray(32) { it.toByte() }
         ServerSocket(0, 1, address).use { receiver ->
@@ -33,8 +45,8 @@ class CarPlusVideoTransportTest {
                 host = address.hostAddress!!,
                 dataPort = receiver.localPort,
                 frameCipher = StreamFrameCipher.ChaCha(key),
-                width = CarPlusVideo.WIDTH,
-                height = CarPlusVideo.HEIGHT,
+                width = width,
+                height = height,
                 targetFps = CarPlusVideo.FPS,
                 limitSurfaceFps = true,
                 log = { Log.i("CarPlusTransportTest", it) },
@@ -45,42 +57,58 @@ class CarPlusVideoTransportTest {
                 assertTrue(sender.start { encoderInput = it })
                 receiver.accept().use { socket ->
                     socket.soTimeout = 5_000
-                    renderSample(encoderInput)
-                    val input = DataInputStream(socket.getInputStream())
-                    var receivedConfig = false
-                    var frameCount = 0L
-                    val deadline = SystemClock.elapsedRealtime() + 10_000
-                    while (frameCount < 3 && SystemClock.elapsedRealtime() < deadline) {
-                        val header = ByteArray(128).also(input::readFully)
-                        val fields = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
-                        val size = fields.getInt(0)
-                        assertTrue("Invalid screen packet size: $size", size in 0..1_000_000)
-                        val body = ByteArray(size).also(input::readFully)
-                        when (fields.get(4).toInt()) {
-                            1 -> {
-                                assertEquals(1, body[0].toInt())
-                                assertEquals(1412f, fields.getFloat(16), 0f)
-                                assertEquals(654f, fields.getFloat(20), 0f)
-                                receivedConfig = true
-                            }
-                            0 -> {
-                                assertTrue("Frame arrived before VideoConfig", receivedConfig)
-                                val nal = ByteBuffer.wrap(
-                                    AirPlayCrypto.chachaOpen(key, AirPlayCrypto.nonce64(frameCount), body, header),
-                                )
-                                val length = nal.int
-                                assertTrue("Invalid H.264 NAL length: $length", length in 1..nal.remaining())
-                                frameCount++
-                            }
-                        }
+                    val scaling = if (width == CarPlusVideo.WIDTH && height == CarPlusVideo.HEIGHT) {
+                        null
+                    } else {
+                        CarPlusSurfaceScaler(encoderInput, width, height, sender::stop)
                     }
-                    assertEquals(3L, frameCount)
-                    assertTrue(sender.isVideoFlowing)
+                    scaling.use {
+                        renderSample(it?.open() ?: encoderInput)
+                        verifyStream(socket, key, width, height, sender)
+                    }
                 }
             } finally {
                 sender.stop()
             }
         }
+    }
+
+    private fun verifyStream(socket: Socket, key: ByteArray, width: Int, height: Int, sender: VideoSender) {
+        val input = DataInputStream(socket.getInputStream())
+        var receivedConfig = false
+        var frameCount = 0L
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (frameCount < 3 && SystemClock.elapsedRealtime() < deadline) {
+            val header = ByteArray(128).also(input::readFully)
+            val fields = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+            val size = fields.getInt(0)
+            assertTrue("Invalid screen packet size: $size", size in 0..1_000_000)
+            val body = ByteArray(size).also(input::readFully)
+            when (fields.get(4).toInt()) {
+                1 -> {
+                    assertEquals(1, body[0].toInt())
+                    assertEquals(1412f, fields.getFloat(16), 0f)
+                    assertEquals(654f, fields.getFloat(20), 0f)
+                    val avcConfig = ByteBuffer.wrap(body)
+                    avcConfig.position(6)
+                    val sps = ByteArray(avcConfig.short.toInt() and 0xffff)
+                    avcConfig.get(sps)
+                    assertEquals(width to height, H264Sps.parseNal(sps))
+                    receivedConfig = true
+                }
+                0 -> {
+                    assertTrue("Frame arrived before VideoConfig", receivedConfig)
+                    val nal = ByteBuffer.wrap(
+                        AirPlayCrypto.chachaOpen(key, AirPlayCrypto.nonce64(frameCount), body, header),
+                    )
+                    val length = nal.int
+                    assertTrue("Invalid H.264 NAL length: $length", length in 1..nal.remaining())
+                    frameCount++
+                }
+            }
+        }
+        assertEquals(3L, frameCount)
+        assertTrue(sender.isVideoFlowing)
     }
 
     private fun renderSample(surface: Surface) {
@@ -113,7 +141,9 @@ class CarPlusVideoTransportTest {
                     }
                     val index = decoder.dequeueOutputBuffer(info, 10_000)
                     if (index >= 0) {
-                        decoder.releaseOutputBuffer(index, info.size > 0)
+                        val render = info.size > 0
+                        decoder.releaseOutputBuffer(index, render)
+                        if (render) SystemClock.sleep(34)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
                     }
                 }

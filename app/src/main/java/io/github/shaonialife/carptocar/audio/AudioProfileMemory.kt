@@ -155,11 +155,13 @@ object AudioProfileMemory {
      *
      * @param candidates 按「越靠前越推荐」排好的基线候选（来自车机 /info）。
      * @param entry 该车机的持久化记忆。
+     * @param preferPcm48Media 优先尝试未被拒绝的 48k PCM 媒体档，保留已验证档位作为回退。
      * @return 依次尝试的档位；**空列表表示不要再试音频**（记忆已判定全部档位拆链）。
      */
     fun order(
         candidates: List<AudioProfile>,
         entry: Entry,
+        preferPcm48Media: Boolean = false,
     ): List<AudioProfile> {
         if (candidates.isEmpty()) return emptyList()
         if (entry.disabled) return emptyList()
@@ -172,7 +174,16 @@ object AudioProfileMemory {
         val allRejected = rest.isNotEmpty() && rest.all { it.key in rejected }
         val safe = if (allRejected) rest else rest.filter { it.key !in rejected }
         val risky = if (allRejected) emptyList() else rest.filter { it.key in rejected }
-        return (listOfNotNull(working) + safe + risky).distinctBy { it.key }
+        val directPcm =
+            if (preferPcm48Media) {
+                safe.firstOrNull {
+                    it.key !in rejected && it.codec == AudioCodec.PCM && it.sampleRate == 48_000 &&
+                        it.audioType == "media"
+                }
+            } else {
+                null
+            }
+        return (listOfNotNull(directPcm, working) + safe + risky).distinctBy { it.key }
     }
 
     // ---- 内部 ----

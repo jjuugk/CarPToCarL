@@ -146,6 +146,7 @@ class VideoSender(
 
     @Volatile
     private var passthrough = false
+    private var strictKeyFrames = false
     private var droppedBeforeConfig = 0L
 
     /** 诊断：最多打印 3 条直通丢帧原因（定位零帧死锁）。 */
@@ -328,11 +329,29 @@ class VideoSender(
     @Synchronized
     fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
+        if (!openDataPort()) {
+            stop()
+            return false
+        }
+        return startEncoder(onSurfaceReady)
+    }
+
+    /** Switches after the encoded-frame reader has stopped, keeping the CarPlay cipher and socket. */
+    @Synchronized
+    fun fallBackToSurface(onSurfaceReady: (Surface) -> Unit): Boolean {
+        if (!running.get() || !passthrough) return false
+        synchronized(writeLock) {
+            passthrough = false
+            configSent = false
+            cachedCsd = null
+            sentSps = null
+            lastIdrNals = null
+        }
+        return startEncoder(onSurfaceReady)
+    }
+
+    private fun startEncoder(onSurfaceReady: (Surface) -> Unit): Boolean {
         return try {
-            if (!openDataPort()) {
-                stop()
-                return false
-            }
             val bitrate =
                 (
                     ((width * height * 6L).toInt()).coerceIn(2_000_000, 10_000_000) *
@@ -471,9 +490,11 @@ class VideoSender(
      * 直通模式启动：不建 MediaCodec，直接把外部 H.264 帧经 [submitH264] 送进同一条
      * 屏幕流通道（同样加密、同样 128B 头）。用于「本地劫持原生 CarLife 再转发给车机」。
      */
-    fun startPassthrough(): Boolean {
+    @Synchronized
+    fun startPassthrough(strictKeyFrames: Boolean = false): Boolean {
         if (running.get()) return true
         if (!openDataPort()) return false
+        this.strictKeyFrames = strictKeyFrames
         passthrough = true
         ended.set(false)
         running.set(true)
@@ -505,7 +526,7 @@ class VideoSender(
 
     private fun passthroughKeepAliveLoop() {
         try {
-            while (running.get()) {
+            while (running.get() && passthrough) {
                 if (reconnecting) {
                     // 重连窗口期 socket 正在被替换：让出，别抢写。
                     Thread.sleep(100)
@@ -518,10 +539,11 @@ class VideoSender(
                     continue
                 }
                 maybeSendKeepAlive(output)
-                maybeResendIdleFrame(output)
+                if (!strictKeyFrames) maybeResendIdleFrame(output)
                 Thread.sleep(200)
             }
         } catch (error: Exception) {
+            if (!passthrough) return
             log("VIDEO: 直通 keepAlive 中止 - ${error.message}")
             // 车机侧的会话已经没了（EOF/Broken pipe）：必须复位 running，否则
             // `isRunning` 会一直为 true，接收端重发 0x4301 时被「会话推流中」挡掉，
@@ -674,7 +696,7 @@ class VideoSender(
             val isIdr = nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 5 }
             if (awaitingKeyFrameAfterRestart) {
                 val waitedMs = android.os.SystemClock.uptimeMillis() - awaitingKeyFrameSince
-                if (!isIdr && waitedMs < WAIT_KEY_FRAME_TIMEOUT_MS) {
+                if (!isIdr && (strictKeyFrames || waitedMs < WAIT_KEY_FRAME_TIMEOUT_MS)) {
                     droppedBeforeRestartKey++
                     if (droppedBeforeRestartKey == 1L || droppedBeforeRestartKey % 30 == 0L) {
                         log(
@@ -754,9 +776,9 @@ class VideoSender(
         }
     }
 
-    /** 编码器不存在时（直通模式）也允许请求关键帧：直接返回 true，由上游自行发 IDR。 */
+    /** Requests a key frame when the local encoder is available. */
     fun requestKeyFrame(): Boolean {
-        if (passthrough) return true
+        if (passthrough) return !strictKeyFrames
         val codec = encoder ?: return false
         return try {
             val params = android.os.Bundle()
@@ -1245,7 +1267,7 @@ class VideoSender(
     }
 
     /** 按 00 00 00 01 / 00 00 01 起始码切分 AnnexB 码流为 NAL 列表。 */
-    private fun splitAnnexB(bytes: ByteArray): List<ByteArray> {
+    internal fun splitAnnexB(bytes: ByteArray): List<ByteArray> {
         val units = ArrayList<ByteArray>()
         val starts = ArrayList<Int>()
         var index = 0

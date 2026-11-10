@@ -4,7 +4,7 @@ Car+ 实验构建使用独立包名 `io.github.shaonialife.carptocar.carplus` �
 
 ## 本地编译与单测
 
-需要 JDK 17、Gradle 8.10.2 和 Android SDK 34。从 1.2.25 工作树根目录运行以下命令。由于仓库 Wrapper 指向 Windows 路径，`GRADLE` 请设为本机 Gradle 8.10.2 的绝对路径，并用 `local.properties` 配置 `sdk.dir`。可通过 `-Dorg.gradle.java.home="$JAVA_HOME"` 覆盖项目的 Windows JDK 路径。
+需要 JDK 17、Gradle 8.10.2、Android SDK 36（Car+）和 Android SDK 34（CarLife）。Car+ 清单显式启用 Android 的 16 KB 页面兼容模式，以运行 SDK 附带的原生库。由于仓库 Wrapper 指向 Windows 路径，`GRADLE` 请设为本机 Gradle 8.10.2 的绝对路径，并用 `local.properties` 配置 `sdk.dir`。可通过 `-Dorg.gradle.java.home="$JAVA_HOME"` 覆盖项目的 Windows JDK 路径。
 
 ```sh
 "$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
@@ -52,6 +52,8 @@ adb -s emulator-5560 shell am instrument -w \
 ```
 
 可安装的单 APK 位于 `app/build/carplus/outputs/apk/carplus-runtime/CarPToCar+ICCOA.apk`。运行模拟器的回环测试时，用它替换前一节安装的应用 APK，测试 APK 路径照常。
+
+运行时包默认关闭 Android 调试标记，并继续使用同一包名和签名，可覆盖安装。ColorOS 在 4 KB 页面设备上也会对可调试包显示原生库对齐警告。需要用 `adb shell run-as` 读应用私有日志时，可加 `-PcarPlusDebuggable=true` 生成诊断包。
 
 ### ColorOS 单机重连包
 

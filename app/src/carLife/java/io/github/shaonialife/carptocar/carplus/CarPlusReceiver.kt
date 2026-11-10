@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.carplus
 import android.content.Context
 import android.view.Surface
 import io.github.shaonialife.carptocar.input.TouchReports.Contact
+import io.github.shaonialife.carptocar.video.VideoSender
 
 @Suppress("UNUSED_PARAMETER")
 internal object CarPlusReceiver {
@@ -14,7 +15,15 @@ internal object CarPlusReceiver {
 
     fun openSystemCarPlus(context: Context, onFailure: () -> Unit) = Unit
 
+    fun requestReconnect() = false
+
     fun attach(surface: Surface) = Unit
+
+    fun startVideo(sender: VideoSender, receiverIdentity: String, width: Int, height: Int) = false
+
+    fun setCanvas(width: Int, height: Int) = Unit
+
+    fun stopVideo(sender: VideoSender?) = Unit
 
     fun detach(surface: Surface) = Unit
 

@@ -21,6 +21,8 @@ import android.view.KeyEvent
 object ConsumerKeys {
     /** Consumer 页面（Generic Desktop 之外最常用的多媒体页）。 */
     private const val USAGE_PAGE_CONSUMER = 0x0C
+    private const val PLAY_PAUSE = 0xCD
+    private const val MUTE = 0xE2
 
     /**
      * 一台 HID 设备的 Consumer 键映射。
@@ -145,7 +147,8 @@ object ConsumerKeys {
             0xB6 -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
             0xB9 -> KeyEvent.KEYCODE_MEDIA_STOP
             // 0xCD = Play/Pause 组合键（部分车机/测试台只发这一个键做切换）
-            0xCD -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            PLAY_PAUSE -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            MUTE -> KeyEvent.KEYCODE_VOLUME_MUTE
             // 0xCF = Consumer「Voice Command」：方向盘语音键在 CarPlay 里的标准用法。
             // 转成 VOICE_ASSIST 只是为了让上层有一个统一的「语音键」标识——它不会拿去
             // 注入系统（本机没有 Siri），而是由 SessionController 转成 CarLife 的
@@ -153,6 +156,15 @@ object ConsumerKeys {
             0xCF -> KeyEvent.KEYCODE_VOICE_ASSIST
             else -> 0
         }
+
+    /** These reports describe a button held down, so the playback action only fires on press. */
+    fun isPlaybackPress(usage: Int): Boolean = usage == PLAY_PAUSE || usage == MUTE
+
+    /** ICCOA forwards the media command to the player; the car owns speaker volume. */
+    fun playbackKeyFor(keyCode: Int, toggleOnMute: Boolean): Int =
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_MUTE) keyCode
+        else if (toggleOnMute) KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+        else 0
 
     /** 可读名称（日志用）。 */
     fun nameOf(usage: Int): String =
@@ -165,7 +177,8 @@ object ConsumerKeys {
             0xB6 -> "上一首"
             0xB9 -> "停止"
             0xBC -> "循环"
-            0xCD -> "播放/暂停"
+            PLAY_PAUSE -> "播放/暂停"
+            MUTE -> "静音"
             0xCF -> "语音键"
             else -> "未知(0x%02x)".format(usage)
         }

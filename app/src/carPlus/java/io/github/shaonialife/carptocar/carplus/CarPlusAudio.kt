@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.carplus
 
+import android.content.Context
+import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
@@ -16,6 +18,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.Keep
 import io.github.shaonialife.carptocar.SessionController
+import io.github.shaonialife.carptocar.media.MediaSessionsState
+import io.github.shaonialife.carptocar.util.Bg
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicReference
 
@@ -87,7 +91,7 @@ internal object CarPlusAudioTap {
 }
 
 /** Combines the SDK's independently paced music and guidance into one CarPlay media stream. */
-internal class CarPlusAudio {
+internal class CarPlusAudio(context: Context?) {
     private val client = SessionController.currentClient
     private val worker = HandlerThread("iccoa-audio", Process.THREAD_PRIORITY_AUDIO).apply { start() }
     private val music = PcmQueue()
@@ -105,12 +109,30 @@ internal class CarPlusAudio {
         true
     }
     val endpoint = Messenger(handler)
+    private val cameraManager = context?.getSystemService(CameraManager::class.java)
+    private val cameraRecovery = CarPlusCameraRecovery(
+        handler,
+        hasMusic = { MediaSessionsState.nowPlaying?.playing == true || music.hasRecentAudio(SystemClock.uptimeMillis()) },
+        recover = {
+            val session = client
+            val sender = SessionController.audioSender
+            if (session != null && sender != null && SessionController.currentClient === session) {
+                val hasPcm = music.hasRecentAudio(SystemClock.uptimeMillis())
+                Bg.run("camera-audio-recovery") {
+                    SessionController.recoverCarPlusAudioAfterCamera(session, sender, hasPcm)
+                }
+            }
+        },
+    )
 
     init {
         scheduleTick()
+        runCatching { cameraManager?.registerAvailabilityCallback(cameraRecovery, handler) }
+            .onFailure { SessionController.appendLog("AUDIO: 相机状态监听启动失败 - ${it.message}") }
     }
 
     fun close() {
+        runCatching { cameraManager?.unregisterAvailabilityCallback(cameraRecovery) }
         worker.quit()
     }
 
@@ -143,6 +165,8 @@ internal class CarPlusAudio {
         private var size = 0
         private var playing = false
         private var readyAt = 0L
+
+        fun hasRecentAudio(now: Long): Boolean = lastAudibleAt > 0 && now - lastAudibleAt <= 2_000
 
         fun add(pcm: ByteArray, rate: Int, channels: Int, source: String) {
             if (size == 0 && !playing) readyAt = SystemClock.uptimeMillis() + BUFFER_MS
@@ -197,5 +221,37 @@ internal class CarPlusAudio {
         const val BUFFER_MS = 90L
         const val BUFFER_SAMPLES = SAMPLE_RATE * 2 * BUFFER_MS / 1_000
         const val MAX_CATCH_UP_MS = 20L
+    }
+}
+
+/** Debounces the camera being released, including lens changes during the same camera session. */
+internal class CarPlusCameraRecovery(
+    private val handler: Handler,
+    private val hasMusic: () -> Boolean,
+    private val recover: () -> Unit,
+) : CameraManager.AvailabilityCallback() {
+    private val inUse = mutableSetOf<String>()
+    private var hadMusic = false
+    private val afterRelease = Runnable {
+        val shouldRecover = hadMusic || hasMusic()
+        hadMusic = false
+        if (shouldRecover) recover()
+    }
+
+    override fun onCameraUnavailable(cameraId: String) {
+        if (inUse.add(cameraId)) {
+            handler.removeCallbacks(afterRelease)
+            hadMusic = hadMusic || hasMusic()
+        }
+    }
+
+    override fun onCameraAvailable(cameraId: String) {
+        if (inUse.remove(cameraId) && inUse.isEmpty()) {
+            handler.postDelayed(afterRelease, RELEASE_DELAY_MS)
+        }
+    }
+
+    companion object {
+        const val RELEASE_DELAY_MS = 2_000L
     }
 }

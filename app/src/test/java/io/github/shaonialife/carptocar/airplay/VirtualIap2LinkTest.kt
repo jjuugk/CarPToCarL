@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.airplay
 
+import android.view.KeyEvent
+import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
@@ -413,5 +415,31 @@ class VirtualIap2LinkTest {
         val body = byteArrayOf(0x00, 0x05, 0x00, 0x00, 0x08)
         val report = VirtualIap2Link.hidReportFromParams(Iap2Csm.parseParams(body))
         assertEquals(listOf<Byte>(0x08), report?.toList())
+    }
+
+    @Test
+    fun mediaMuteRequestsPlayPauseOncePerPressInCarPlus() {
+        val h = Harness()
+        val playbackKeys = mutableListOf<Int>()
+        h.link.onMediaKey = { playbackKeys += ConsumerKeys.playbackKeyFor(it, toggleOnMute = true) }
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        assertEquals(Iap2LinkEngine.State.NORMAL, h.car.state)
+
+        val mute = Iap2Csm.param(1, byteArrayOf(0xE2.toByte()))
+        val released = Iap2Csm.param(1, byteArrayOf(0))
+        h.carSends(0x6802, mute)
+        h.clock += 2_000
+        h.carSends(0x6802, mute)
+        assertEquals(listOf(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE), playbackKeys)
+        h.carSends(0x6802, released)
+        h.carSends(0x6802, mute)
+        h.carSends(0x6802, released)
+        h.carSends(0x6802, Iap2Csm.param(1, byteArrayOf(0xB5.toByte())))
+        assertEquals(
+            listOf(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_NEXT),
+            playbackKeys,
+        )
     }
 }

@@ -35,6 +35,29 @@ class AudioProfileMemoryTest {
     }
 
     @Test
+    fun carPlusTriesNativePcmBeforeRememberedAacButRespectsRejectedPcm() {
+        val aac48 = AudioProfile("media", 1L shl 23, 48_000, 250, 102L, AudioCodec.AAC_LC)
+        val aac44 = AudioProfile("media", 1L shl 22, 44_100, 250, 102L, AudioCodec.AAC_LC)
+        val pcm48 = AudioProfile("media", 1L shl 15, 48_000, 250)
+        val pcm44 = hondaCandidates[0]
+        val candidates = listOf(aac48, aac44, pcm48, pcm44)
+        val entry = AudioProfileMemory.Entry(working = aac44.key)
+
+        assertEquals(
+            listOf(pcm48, aac44, aac48, pcm44),
+            AudioProfileMemory.order(candidates, entry, preferPcm48Media = true),
+        )
+        assertEquals(
+            listOf(aac44, aac48, pcm44, pcm48),
+            AudioProfileMemory.order(candidates, entry.copy(rejected = setOf(pcm48.key)), preferPcm48Media = true),
+        )
+        assertEquals(
+            listOf(aac44, aac48, pcm48, pcm44),
+            AudioProfileMemory.order(candidates, entry),
+        )
+    }
+
+    @Test
     fun rejectedProfileGoesLastButStaysAsFallback() {
         val media44 = hondaCandidates[0].key
         val ordered =
