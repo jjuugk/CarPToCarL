@@ -804,13 +804,33 @@ class Iap2SenderSession(
         if (greetingsSent && !force) return
         greetingsSent = true
         val sent = ArrayList<Int>(5)
-        // 0x4E0D（无线可用）与 0x4E0C（设备 UUID）：车机可收清单里没声明也照发，
-        // 只记一条日志（2026-10-27 起取消裁剪；取证在 [send] 出口统一做）。
-        // 别克 BUICK_3138 与凯迪拉克 CT5 的可收清单是同一份 9 项、都不含 0x4E0D——
-        // 这一族就是 GM/Cinemo，按声明裁等于对它永远不发，是否该发由「0x4300 报文体
-        // 阶梯」去试，不在这里改规则。
-        send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
-        sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
+        // 0x4E0D（无线可用）：**新协议车机只在它自己声明能收时才发**，老协议无条件发。
+        //
+        // 2026-11-10 推翻 10-27 的「一律照发」（042abc0）。当时的依据是「清单只能证明
+        // 『有』不能证明『没有』」，三条理由里只有 0x5702 那条是真车实测；用来支撑
+        // 0x4E0D 的那条「0x4e0d/0x4e0e 不在清单却被逐条 ACK」在协议上不成立——
+        // **链路层 ACK 只证明 CRC 校验通过，跟业务层认不认这条消息无关**。
+        //
+        // 决定性对照（同一份代码、同一个入口）：
+        // - 奥迪 3874（1.0.7 完整连通的那台）可收清单 16 项里**有** 0x4e0d/0x4e0e；
+        // - 别克 E2LB / BUICK_3138 / 凯迪拉克 CT5 的 9 项清单**都没有**，三台全部
+        //   「ACK 到最后一条我们自己发的帧，然后只剩 ff550200ee10 心跳」。
+        // 所以按声明裁对唯一验证过的奥迪**零影响**（它 wifiGen=LEGACY，走 !modern 分支
+        // 照发，与 1.0.7 逐字节相同），对 GM/Cinemo 这一族才是新增变量。
+        // 同源 link_plus 别克分支的条件与此一致：
+        // `if (!modernBootstrap || declaresReceive(0x4E0D) == true)`。
+        //
+        // 0x4E0C（设备 UUID）**不裁**：奥迪 16 项清单里恰恰没有 0x4e0c，而 1.0.7
+        // 一直发着、奥迪也连上了——它对这条消息是真反例，动了才是拿奥迪冒险。
+        val modernBootstrap = wifiGen == ReceiverProfile.WifiGen.NEW
+        val sendWirelessUpdate =
+            !modernBootstrap || accessoryDeclaresReceive(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE) != false
+        if (sendWirelessUpdate) {
+            send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
+            sent += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
+        } else {
+            log("iap2 跳过 0x4e0d 无线可用性——车机可收清单明确没声明它，按声明裁（新协议车机）")
+        }
         // 语言字段：iAP2 只认 ISO 639 的两字母码。车机在 0x1D01 参 12 声明语言时
         // 按声明规范化（zh-CN → zh、en_US → en）；无声明/非法声明时保留原兜底
         // （新代 zh、旧代 zh-CN，奥迪侧已按这个串跑通，不动）。
