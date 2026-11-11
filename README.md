@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk)**
-> —— 主线固定直链（当前 1.2.34，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.35.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.35/CarPToCarL-1.2.35.apk)**
+> —— 主线固定直链（当前 1.2.35，13.7 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.35.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.35/CarPToCarL-1.2.35.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.34，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.34.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.35，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.35.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.34`（正式版；**撤掉画面停摆自动干预，看门狗退回「只观测」**：1.2.32 加的那套分级干预（8 秒 `requestVideoReinit`、每 8 秒轻推、30 秒 `client.stop()` 重建会话、阈值翻倍封顶 120 秒）在 2026-11-10 16:34 的实车日志里没有一次救到画面，反而全是副作用——① 引擎退出（7240 未监听）之后请求发出去没有任何接管者，日志却仍按 8 秒节奏刷「请求重建编码器」，把「引擎不在」的空白期写成了「正在恢复」；② 阈值会翻倍（30→60→120），上一轮已顶到 60 秒，第 5 轮停摆到 36 秒时「强制重建会话」根本还没到；③ 它会自己 `client.stop()`，在排障时把「我们主动断」和「引擎自己断」混成一种现象。本版删除 `StallJudge` / `StallRecoveryPrefs` 与其 7 个用例、看门狗里整段干预分支、设置页「画面停摆自动恢复」开关，**不再有任何自动停摆会话重建**。保留的全是纯诊断：停摆/恢复日志、手机屏幕状态、判据仍用「最后一帧距今」（通话期 0.8fps 心跳帧不误报）、`VideoSender.noteWriteStall()` 写卡死观测。顺带把 `BUILD_TAG` 清空，正式包版本行不再带 `#p1` 尾巴。单测 569 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.34.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.34/CarPToCarL-1.2.34.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.35`（正式版；**别克/Cinemo 新协议车机的建链路径按对端声明逐项对齐**。1.2.34 及以前的实现，在这台车身上有五个「我们自己造成的沉默」：① `0x4300`（CarPlay 可用性）因三次「零业务帧」被静默记忆判死、此后永久不发——而车机可收清单里明确有它，等于把唯一的热点交换入口锁了；② 这一帧还是「发后不管」，丢一次就永远等不到 `0x4301`；③ 首轮 8 秒空手而归后不重开认证，而车机此刻正在等我们重认证（iAP2 允许配件在手机首次启用无线 CarPlay 时要求重跑一轮）；④ 发送窗口按本方声明的 0x7F 连发，无视对端写明的 5，问候 7 帧连发出的包零 ACK；⑤ 车机可收清单之外的号照旧往下发。本版逐条改：`0x4300` 只在「新协议 + 可收清单明确声明能收」时走链路确认 + 最多 2 次重传（RTO 4s，共 8s，且落在 `0x4301` 的等待窗口之内；补不上只把这一帧从待确认队列摘掉、打一行日志，**不拆链**）；首轮没等来 `0x4301` 时在同一蓝牙链路上重开一轮识别+认证（`0x1D00 → 0x1D01 → 0x1D02 → 0xAA00 段 → 0xAA05`）再宣告一次 `0x4300`，只做一次，旧协议（奥迪等）不介入；发送窗口改为 `min(本方, 对端)`，对端声明零重传时不裁剪（否则 backlog 永久卡死）；新协议车机进严格模式，可收清单之外一律不发（`0x1D02` / MFi / `0x4300` 这些骨架永不裁，否则永远连不上）；AirPlay 资源归属（`/info.modes` 的 `transferType` / `takeConstraint` / `initialPermanentEntity`）改为状态机，不再无条件宣称「主屏永久归手机」，`changeModes` / `requestUI` 统一走状态机并新增 `commandAccepted`（RTSP 200 **且** body `status==0`）；入站蓝牙 socket 的物理关闭走 `Semaphore(6)` 有界池 + 2 线程关闭线程，不再堆在 accept 循环里。单测 596 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.35.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.35/CarPToCarL-1.2.35.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -829,6 +829,66 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.35 —— 2026-11-11（别克/Cinemo 新协议建链逐项对齐：0x4300 解封、走确认与重传、可重认证，正式版）
+
+本版全部围绕一件事：**让「新协议」车机（GM/Cinemo 栈，别克 E2LB / BUICK_3138、凯迪拉克 CT5）
+真的迈出建链的第一步**。之前几轮的失败不是「连不上」，而是**我们从没发出过那一帧**。
+
+**一、现场证据**
+
+把两份别克实车日志与 11-09 宝马（NBT Evo，能连上）成功那轮逐行对齐，差距只有一个：
+
+```
+宝马 18.293 tx=0x4300（发后不管）
+     18.331 rx ack=201                    车机 38ms 内确认
+     19.645 NSD 发现 _airplay._tcp → 172.16.224.1:7000   （0x4300 后 17ms）
+     20.389 CTRL: 车机 GET /ctrl-int/1/connect 邀请
+
+别克 47.044 tx=0xaa05 + 问候逐条发出（车机逐条 ACK 到 seq=198，链路完全健康）
+     47.050 「0x4300 本轮不发」            ← 一条都没发
+     47~118 秒  PROBE ×3 全空、零邀请、零 0x4301
+     ~61 秒    车机自己关 RFCOMM，重连，再来一遍
+```
+
+关键认知：**宝马的 AirPlay 服务常驻，别克的要收到 `0x4300` 才拉起**。所以
+「mDNS 上看不到 `_airplay._tcp` 就不当作车机热点」是在拿结果当判据，形成循环。
+
+**二、五处改动**
+
+| # | 旧行为 | 现在 |
+|---|---|---|
+| 1 | `AvailabilityBodyMemory` 把三种报文体各判过一次「静默」后永久返回 `NONE`，`0x4300` 再也不发 | 车机自己在可收清单里声明能收 `0x4300` 时，静默记忆**不许堵**；全静默回首选形态（通用系 = 双标识体，与 `link_plus` 的 `modernBootstrap` 一致） |
+| 2 | `0x4300` 一律发后不管，丢了就丢 | 「新协议 + 声明可收」改走链路确认 + 最多 **2 次重传**（RTO 4s，共 8s），并新增引擎级 `dropWhenExhausted`：补不上只把这一帧摘掉、打一行日志，**不 die、不拆链** |
+| 3 | 首轮 `0x4300` 等 8s 无 `0x4301` 就进保活 | 在同一条蓝牙链路上重开一轮识别+认证（`0x1D00 → 0x1D01 → 0x1D02 → 0xAA00 段 → 0xAA05`）再宣告一次 `0x4300`，只做一次；任何一步没回立刻收手交给保活泵 |
+| 4 | 发送窗口按本方声明的 `0x7F` 连发 | 改为 `min(本方, 对端)`；**对端声明零重传时不裁剪**（它不会回 ACK，套小窗 = backlog 永久卡死） |
+| 5 | 可收清单之外的号照发（`0x4E0D`/`0x4E0E` 等） | 新协议车机进**严格模式**：清单外一律不发；`0x1D02` / MFi / `0x4300` 这些骨架永不裁（裁了永远连不上）。旧协议奥迪行为逐字节不变 |
+
+另外两处一并进版：
+
+- **AirPlay 资源归属改状态机**（`AirPlayResourceState`）：`/info.modes` 的 `transferType` /
+  `takeConstraint` / `initialPermanentEntity` 决定主屏与主音频归谁，不再无条件回「永久归手机」
+  （奥迪 `/info` 就带着 `transferType=1`，即车机已接管主屏）。`changeModes` / `requestUI` 统一走状态机，
+  成功判据新增 `commandAccepted`：**RTSP 200 且 body `status==0`**（旧实现只看状态行，车机回
+  `200 OK` + `{status:-1}` 时被当成功，现场表现是「都说成功了，过一会儿断」）。
+- **入站蓝牙 socket 的物理关闭走有界池**：`Semaphore(6)` 记「在用/在关」的套接字，关闭交给 2 线程
+  有界队列，额度只在 `close()` 返回后归还；额度用尽退让 500ms 再 accept。旧实现把阻塞的
+  `BluetoothSocket.close()` 堆在 accept 循环里，车机反复回连时进程级 RFCOMM 配额被吃满，
+  现象是「越连越差，重启 App 就好」。
+
+**三、验证**
+
+单测 **596 例 0 失败**（较 1.2.34 的 569 例新增 27 例：严格模式、发送窗口三条边界含「零重传对端不裁剪」、
+`dropWhenExhausted` 双向边界、资源归属 8 例、重认证闭环、socket 关闭池额度）。`BUILD_TAG` 清空。
+
+**四、上车观察点**
+
+1. `iap2 tx=0x4300（等确认，最多重传 2 次；补不上只丢这一帧，不拆链）` —— 这一帧真的发出去了；
+2. `iap2 重认证：首轮 0x4300 未换来 0x4301 …` —— 走到了重认证那一轮；
+3. `CTRL: … GET /ctrl-int/1/connect` —— 车机的 ctrl 邀请，出现它才会有 `0x4301`。
+
+若三步都走完仍无 `0x4301`，下一个怀疑对象是报文体本身（换 `MODERN_NESTED`），
+而不是认证轮次或链路层。
 
 ### 1.2.34 —— 2026-11-10（撤掉画面停摆自动干预，看门狗退回「只观测」，正式版）
 
