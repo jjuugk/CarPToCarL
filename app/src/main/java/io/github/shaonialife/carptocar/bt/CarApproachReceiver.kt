@@ -106,7 +106,7 @@ class CarApproachReceiver : BroadcastReceiver() {
             CarApproachPrefs.setAclConnected(context, true)
             CarIdleGuard.cancel(context)
         }
-        val sessionRunning = SessionController.isSessionRunning() || SessionController.sessionStarting.get()
+        val sessionRunning = SessionController.isSessionRunning() || SessionController.sessionStarting
         val decision =
             CarApproachPolicy.onAclConnected(
                 eventAddress = address,

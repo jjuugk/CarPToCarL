@@ -31,6 +31,16 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
  * 与它的差别：那边把「全绿」当作连接前提（含 Shizuku、触控服务）；我们这里只分
  * [Severity.BLOCKING] / [Severity.WARNING] / [Severity.INFO] 三档——**只读体检绝不
  * 阻断连接**，缺项写清后果，由既有流程去引导，避免又多出几个自家弹窗。
+ *
+ * 11 项：蓝牙权限 / 蓝牙开关 / WLAN 权限 / WLAN 开关 / 本机地址 / 位置服务 /
+ * 目标车机已配对 / 本机蓝牙名 / 通知权限 / 通知使用权（媒体会话）/ 电池优化。UI 与日志
+ * 取的是同一份 [Report]（[Report.headline] 给界面一行摘要，[Report.describe] 给日志与
+ * 详情弹窗），因此界面上看到的那句话，导出的日志里一定有完全相同的一份。
+ *
+ * **不含「投屏授权」**：本版本画面走双屏虚拟屏、声音走 CarLife 引擎 PCM 直通，
+ * 都不经 `MediaProjection`（2026-11-11 核对：`AudioSender.start(projection)` 无调用方，
+ * `CarPlayService.pendingProjectionResult` 从未被写入）。把它列进体检只会让用户
+ * 白去找一个根本不存在的授权框。
  */
 object ConnectionPreflight {
     /** 一项检查的严重度。 */
@@ -58,6 +68,7 @@ object ConnectionPreflight {
         TARGET_PAIRED("目标车机已配对", Severity.WARNING),
         IDENTITY_NAME("本机蓝牙名", Severity.WARNING),
         NOTIFICATIONS("通知权限", Severity.INFO),
+        NOTIFICATION_ACCESS("通知使用权（媒体会话）", Severity.INFO),
         BATTERY_OPTIMIZATION("电池优化已忽略", Severity.INFO),
     }
 
@@ -88,6 +99,19 @@ object ConnectionPreflight {
 
         val ready: Boolean get() = blockingMissing.isEmpty()
 
+        /** 除「全绿」以外的缺项（阻塞 + 降级），供 UI 决定要不要标黄。 */
+        val missing: List<Check>
+            get() =
+                checks.filter {
+                    !it.ready && it.requirement.severity != Severity.INFO
+                }
+
+        /**
+         * 最该先处理的那一项：先阻塞、再降级；同类里按枚举顺序（越靠前越基础）。
+         * UI 上「体检」那一行只放得下一句提示，就放它。
+         */
+        fun topIssue(): Check? = blockingMissing.firstOrNull() ?: warnings.firstOrNull()
+
         /** 一行摘要（UI 提示 / 节流日志用）。 */
         fun headline(): String {
             val head = "$readyCount/${checks.size} 项就绪"
@@ -99,6 +123,13 @@ object ConnectionPreflight {
                 else -> "$head，全部通过"
             }
         }
+
+        /**
+         * 详情弹窗正文：与 [describe] **同一份逐行结论**，只是去掉 `PREFLIGHT:` 前缀、
+         * 换成更适合人读的符号。UI 与日志必须能逐行对上，否则「界面说 A、日志说 B」
+         * 又回到要靠猜的老路上。
+         */
+        fun dialogText(): String = describe().drop(1).joinToString("\n") { it.removePrefix("PREFLIGHT:   ") }
 
         /** 逐行日志：✓/○/· 分别表示通过 / 阻塞缺项 / 降级或缺项提示。 */
         fun describe(): List<String> {
@@ -146,17 +177,18 @@ object ConnectionPreflight {
     fun log(
         context: Context,
         sink: (String) -> Unit,
-    ) {
+    ): Report {
         val report = inspect(context)
         val signature = report.signature()
         val now = SystemClock.uptimeMillis()
         if (signature == lastSignature && now - lastLoggedAtMillis < REPEAT_QUIET_MILLIS) {
             sink("PREFLIGHT: 与上次相同——${report.headline()}")
-            return
+            return report
         }
         lastSignature = signature
         lastLoggedAtMillis = now
         report.describe().forEach(sink)
+        return report
     }
 
     /** 只读当前状态。任何一项读取失败都按「未就绪」处理，不让体检本身抛异常。 */
@@ -202,6 +234,16 @@ object ConnectionPreflight {
         val identityReady = !mac.isNullOrEmpty() && mac != DeviceIdentity.PLACEHOLDER_MAC
         val rawName = runCatching { adapter?.name }.getOrNull()
         val nameReady = DeviceIdentity.displayName(rawName) != null
+        // 通知使用权 = 音乐卡（NowPlaying / 0x5001）的数据源。**不是 MediaProjection**：
+        // 本版本的画面走双屏虚拟屏、声音走 CarLife 引擎 PCM 直通，都不需要录屏授权
+        // （MediaProjection 相关代码只剩 AudioSender.start 这个没有调用方的旧入口，
+        // 2026-11-11 核对）。缺它只影响车机上显示的歌名/封面，故只算 INFO。
+        val notificationAccess =
+            runCatching {
+                androidx.core.app.NotificationManagerCompat
+                    .getEnabledListenerPackages(app)
+                    .contains(app.packageName)
+            }.getOrDefault(false)
 
         val checks =
             buildList {
@@ -288,6 +330,17 @@ object ConnectionPreflight {
                         runCatching { NotificationManagerCompat.from(app).areNotificationsEnabled() }
                             .getOrDefault(false),
                         "不授权也能连，只是后台自动连接时看不到状态通知",
+                    ),
+                )
+                add(
+                    Check(
+                        Requirement.NOTIFICATION_ACCESS,
+                        notificationAccess,
+                        if (notificationAccess) {
+                            "已授权——车机上的歌名/封面可用"
+                        } else {
+                            "未授权——车机音乐卡与 0x5001 NowPlaying 拿不到歌名（不影响连接与推流）"
+                        },
                     ),
                 )
                 add(

@@ -117,6 +117,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var macInput: EditText
     /** 测试台接收端地址（IP:端口）——见 [SessionController.connectTestSink]。 */
     private lateinit var mockSinkInput: EditText
+    private lateinit var preflightSummary: TextView
     private lateinit var tvMacHint: TextView
     private lateinit var btDesc: TextView
     private lateinit var btBadge: TextView
@@ -358,7 +359,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
         if (startupCheckRunning || pendingResidualDisplays != null) return
-        if (SessionController.isSessionRunning() || SessionController.sessionStarting.get()) return
+        if (SessionController.isSessionRunning() || SessionController.sessionStarting) return
         if (heroState != HeroState.IDLE) return
 
         autoConnectRequested = false
@@ -676,6 +677,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 刷新「连接前体检」那一行的摘要。
+     *
+     * 与日志、与 [SessionController.startConnection] 的启动前体检共用同一份
+     * [ConnectionPreflight.Report]：这里显示的 [ConnectionPreflight.Report.headline]
+     * 就是日志里 `PREFLIGHT: 连接前体检——…` 那一行的后半句，不存在「界面说一套、
+     * 日志说另一套」。
+     */
+    private fun refreshPreflight(report: ConnectionPreflight.Report? = null) {
+        if (!::preflightSummary.isInitialized) return
+        val subject =
+            report
+                ?: runCatching { ConnectionPreflight.inspect(this) }.getOrNull()
+                ?: return
+        val issue = subject.topIssue()
+        preflightSummary.text =
+            if (issue == null) {
+                subject.headline()
+            } else {
+                subject.headline() + "——先看「" + issue.requirement.title + "」"
+            }
+        preflightSummary.setTextColor(
+            getColor(
+                if (subject.blockingMissing.isEmpty()) R.color.m3_mono_dim else R.color.m3_error,
+            ),
+        )
+    }
+
     /** 「启动连接」主体（权限已在 [ensureBluetoothReady] 里一次申请完；会话启动交给 [SessionController]，幂等不双开）。 */
     private fun startConnectionNow() {
         runOnUiThread {
@@ -740,6 +769,7 @@ class MainActivity : AppCompatActivity() {
         ssidInput = findViewById(R.id.ssidInput)
         macInput = findViewById(R.id.macInput)
         mockSinkInput = findViewById(R.id.mockSinkInput)
+        preflightSummary = findViewById(R.id.preflightSummary)
         tvMacHint = findViewById(R.id.tvMacHint)
         btDesc = findViewById(R.id.btDesc)
         btBadge = findViewById(R.id.btBadge)
@@ -1146,6 +1176,29 @@ class MainActivity : AppCompatActivity() {
             SessionController.connectTestSink(this, host, port)
         }
 
+        // 连接前体检（UI 侧）：与日志、与启动连接前的体检**共用同一份 Report**——
+        // 摘要行放 headline()，弹窗放 describe() 去掉前缀后的逐行版本，两边逐行能对上。
+        // 这条入口的意义：以前「位置服务开没开 / 地址是不是占位 / 目标车机还在不在」
+        // 全靠事后翻日志猜，现在点一下就能看见。
+        findViewById<TextView>(R.id.btnPreflight).setOnClickListener {
+            val report = ConnectionPreflight.inspect(this)
+            report.describe().forEach { line -> log(line) }
+            val blocking =
+                if (report.blockingMissing.isEmpty()) {
+                    ""
+                } else {
+                    "\n\n⚠ 阻塞项缺失：现在点「启动连接」必然失败，请先补齐（" +
+                        report.blockingMissing.joinToString("、") { it.requirement.title } + "）"
+                }
+            DarkMessageDialog.show(
+                activity = this,
+                title = "连接前体检 · ${report.headline()}",
+                message = report.dialogText() + blocking,
+                actions = listOf(DarkMessageDialog.Action("知道了", DarkMessageDialog.Emphasis.PRIMARY) {}),
+            )
+            refreshPreflight(report)
+        }
+
         // 「画质增强」（写 CarLife 官方调试配置）入口已按用户要求从首页移除：
         // 实测这条 MediaFormat 通道对码率/帧率无效，而 /sdcard/BaiduCarlife/vehicle
         // 一存在就会让 CarLife 进入调试模式，白担开销。CarLifeDevConfig 保留备用
@@ -1323,7 +1376,7 @@ class MainActivity : AppCompatActivity() {
         val s =
             when {
                 SessionController.videoSender?.isRunning == true -> HeroState.CONNECTED
-                SessionController.isSessionRunning() || SessionController.sessionStarting.get() ->
+                SessionController.isSessionRunning() || SessionController.sessionStarting ->
                     HeroState.CONNECTING
                 else -> HeroState.IDLE
             }
@@ -2759,6 +2812,8 @@ class MainActivity : AppCompatActivity() {
         mainHandler.post(heroTick)
         // 从系统设置/别的界面回来：门禁提示与按钮状态重新对一次（地址可能已补填）
         refreshMacGate()
+        // 体检摘要跟着状态走（权限/蓝牙/WiFi 可能在别处被改过）：与日志同一份结论
+        refreshPreflight()
         // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
         if (needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),

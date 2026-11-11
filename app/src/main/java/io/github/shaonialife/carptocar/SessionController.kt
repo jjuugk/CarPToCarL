@@ -43,9 +43,11 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
+import io.github.shaonialife.carptocar.net.CarNetworkReadiness
 import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
+import io.github.shaonialife.carptocar.net.NetworkReusePolicy
 import io.github.shaonialife.carptocar.net.SilentJoinPolicy
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiJoinGate
@@ -55,7 +57,9 @@ import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
+import io.github.shaonialife.carptocar.session.AsyncSessionStop
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
+import io.github.shaonialife.carptocar.session.SessionAttemptGate
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
@@ -1018,8 +1022,26 @@ object SessionController {
      */
     private const val PENDING_INVITE_TTL_MS = 30_000L
 
-    /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
-    val sessionStarting = AtomicBoolean(false)
+    /**
+     * 会话建立闸门（端点交接 → 配对 → 推流全程只允许一条）。
+     *
+     * 从裸 `AtomicBoolean` 换成记账的 [SessionAttemptGate]：编号、来源、耗时、被拦次数
+     * 都进日志。以前只有一句「已有会话在处理中」，卡住时完全看不出是哪一轮、
+     * 从哪儿来、跑了多久（2026-11-11 别克那几晚全是靠这个「猜」）。
+     */
+    private val attemptGate = SessionAttemptGate(log = { line -> appendLog(line) })
+
+    /** 是否有会话正在处理中（对外语义不变：Activity / 靠近触发用它避免重复启动）。 */
+    val sessionStarting: Boolean get() = attemptGate.isActive
+
+    /**
+     * 会话收尾的唯一执行者。
+     *
+     * 断开（主线程）、通知栏动作、BT 链路关闭（BT 线程）、车机要求重建（Bg 线程）
+     * 会同时要求收尾；并发拆解会让「新一代刚绑好的 WiFi 被上一代的 release 拆掉」，
+     * 日志里表现为「连上了又没了」。这里让第一个请求者执行，其余并掉。
+     */
+    private val sessionStop = AsyncSessionStop(log = { line -> appendLog(line) })
 
     /**
      * 交接流程已在跑、但 AirPlayClient 尚未创建时收到的晚到端点（0x4301）。
@@ -1114,7 +1136,7 @@ object SessionController {
         // 强制释放互斥：配对流程线程可能阻塞在不可中断的连接/mDNS 等待上（如手机
         // 不在热点网段时连热点 IP），finally 遥遥无期——用户显式取消即强制解锁，
         // 否则英雄卡永久「正在连接」（旧流程产出已被 retireSession 清理，无冲突）
-        sessionStarting.set(false)
+        attemptGate.end("用户取消连接——强制释放闸门")
         phaseHint = "已取消连接"
     }
 
@@ -1131,7 +1153,7 @@ object SessionController {
      */
     fun onSenderLinkClosed() {
         if (videoSender?.isRunning == true) return
-        if (sessionStarting.compareAndSet(true, false)) {
+        if (attemptGate.end("蓝牙链路断开，未进入推流")) {
             connectCancelled = true
             appendLog(">>> 本轮蓝牙链路断开——释放「会话处理中」，等待车机重连端点接手")
             // 未推流就断链 = 这一轮没连上：报文快照落盘（成功过的轮次在 markLinked 时已丢弃）
@@ -1219,9 +1241,9 @@ object SessionController {
             )
             // 上一轮可能卡在「会话处理中」：冻结后它已不可能再推进，强释放让本轮进场。
             // 不清的话 onCarPlayEndpoint 会直接以「已有会话在处理中」把恢复请求丢掉。
-            if (sessionStarting.get()) {
-                appendLog("PROC: 上一轮仍占着「会话处理中」——强制释放后重走交接")
-                sessionStarting.set(false)
+            if (attemptGate.isActive) {
+                appendLog("PROC: 上一轮仍占着闸门——" + attemptGate.describe())
+                attemptGate.end("解冻后自动恢复——强制释放上一轮")
             }
             restartBluetoothForRecovery()
             onCarPlayEndpoint(endpoint, "解冻后自动恢复 #${index + 1}")
@@ -1286,7 +1308,7 @@ object SessionController {
             return
         }
         Bg.run("bt-compat-listen") {
-            if (isSessionRunning() || sessionStarting.get()) {
+            if (isSessionRunning() || sessionStarting) {
                 // 正在连/已在跑：start() 幂等，顺带把占位记录同步到当前开关状态
                 server.start()
                 return@run
@@ -1314,7 +1336,7 @@ object SessionController {
                 val ctx = appContext ?: continue
                 if (!BtCompatPrefs.enabled(ctx) || compatSuppressed) continue
                 // 连接流程/推流中由它们自己维护监听，这里不插手
-                if (sessionStarting.get() || isStreaming()) continue
+                if (sessionStarting || isStreaming()) continue
                 val server = bluetoothServer ?: continue
                 if (server.isRunning && server.isProbeRunning) continue
                 if (!server.hasPermission()) continue
@@ -1507,7 +1529,7 @@ object SessionController {
                     appendLog("RETRY: 等待期间已有新一轮接手（车机邀请/用户操作）——本次重试作废")
                     return@run
                 }
-                if (connectCancelled || !sessionWanted || isStreaming() || sessionStarting.get()) {
+                if (connectCancelled || !sessionWanted || isStreaming() || sessionStarting) {
                     appendLog("RETRY: 条件已变（取消/正在连/已出画面）——跳过本次重试")
                     return@run
                 }
@@ -1546,7 +1568,7 @@ object SessionController {
             )
             return
         }
-        if (sessionStarting.get()) {
+        if (sessionStarting) {
             appendLog("CTRL: 车机邀请到达——本轮已有会话在处理中，交给它（不并行再起一轮）")
             return
         }
@@ -1609,7 +1631,7 @@ object SessionController {
             appendLog("CTRL: 推流中邀请——但还没有热点端点可用，只能继续推流并等车机下发 0x4301")
             return
         }
-        if (sessionStarting.get()) {
+        if (sessionStarting) {
             appendLog("CTRL: 推流中邀请——本轮已有会话在交接，交给它处理")
             return
         }
@@ -1629,7 +1651,7 @@ object SessionController {
             // 先退役：onCarPlayEndpoint 开头有「推流中忽略端点」的守卫，不退役就进不去。
             runCatching { retireSession() }
                 .onFailure { appendLog("CTRL: 退役旧会话失败（${it.message}）——仍尝试重连") }
-            sessionStarting.set(false)
+            attemptGate.end("推流中车机要求重建——释放旧轮次")
             connectCancelled = false
             onCarPlayEndpoint(endpoint, "推流中车机邀请要求重建")
         }
@@ -1848,7 +1870,7 @@ object SessionController {
         val hint = phaseHint
         return when {
             videoSender?.isRunning == true -> "已连上车机，正在镜像手机画面（点「断开」可停止）"
-            sessionStarting.get() -> hint ?: "正在连接车机…"
+            sessionStarting -> hint ?: "正在连接车机…"
             isSessionRunning() -> hint ?: "蓝牙已连上车机，等待它下发连接信息…"
             else -> hint ?: "空闲——等待车机靠近，或点「打开界面」查看"
         }
@@ -1892,6 +1914,10 @@ object SessionController {
         // 同类结论 20 秒内只留一行摘要。这一轮日志里因此能直接看到「位置服务开没开」
         // 「本机蓝牙地址是不是占位」这些以前只能靠猜的东西。
         ConnectionPreflight.log(context) { line -> appendLog(line) }
+        // 闸门 / 收尾状态各一行：如果有僵尸轮次或上一轮拆解没结束，这里立刻看得见，
+        // 而不是等到几秒后只冒出一句「已有会话在处理中」。
+        appendLog(attemptGate.describe())
+        appendLog(sessionStop.describe())
         // 新一次用户点击 = 新的 5 分钟等待预算（断链重连不再重置，见 pendingWaitBudgetStartedAt）
         pendingWaitBudgetStartedAt = 0L
         pendingWaitGaveUp = false
@@ -1990,8 +2016,27 @@ object SessionController {
         }
     }
 
-    /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
-    fun disconnect(context: Context) {        val hadProjection = CarPlayService.mediaProjection != null
+    /**
+     * 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。
+     *
+     * 收尾只允许一个执行者（[sessionStop]）：用户双击断开、通知栏动作与 BT 线程同时
+     * 要求收尾时，第二个请求直接返回，不会把上一代的 `wifiConnector.release()` 拖到
+     * 新一代刚绑好的网络上。真正的拆解在 [disconnectNow]。
+     */
+    fun disconnect(context: Context) {
+        if (!sessionStop.request("用户断开")) {
+            appendLog("STOP: 另一次收尾正在进行（${sessionStop.reason ?: "?"}）——本次不再重复拆解")
+            return
+        }
+        try {
+            disconnectNow(context)
+        } finally {
+            sessionStop.finish("用户断开")
+        }
+    }
+
+    private fun disconnectNow(context: Context) {
+        val hadProjection = CarPlayService.mediaProjection != null
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
         // 兼容模式的常开监听也一并停在这里；记下「用户叫停过」，
@@ -2285,6 +2330,69 @@ object SessionController {
     }
 
     /**
+     * 「这条热点还能不能直接复用」的唯一判定入口（[NetworkReusePolicy] 落地处）。
+     *
+     * 为什么不再用 `boundCarSsid == ssid && currentNetwork != null`：那是**我们自己记的账**。
+     * 系统在下面悄悄换过网络（热点掉了、被 ROM 踢回家里那条）时，账本还写着车机热点、
+     * `currentNetwork` 也非空，于是「复用」的其实是家里那条 WiFi——之后 mDNS、ctrl 广播、
+     * 建链全打在错的网络上，日志里却只有一句「已绑定车机热点，跳过重复绑定」。
+     *
+     * 三种「网络在」的形态要分开处置（这正是 2026-11-11 那晚 `手机提前挂在车机热点上`
+     * 这个疑点一直说不清的原因——旧日志里它们全是同一句「绑定失败」）：
+     *  - 已绑定且有地址 → 直接复用；
+     *  - 系统已关联、进程没绑 → 补一次 `bindProcessToNetwork`（零交互）；
+     *  - 关联上了但没地址（DHCP 未完成）→ **等地址**，绝不重新发 specifier
+     *    （`joinCarPlayNetwork` 第一行就是 `release()`，会把正在建立的网络拆掉）。
+     *
+     * @param waitForAddress 允许为「网络在但没地址」等一小会儿。**调用方在 BT 回调线程上
+     *   时必须传 false**：那里阻塞的是车机链路的读循环，等地址该交给后台入网线程。
+     * @return 可用的网络；null = 真的不可用（或必须是别的热点），调用方走完整入网
+     */
+    private fun tryReuseCarNetwork(
+        connector: WifiCarPlayConnector,
+        expectedSsid: String,
+        where: String,
+        waitForAddress: Boolean = true,
+    ): android.net.Network? {
+        val observation = CarNetworkReadiness.inspect(connector.networkSnapshot(expectedSsid))
+        val decision = NetworkReusePolicy.decide(observation)
+        if (NetworkReusePolicy.shouldLog(decision)) {
+            appendLog("WIFI[$where] " + NetworkReusePolicy.describe(decision))
+        }
+        return when (decision) {
+            is NetworkReusePolicy.Decision.Reuse -> connector.currentNetwork
+            is NetworkReusePolicy.Decision.AdoptNow -> {
+                val bound = connector.adoptAssociated(expectedSsid)
+                if (bound != null) {
+                    boundCarSsid = expectedSsid
+                    appendLog("WIFI[$where] 只补了一次绑定就可用（零交互）——没有重新入网")
+                }
+                bound
+            }
+            is NetworkReusePolicy.Decision.WaitForAddress -> {
+                if (!waitForAddress) {
+                    // 在 BT 回调线程上不能睡：交给后台入网流程按同一份判定继续等
+                    appendLog("WIFI[$where] 网络在但没地址——交给后台入网流程等它就绪（这里不睡）")
+                    return null
+                }
+                appendLog(
+                    "WIFI[$where] 等 DHCP 给出地址（最多 ${decision.waitMillis}ms）——" +
+                        "期间不发 specifier（那会 release 掉正在建立的这条网络）",
+                )
+                val waited = connector.awaitAssociation(expectedSsid, decision.waitMillis) { connectCancelled }
+                if (waited != null) {
+                    boundCarSsid = expectedSsid
+                    appendLog("WIFI[$where] 地址已到——\"$expectedSsid\" 直接复用，本轮没有重新入网")
+                } else {
+                    appendLog("WIFI[$where] ${decision.waitMillis}ms 内仍未就绪——按「不可用」处理，重新入网")
+                }
+                waited
+            }
+            is NetworkReusePolicy.Decision.Rejoin -> null
+        }
+    }
+
+    /**
      * 真正发起一次入网请求——**同一 SSID 全程只允许一次在跑**。
      *
      * 为什么必须互斥：`WifiCarPlayConnector.joinCarPlayNetwork` 第一行是 `release()`
@@ -2302,10 +2410,12 @@ object SessionController {
         wifi: Iap2SenderSession.WifiConfiguration,
         force: Boolean,
     ): WifiCarPlayConnector.JoinResult {
-        val wired = connector.currentNetwork
-        if (boundCarSsid == wifi.ssid && wired != null) {
+        // 复用判定（不再只看 `boundCarSsid` 这本账，见 tryReuseCarNetwork）：
+        // 「已绑定且就绪」「已关联只差绑定」都算复用成功；「关联了但没地址」会先等一小会儿；
+        // 只有「真的掉了」或「绑着的不是这条」才往下走完整入网。
+        tryReuseCarNetwork(connector, wifi.ssid, "入网前")?.let { reused ->
             appendLog("WIFI: 应用专属网络已在位——跳过重复加入（只复用网络，认证照常重做）")
-            return WifiCarPlayConnector.JoinResult.Joined(wired)
+            return WifiCarPlayConnector.JoinResult.Joined(reused)
         }
         return when (val decision = wifiJoinGate.decide(wifi.ssid, android.os.SystemClock.uptimeMillis(), force)) {
             is WifiJoinGate.Decision.Skip -> {
@@ -2851,7 +2961,14 @@ object SessionController {
                 connector.awaitAssociation(ssid, 4_000L) { connectCancelled }
             }
         if (bound == null) {
-            appendLog("PROBE #$attempt: 绑定当前 WiFi 失败（手机没挂在任何 WiFi 上）——跳过本轮探测（蓝牙保活不受影响）")
+            // 「没绑上」有三种完全不同的现场，以前它们都只写一句「手机没挂在任何 WiFi 上」，
+            // 事后根本分不清是热点关了、还是网在但 DHCP 没走完（后者再等两秒就好），
+            // 还是系统挂在别的网络上。这里让状态自己说话（[CarNetworkReadiness]）。
+            val observation = CarNetworkReadiness.inspect(connector.networkSnapshot(ssid))
+            appendLog(
+                "PROBE #$attempt: 绑定当前 WiFi 失败——${CarNetworkReadiness.summarize(observation)}" +
+                    "；跳过本轮探测（蓝牙保活不受影响）",
+            )
             return null
         }
         // 广播跟着同一条网络走，车机才可能发出 ctrl 邀请。
@@ -2930,7 +3047,7 @@ object SessionController {
                 if (connectCancelled) return@run
                 if (pendingWatchGeneration.get() != generation) return@run
                 // 晚到 0x4301 已触发新一轮交接——观察任务让位。
-                if (sessionStarting.get()) return@run
+                if (sessionStarting) return@run
                 val (wifiEnabled, currentSsid) = shellWifiStatus()
                 // 每 30s 落一行：没有它，等待期在日志里只剩车机心跳，用户/排查都看不出在等什么。
                 if (tick % 6 == 0) {
@@ -2973,7 +3090,7 @@ object SessionController {
                         val found = probeAirplayOnCurrentWifi(ssid, probeCount)
                         val foundHost = found?.host?.hostAddress
                         if (found != null && !foundHost.isNullOrEmpty()) {
-                            if (!connectCancelled && !sessionStarting.get()) {
+                            if (!connectCancelled && !sessionStarting) {
                                 val label = if (ssid.isNullOrEmpty()) CURRENT_WIFI_LABEL else "\"$ssid\""
                                 appendLog(
                                     ">>> [$source] $label 里已有车机 AirPlay 服务（$foundHost:${found.port}）——" +
@@ -3022,7 +3139,7 @@ object SessionController {
                         "不当作车机热点（不打扰用户），继续蓝牙保活等车机下发 0x4301",
                 )
             }
-            if (!connectCancelled && !sessionStarting.get() && pendingWatchGeneration.get() == generation) {
+            if (!connectCancelled && !sessionStarting && pendingWatchGeneration.get() == generation) {
                 pendingWaitGaveUp = true
                 phaseHint = "车机未下发热点信息（0x4301），本轮已停止重试"
                 appendLog(
@@ -3924,7 +4041,7 @@ object SessionController {
             return
         }
         val client = currentClient
-        if (sessionStarting.get()) {
+        if (sessionStarting) {
             if (client != null && client.pairingInProgress) {
                 // 合并而非替换：0x4301 可能不带 IPv4（Audi MMI 0000 实测端点解析依赖
                 // mDNS/网关），直接替换会把已解析到的地址抹掉，配对循环反而连不上。
@@ -4326,7 +4443,7 @@ object SessionController {
             appendLog(">>> [$source] 会话推流中——忽略冗余端点（接收端周期重连的重复 0x4301）")
             return
         }
-        if (!sessionStarting.compareAndSet(false, true)) {
+        if (attemptGate.begin(source) == null) {
             appendLog(">>> [$source] 已有会话在处理中，忽略本次端点（等待上一轮结束）")
             return
         }
@@ -4365,7 +4482,7 @@ object SessionController {
                     "检测到手机已连 WiFi 时会询问是否按车机热点继续",
             )
             phaseHint = "等待车机下发连接信息（0x4301）…"
-            sessionStarting.set(false)
+            attemptGate.end("端点无 AP 信息，转入保活等待")
             watchForPendingStartSession(endpoint, source)
             return
         }
@@ -4457,7 +4574,7 @@ object SessionController {
                     cause = "手机没加入车机热点 \"${endpoint.ssid}\"",
                     keywords = "手机当前不在该热点 / 入网",
                 )
-                sessionStarting.set(false)
+                attemptGate.end("手机没加入车机热点")
                 return@proceed
             }
             // 网络绑定完成：ctrl 广播重新注册（落到车机所在网络），同时开始后台 mDNS 发现。
@@ -4475,7 +4592,7 @@ object SessionController {
                 try {
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
-                        sessionStarting.set(false)
+                        attemptGate.end("用户已取消——中止配对")
                         return@run
                     }
                     if (endpointSelfContained) {
@@ -4500,7 +4617,7 @@ object SessionController {
                     }
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
-                        sessionStarting.set(false)
+                        attemptGate.end("用户已取消——中止配对（端点解析后）")
                         return@run
                     }
 
@@ -4707,7 +4824,7 @@ object SessionController {
                     if (connectCancelled) {
                         retireSession()
                         appendLog("AIRPLAY: 用户已取消——中止配对")
-                        sessionStarting.set(false)
+                        attemptGate.end("用户已取消——中止配对（首轮配对后）")
                         return@run
                     }
                     // 配对失败后的兜底路径（纯函数决策，真机抓包场景由 PairingFallbackTest 钉死）
@@ -4740,7 +4857,7 @@ object SessionController {
                         if (connectCancelled) {
                             retireSession()
                             appendLog("AIRPLAY: 用户已取消——中止配对")
-                            sessionStarting.set(false)
+                            attemptGate.end("用户已取消——中止配对（BT 重试后）")
                             return@run
                         }
                     }
@@ -5540,7 +5657,7 @@ object SessionController {
                     } else {
                         appendLog(connectBudget.summary())
                     }
-                    sessionStarting.set(false)
+                    attemptGate.end("配对流程结束（推流=${videoSender?.isRunning == true}）")
                     // 认证轮次结算（「只复用网络、认证重做」的判据来源）。
                     // 用户主动取消 / 被新一轮顶掉不算车机失败——拿它推「认证重做」
                     // 只会在本来能连的车机上白多花一轮 120s 配对窗口。
@@ -5610,10 +5727,18 @@ object SessionController {
             continueWithNetwork(true)
             return
         }
-        if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
-            appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定（只复用网络，认证照常重做）")
-            continueWithNetwork(true)
-            return
+        // 复用判定与 joinCarWifiOnce 共用一套（见 tryReuseCarNetwork）。这一处尤其关键：
+        // 「手机提前挂在车机热点上」时系统那张关联表已经在了，旧代码只要 `boundCarSsid`
+        // 没记上就重新发 specifier，把现成的关联连同回调一起 release 掉——白等一轮超时，
+        // 现场表现成「明明连着热点却连不上」。
+        wifiConnector?.let { connector ->
+            // 这里跑在 BT 回调线程上：不许阻塞等地址（waitForAddress = false），
+            // 只做「已就绪 / 已关联」两种零等待复用。
+            if (tryReuseCarNetwork(connector, endpoint.ssid, source, waitForAddress = false) != null) {
+                appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定（只复用网络，认证照常重做）")
+                continueWithNetwork(true)
+                return
+            }
         }
         // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
         // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
@@ -5651,13 +5776,13 @@ object SessionController {
                         if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
                             continueWithNetwork(true)
                         } else {
-                            sessionStarting.set(false)
+                            attemptGate.end("入网失败（复用/静默/锚点三条路都没成）")
                         }
                         return@run
                     }
                 }
             }
-            sessionStarting.set(false)
+            attemptGate.end("入网循环退出（已取消或未拿到网络）")
         }
     }
 

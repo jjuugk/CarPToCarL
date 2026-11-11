@@ -94,4 +94,65 @@ class ConnectionPreflightReportTest {
         assertEquals(a.signature(), b.signature())
         assertEquals("BLUETOOTH_ENABLED:BLOCKING", a.signature())
     }
+
+    @Test
+    fun elevenItemsAreChecked() {
+        // 11 项是「一眼看全」的上限：再多就把摘要行压垮了。
+        // 注意**不含投屏授权（MediaProjection）**——本版本画面走双屏虚拟屏、
+        // 声音走 CarLife 引擎 PCM 直通，都不过 MediaProjection（2026-11-11 核对）。
+        assertEquals(11, Requirement.values().size)
+        assertTrue(Requirement.values().any { it.name == "NOTIFICATION_ACCESS" })
+        assertFalse(Requirement.values().any { it.name == "PROJECTION" })
+    }
+
+    @Test
+    fun dialogTextMirrorsLogLinesWithoutPrefix() {
+        val subject =
+            report(
+                Check(Requirement.BLUETOOTH_ENABLED, true),
+                Check(Requirement.LOCATION_SERVICE, false, "已关闭"),
+            )
+        val lines = subject.dialogText().lines()
+        // UI 与日志必须逐行对得上：弹窗正文 = 日志行去掉 `PREFLIGHT:   ` 前缀
+        assertEquals(subject.describe().size - 1, lines.size)
+        assertTrue(lines.any { it.startsWith("✓ 手机蓝牙开关") })
+        assertTrue(lines.any { it.startsWith("· 位置服务") })
+        assertFalse(lines.any { it.startsWith("PREFLIGHT:") })
+    }
+
+    @Test
+    fun topIssuePrefersBlockingOverWarning() {
+        val blockingFirst =
+            report(
+                Check(Requirement.LOCATION_SERVICE, false, "已关闭"),
+                Check(Requirement.WIFI_ENABLED, false, "已关闭"),
+            )
+        assertEquals(Requirement.WIFI_ENABLED, blockingFirst.topIssue()?.requirement)
+
+        val warningOnly =
+            report(
+                Check(Requirement.WIFI_ENABLED, true),
+                Check(Requirement.LOCATION_SERVICE, false, "已关闭"),
+            )
+        assertEquals(Requirement.LOCATION_SERVICE, warningOnly.topIssue()?.requirement)
+
+        val allGood = report(Check(Requirement.WIFI_ENABLED, true))
+        assertEquals(null, allGood.topIssue())
+    }
+
+    @Test
+    fun infoOnlyMissesDoNotCountAsAttention() {
+        // 通知权限 / 通知使用权 / 电池优化都只算 INFO：缺了不该让摘要行标黄
+        val subject =
+            report(
+                Check(Requirement.WIFI_ENABLED, true),
+                Check(Requirement.NOTIFICATIONS, false, "未授权"),
+                Check(Requirement.NOTIFICATION_ACCESS, false, "未授权"),
+                Check(Requirement.BATTERY_OPTIMIZATION, false, "未忽略"),
+            )
+        assertTrue(subject.ready)
+        assertTrue(subject.missing.isEmpty())
+        assertEquals(null, subject.topIssue())
+        assertTrue(subject.headline().endsWith("全部通过"))
+    }
 }

@@ -774,6 +774,59 @@ class WifiCarPlayConnector(
         }
     }
 
+    /**
+     * 拍一份「车机热点现在到底什么样」的快照，供 [CarNetworkReadiness] 判读。
+     *
+     * 只读：不请求、不绑定、不 release，因此可以在任何线程、任何时机调（包括每次
+     * 轮询都调一次）。**这是「网络在但没就绪」与「真的掉了」能分开的唯一依据**——
+     * 旧代码只有一句「绑定失败」，三种完全不同的现场在日志里长得一模一样。
+     *
+     * @param expectedSsid 目标热点名；null = 不按 SSID 判断（读不到 SSID 的探测路径）
+     */
+    fun networkSnapshot(expectedSsid: String?): CarNetworkSnapshot {
+        val bound = boundNetwork.get()
+        val boundCaps = bound?.let { runCatching { connectivityManager.getNetworkCapabilities(it) }.getOrNull() }
+        val boundSsid = plainSsid((boundCaps?.transportInfo as? WifiInfo)?.ssid)
+        // 按 SSID 精确找「系统已关联在目标热点上的那条」：读不到 SSID 时它一定返回 null，
+        // 这时不猜（猜错会把进程绑到家里的 WiFi 上）。
+        val associated = if (expectedSsid == null) null else findAssociatedNetwork(expectedSsid)
+        val associatedSsid =
+            when {
+                associated != null -> expectedSsid
+                boundSsid != null -> boundSsid
+                else -> currentSystemSsid()
+            }
+        val link = bound?.let { runCatching { connectivityManager.getLinkProperties(it) }.getOrNull() }
+        return CarNetworkSnapshot(
+            expectedSsid = expectedSsid,
+            boundSsid = boundSsid,
+            associatedSsid = associatedSsid,
+            hasBoundNetwork = bound != null,
+            hasAddress = bound != null && linkReady(bound),
+            associatedReady = associated != null && linkReady(associated),
+            localIpv4 =
+                link?.linkAddresses
+                    ?.mapNotNull { it.address?.hostAddress }
+                    ?.firstOrNull { it.contains('.') && !it.contains(':') }
+                    ?.substringBefore('/'),
+            gateway =
+                link?.routes
+                    ?.filter { it.isDefaultRoute }
+                    ?.mapNotNull { it.gateway?.hostAddress?.substringBefore('%') }
+                    ?.firstOrNull { it.contains('.') && !EndpointHosts.isPlaceholder(it) },
+            interfaceName = link?.interfaceName,
+        )
+    }
+
+    /** 系统当前 WiFi 的 SSID（读不到就 null）。只作快照的补充信息，不参与猜测。 */
+    @Suppress("DEPRECATION")
+    private fun currentSystemSsid(): String? {
+        val manager = wifiManager ?: return null
+        val info = runCatching { manager.connectionInfo }.getOrNull() ?: return null
+        if (info.networkId < 0) return null
+        return plainSsid(info.ssid)
+    }
+
     fun release() {
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }
