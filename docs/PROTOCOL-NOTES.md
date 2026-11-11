@@ -339,6 +339,22 @@ CarPlay，以及传输通道发生切换之后。要求的形式是重开 IDPS �
 任何一步没回立刻收手并返回 null，把链路交给保活泵：这里抛异常等于用「车机慢」的
 证据执行「链路坏了」的动作，会亲手掐掉还活着的 RFCOMM。
 
+**整段软发送**（2026-11-11）：重认证期间 `Iap2SenderSession.softSending = true`，
+所有出站帧改走「等确认 + 重传 1 次（RTO 4s）+ 补不上只丢这一帧」，**绝不 die**。
+旧实现里 `0x1d00` 走普通等确认，车机一次 ACK 都不给时按链路级上限（10 次）重传到
+`packet N not acknowledged`，把还活着的 RFCOMM 亲手拆掉——2026-11-11 别克日志：
+`13:44:15 tx=0x1d00` → `13:44:31 LINK closed: packet 210 not acknowledged`，
+16 秒一轮重连死循环。用成员标志而不是逐个改调用点，是因为同一段里的
+`runMfiChallenge` / `sendDeviceStateGreetings` 也在发帧。
+
+**「车机端 CarPlay 已退出」的判定**（`CarPlayUplinkHealth`，2026-11-11）：第一轮
+正常出画面之后我们那批抓包常量把车机的 WiFi/CarPlay 组件打崩，此后蓝牙侧它照常识别、
+照常 ACK，只是**永远不再发 `0x4301`**。判据刻意收窄：**本机在这台车机上曾经拿到过
+`0x4301`** 才开始计数，连续 2 轮要不到即判死；若同一时段事件口已 `ECONNREFUSED`
+（车机连监听都没了），1 轮即判死。判死后：跳过重认证（省掉十几秒空转）、把重连
+间隔从 16 秒拉到 60 秒，日志明确写「请重启车机」。拿到 `0x4301` 立刻恢复。
+从没连通过的车机不进入这个判定——那是另一个问题，不能被这条逻辑吞掉。
+
 ## 9d. WinPlay（Windows 接收端）实测记录（2026-10-19）
 
 WinPlay 是开源 Windows 无线 CarPlay 接收端（`reference/WinPlay`，GPL-3.0，Node + TS，
@@ -659,9 +675,12 @@ down in ~12s with no picture."
    路径接 `MfiLengthMemory`（记忆键=身份串+" tunnel"，与蓝牙链路独立），冷启动
    基线 20B 优先，静默 6s/3s 换档重试、被拒（0xAA04）即换、全静默照发 0xAA05；
 4. 0xAA05 后手机**突发**（先于车机任何订阅）：0x4E0C 无线会话标识(随机大写 UUID)、
-   0xA100(param 6 空)、0x4E0A 语言 "zh"、0x4E0B 设备时间(u64 秒+s16 时区分+u8 夏令时)、
-   0x4E09 设备名 "iPhone"、0xFFFA StartLocationInformation、0xFFF0 GPRMC 状态——
-   后两条为逐字节 Frida 常量（`VirtualIap2Link` companion）；
+   0x4E0A 语言 "zh"、0x4E0B 设备时间(u64 秒+s16 时区分+u8 夏令时)、0x4E09 设备名 "iPhone"。
+   **0xA100 / 0xFFFA / 0xFFF0 自 1.2.36 起停发**（2026-11-11）：这三条是 Frida 抓的
+   奥迪固件逐字节常量，别克 BUICK_3138 收下后 8 秒 `Connection reset`，宝马 NBT Evo
+   40 毫秒就断——车机在 0x1D01 里声明"可收 0xfffa"只代表认得消息号，不代表吃得下布局。
+   它们都是**向车机索要**位置/车辆状态，回复我们从不消费，删掉零功能损失。
+   常量仍留在 `VirtualIap2Link` companion 里，仅供对照；奥迪若出现回归再按画像单独恢复；
 5. 车机订阅应答：0x5000→0x5001 NowPlaying 空态（**仪表盘歌词的数据通路**，后续接
    MediaSessionsState）、0x4157→0x4158 通讯空态、0x4154→0x4155 无通话、
    0x4170→0x4171 空列表；0xEA02(requestAppLaunch)/0xA101(VehicleStatus)/

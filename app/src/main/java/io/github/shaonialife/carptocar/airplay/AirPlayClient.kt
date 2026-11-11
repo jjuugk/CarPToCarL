@@ -7,6 +7,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.CarPlayUplinkHealth
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkPacket
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
@@ -3169,6 +3170,14 @@ class AirPlayClient(
             // 返回值给调用方判定「半握手」用：SETUP 回 200 但事件口拒绝连接，
             // 是车机侧 CarPlay 服务没起来的典型形态（2026-11-02 MBUX 两轮实测）。
             log("EVENT: 连接失败 - ${error.message}")
+            // 端口**拒绝**（不是超时）是车机那半边没在监听的硬证据：交给「车机端 CarPlay
+            // 是否已退出」的判定，与「本轮要不到 0x4301」同时成立即可判死（CarPlayUplinkHealth）。
+            val reason = error.message.orEmpty()
+            if (reason.contains("ECONNREFUSED", ignoreCase = true) ||
+                reason.contains("Connection refused", ignoreCase = true)
+            ) {
+                CarPlayUplinkHealth.notePortRefused()
+            }
             return false
         }
         return true

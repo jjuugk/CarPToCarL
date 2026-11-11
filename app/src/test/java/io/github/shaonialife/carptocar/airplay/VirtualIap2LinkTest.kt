@@ -6,6 +6,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -245,13 +246,15 @@ class VirtualIap2LinkTest {
                 .let { Iap2Csm.parseParams(it).first() }
         assertEquals(20, challengeBody.value.size)
 
-        // 0xAA03（签名应答）→ 0xAA05 + 突发（0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0）
-        // 窗口按对端声明的 4 计：这 8 条会分成 4+4 两批，靠车机 ACK 放行；顺序不变。
+        // 0xAA03（签名应答）→ 0xAA05 + 突发（0x4E0C/0x4E0A/0x4E0B/0x4E09）。
+        // **0xA100 / 0xFFFA / 0xFFF0 自 1.2.36 起不发**：它们是抓包常量，别克与宝马
+        // 收到后数十毫秒到数秒内重置 WiFi/CarPlay 组件（2026-11-11 日志）。
+        // 窗口按对端声明的 4 计：这 5 条会分成 4+1 两批，靠车机 ACK 放行；顺序不变。
         val burstFrom = h.controlFrames().size
         h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
         h.settle()
         assertEquals(
-            listOf(0xAA05, 0x4E0C, 0xA100, 0x4E0A, 0x4E0B, 0x4E09, 0xFFFA, 0xFFF0),
+            listOf(0xAA05, 0x4E0C, 0x4E0A, 0x4E0B, 0x4E09),
             h.controlFrames().drop(burstFrom).map { it.second },
         )
 
@@ -407,9 +410,13 @@ class VirtualIap2LinkTest {
         // 32B 得到应答 → 0xAA05 + 突发照常
         val after = h.controlFrames().size
         h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
-        h.settle() // 突发分两批，0xFFFA 在第二批
+        h.settle() // 突发分两批（窗口 4）
         val emitted = h.controlFrames().drop(after).map { it.second }
-        assertTrue("frames=$emitted", emitted.containsAll(listOf(0xAA05, 0x4E0C, 0xFFFA)))
+        assertTrue("frames=$emitted", emitted.containsAll(listOf(0xAA05, 0x4E0C, 0x4E09)))
+        // 抓包常量那三条必须**一条都不再发**：它们是车机 CarPlay 组件崩溃的嫌疑源。
+        assertFalse("不应再发 0xFFFA：frames=$emitted", emitted.contains(0xFFFA))
+        assertFalse("不应再发 0xFFF0：frames=$emitted", emitted.contains(0xFFF0))
+        assertFalse("不应再发 0xA100（对端声明可收也不发）：frames=$emitted", emitted.contains(0xA100))
     }
 
     /**

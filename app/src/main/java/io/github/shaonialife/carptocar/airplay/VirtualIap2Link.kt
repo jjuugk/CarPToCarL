@@ -948,8 +948,24 @@ class VirtualIap2Link(
 
     /**
      * 0xAA05 后的突发（Frida：真机在认证成功后立即发这一批，先于车机的订阅请求）。
-     * 0xFFFA/0xFFF0/0x4158/0x5001 用逐字节常量——字段布局只存在于真机抓包里，
-     * 重新编码极易走样（对照 AADisplay WifiIap2Link 的 Frida 常量）。
+     *
+     * **只发按字段编出来的四条**（0x4E0C / 0x4E0A / 0x4E0B / 0x4E09）。这三条不再发：
+     * 0xA100（AUX 状态）、0xFFFA（StartLocationInformation）、0xFFF0（GPRMC 状态）。
+     *
+     * 停发依据（2026-11-11 三份别克实车日志 + 11-09 宝马对照）：
+     * ```
+     * 别克 13:38:14.96  tx 0x4e0c 0xa100 0x4e0a 0x4e0b 0x4e09 0xfffa
+     *       13:38:22.97  EVENT 读取结束 - Connection reset   车机 8s 后重置整条 AirPlay
+     * 宝马 16:01:16.575 tx 0x4e0c 0x4e0a 0x4e0b 0x4e09 0xfffa（0xa100/0xfff0 按清单已裁）
+     *       16:01:16.613  通道关闭 EOF                     40ms 后就断
+     * ```
+     * 两台的唯一交集就是 0xFFFA：它是一段 Frida 抓到的**奥迪固件字节常量**
+     * （`4040 0032 fffa 0008 …`），不是按字段编出来的。车机在 0x1D01 里声明「可收 0xfffa」
+     * 只说明它认得这个消息号，**不代表它吃得下这段布局**——收到就把 WiFi/CarPlay
+     * 组件重置掉，症状正是「出画面后卡一下、然后连不上」。
+     *
+     * 这三条对我们的功能零贡献：它们是**向车机索要**车辆位置/状态，回复我们从不消费。
+     * 奥迪 MIB3 是这套字节的原始采集对象，若它出现回归，再按画像单独恢复。
      */
     private fun sendMib3BurstLocked() {
         val sessionId =
@@ -960,7 +976,6 @@ class VirtualIap2Link(
             WIRELESS_SESSION_ID,
             Iap2Csm.param(0, sessionId.toByteArray(Charsets.UTF_8)),
         )
-        sendCsmLocked(AUX_STATUS_NOTIFICATION, Iap2Csm.param(0x0006, ByteArray(0)))
         sendCsmLocked(
             DEVICE_LANGUAGE,
             Iap2Csm.param(0, "zh".toByteArray(Charsets.UTF_8)),
@@ -970,10 +985,9 @@ class VirtualIap2Link(
             DEVICE_INFORMATION_UPDATE,
             Iap2Csm.param(0, "iPhone".toByteArray(Charsets.UTF_8)),
         )
-        sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
-        sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
         log(
             "IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅；" +
+                "已停发 0xA100/0xFFFA/0xFFF0（抓包常量，疑为车机 CarPlay 组件崩溃源）；" +
                 AccessoryDeclaration.describe(),
         )
     }
@@ -1134,6 +1148,7 @@ class VirtualIap2Link(
         const val DEVICE_TIME = 0x4E0B
         const val DEVICE_LANGUAGE = 0x4E0A
         const val DEVICE_INFORMATION_UPDATE = 0x4E09
+        /** 0xA100 AUX 状态。**已停发**（见 [sendMib3BurstLocked]），常量保留备恢复。 */
         const val AUX_STATUS_NOTIFICATION = 0xA100
         const val START_COMMUNICATIONS_UPDATES = 0x4157
         const val CALL_STATE_UPDATE = 0x4155
@@ -1159,14 +1174,22 @@ class VirtualIap2Link(
         /** ---- 以下为 Frida 抓包的逐字节常量（MIB3 真机 iPhone → Audi MMI）---- */
         private val HEX_DIGITS = "0123456789abcdef"
 
-        /** 0xFFFA StartLocationInformation。 */
+        /**
+         * 0xFFFA StartLocationInformation。
+         *
+         * **已停发**（2026-11-11）：纯 Frida 抓包常量，别克/宝马收到后数十毫秒到数秒内
+         * 重置 WiFi/CarPlay 组件。保留字节仅供对照，别再接回 [sendMib3BurstLocked]——
+         * 要恢复请先证明它在目标车机上不会引发连接重置。
+         */
         internal val MIB3_START_LOCATION_INFORMATION: ByteArray =
             hex(
                 "40400032fffa00080000000000140004000100088001000000fa" +
                     "0004000200088002000000fa000400040008800400000014",
             )
 
-        /** 0xFFF0 GPRMCDataStatusValuesNotification。 */
+        /**
+         * 0xFFF0 GPRMCDataStatusValuesNotification。**已停发**，理由同上。
+         */
         internal val MIB3_GPRMC_DATA_STATUS: ByteArray =
             hex("4040000efff00004000000040001")
 

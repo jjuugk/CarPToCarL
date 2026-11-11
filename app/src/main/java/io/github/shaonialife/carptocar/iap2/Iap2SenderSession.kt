@@ -175,6 +175,30 @@ class Iap2SenderSession(
     @Volatile
     private var reauthenticationTried = false
 
+    /**
+     * 重认证期间的「软发送」开关：置 true 时 [send] 改走 [sendAwaitingWithBudget]。
+     *
+     * 为什么整段都要软：重认证是在**试探车机还认不认这个会话**，任何一步沉默都只是
+     * 「它不认」，不是「链路坏了」。旧实现里 0x1d00 走普通等确认，车机一次 ACK 都不给，
+     * 重传到链路级上限就 `packet N not acknowledged` 把还活着的 RFCOMM 拆掉——
+     * 2026-11-11 别克日志里 13:44:15 发出、13:44:31 自拆，16 秒一轮死循环。
+     *
+     * 用成员标志而不是逐个改调用点：[reauthenticateAndReannounce] 里的
+     * [runMfiChallenge]、[sendDeviceStateGreetings] 也会发帧，它们的 [send] 同样危险。
+     */
+    @Volatile
+    private var softSending = false
+
+    /**
+     * 本轮是否拿到过 `0x4301`（含保活期晚到）。
+     *
+     * 只给链路层做「车机端 CarPlay 是否已死」的判定用（[CarPlayUplinkHealth]）：
+     * 会话结束时蓝牙客户端读它，连续若干轮为空就说明车机那半边没起来。
+     */
+    @Volatile
+    var startSessionReceived: Boolean = false
+        private set
+
     /** 已催问次数（用于限次与日志节流）。 */
     @Volatile
     private var nudgeCount = 0
@@ -355,6 +379,14 @@ class Iap2SenderSession(
          * （日志：0x1d02 往返 5ms、0xaa01 在 100ms 内），3 秒已经非常宽裕。
          */
         const val REAUTH_STEP_TIMEOUT_MILLIS = 3_000L
+
+        /**
+         * 重认证期间每一帧的重传预算（RTO 4s × 1 = 4s，与上面的 3s 步窗口基本对齐）。
+         *
+         * 取小值是为了不给链路留长尾：车机 ACK 是毫秒级的，4 秒不认就是不打算认；
+         * 预算再长也只会在函数已经收手之后继续发出重传噪音。
+         */
+        const val REAUTH_RETRANSMIT_LIMIT = 1
 
         /**
          * 重认证里 MFi 挑战段的整体预算（多档长度共用一个）。
@@ -652,6 +684,9 @@ class Iap2SenderSession(
             wifiFromExchange == null &&
             !reauthenticationTried &&
             channel.isAlive &&
+            // 车机端 CarPlay 已经判死（连续多轮要不到 0x4301）：重认证只会在同一个死掉的
+            // 组件上空转十几秒，省掉它，把节奏交给链路层的长间隔重连（CarPlayUplinkHealth）。
+            !CarPlayUplinkHealth.isDead &&
             remainingMillis(deadline) > REAUTH_STEP_TIMEOUT_MILLIS * 2
         ) {
             // 静默判定的基线要取「重发那一刻」的业务帧数：这之前可能还有问候的迟到 ACK
@@ -659,6 +694,8 @@ class Iap2SenderSession(
             lastNudgePeerFrames = channel.peerFrameCount
             startSession = reauthenticateAndReannounce(deadline)
         }
+        // 「本轮拿到过 0x4301」是链路层判定「车机端 CarPlay 是否已死」的唯一正面证据。
+        if (startSession != null) noteStartSessionReceived()
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。
         // 老协议车机（Audi 等）对 0x4300 的处置不影响后续流程，不做阶梯，避免回归。
         if (startSession == null && declaresStartSession == true && wifiFromExchange == null) {
@@ -1081,11 +1118,24 @@ class Iap2SenderSession(
      */
     private fun reauthenticateAndReannounce(deadline: Long): Iap2Csm.Frame? {
         reauthenticationTried = true
-        fun step(): Long = minOf(deadline, System.nanoTime() + REAUTH_STEP_TIMEOUT_MILLIS * 1_000_000L)
         log(
             "iap2 重认证：首轮 0x4300 未换来 0x4301 —— 按首次联网的重新认证要求，在本链路重开" +
-                "一轮 0x1d00 → 0x1d02 → 0xaa00 段 → 0xaa05，之后重发 0x4300",
+                "一轮 0x1d00 → 0x1d02 → 0xaa00 段 → 0xaa05，之后重发 0x4300" +
+                "（整段软发送：单帧补不上只丢帧，不拆链）",
         )
+        // 整段软发送：这一步是「试探」，车机沉默只说明它不认这轮重认证，不代表 RFCOMM 坏了。
+        // 不这么做的话，0x1d00 会在重传用尽时 die，把还活着的链路亲手拆掉（2026-11-11 日志）。
+        softSending = true
+        return try {
+            reauthenticateSteps(deadline)
+        } finally {
+            softSending = false
+        }
+    }
+
+    /** [reauthenticateAndReannounce] 的实际步骤，与 [run] 保持同序、同报文体。 */
+    private fun reauthenticateSteps(deadline: Long): Iap2Csm.Frame? {
+        fun step(): Long = minOf(deadline, System.nanoTime() + REAUTH_STEP_TIMEOUT_MILLIS * 1_000_000L)
         send(Iap2MessageIds.START_IDENTIFICATION)
         val identification = expectOrNull(Iap2MessageIds.IDENTIFICATION_INFORMATION, step())
         if (identification == null) {
@@ -1340,12 +1390,25 @@ class Iap2SenderSession(
         }
 
     /**
+     * 记录「本轮拿到过 `0x4301`」。
+     *
+     * 这是判定「车机端 CarPlay 是否还活着」唯一的正面证据（见 [CarPlayUplinkHealth]）：
+     * 车机连 `0x4301` 都不给，说明它那半边的无线 CarPlay 组件没起来，而不是我们连不上。
+     */
+    private fun noteStartSessionReceived() {
+        startSessionReceived = true
+        CarPlayUplinkHealth.noteStartSession()
+    }
+
+    /**
      * 保活期间收到 0x4301：解析成端点交给主控（配对窗口内热更新，或上一轮失败后重走）。
      * 没有 0x5703 缓存时（新协议车机：BMW iD9 只有 0x4301）AP 信息直接从 0x4301 的
      * 无线组解析——这正是这类车机唯一的凭据来源，不能像旧代码那样「无 0x5703 就忽略」。
      */
     private fun handleLateStartSession(frame: Iap2Csm.Frame) {
         logStartSessionRaw(frame)
+        // 晚到也算：车机最终还是把端点给了，说明它那半边活着（哪怕本条因为缺 SSID 被忽略）。
+        noteStartSessionReceived()
         val endpoint = parseStartSession(frame, wifi)
         if (wifi == null && endpoint.ssid.isNotEmpty()) {
             wifi =
@@ -1502,15 +1565,20 @@ class Iap2SenderSession(
         messageId: Int,
         vararg body: ByteArray,
     ) {
-        // 越权取证 + 两条 MIB3 专用消息裁剪，统一走跨链路的单一出口。
-        // 清单未到时 noteSend 直接放行，不会误裁。
-        if (!AccessoryDeclaration.noteSend(messageId, "bt", log)) return
         val joined =
             when (body.size) {
                 0 -> ByteArray(0)
                 1 -> body[0]
                 else -> body.reduce { acc, bytes -> acc + bytes }
             }
+        // 重认证整段软发送：车机不认这些帧时该做的是收手等保活，而不是拆掉还活着的链路。
+        if (softSending) {
+            sendAwaitingWithBudget(messageId, joined, REAUTH_RETRANSMIT_LIMIT)
+            return
+        }
+        // 越权取证 + 两条 MIB3 专用消息裁剪，统一走跨链路的单一出口。
+        // 清单未到时 noteSend 直接放行，不会误裁。
+        if (!AccessoryDeclaration.noteSend(messageId, "bt", log)) return
         val frame = Iap2Csm.encode(messageId, joined)
         val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
         var offset = 0

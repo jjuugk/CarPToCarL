@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.CarPlayUplinkHealth
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.transport.StreamDuplexStream
@@ -312,6 +313,8 @@ class Iap2BluetoothClient(
         iap2ServiceCache.clear()
         skippedNoService.clear()
         BtSessionGate.targetSoftFallback = false
+        // 用户主动「启动连接」= 给车机端健康判定一次干净的重来机会（可能刚重启过车机）。
+        CarPlayUplinkHealth.reset()
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
@@ -580,7 +583,17 @@ class Iap2BluetoothClient(
             // 关闭」（车机不在无线窗口/要自己发起）。这类轮次按失败计，否则退避永远回到 3 秒，
             // 每轮白断一次车机、还可能抢掉它主动连入的时机。
             val aliveMillis = android.os.SystemClock.uptimeMillis() - sessionStartedAt
-            if (aliveMillis < SESSION_USEFUL_MILLIS) {
+            if (CarPlayUplinkHealth.isDead) {
+                // 车机端 CarPlay 已退出：蓝牙侧它照常识别、照常 ACK，只有 0x4301 永远不来。
+                // 这时 16 秒一轮的密集重连既刷屏，也可能打断车机正在进行的恢复，
+                // 拉到 60 秒一轮静候它自己好（用户重启车机后下一轮即可恢复）。
+                log(
+                    "BT-C: 车机端 CarPlay 已退出——本轮结束，" +
+                        "${CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS / 1000} 秒后再探" +
+                        "（请重启车机；车机恢复后本机会自动接上）",
+                )
+                sleepBackoff(CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS)
+            } else if (aliveMillis < SESSION_USEFUL_MILLIS) {
                 failStreak++
                 sleepBackoff(backoffMillis(failStreak))
             } else {
@@ -738,6 +751,9 @@ class Iap2BluetoothClient(
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
         } finally {
+            // 先读「本轮拿到过 0x4301 没有」，再清 senderSession——它是判定车机端 CarPlay
+            // 是否已退出的唯一正面证据（见 CarPlayUplinkHealth）。
+            val gotStartSession = senderSession?.startSessionReceived == true
             activeChannel = null
             senderSession = null
             BtSessionGate.iap2Ready = false
@@ -745,6 +761,21 @@ class Iap2BluetoothClient(
             runCatching { socket.close() }
             channel.close()
             log("BT-C: 本轮会话结束（客户端仍在运行，将自动重连）")
+            // 只统计「本轮到死都没拿到 0x4301 且是自然结束」的轮次：用户主动停止、或为换链路
+            // 而退役控制会话，都不是车机的态度，计进去会让「连续两轮」变得廉价。
+            // 成功那条路已在会话内 noteStartSession() 清零，这里不必重复。
+            if (!gotStartSession &&
+                !manualTeardown &&
+                running &&
+                CarPlayUplinkHealth.finishRound(gotStartSession = false)
+            ) {
+                log(
+                    "BT-C: ⚠ 判定「车机端 CarPlay 已退出」——${CarPlayUplinkHealth.describe()}。" +
+                        "这不再是「连不上」：车机的 AirPlay/WiFi 组件没起来，蓝牙侧它照常应答。" +
+                        "重连放慢到 ${CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS / 1000} 秒一轮，" +
+                        "请**重启车机**（或熄火重上电）后再试；车机恢复后本机会自动接上。",
+                )
+            }
             // CarPlay 还在跑、又不是我们主动拆的 → 这不是「本轮结束」，是控制链路掉线。
             // 主循环的静音闸门（sessionActive）会把重连一起挡掉，所以必须显式登记，
             // 让出站循环对**这一台**单独补连（2026-11-04 奥迪 MIB3 实车：
