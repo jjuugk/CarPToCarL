@@ -59,6 +59,19 @@ class Iap2LinkChannel(
     var peerDataFrameCount: Int = 0
         private set
 
+    /**
+     * 对端已确认到的我方序号（null = 本轮一次 ACK 都没收到过）。
+     *
+     * 会话层用「发送前后的水位差」判断某一帧到底有没有被读走：水位不动 = 车机已经不读
+     * 这条链路（2026-11-11 21:12 别克 E2LB：0x4300 之后三档全被丢弃，ack 停在 43，
+     * 我们空等保活 5 分钟）。与 [peerFrameCount] 的区别是它只认 ACK 位推进，不会被
+     * 「车机自说自话的控制帧」掺进来。
+     */
+    fun peerAcknowledgedSequence(): Int? = synchronized(lock) { engine.acknowledgedSequence }
+
+    /** 我方最后发出的控制帧序号（配合 [peerAcknowledgedSequence] 判「最后一帧被读走没」）。 */
+    fun lastSentSequence(): Int = synchronized(lock) { engine.lastSentSequence }
+
     init {
         engine.onPeerSynchronizationAdopted = { sync ->
             log(

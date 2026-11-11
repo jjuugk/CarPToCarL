@@ -129,6 +129,15 @@ class Iap2SenderSession(
     private var availabilityVariant: AvailabilityBodyMemory.Variant? = null
 
     /**
+     * 首帧 `0x4300` 发出的时刻，以及那一刻「对端已确认到的我方序号」。
+     *
+     * 45 秒内这个水位一动不动 / 追不上最后一帧 = 车机已经不读这条链路
+     * （见 [AVAILABILITY_FAST_RETRY_NANOS]），本轮不该再空等保活。
+     */
+    private var availabilityFirstSentAtNanos = 0L
+    private var availabilityAckBaseline: Int? = null
+
+    /**
      * 是否通用系（SAIC-GM / Cinemo 栈）——决定 0x4300 优先试「双标识体」。
      *
      * 依据 2026-11-07 别克 E2LB 现场：该族车机收到我们只带 group1 的 0x4300 后
@@ -378,6 +387,20 @@ class Iap2SenderSession(
          */
         const val AVAILABILITY_VARIANT_EXTRA_TRIES = 2
 
+        /**
+         * `0x4300` 连**链路 ACK** 都拿不到时，本轮的总宽限（从首帧 0x4300 发出算起）。
+         *
+         * 为什么要有这条快通道：链路级的 `ack` 一旦不再推进，就说明车机已经不读这条链路
+         * 了——它既不会回 0x4301，也不会回任何业务帧，继续等只是空转。而旧行为是返回空
+         * 端点进 [SessionController] 的 5 分钟保活，一档一小轮、四档二十分钟，实车往往
+         * 只有一次点击机会。
+         *
+         * 45 秒的取法：三档各一个 8 秒窗口（24s）+ 每档 2 次重传的 RTO（≈4s×2）留余量，
+         * 刚好够把三档都试完还多一点。**只看 ACK 水位，不看业务帧**——像奥迪/凯迪拉克
+         * 那种「ACK 正常、只是 0x4301 晚到」的车机水位一直在动，不会被这条判据误伤。
+         */
+        const val AVAILABILITY_FAST_RETRY_NANOS = 45_000_000_000L
+
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
 
@@ -604,6 +627,7 @@ class Iap2SenderSession(
                     )
                     dataFramesBeforeAvailability = channel.peerDataFrameCount
                     lastNudgePeerFrames = channel.peerFrameCount
+                    noteAvailabilitySendBegan()
                     sendAvailability()
                     availabilitySent = true
                     wifiConfiguration =
@@ -663,6 +687,7 @@ class Iap2SenderSession(
             dataFramesBeforeAvailability = channel.peerDataFrameCount
             // 催问的静默基线另用全部控制帧：它衡量的是「RFCOMM 上还有没有东西回来」。
             lastNudgePeerFrames = channel.peerFrameCount
+            noteAvailabilitySendBegan()
             sendAvailability()
         } else {
             log("iap2 0x4300 已在 0x5702 之后提前发出——此处不重发（0x4301 若早到已在暂存区）")
@@ -739,6 +764,55 @@ class Iap2SenderSession(
                         minOf(deadline, System.nanoTime() + startSessionWindow),
                     )
                 next = if (startSession == null) noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow) else null
+            }
+        }
+        // ---- 车机连链路 ACK 都不给：45 秒内主动重连换档，不再空等保活 ----
+        // 2026-11-11 21:12 BUICK_3767：首档 0x4300（seq=46）之后车机不再读任何帧，
+        // 后面两档全被丢弃（对端 ack 一直停在 43），而旧行为是返回空端点进 5 分钟保活——
+        // 一档一小轮、四档二十分钟，实车往往只有一次点击机会。
+        //
+        // 判据只用**链路 ACK 水位**：没追上我们最后发出的那一帧，就说明这一帧根本没被读走，
+        // 0x4301 不可能凭空冒出来。奥迪/凯迪拉克那种「ACK 毫秒级、0x4301 晚到 2 分 35 秒」的
+        // 车机水位一直是追上的，因此不会被这条误伤——这也正是不拿「零业务帧」当判据的原因。
+        if (startSession == null &&
+            declaresStartSession == true &&
+            wifiFromExchange == null &&
+            availabilityFirstSentAtNanos != 0L
+        ) {
+            val fastDeadline = availabilityFirstSentAtNanos + AVAILABILITY_FAST_RETRY_NANOS
+            if (!peerCaughtUpWithLastSent() &&
+                channel.isAlive &&
+                System.nanoTime() < fastDeadline
+            ) {
+                // 还没到 45 秒：把剩下的时间继续用来等 0x4301（车机也可能只是慢），到点再判。
+                startSession =
+                    expectOrNull(
+                        Iap2MessageIds.CARPLAY_START_SESSION,
+                        minOf(deadline, fastDeadline),
+                    )
+            }
+            if (startSession == null && !peerCaughtUpWithLastSent()) {
+                val waitedSeconds = (System.nanoTime() - availabilityFirstSentAtNanos) / 1_000_000_000
+                val acked = channel.peerAcknowledgedSequence()
+                // 「整轮零 ACK」与「先 ACK 后停读」是两种不同故障，日志必须分得开
+                val zeroAckNote =
+                    if (acked == null) "，整轮连一次 ACK 都没给过" else ""
+                val beforeNote =
+                    if (availabilityAckBaseline == null && acked != null) {
+                        "（0x4300 之前它一次 ACK 都没给过，之后才开始 ACK——只读走了前几帧）"
+                    } else {
+                        ""
+                    }
+                log(
+                    "iap2 ⚠ 0x4300 发出 ${waitedSeconds}s 后车机的链路 ACK 仍未追上我们最后一帧" +
+                        "（对端 ack=${acked ?: "无"}，我方最后 seq=${channel.lastSentSequence()}" +
+                        "$zeroAckNote$beforeNote）——它已经不读这条链路了，0x4301 不会来；" +
+                        "主动拆链重连（下一轮带着下一档报文体重试，不再空等 5 分钟保活）",
+                )
+                throw IOException(
+                    "0x4300 未被车机读走：${waitedSeconds}s 内链路 ACK 没有追上最后一帧" +
+                        "（对端 ack=${acked ?: "无"}）——控制会话已停摆，重连换档",
+                )
             }
         }
         if (startSession != null) {
@@ -1287,6 +1361,34 @@ class Iap2SenderSession(
         } else {
             sendFireAndForget(Iap2MessageIds.CARPLAY_AVAILABILITY, body)
         }
+    }
+
+    /**
+     * 对端 ACK 水位是否已经追上「我方最后发出的那一帧」。
+     *
+     * 追上 = 最后一帧被读走；没追上 = 车机已经不读这条链路，等 0x4301 只是空转
+     * （判据本身见 [AvailabilityAckProgress]）。
+     */
+    private fun peerCaughtUpWithLastSent(): Boolean =
+        AvailabilityAckProgress.caughtUp(
+            channel.peerAcknowledgedSequence(),
+            channel.lastSentSequence(),
+        )
+
+    /**
+     * 记下「首帧 0x4300 就此发出」的时刻与此刻的对端确认水位（快速重连判据的起点）。
+     *
+     * 只在**真要发**的时候记：`NONE` 档根本不发，若也记时，45 秒后就会拿一条从没发过
+     * 0x4300 的链路去判「车机没读我的帧」，把「只等车机自己开口」的机型误拆链。
+     */
+    private fun noteAvailabilitySendBegan() {
+        if (availabilityVariant == AvailabilityBodyMemory.Variant.NONE) {
+            availabilityFirstSentAtNanos = 0L
+            availabilityAckBaseline = null
+            return
+        }
+        availabilityFirstSentAtNanos = System.nanoTime()
+        availabilityAckBaseline = channel.peerAcknowledgedSequence()
     }
 
     /**

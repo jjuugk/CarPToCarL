@@ -9,6 +9,7 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 
@@ -56,12 +57,30 @@ class CarPlayCtrlAdvertiser(
         private const val TAG = "CTRL"
         private const val MAX_HEAD_BYTES = 16 * 1024
 
+        /** 上次监听端口的持久化键（见 [lastPort]）。 */
+        private const val PREF_NAME = "carplay-ctrl"
+        private const val KEY_LAST_PORT = "ctrl_port"
+
         /** 同一 SSID 的强制重注册冷却（见 ensureForNetwork）。 */
         private const val FORCE_COOLDOWN_MILLIS = 2_000L
     }
 
     private var serverSocket: ServerSocket? = null
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+
+    /**
+     * 上次成功监听的端口，**跨 stop()/start() 与进程重启复用**。
+     *
+     * 真 iPhone 在一台车机上的 ctrl 端口是稳定的：车机缓存了 mDNS 记录里的端口后，
+     * 每次 ctrl-int 探测都连那个端口。旧实现每次 `start()` 都 `ServerSocket(0)` 取随机端口，
+     * 2026-11-11 别克 3767 一轮里注册 10 次、端口从 39111 一路漂到 35521，每次都带
+     * 约 1 秒「旧广播已停、新广播未起」的空窗；缓存过旧记录的车机还会连到已关闭的端口上。
+     * （同一晚的成功轮只注册过 2 次。）绑定失败（端口被别的 App 占用）就退回随机端口。
+     */
+    private var lastPort: Int =
+        context
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_LAST_PORT, 0)
 
     @Volatile
     private var registered = false
@@ -193,7 +212,7 @@ class CarPlayCtrlAdvertiser(
     fun start(): Boolean {
         if (registered) return true
         return try {
-            val socket = ServerSocket(0)
+            val socket = openServerSocket()
             serverSocket = socket
             // 占位 MAC 时强制重试一次（启动连接即发布广播时，蓝牙栈可能还没就绪；
             // 广播内容错了车机就永远不会邀请我们）
@@ -220,11 +239,15 @@ class CarPlayCtrlAdvertiser(
             registered = true
             registeredAtMillis = SystemClock.uptimeMillis()
             registeredWithMac = mac
+            // rememberPort 会把 lastPort 改成这次的值，所以「是否复用」要在它之前判
+            val reusedPort = socket.localPort == lastPort
+            rememberPort(socket.localPort)
+            val portNote = if (reusedPort) "（复用上次端口）" else ""
             // 车机在 WiFi 上唯一可见的手机身份就是这几个 TXT 字段：占位 MAC / 版本不符都会
             // 直接导致「不发 ctrl 探测、0x4301 永不到达」，而此前日志完全看不到它们
             // （2026-10-19 奥迪 0.1.7 排查时无法归因），故每次注册都打一行。
             log(
-                "$TAG: 已监听 :${socket.localPort}，广播 $SERVICE_TYPE " +
+                "$TAG: 已监听 :${socket.localPort}$portNote，广播 $SERVICE_TYPE " +
                     "name=$SERVICE_NAME id=$mac srcvers=$SENDER_SRCVERS" +
                     if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（⚠ 占位 MAC：车机不会邀请）" else "",
             )
@@ -247,6 +270,43 @@ class CarPlayCtrlAdvertiser(
             serverSocket = null
             registered = false
             false
+        }
+    }
+
+    /**
+     * 绑定 ctrl 监听端口：**优先复用上次那个**，被占用才退回系统随机分配。
+     *
+     * 复用让「同一轮里反复注册广播」（PROBE 每次 stop→start）不再换端口，车机缓存的
+     * mDNS 记录始终有效；这也是对齐真 iPhone 的行为（一个会话里端口固定不变）。
+     */
+    private fun openServerSocket(): ServerSocket {
+        val preferred = lastPort
+        if (preferred in 1..65_535) {
+            try {
+                return ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(preferred))
+                }
+            } catch (error: Exception) {
+                log(
+                    "$TAG: 上次的端口 $preferred 复用失败" +
+                        "（${error.javaClass.simpleName}: ${error.message}）——改用系统分配",
+                )
+            }
+        }
+        return ServerSocket(0)
+    }
+
+    /** 记下本次实际监听的端口（端口没变就不落盘，免得每次注册都写一次 SharedPreferences）。 */
+    private fun rememberPort(port: Int) {
+        if (port <= 0 || port == lastPort) return
+        lastPort = port
+        runCatching {
+            context
+                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_LAST_PORT, port)
+                .apply()
         }
     }
 

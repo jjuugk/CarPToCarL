@@ -144,6 +144,19 @@ class Iap2LinkEngine(
     private var lastSentAcknowledged: Int? = null
     private var lastReceivedInOrder = 0
 
+    /**
+     * 对端**已确认到**的我方序号（null = 本轮它还一次都没 ACK 过任何帧）。
+     *
+     * 会话层用它回答一个很具体的问题：「我发出去的那一帧，车机到底读没读？」
+     * 2026-11-11 21:12 BUICK_3767：0x4300（seq=46）之后车机不再 ACK 任何帧
+     * （后续三档全被丢弃，ack 一直停在 43），我们却在死链上空等了 5 分钟保活。
+     * 有它就能判出「连链路 ACK 都没有」并立刻重连换档。
+     */
+    val acknowledgedSequence: Int? get() = lastSentAcknowledged
+
+    /** 我方最后发出的控制帧序号（与 [acknowledgedSequence] 一起判「那一帧到底被读走没」）。 */
+    val lastSentSequence: Int get() = sentSequence
+
     /** 本轮「窗口满、停发等 ACK」的起始时刻（null = 没在停）；只用于诊断日志去重。 */
     private var heldSinceMillis: Long? = null
 
