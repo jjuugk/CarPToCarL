@@ -276,9 +276,19 @@ object SessionController {
      * - 不崩 → 元凶就是这次重发，接着走音频优先（先 SETUP 音频、只 RECORD 一次）；
      * - 仍崩 → 与它无关，回到 `assertModes` 缺失 / 视频先于控制会话。
      *
-     * 代价：车机侧可能没声音（补这一步本来就是为出声）。
+     * **2026-11-11 恢复（P1 结论已出）**：宝马 MGU-81（vivo V2337A，20:05-20:11 五分工
+     * 会话）在「停发 `0xFFFA`」之后全程不崩，而同一次会话里画面正常、音频包 1400kbps
+     * 持续在发、采集电平 91%，**车机喇叭一点声音都没有**，且 `controlPort 6011` 全程
+     * ICMP 端口不可达（15 个同步包 14 次被拒）——正是「流后不补 RECORD → 接收端给端口
+     * 但不排播、也不为这条流开口」的教科书形态。也就是说 P1 的代价（无声）是全局的，
+     * 而它要排查的崩溃已经被停发 `0xFFFA` 解决，开关没有继续关着的理由。
+     *
+     * 恢复后仍需实车确认两件事：① 喇叭出声；② 车机不再在 RECORD 后 16~36ms 关通道。
+     * 若 ② 复发 → 说明这台接收端确实受不了「流后补 RECORD」，应转
+     * [StreamOrderMemory.Order.AUDIO_FIRST]（一次 RECORD 同时纳入视频+音频），
+     * 而不是再把它关掉。
      */
-    private const val POST_RECORD_REACTIVATE_ENABLED = false
+    private const val POST_RECORD_REACTIVATE_ENABLED = true
 
     /**
      * 「HID 报告映射不到 usage」最多打几条日志。

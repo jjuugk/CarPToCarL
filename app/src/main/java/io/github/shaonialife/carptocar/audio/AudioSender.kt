@@ -777,6 +777,22 @@ class AudioSender(
                     log("AUDIO: 同步包恢复（连续失败 $syncFailures 次后发出）——锚点重建")
                     syncFailures = 0
                 }
+                // 每 30 秒报一次「这条流的 controlPort 到底通没通」。
+                // 判据只有一条：`syncIcmpDeferrals` 是否在涨。
+                //  - 全程不涨 = 车机为这条流开了口，锚点有效（此时若仍无声，问题在别处）；
+                //  - 一路在涨 = 车机压根没为这条流监听 → 多半是「流加入会话后没被 RECORD
+                //    纳入」，接收端给了端口号但从不排播（2026-11-11 宝马 MGU-81 实证）。
+                if (syncSent % 30L == 0L) {
+                    log(
+                        "AUDIO: 同步锚点 30s 体检——已发 $syncSent 个，其中 $syncIcmpDeferrals 次" +
+                            "被 ICMP 拒绝" +
+                            if (syncIcmpDeferrals >= syncSent - 1) {
+                                "（车机未为这条流开口：检查 RECORD 是否纳入了音频流）"
+                            } else {
+                                "（车机已在监听 controlPort）"
+                            },
+                    )
+                }
                 return true
             } catch (error: Exception) {
                 if (attempt + 1 < SYNC_SEND_ATTEMPTS && isSyncIcmpRejection(error)) {
