@@ -59,6 +59,35 @@ class AvailabilityBodyMemoryTest {
         assertEquals("无", AvailabilityBodyMemory.silentDescription(null, key))
     }
 
+    /**
+     * 同一档「先记成功、后又记静默」时，成功记录不能把阶梯钉死。
+     *
+     * 2026-11-11 BUICK_3767 现场：下午用双标识体连通过一次（记成功），晚上连续五轮
+     * 零业务帧（同一档又记静默）。旧逻辑 `if (ok != null) return ok` 让这台车五个会话
+     * 发出的 0x4300 字节一模一样，阶梯一格都没走。
+     */
+    @Test
+    fun silentAfterSuccessDoesNotPinVariantForever() {
+        val key = "buick_3767 e2lb saic general motors pin_${System.nanoTime()}"
+        AvailabilityBodyMemory.recordSuccess(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+
+        // 这一档后来又被判静默（车机不再吃它）→ 必须让位给下一档，不能永远钉在双标识体
+        AvailabilityBodyMemory.recordSilent(
+            null,
+            key,
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            preferDual = true,
+        )
+        assertEquals(
+            AvailabilityBodyMemory.Variant.MODERN_NESTED,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
+        )
+    }
+
     @Test
     fun overIntervalVariantIsReportedForLogs() {
         val key = "$buick desc_${System.nanoTime()}"

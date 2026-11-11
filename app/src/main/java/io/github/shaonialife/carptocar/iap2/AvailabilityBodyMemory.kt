@@ -87,6 +87,8 @@ object AvailabilityBodyMemory {
      * 停在 [Variant.NONE]（不再打扰车机，只等它自己开口）——**除非车机自己声明
      * 能收 0x4300**（[acceptsAvailability]），那种情况下静默记忆不再阻断发送。
      *
+     * 「成功档」与「静默档」是同一档时（先成功后静默），按静默处理——详见方法内的注释。
+     *
      * @param preferDual 通用系（Cinemo 栈）优先试 [Variant.DUAL_GROUPS]——见 [GM_ORDER]
      * @param acceptsAvailability 车机在 0x1D01 的「可收清单」里是否声明了 0x4300。
      *   声明了却因历史静默记忆而一言不发，等于把**唯一的热点交换入口**关掉：
@@ -103,9 +105,15 @@ object AvailabilityBodyMemory {
         acceptsAvailability: Boolean = false,
     ): Variant {
         val ok = readOk(context, identityText)
-        // 成功档优先，含 NONE——它意味着「不发 0x4300 也拿到了 0x4301」，是有实证的结论。
-        if (ok != null) return ok
         val silent = readSilent(context, identityText)
+        // 成功档优先，含 NONE——它意味着「不发 0x4300 也拿到了 0x4301」，是有实证的结论。
+        // **但同一档后来又判过静默时不能再生效**：2026-11-11 BUICK_3767 就是这种状态
+        // （下午用双标识体连通过一次 → 记了成功；晚上连续五轮零业务帧 → 同一档又被记了
+        // 静默）。旧写法 `if (ok != null) return ok` 让成功记录压过静默记录，于是这台车
+        // 19:57 / 20:15 / 20:24 / 20:45 / 21:06 五个会话发出的 0x4300 字节一模一样，
+        // 阶梯一格都没走——上次把原因归到 `order.first()` 是错的，真正的钉子在这里。
+        // 两处矛盾的记录同时存在时，以「更近的一次判断」为准：静默更新，所以信静默。
+        if (ok != null && ok.name !in silent) return ok
         val order = if (preferDual) GM_ORDER else ORDER
         // 注意：NONE 也在 order 末尾，必须显式排除——否则「全静默」时 firstOrNull 会
         // 直接返回 NONE，下面那条 acceptsAvailability 的兜底永远走不到。
