@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.net
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import io.github.shaonialife.carptocar.util.Bg
 
 /**
  * mDNS 服务发现：找到接收端（车机/xcertplay）广播的 _airplay._tcp，
@@ -21,6 +22,11 @@ class CarPlayServiceBrowser(
         const val AIRPLAY_TYPE = "_airplay._tcp"
         const val CARPLAY_CTRL_TYPE = "_carplay-ctrl._tcp"
         private const val TAG = "NSD"
+
+        /** [restartDiscovery] 的尝试次数与时序：stop 是异步的，得等框架收尾。 */
+        private const val RESTART_ATTEMPTS = 5
+        private const val RESTART_FIRST_DELAY_MILLIS = 300L
+        private const val RESTART_RETRY_DELAY_MILLIS = 500L
     }
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -44,16 +50,48 @@ class CarPlayServiceBrowser(
     @Volatile
     private var resolved: NsdServiceInfo? = null
 
-    /** 新会话开始时清掉上一轮缓存（车机可能换了地址/端口）。 */
+    /**
+     * **跨轮保留**的最后一次解析结果（[resetCache] 不清它）。
+     *
+     * 为什么必须留（2026-11-11 宝马 iD8 实测）：`NsdManager` 不会为「已发现过」的服务
+     * 补发 `onServiceFound`。原来每轮新会话都 `resetCache()` 把 [resolved] 清空，再
+     * `start()` 又因为 `discovering=true` 直接返回「已在扫描中」，于是第 2 轮起永远
+     * 「未发现」——同一次连车里第 1 轮解析到 `172.16.222.97:7000` 成功，后续所有轮次
+     * 都退回网关兜底，而该车热点网关是占位值 `0.0.0.0`，等于整段时间一次真车机都没连过。
+     *
+     * 缓存可能过期（车机换 IP），所以只作**兜底候选**：[awaitEndpoint] 默认仍只返回
+     * 本轮新结果，只有显式 `allowStale = true` 的调用方才会拿到它；地址本身还会被
+     * `EndpointHosts` 排序去重、被主控按同网段筛选。
+     */
+    @Volatile
+    private var lastKnown: NsdServiceInfo? = null
+
+    @Volatile
+    private var lastKnownAtMillis: Long = 0L
+
+    /**
+     * 清「本轮新解析」标记。**故意不清 [lastKnown]**——清掉就再也回不来（见其注释）。
+     * 车机确实换了地址时，新结果会覆盖 [resolved]，[lastKnown] 随之更新。
+     */
     fun resetCache() {
         resolved = null
     }
 
+    /** 跨轮保留的最后一次解析结果（可能过期，供兜底候选使用）。 */
+    fun lastKnownEndpoint(): NsdServiceInfo? = lastKnown
+
     /**
      * 等已解析结果（轮询缓存）。返回 null = 超时仍未发现。
      * 调用方通常在等待期间继续做别的事（绑定网络、握手），不是纯粹的阻塞 sleep。
+     *
+     * @param allowStale 本轮没有新结果时是否回退到 [lastKnown]（跨轮缓存）。
+     *   只有「拿上轮地址试一下也比不试强」的端点解析该传 true；纯诊断性质的探测
+     *   （要判断车机此刻到底有没有起 AirPlay）必须保持 false，否则会误报「已就绪」。
      */
-    fun awaitEndpoint(timeoutMillis: Long): NsdServiceInfo? {
+    fun awaitEndpoint(
+        timeoutMillis: Long,
+        allowStale: Boolean = false,
+    ): NsdServiceInfo? {
         val deadline = android.os.SystemClock.uptimeMillis() + timeoutMillis
         while (android.os.SystemClock.uptimeMillis() < deadline) {
             resolved?.let { return it }
@@ -63,12 +101,27 @@ class CarPlayServiceBrowser(
                 return resolved
             }
         }
-        return resolved
+        resolved?.let { return it }
+        if (allowStale) {
+            lastKnown?.let {
+                val ageSec = (android.os.SystemClock.uptimeMillis() - lastKnownAtMillis) / 1000
+                log(
+                    "$TAG: 本轮无新结果——沿用上轮地址 ${it.host?.hostAddress}:${it.port}" +
+                        "（${ageSec}s 前解析；NsdManager 不会为已知服务补发回调）",
+                )
+                return it
+            }
+        }
+        return null
     }
 
     fun start(serviceType: String = AIRPLAY_TYPE) {
         if (discovering) {
-            log("$TAG: 已在扫描中")
+            // 不能只打「已在扫描中」就返回：discoverServices 在同一个 listener 上重复调用
+            // 会被框架拒掉，而已发现的服务也不会补发 onServiceFound。真停一次再重新
+            // discoverServices 才会重新枚举（2026-11-11 宝马 iD8 第 2 轮起全部「未发现」）。
+            log("$TAG: 已在扫描中——重启发现以重新枚举已知服务")
+            restartDiscovery(serviceType)
             return
         }
         log("$TAG: 开始发现 $serviceType")
@@ -82,6 +135,30 @@ class CarPlayServiceBrowser(
         runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
         discovering = registerDiscovery(serviceType)
         if (!discovering) log("$TAG: 发现仍未启动——本轮改为直连端点兜底")
+    }
+
+    /**
+     * 真重启发现：先 `stopServiceDiscovery`，再等框架收尾后重新 `discoverServices`。
+     *
+     * `stop` 是异步生效的，紧接着 `discoverServices` 会抛 "listener already in use"，
+     * 所以分多次重试（首次 300ms，之后每 500ms，共 5 次）。整个过程在后台线程，
+     * 不占会话线程——发现晚几百毫秒不影响本轮，端点解析另有缓存与邀请地址兜底。
+     */
+    private fun restartDiscovery(serviceType: String) {
+        discovering = false
+        runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+        Bg.run("nsd-restart") {
+            for (index in 0 until RESTART_ATTEMPTS) {
+                if (discovering) return@run
+                Thread.sleep(if (index == 0) RESTART_FIRST_DELAY_MILLIS else RESTART_RETRY_DELAY_MILLIS)
+                if (registerDiscovery(serviceType)) {
+                    discovering = true
+                    log("$TAG: 发现已重启（第 ${index + 1} 次尝试）")
+                    return@run
+                }
+            }
+            log("$TAG: 发现重启失败——本轮靠上轮缓存 / ctrl 邀请来源地址兜底")
+        }
     }
 
     /** 真正发起发现；任何异常都折成 false（不抛给调用方）。 */
@@ -165,7 +242,11 @@ class CarPlayServiceBrowser(
                     val accepted = accept(info)
                     log("$TAG: OK ${info.serviceName} -> $host:${info.port}${if (accepted) "" else "（非车机，忽略）"}")
                     if (txt.isNotEmpty()) log("$TAG: TXT $txt")
-                    if (accepted) resolved = info
+                    if (accepted) {
+                        resolved = info
+                        lastKnown = info
+                        lastKnownAtMillis = android.os.SystemClock.uptimeMillis()
+                    }
                     onEndpoint(info)
                 }
             }

@@ -344,6 +344,22 @@ class AirPlayClient(
             if (!ensureConnected(2_000)) {
                 // 端口连续拒绝：接收端根本还没起 AirPlay 服务。每 3 次给主控一次机会去「叫醒」
                 // 车机（重发 0x4e0e + 0x4300 + 重新公告 ctrl），否则整轮就只是空转日志。
+                //
+                // **前提是「我们真的在连车机」**：端点为空/只有占位地址（如热点网关下发
+                // `0.0.0.0` → 实际连 127.0.0.1）时失败的是我们自己，不是车机。把它计成
+                // 「车机 7000 连续拒绝」会让主控反复去叫醒一个活得好好的车机，还掩盖了
+                // 「我们根本没有地址」这个真问题（2026-11-11 宝马 iD8：四十多条连自己的
+                // ECONNREFUSED，被读成车机没起 AirPlay 服务）。
+                if (EndpointHosts.candidates(endpoint.ipAddresses).isEmpty()) {
+                    if (attempt == 1 || attempt % 5 == 0) {
+                        log(
+                            "AIRPLAY: 端点没有可用地址（${endpoint.ipAddresses.joinToString(" / ").ifEmpty { "空" }}）" +
+                                "——等待 mDNS / ctrl 邀请来源地址，本轮不计「端口拒绝」",
+                        )
+                    }
+                    Thread.sleep(2_000)
+                    continue
+                }
                 refusedStreak++
                 if (refusedStreak % PORT_REFUSED_WAKE_EVERY == 0) {
                     runCatching { onPortRefused?.invoke(refusedStreak) }
@@ -2129,7 +2145,12 @@ class AirPlayClient(
         /** 配对重试期间调用 [retryTick] 的间隔（次）：每轮回 2s，10 次 ≈ 每 20s 重新公告一次。 */
         private const val RETRY_TICK_ATTEMPTS = 10
 
-        /** 端口每连续拒绝这么多次，就请主控「叫醒」一次车机（约 6s 一次，主控另有 10s/3 次限流）。 */
+        /**
+         * 端口每连续拒绝这么多次，就请主控「叫醒」一次车机（约 6s 一次，主控另有 10s/3 次限流）。
+         *
+         * 只统计「有真实车机地址却连不上」的失败（见 [runPairingLoop] 里的候选判据）——
+         * 端点为空/只有 `0.0.0.0` 时不计数，否则会把「我们自己没地址」误诊成车机没起服务。
+         */
         private const val PORT_REFUSED_WAKE_EVERY = 3
 
         /**

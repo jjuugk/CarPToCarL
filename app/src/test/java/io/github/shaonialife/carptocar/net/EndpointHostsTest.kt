@@ -58,6 +58,35 @@ class EndpointHostsTest {
         assertEquals("fe80::1", ordered.first())
     }
 
+    /**
+     * 2026-11-11 宝马 iD8：车机热点 DHCP 下发的默认网关是占位值 `0.0.0.0`，
+     * 旧代码用 `contains('.')` 判定 IPv4 放行，端点里只剩它 → 每次连接都打
+     * `127.0.0.1:7000`（日志里四十多条 ECONNREFUSED），真正的车机一次都没被试过。
+     *
+     * 占位地址必须在候选这一层就被剔掉：`0.0.0.0` / `127.x` / `::` / `::1` 永远连不到车机，
+     * 放进去只会烧 2s 超时并污染「7000 连续拒绝」计数。链路本地 IPv6 不是占位，别误伤。
+     */
+    @Test
+    fun placeholderAddressesAreNeverCandidates() {
+        assertTrue(EndpointHosts.isPlaceholder("0.0.0.0"))
+        assertTrue(EndpointHosts.isPlaceholder("::"))
+        assertTrue(EndpointHosts.isPlaceholder("::1"))
+        assertTrue(EndpointHosts.isPlaceholder("127.0.0.1"))
+        assertTrue(EndpointHosts.isPlaceholder("::ffff:0.0.0.0"))
+        assertTrue(EndpointHosts.isPlaceholder(""))
+        assertFalse(EndpointHosts.isPlaceholder("fe80::1%wlan0"))
+        assertFalse(EndpointHosts.isPlaceholder("172.16.222.97"))
+
+        assertEquals(emptyList<String>(), EndpointHosts.candidates(listOf("0.0.0.0")))
+        assertEquals(
+            listOf("172.16.222.97", "fe80::1%wlan0"),
+            EndpointHosts.candidates(listOf("0.0.0.0", "172.16.222.97", "127.0.0.1", "fe80::1%wlan0")),
+        )
+        // 端点里只剩占位地址时，「没有可用地址」必须为真——这是 AirPlayClient 不把
+        // 失败计成「车机拒绝」的判据。
+        assertFalse(EndpointHosts.hasUsable(listOf("0.0.0.0", "::")))
+    }
+
     @Test
     fun ipv4NetworkFilterUses24Prefix() {
         assertTrue(EndpointHosts.isSameNetwork("10.174.189.1", "10.174.189.57"))

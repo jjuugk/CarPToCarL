@@ -117,7 +117,18 @@ class WifiCarPlayConnector(
             } catch (_: Exception) {
                 return emptyList()
             }
-        return gateways.filter { it.contains('.') } + gateways.filter { !it.contains('.') }
+        // 占位网关必须剔掉：部分车机热点把默认路由的网关填成 `0.0.0.0`（2026-11-11 宝马
+        // iD8 实测），`contains('.')` 判定会把它当合法 IPv4 放行，端点里于是只剩 `0.0.0.0`，
+        // 每次连接都打到 127.0.0.1。剔除后端点为空，主控会走 ctrl 邀请来源地址 / mDNS，
+        // 而不是拿一个「连自己」的地址空转。
+        val usable = gateways.filterNot { EndpointHosts.isPlaceholder(it) }
+        if (usable.size < gateways.size) {
+            log(
+                "WIFI: 忽略占位网关 ${gateways.filter { EndpointHosts.isPlaceholder(it) }.joinToString(" / ")}" +
+                    "（不是车机地址，热点 DHCP 没下发真实网关）",
+            )
+        }
+        return usable.filter { it.contains('.') } + usable.filter { !it.contains('.') }
     }
 
     /** [gatewayAddresses] 的首选（IPv4 优先）。 */

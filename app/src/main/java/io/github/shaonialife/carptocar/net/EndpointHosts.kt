@@ -62,7 +62,35 @@ object EndpointHosts {
     }
 
 
-    /** 排序 + 去重。空串/纯 scope 一律剔除。 */    fun candidates(addresses: List<String>): List<String> {
+    /**
+     * 占位地址 / 回环地址：`0.0.0.0`、`::`、`::ffff:0.0.0.0`、`127.x`、`::1`。
+     *
+     * **必须在「候选」这一步就剔掉**。2026-11-11 宝马 iD8 实测：车机热点 DHCP 把默认
+     * 网关填成占位值 `0.0.0.0`，`gatewayAddresses()` 放行后端点里只剩它，于是每次连接都
+     * 打到 `127.0.0.1:7000`——日志里四十多条
+     * `failed to connect to localhost/127.0.0.1 (port 7000) ECONNREFUSED`，
+     * 而真正在发 ctrl 邀请的车机 172.16.222.97 一次都没被试过。更坏的是主控把
+     * 「连自己失败」读成「车机 7000 连续拒绝」，反复去「叫醒」一个本来就活着的车机。
+     *
+     * 注意别顺手把链路本地 IPv6（`fe80::`）算成占位——奥迪 MIB3 只发这个，它是有效地址。
+     */
+    fun isPlaceholder(host: String): Boolean {
+        val base = stripScope(host).trim().lowercase()
+        if (base.isEmpty()) return true
+        if (base == "0.0.0.0" || base == "::" || base == "0:0:0:0:0:0:0:0") return true
+        if (base == "::1" || base == "0:0:0:0:0:0:0:1") return true
+        if (base == "::ffff:0.0.0.0" || base == "0000:0000:0000:0000:0000:ffff:0000:0000") return true
+        if (base.startsWith("127.")) return true
+        return false
+    }
+
+    /**
+     * 排序 + 去重。空串 / 纯 scope / 占位地址（见 [isPlaceholder]）一律剔除。
+     *
+     * 占位值收口在这里，而不是只堵网关一处：0x4301、mDNS、网关三条来源最后都汇进本函数，
+     * `0.0.0.0` 从任何一条进来都连不通，只会白烧一次 2s 超时再污染「连续拒绝」计数。
+     */
+    fun candidates(addresses: List<String>): List<String> {
         val seen = HashSet<String>()
         val out = ArrayList<String>(addresses.size)
 
@@ -72,6 +100,7 @@ object EndpointHosts {
             val base = stripScope(trimmed)
             if (base.isEmpty()) return
             if (!isIpv4(base) && !isIpv6(base)) return
+            if (isPlaceholder(trimmed)) return
             val key = base.lowercase()
             if (seen.add(key)) out += trimmed
         }

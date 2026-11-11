@@ -150,6 +150,15 @@ object SessionController {
     private const val ENDPOINT_RESOLVE_WAIT_MS = 3_000L
 
     /**
+     * ctrl 邀请来源地址作为端点候选的时效。
+     *
+     * 车机换网段/换热点后旧地址就废了，所以只认近期的邀请；同网段判定另由
+     * [invitePeerHost] 做（`EndpointHosts.isSameNetwork`）。10 分钟足够覆盖
+     * 「一轮连接失败→用户重试」的常见节奏，又不至于把上一次行程的地址拖进来。
+     */
+    private const val INVITE_PEER_TTL_MS = 10 * 60 * 1000L
+
+    /**
      * 明文 SETUP 被拒后「加密升级」补配对的上限（catplay handle_setup_result 路径）。
      * 只在实际被拒时才走到这里，正常车机零成本；不支持配对的接收端会在
      * pair-setup 收到 404/405/455 后立刻放弃，不会等满这个窗口。
@@ -3626,6 +3635,23 @@ object SessionController {
         }.getOrDefault(emptySet())
 
     /**
+     * 车机 ctrl 邀请的来源地址（若仍可信）。
+     *
+     * 三道关：不是占位/回环地址、是近 [INVITE_PEER_TTL_MS] 内收到的、与本机在同一网段。
+     * 三条都过才是「本车此刻的地址」；任何一条不成立就返回 null，让调用方走 mDNS/网关，
+     * 不要拿一个可能是上一台车的地址去连（连错机器的代价是整轮 120s 配对窗口空转）。
+     */
+    private fun invitePeerHost(): String? {
+        val peer = ctrlAdvertiser?.lastInvitePeer ?: return null
+        if (EndpointHosts.isPlaceholder(peer)) return null
+        val age = android.os.SystemClock.uptimeMillis() - (ctrlAdvertiser?.lastInvitePeerAtMillis ?: 0L)
+        if (age > INVITE_PEER_TTL_MS) return null
+        val local = wifiConnector?.localIpv4Address()
+        if (!EndpointHosts.isSameNetwork(peer, local)) return null
+        return peer
+    }
+
+    /**
      * 端点补全：优先吸收 mDNS 解析出的地址，再决定是否等待/兜底。
      *
      * 关键（2026-10-19 奥迪 4851 实车日志）：0x4301 只给了
@@ -3643,6 +3669,16 @@ object SessionController {
         if (cached != null) {
             effective = mergeBrowserEndpoint(effective, cached, source, needPort = effective.airPlayPort <= 0)
         }
+        // ctrl 邀请来源地址：车机亲手连过我们，这是链路里唯一「它活着且我们知道它在哪」
+        // 的一手证据。放在 mDNS 之后、网关之前——mDNS 是本轮新鲜解析，更可信；但当
+        // mDNS 已经失效（Android 不会为已知服务补发回调）而网关又是占位值 0.0.0.0 时，
+        // 这个地址就是救回整轮连接的唯一候选（2026-11-11 宝马 iD8 实测）。
+        invitePeerHost()?.let { peer ->
+            if (effective.ipAddresses.none { EndpointHosts.stripScope(it) == EndpointHosts.stripScope(peer) }) {
+                effective = effective.copy(ipAddresses = listOf(peer) + effective.ipAddresses)
+                appendLog(">>> [$source] 车机 ctrl 邀请来源地址 $peer 作为候选（车机刚从这里连过我们）")
+            }
+        }
         val needHost = !EndpointHosts.hasUsable(effective.ipAddresses)
         val needPort = effective.airPlayPort <= 0
         if (!needHost && !needPort) return effective
@@ -3652,8 +3688,12 @@ object SessionController {
         // 用常驻发现器的缓存（绑网时已开始后台发现，通常此时已命中）。
         // 此前现起一次发现并硬重试 3×6s：车机 mDNS 稳定时白等，不稳定时又拖满 18s。
         // 网段过滤（防误连同网 macOS 接收器）由 browser 的 accept 统一做。
+        //
+        // allowStale = true：本轮没新结果时沿用上一轮解析到的地址。NsdManager 不会为
+        // 已发现的服务补发 onServiceFound，缓存清掉就再也回不来（宝马 iD8 第 2 轮起
+        // 永远「未发现」）。旧地址可能过期，但作为候选试一次远好过退回占位网关。
         val info =
-            endpointBrowser?.awaitEndpoint(ENDPOINT_RESOLVE_WAIT_MS) ?: run {
+            endpointBrowser?.awaitEndpoint(ENDPOINT_RESOLVE_WAIT_MS, allowStale = true) ?: run {
                 // 兜底：热点场景车机 IP = 网关（Audi 实测 .1，但取网关更通用）。
                 // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
                 // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
@@ -4351,10 +4391,17 @@ object SessionController {
                                 )
                                 val invites = ctrlAdvertiser?.inviteCount ?: 0
                                 val found = endpointBrowser?.awaitEndpoint(0)
+                                val stale = if (found == null) endpointBrowser?.lastKnownEndpoint() else null
                                 appendLog(
                                     "AIRPLAY: 重试 #$attempt —— 已重新公告 ctrl；" +
                                         "车机邀请=$invites 次，mDNS _airplay._tcp=" +
-                                        (found?.let { "${it.host?.hostAddress}:${it.port}" } ?: "未发现"),
+                                        (
+                                            found?.let { "${it.host?.hostAddress}:${it.port}" }
+                                                // 本轮没新结果但上轮有：写出来，否则「未发现」会盖掉
+                                                // 「其实有旧地址可用」这个事实（宝马 iD8 第 2 轮起）。
+                                                ?: stale?.let { "本轮无新结果，沿用上轮 ${it.host?.hostAddress}:${it.port}" }
+                                                ?: "未发现"
+                                        ),
                                 )
                             },
                         ).also { created ->

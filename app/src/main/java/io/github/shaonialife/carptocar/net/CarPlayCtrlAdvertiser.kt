@@ -83,6 +83,27 @@ class CarPlayCtrlAdvertiser(
     }
 
     /**
+     * 最近一次 ctrl 邀请的**来源地址**（就是车机 IP），以及它的时刻。
+     *
+     * 为什么值得记：车机能发 `GET /ctrl-int/1/connect` 到我们的 ServerSocket，说明
+     * 「它活着 + 网段通 + 它知道我们在哪」——这是整条链路里唯一由车机亲手给出的
+     * **地址证据**，比 mDNS、比网关都更直接。2026-11-11 宝马 iD8 现场：mDNS 第 2 轮起
+     * 再也发现不到、热点网关是占位值 `0.0.0.0`，但同一时间车机连发了两次邀请
+     * （`172.16.222.97`）——有这么确凿的地址却一次都没用上。
+     *
+     * **跨轮保留**：上一轮邀请过的地址仍是本车的有效候选，主控会再按「同网段 +
+     * 时效」筛一遍（见 SessionController.invitePeerHost）。
+     */
+    @Volatile
+    var lastInvitePeer: String? = null
+        private set
+
+    /** [lastInvitePeer] 的采集时刻（`SystemClock.uptimeMillis()`）。 */
+    @Volatile
+    var lastInvitePeerAtMillis: Long = 0L
+        private set
+
+    /**
      * 收到车机 ctrl 邀请时回调（每次邀请都回调，跑在 ctrl 服务线程池）。
      *
      * 邀请是「车机已发现手机、AirPlay 窗口已开」的**唯一权威信号**：空闲态收到它
@@ -290,6 +311,12 @@ class CarPlayCtrlAdvertiser(
                         }?.substringAfter(':')
                         ?.trim()
                 inviteCount++
+                // 来源地址即车机 IP：记下来当端点候选（mDNS 失效时它是唯一活证据）。
+                // 占位值（0.0.0.0 / 127.x）不采信，那是本机网络栈自己，不是车机。
+                if (!EndpointHosts.isPlaceholder(peer)) {
+                    lastInvitePeer = peer.substringBefore('%')
+                    lastInvitePeerAtMillis = SystemClock.uptimeMillis()
+                }
                 log("$TAG: ✓ 车机 ctrl 邀请（第 $inviteCount 次，receiver=${receiverId ?: "?"}）——AirPlay 窗口已开启")
                 // 回调里可能再走一轮连接（会话失败后的恢复入口），异常不能打死应答
                 runCatching { onInvite?.invoke(receiverId) }
