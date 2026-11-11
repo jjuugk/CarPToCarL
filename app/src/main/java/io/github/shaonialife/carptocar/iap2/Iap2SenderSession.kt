@@ -1280,10 +1280,11 @@ class Iap2SenderSession(
             )
         val nextLabel =
             if (next == variant) {
-                // 车机声明可收 0x4300 时不会退到「不发」，形态原地不动——措辞别写成"下一轮改用"
+                // 理论上只在环里只剩一档时发生；措辞别写成"下一轮改用"
                 "仍用「${next.label}」（车机声明可收 0x4300，不退到不发）"
             } else {
-                "下一轮改用「${next.label}」"
+                "下一轮改用「${next.label}」" +
+                    if (acceptsAvailability) "（车机声明可收 0x4300——不会退到不发，改为几档轮流试）" else ""
             }
         log(
             "iap2 ⚠ 0x4300（${variant.label}）发出后 ${windowNanos / 1_000_000_000}s 内车机零**业务**帧" +

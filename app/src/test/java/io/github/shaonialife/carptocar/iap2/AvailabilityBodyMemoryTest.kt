@@ -138,11 +138,35 @@ class AvailabilityBodyMemoryTest {
             AvailabilityBodyMemory.Variant.NONE,
             AvailabilityBodyMemory.nextVariant(null, key, preferDual = true),
         )
-        // 可收清单里有 0x4300 → 必须回到首选形态继续发：不发等于关掉唯一的热点交换入口
+        // 可收清单里有 0x4300 → 必须继续发：不发等于关掉唯一的热点交换入口。
+        // 上一轮试的是 LEGACY_FLAT，环形往后挪一格正好回到首选档。
         assertEquals(
             AvailabilityBodyMemory.Variant.DUAL_GROUPS,
             AvailabilityBodyMemory.nextVariant(null, key, preferDual = true, acceptsAvailability = true),
         )
+    }
+
+    // ---- 2026-11-11 BUICK_3767（E2LB）：全静默时必须轮换，不能每轮重发同一份字节 ----
+
+    @Test
+    fun declaringReceiverRotatesFormsInsteadOfResendingSameBytes() {
+        val key = "buick_3767 e2lb saic general motors rot_${System.nanoTime()}"
+        // 三个会话都发了同一份「双标识体」——阶梯在这台车上从未走过一格
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS, preferDual = true)
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.MODERN_NESTED, preferDual = true)
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.LEGACY_FLAT, preferDual = true)
+
+        val seen = ArrayList<AvailabilityBodyMemory.Variant>()
+        var v = AvailabilityBodyMemory.nextVariant(null, key, preferDual = true, acceptsAvailability = true)
+        repeat(4) {
+            seen += v
+            v = AvailabilityBodyMemory.recordSilent(null, key, v, preferDual = true, acceptsAvailability = true)
+        }
+        // 永远不退到「不发」
+        assertEquals(0, seen.count { it == AvailabilityBodyMemory.Variant.NONE })
+        // 三档都轮到过，且是环形（第 4 轮回到第 1 轮那一档）
+        assertEquals(3, seen.toSet().size)
+        assertEquals(seen[0], seen[3])
     }
 
     @Test

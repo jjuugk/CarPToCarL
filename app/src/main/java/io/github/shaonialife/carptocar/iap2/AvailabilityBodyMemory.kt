@@ -21,6 +21,10 @@ import android.content.Context
  * 2026-11-07 增补 [Variant.DUAL_GROUPS]：同源工程 link_plus 给新版车机发的是「两段 group」
  * （有线标识 + 无线标识），而我们只发了其中一段。通用系（Cinemo 栈）先用它，见 [GM_ORDER]。
  *
+ * 2026-11-11 修正：车机在可收清单里声明了 0x4300 时，全静默的兜底从「回到首选形态」
+ * 改成**环形轮换**。原来的写法让「阶梯」在这类车上从未走过一格——BUICK_3767 三个会话
+ * 发出的 0x4300 字节完全一致，等于把唯一还能变的变量钉死了（详见 [nextVariant]）。
+ *
  * 判据不是「车机没发 0x4301」（这个家族从来不发），而是**它是否还回链路 ACK**：
  * 发出 0x4300 后整个等待窗口内对端零控制帧 = 该形态把这台车的会话打住了 → 记为
  * [recordSilent]，下一轮自动换下一档。换成能正常 ACK 的形态后立刻记住成功档
@@ -70,6 +74,9 @@ object AvailabilityBodyMemory {
     private const val KEY_OK = "ok_"
     private const val KEY_SILENT = "silent_"
 
+    /** 上一次实际试过的形态（轮换指针）。 */
+    private const val KEY_LAST = "last_"
+
     /** 车机身份 → 存储键（与 MFi 记忆共用同一套归一化规则）。 */
     fun receiverKey(identityText: String): String = MfiLengthMemory.receiverKey(identityText)
 
@@ -86,7 +93,8 @@ object AvailabilityBodyMemory {
      *   2026-11-10 BUICK_3138（Cinemo）就是这样卡死的——三种形态各被判过一次静默，
      *   此后每轮都不发 0x4300，车机也就永远不发 0x4301，链路每 40 秒被车机关一次。
      *   而同一份日志里「不发 0x4300」那一轮同样零业务帧，说明「零业务帧」是这台车的
-     *   常态、根本不能证明报文体有错。所以：它说能收，就照发（回到首选形态）。
+     *   常态、根本不能证明报文体有错。所以：它说能收，就照发——**并继续轮换形态**
+     *   （见 [nextVariant] 里的环形推进），不是每次都重发同一份字节。
      */
     fun nextVariant(
         context: Context?,
@@ -102,7 +110,17 @@ object AvailabilityBodyMemory {
         // 注意：NONE 也在 order 末尾，必须显式排除——否则「全静默」时 firstOrNull 会
         // 直接返回 NONE，下面那条 acceptsAvailability 的兜底永远走不到。
         val candidate = order.firstOrNull { it != Variant.NONE && it.name !in silent }
-        return candidate ?: if (acceptsAvailability) order.first() else Variant.NONE
+        if (candidate != null) return candidate
+        if (!acceptsAvailability) return Variant.NONE
+        // 全被判静默、但车机声明能收 0x4300：**不许停发，但也不许每次都发同一份**。
+        // 2026-11-11 BUICK_3767（E2LB）三个会话（19:57 / 20:15 / 20:24）发出的
+        // 0x4300 字节完全一样，因为这条兜底写死成 `order.first()`——所谓「阶梯」
+        // 在这台车上从未真正走过一格，等于把唯一还能变的变量钉死了。改成按上一轮
+        // 试过的档往后轮换一格（环形），三档轮流上，日志里能直接看出这一轮换了没有。
+        val ring = order.filter { it != Variant.NONE }
+        val last = readLast(context, identityText)
+        val idx = ring.indexOfFirst { it.name == last }
+        return if (idx < 0) ring.first() else ring[(idx + 1) % ring.size]
     }
 
     /** 这台车机是否被判过「某个形态静默」（日志用）。 */
@@ -139,24 +157,31 @@ object AvailabilityBodyMemory {
         if (variant == Variant.NONE) return Variant.NONE
         val key = receiverKey(identityText)
         val silent = readSilent(context, identityText) + variant.name
-        store(context, key, readOk(context, identityText), silent)
+        // 顺手把「刚试过的那档」记成轮换指针：全静默时下一轮从它往后挪一格。
+        store(context, key, readOk(context, identityText), silent, variant.name)
         return nextVariant(context, identityText, preferDual, acceptsAvailability)
     }
 
-    /** 记录「该形态车机正常应答（拿到了 0x4301 / 继续推进）」——成功即定档，清掉旧结论。 */
+    /** 记录「该形态车机正常应答（拿到了 0x4301 / 继续推进）」——成功即定档，清掉旧结论与轮换指针。 */
     fun recordSuccess(
         context: Context?,
         identityText: String,
         variant: Variant,
     ) {
         val key = receiverKey(identityText)
-        store(context, key, variant, emptySet())
+        store(context, key, variant, emptySet(), null)
     }
 
     // ---- 内部 ----
 
-    /** 无 Context 时的进程内记忆：key → (成功档, 静默档)。 */
-    private val memory = HashMap<String, Pair<String?, Set<String>>>()
+    /** 无 Context 时的进程内记忆。 */
+    private data class Entry(
+        val ok: String?,
+        val silent: Set<String>,
+        val last: String?,
+    )
+
+    private val memory = HashMap<String, Entry>()
 
     private fun readOk(
         context: Context?,
@@ -165,11 +190,23 @@ object AvailabilityBodyMemory {
         val key = receiverKey(identityText)
         val raw =
             if (context == null) {
-                synchronized(memory) { memory[key]?.first }
+                synchronized(memory) { memory[key]?.ok }
             } else {
                 prefs(context).getString(KEY_OK + key, null)
             }
         return ALL.firstOrNull { it.name == raw }
+    }
+
+    private fun readLast(
+        context: Context?,
+        identityText: String,
+    ): String? {
+        val key = receiverKey(identityText)
+        return if (context == null) {
+            synchronized(memory) { memory[key]?.last }
+        } else {
+            prefs(context).getString(KEY_LAST + key, null)
+        }
     }
 
     private fun readSilent(
@@ -179,7 +216,7 @@ object AvailabilityBodyMemory {
         val key = receiverKey(identityText)
         val raw =
             if (context == null) {
-                synchronized(memory) { memory[key]?.second }.orEmpty()
+                synchronized(memory) { memory[key]?.silent }.orEmpty()
             } else {
                 prefs(context)
                     .getString(KEY_SILENT + key, null)
@@ -197,10 +234,11 @@ object AvailabilityBodyMemory {
         key: String,
         ok: Variant?,
         silent: Set<String>,
+        last: String?,
     ) {
         val ordered = ALL.filter { it.name in silent }.map { it.name }
         if (context == null) {
-            synchronized(memory) { memory[key] = ok?.name to ordered.toSet() }
+            synchronized(memory) { memory[key] = Entry(ok?.name, ordered.toSet(), last) }
             return
         }
         prefs(context)
@@ -208,6 +246,7 @@ object AvailabilityBodyMemory {
             .apply {
                 if (ok != null) putString(KEY_OK + key, ok.name) else remove(KEY_OK + key)
                 if (ordered.isEmpty()) remove(KEY_SILENT + key) else putString(KEY_SILENT + key, ordered.joinToString(","))
+                if (last != null) putString(KEY_LAST + key, last) else remove(KEY_LAST + key)
             }.apply()
     }
 
