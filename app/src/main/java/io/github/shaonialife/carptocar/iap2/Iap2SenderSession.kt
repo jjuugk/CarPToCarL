@@ -161,6 +161,20 @@ class Iap2SenderSession(
     @Volatile
     private var awaitingStartSession = false
 
+    /**
+     * 首轮 0x4300 未换来 0x4301 时，是否已经试过「在同一链路重开一轮识别+认证」。
+     *
+     * iAP2 的无线流程里，手机首次连上某个配件、以及传输通道发生切换后，配件可以要求
+     * 重新认证（`0x1D00` 重开 IDPS 会话）。真 iPhone 在收到这种要求时会重跑
+     * 0x1D01 → 0x1D02 → 0xAA00 → 0xAA05，然后**重新宣告一次 0x4300**；只认第一轮的
+     * 实现会在这里停住——车机等我们重认证，我们等它发 0x4301，双方互相空等到拆链。
+     *
+     * 只做一次：车机若对重认证后的 0x4300 仍无反应，问题就不在认证轮次上，再重来
+     * 只会把 8 秒窗口和链路预算白白烧掉。
+     */
+    @Volatile
+    private var reauthenticationTried = false
+
     /** 已催问次数（用于限次与日志节流）。 */
     @Volatile
     private var nudgeCount = 0
@@ -332,6 +346,23 @@ class Iap2SenderSession(
 
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
+
+        /**
+         * 「重认证」每一步的等待上限（0x1D01 / 0xAA01 / 0x4301 各自的窗口）。
+         *
+         * 走这条路时第一轮 0x4300 已经空等了 8 秒，链路预算本来就紧（BUICK_3138 在
+         * 最后一帧后约 14 秒被车机断开）。0x1D01 与 0xAA01 在正常链路上都是毫秒级
+         * （日志：0x1d02 往返 5ms、0xaa01 在 100ms 内），3 秒已经非常宽裕。
+         */
+        const val REAUTH_STEP_TIMEOUT_MILLIS = 3_000L
+
+        /**
+         * 重认证里 MFi 挑战段的整体预算（多档长度共用一个）。
+         *
+         * 单档窗口是 3~6 秒，给 10 秒够跑完「记忆命中的第一档 + 一档兜底」。
+         * 再长就挤占后面等 0x4301 的时间——那才是这轮真正要拿到的结果。
+         */
+        const val REAUTH_CHALLENGE_BUDGET_MILLIS = 10_000L
 
         /** 催问间隔：太密会像洪水把车机打懵，太疏则复测一轮耗时长。 */
         const val NUDGE_INTERVAL_MILLIS = 15_000L
@@ -611,6 +642,22 @@ class Iap2SenderSession(
                     Iap2MessageIds.CARPLAY_START_SESSION,
                     minOf(deadline, System.nanoTime() + startSessionWindow),
                 )
+        }
+        // 首轮 0x4300 没换来 0x4301 —— 按「首次联网需重新认证」的约定，在本链路重开一轮
+        // 识别+认证，完成后重发一次 0x4300（只做一次，见 [reauthenticationTried]）。
+        // 只对「新协议 + 车机声明会发 0x4301 + 没有 0x5703」这条路上生效：奥迪那类旧协议
+        // 车机的 0x4300 本来就只是走个过场，给它重认证会白白打乱已经跑通的序列。
+        if (startSession == null &&
+            declaresStartSession == true &&
+            wifiFromExchange == null &&
+            !reauthenticationTried &&
+            channel.isAlive &&
+            remainingMillis(deadline) > REAUTH_STEP_TIMEOUT_MILLIS * 2
+        ) {
+            // 静默判定的基线要取「重发那一刻」的业务帧数：这之前可能还有问候的迟到 ACK
+            dataFramesBeforeAvailability = channel.peerDataFrameCount
+            lastNudgePeerFrames = channel.peerFrameCount
+            startSession = reauthenticateAndReannounce(deadline)
         }
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。
         // 老协议车机（Audi 等）对 0x4300 的处置不影响后续流程，不做阶梯，避免回归。
@@ -1014,6 +1061,62 @@ class Iap2SenderSession(
                     "——车机仍未下发 0x4301，链路正常保活中",
             )
         }
+    }
+
+    /**
+     * 首轮 `0x4300` 没换来 `0x4301` 时的第二轮：在**同一条蓝牙链路**上重开识别会话。
+     *
+     * 依据（协议要点 + iAP2 的会话模型）：手机**首次**在某个配件上启用无线 CarPlay 时，
+     * 配件收到 CarPlayAvailability 后可以要求重新认证——它重开 IDPS 会话，手机必须重跑
+     * `0x1D00 → 0x1D01 → 0x1D02 → 0xAA00 段 → 0xAA05`，然后**重新宣告一次 0x4300**，
+     * 配件才会下发 `0x4301`。只做第一轮的实现会精确地停在这里：车机等我们重认证、
+     * 我们等它发 0x4301，双方互相空等到拆链。
+     *
+     * 现场形态（2026-11-10 BUICK_3138 三轮日志）：问候逐条 ACK 到最后一条（ack=198），
+     * 之后 8 秒零业务帧、零 0x4301，最后一帧之后约 14 秒车机自己关 RFCOMM 重连。
+     *
+     * 与 [run] 里那段刻意保持同序、同报文体：重认证不是另一套流程，就是同一轮识别再做
+     * 一遍。任何一步没回都立刻收手（返回 null），把链路留给保活泵——这里抛异常等于用
+     * 「车机慢」的证据执行「链路坏了」的动作，会亲手掐掉还活着的 RFCOMM。
+     */
+    private fun reauthenticateAndReannounce(deadline: Long): Iap2Csm.Frame? {
+        reauthenticationTried = true
+        fun step(): Long = minOf(deadline, System.nanoTime() + REAUTH_STEP_TIMEOUT_MILLIS * 1_000_000L)
+        log(
+            "iap2 重认证：首轮 0x4300 未换来 0x4301 —— 按首次联网的重新认证要求，在本链路重开" +
+                "一轮 0x1d00 → 0x1d02 → 0xaa00 段 → 0xaa05，之后重发 0x4300",
+        )
+        send(Iap2MessageIds.START_IDENTIFICATION)
+        val identification = expectOrNull(Iap2MessageIds.IDENTIFICATION_INFORMATION, step())
+        if (identification == null) {
+            log("iap2 重认证放弃：0x1d00 发出后车机未回 0x1d01（链路存活=${channel.isAlive}）")
+            return null
+        }
+        logIdentification(identification)
+        send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
+        // 0xAA06 那一步的状态要重置：expectOrNull 用它判断「完整证书是否已经在要」
+        fullCertificateRequested = false
+        val wantsAuthSerial =
+            wifiGen == ReceiverProfile.WifiGen.NEW &&
+                accessoryDeclaresSend(Iap2MessageIds.MFI_AUTH_SERIAL_NUMBER) == true
+        if (wantsAuthSerial) {
+            send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE, Iap2Csm.param(0, ByteArray(0)))
+        } else {
+            send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+        }
+        if (expectOrNull(Iap2MessageIds.MFI_CERTIFICATE, step()) == null) {
+            log("iap2 重认证放弃：0xaa00 之后没等到 0xaa01（链路存活=${channel.isAlive}）")
+            return null
+        }
+        // 挑战可能要多档试（32/20/16B），窗口按整段给而不是单步 3 秒
+        val challengeDeadline = minOf(deadline, System.nanoTime() + REAUTH_CHALLENGE_BUDGET_MILLIS * 1_000_000L)
+        val legacyCar = LEGACY_RECEIVER_MARKERS.any { receiverIdentity.contains(it) }
+        runMfiChallenge(challengeDeadline, prefer20First = legacyCar, receiverKey = receiverIdentity)
+        send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
+        log("iap2 重认证完成（tx=0xaa05）——重发设备状态问候与 0x4300")
+        sendDeviceStateGreetings()
+        sendAvailability()
+        return expectOrNull(Iap2MessageIds.CARPLAY_START_SESSION, step())
     }
 
     /**

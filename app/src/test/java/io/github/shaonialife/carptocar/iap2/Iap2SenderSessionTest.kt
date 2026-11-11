@@ -200,6 +200,45 @@ class Iap2SenderSessionTest {
     }
 
     /**
+     * 首轮 0x4300 没换来 0x4301 时，必须在同一链路重开一轮识别+认证，再重发 0x4300。
+     *
+     * iAP2 的无线流程里，手机首次在某个配件上启用无线 CarPlay、以及传输通道切换后，
+     * 配件可以要求重新认证：它重开 IDPS 会话，手机要重跑 0x1D00 → 0x1D01 → 0x1D02 →
+     * 0xAA00 段 → 0xAA05，然后重新宣告 0x4300，配件才下发 0x4301。
+     *
+     * 不实现这一步的现场形态就是 2026-11-10 BUICK_3138：问候逐条 ACK 到最后一条、
+     * 0x4301 一帧不来、最后一帧后约 14 秒车机自己关 RFCOMM 重连。
+     */
+    @Test
+    fun firstAvailabilityWithoutAnswerTriggersReauthentication() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory =
+            MockAccessory(accessoryChannel, newProtocol = true, requireReauthentication = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:BE:EF:02",
+            )
+        // 整轮预算给足：首轮 0x4301 空等 8s，重认证再走一遍识别与 MFi
+        val endpoint = session.run(timeoutMillis = 30_000L)
+        assertEquals("MockAP", endpoint.ssid)
+        assertEquals("secret-passphrase", endpoint.passphrase)
+        assertEquals(49152, endpoint.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+        accessoryThread.join(2_000)
+    }
+
+    /**
      * 别克 E2LB（GM/Cinemo）在 0x1D01 的「会发」清单里列了 0xAA06 认证序列号——
      * 真 iPhone 是「先要序列号、拿到后再要完整证书」。旧实现直接要证书，车机那条
      * 「发序列号」的分支从头到尾没被触发过（2026-11-07 12:45 日志 6 轮里 0xaa06 零次）。
@@ -291,6 +330,14 @@ class Iap2SenderSessionTest {
          * modernBootstrap 分支都是这个次序（别克 E2LB 的发送清单里就列着 0xAA06）。
          */
         private val serialNumberFirst: Boolean = false,
+        /**
+         * 「首次联网要求重新认证」的车机：收到第一轮 0x4300 **不回** 0x4301，
+         * 等发送端重开识别会话（第二条 0x1D00）后走完认证，才吐出 0x4301。
+         *
+         * 对应 2026-11-10 BUICK_3138 实车形态：问候全部 ACK、0x4301 一帧不来、
+         * 最后一帧之后约 14 秒车机自己关 RFCOMM。
+         */
+        private val requireReauthentication: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -313,28 +360,30 @@ class Iap2SenderSessionTest {
             check(channel.awaitReady(10_000)) { "mock link not ready" }
 
             expect(Iap2MessageIds.START_IDENTIFICATION)
-            send(
-                Iap2MessageIds.IDENTIFICATION_INFORMATION,
-                Iap2Csm.string(0, "MockCarPlay"),
-                Iap2Csm.string(1, "MU-1"),
-                Iap2Csm.string(2, "Mock Manufacturer"),
-                if (audiDeclarations) {
-                    Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03))
-                } else if (newProtocol) {
-                    // 凯迪拉克 CT5（GM/Cinemo）实测清单：发 11 项含 0x4301、收 9 项，
-                    // 两个清单都不含 0x57xx —— AP 信息只能在 0x4301 里
-                    Iap2Csm.u16List(
-                        6,
-                        intArrayOf(0xaa06, 0x6800, 0x6802, 0x6803, 0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x5000, 0x5002, 0x4301),
-                    ) +
-                        Iap2Csm.u16List(
-                            7,
-                            intArrayOf(0x6801, 0x4c01, 0x4c04, 0x5001, 0x4e09, 0x4e0a, 0x4e0b, 0x4e0c, 0x4300),
-                        )
-                } else {
-                    ByteArray(0)
-                },
-            )
+            // 重认证时车机要把同一份识别信息再发一遍，先把 body 拼好复用
+            val identificationBody =
+                Iap2Csm.string(0, "MockCarPlay") +
+                    Iap2Csm.string(1, "MU-1") +
+                    Iap2Csm.string(2, "Mock Manufacturer") +
+                    (
+                        if (audiDeclarations) {
+                            Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03))
+                        } else if (newProtocol) {
+                            // 凯迪拉克 CT5（GM/Cinemo）实测清单：发 11 项含 0x4301、收 9 项，
+                            // 两个清单都不含 0x57xx —— AP 信息只能在 0x4301 里
+                            Iap2Csm.u16List(
+                                6,
+                                intArrayOf(0xaa06, 0x6800, 0x6802, 0x6803, 0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x5000, 0x5002, 0x4301),
+                            ) +
+                                Iap2Csm.u16List(
+                                    7,
+                                    intArrayOf(0x6801, 0x4c01, 0x4c04, 0x5001, 0x4e09, 0x4e0a, 0x4e0b, 0x4e0c, 0x4300),
+                                )
+                        } else {
+                            ByteArray(0)
+                        }
+                    )
+            send(Iap2MessageIds.IDENTIFICATION_INFORMATION, identificationBody)
             expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
 
             expect(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
@@ -408,7 +457,28 @@ class Iap2SenderSessionTest {
                 sendStartSession()
             }
 
-            if (newProtocol) {
+            if (newProtocol && requireReauthentication) {
+                // 首轮 0x4300 故意不回 0x4301：等发送端按「首次联网要重新认证」自己重开
+                // 识别会话。窗口比 8s 略短，免得把重认证的第一帧（0x1d00）当越权帧吞掉。
+                assertUndeclaredFramesCut(7_900)
+                expect(Iap2MessageIds.START_IDENTIFICATION)
+                send(Iap2MessageIds.IDENTIFICATION_INFORMATION, identificationBody)
+                expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
+                expect(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
+                send(Iap2MessageIds.MFI_CERTIFICATE, Iap2Csm.param(0, ByteArray(64) { it.toByte() }))
+                expect(Iap2MessageIds.MFI_REQUEST_CHALLENGE)
+                send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
+                expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
+                // 重认证完成后，发送端要重新走一遍问候再宣告 0x4300
+                expectAll(
+                    Iap2MessageIds.DEVICE_UUID_UPDATE,
+                    Iap2MessageIds.DEVICE_TIME_UPDATE,
+                    Iap2MessageIds.DEVICE_LANGUAGE_UPDATE,
+                    Iap2MessageIds.DEVICE_INFORMATION_UPDATE,
+                )
+                expect(Iap2MessageIds.CARPLAY_AVAILABILITY)
+                sendStartSession()
+            } else if (newProtocol) {
                 // 凯迪拉克的可收清单里没有 0x4E0D（无线可用）与 0x4E0E（传输标识）。
                 // 2026-11-10 起新协议车机走严格模式：两条都按声明裁掉。
                 // 判据见 assertUndeclaredFramesCut。
