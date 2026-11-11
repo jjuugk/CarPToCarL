@@ -39,4 +39,17 @@ class FeatureConfigTest {
         val text = asText(payload)
         assertTrue("关掉时仍要有这一项（值为 0）而不是消失", text.contains("CONTENT_ENCRYPTION"))
     }
+
+    @Test
+    fun contentEncryptionIsOffByDefault() {
+        // 2026-11-11 撤回：带上 1 之后引擎立刻发 65642 要 RSA/AES 密钥，我们不应答，
+        // 约 20 秒后整条会话被拆（CarLife+ 重启）且媒体音频再也不推 PCM。
+        // 默认必须是 0；要再打开只能显式传 true 并先实现密钥协商。
+        val payload = CarLifeProtocol.featureConfig()
+        val text = asText(payload)
+        val at = text.indexOf("CONTENT_ENCRYPTION")
+        assertTrue("清单里必须有这一项：$text", at >= 0)
+        val valueIndex = at + "CONTENT_ENCRYPTION".length + 1 // +1 跳过 field2 的 tag(0x10)
+        assertEquals("默认必须发 0（不加密）", 0, payload[valueIndex].toInt())
+    }
 }

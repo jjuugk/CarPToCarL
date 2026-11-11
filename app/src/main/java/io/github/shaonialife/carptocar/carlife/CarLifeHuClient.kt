@@ -383,6 +383,9 @@ class CarLifeHuClient(
     /** 已记录过的未处理控制消息 id（避免刷屏）。 */
     private val unknownLogged = HashSet<Int>()
 
+    /** 「引擎要求内容加密」这轮是否已经报过（每轮一条，见 [CarLifeProtocol.MD_ENCRYPT_SETUP]）。 */
+    private val encryptSetupLogged = AtomicBoolean(false)
+
     /**
      * 上一次引擎上报的模块状态（65574）。
      *
@@ -486,6 +489,7 @@ class CarLifeHuClient(
         firstInitSent = false
         featureConfigAcked = false
         settleReinitStarted.set(false)
+        encryptSetupLogged.set(false)
         // CONNECT_TYPE 探测：只在开启时复位成「待探测」，否则保持已完成态（不会被触发）。
         probeResults.clear()
         probeQueue = if (connectTypeProbe) probeCandidates(connectType) else IntArray(0)
@@ -775,7 +779,7 @@ class CarLifeHuClient(
                     log(
                         "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                             "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
-                            "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=1 内容加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
+                            "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
                     )
                     send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
                     Thread.sleep(1200)
@@ -894,6 +898,20 @@ class CarLifeHuClient(
 
             CarLifeProtocol.VIDEO_ENC_DONE -> {
                 sendEncoderInit()
+            }
+
+            CarLifeProtocol.MD_ENCRYPT_SETUP -> {
+                // 引擎要求内容加密（RSA/AES）握手。我们不实现密钥协商，收到它几乎等于
+                // 「这轮会话 20 秒后会被引擎拆掉 + 媒体音频永远不推」。默认已不下发
+                // CONTENT_ENCRYPTION，这一行是万一又被打开的判据（每轮只说一次）。
+                if (encryptSetupLogged.compareAndSet(false, true)) {
+                    val head = payload.take(32).joinToString(" ") { "%02x".format(it) }
+                    log(
+                        "CARLIFE: ⚠ 引擎要求内容加密握手 0x1006a (EncryptSetup) ${payload.size}B head=$head" +
+                            "——本实现没有 RSA/AES 密钥协商；实测带上 CONTENT_ENCRYPTION=1 时，" +
+                            "引擎约 20 秒后拆掉整条会话、CarLife+ 重启且媒体音频不再推流",
+                    )
+                }
             }
 
             else -> {
@@ -1334,7 +1352,7 @@ class CarLifeHuClient(
             log(
                 "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                     "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
-                    "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=1 内容加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
+                    "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
             )
         }
         send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))

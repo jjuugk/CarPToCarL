@@ -104,6 +104,18 @@ internal object CarLifeProtocol {
     const val MD_FEATURE_CONFIG_DONE = 65570
 
     /**
+     * 引擎要求「内容加密」握手（65642 / 0x1006A，RSA/AES 密钥交换的第一步）。
+     *
+     * **它是 98386 里 `CONTENT_ENCRYPTION=1` 的直接后果**（2026-11-11 18:48~18:53 四轮实证：
+     * 每轮都是「发 98386（带该项）→ 同一毫秒收到 65642」，而不带该项的 2026-10-26 日志里
+     * 一次都没出现）。我们没有任何密钥协商实现，收到之后引擎约 20 秒（实测 18.07s 起算于
+     * 98311、20.1s 起算于建链）就把四条通道全部拆掉并重启会话——
+     * 表现正是「CarLife 一直在重启」，同时媒体音频一个字节都不推（只有我们补的静音帧）。
+     * 所以默认**不再下发** `CONTENT_ENCRYPTION`，这行日志留着当判据。
+     */
+    const val MD_ENCRYPT_SETUP = 65642
+
+    /**
      * 手机端主动推送的媒体信息（歌名/歌手/专辑/封面/时长）。
      *
      * 命令号来自 `com.baidu.carlife.core.CommonParams.MSG_CMD_MEDIA_INFO = 0x00010035`，
@@ -352,17 +364,18 @@ internal object CarLifeProtocol {
      *  - `MEDIA_LYRIC_SUPPORT = 1` → 引擎 dispatch `carlife_other_media_lyric_support`，
      *    开启歌词支持。
      *
-     * 2026-11-08 补 `CONTENT_ENCRYPTION = 1`：参考实现 OcarPlay（CarPlay 接收端）的
-     * 同一份特征清单里带这一项，而我们此前只发了 `DISABLE_RESOLUTION_OPTION`。
-     * 它属于引擎侧「内容是否加密传输」的开关，缺失时部分车机固件会在建流后挑剔链路；
-     * 与 `DISABLE_RESOLUTION_OPTION` 同批下发，行为差异只能靠 A/B 观察，故单列一版。
+     * 2026-11-08 曾补 `CONTENT_ENCRYPTION = 1`（参考 OcarPlay 的同一份清单）。**2026-11-11 撤回**：
+     * 带上它以后引擎立刻发 65642（见 [MD_ENCRYPT_SETUP]）要 RSA/AES 密钥，我们不应答 →
+     * 约 20 秒后整条会话被引擎拆掉、CarLife+ 重启，且媒体音频再也不推 PCM。
+     * 同一台荣耀机 2026-10-26（不带该项）连续放音 6 分钟，媒体音频格式、PCM 都正常，
+     * 所以这是一条可 A/B 的单变量：默认关，需要时再显式打开。
      */
     fun featureConfig(
         connectType: Int = CONNECT_TYPE_WIFI,
         iFrameInterval: Int = I_FRAME_INTERVAL_DEFAULT,
         useVehicleResolution: Boolean = true,
         mediaLyricSupport: Boolean = true,
-        contentEncryption: Boolean = true,
+        contentEncryption: Boolean = false,
     ): ByteArray {
         val items = ArrayList<ByteArray>()
         items += pbString(1, "I_FRAME_INTERVAL") + pbVarint(2, iFrameInterval)
