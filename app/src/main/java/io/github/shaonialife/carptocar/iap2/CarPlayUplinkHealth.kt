@@ -27,11 +27,27 @@ object CarPlayUplinkHealth {
     var isDead: Boolean = false
         private set
 
-    /** 判死之后的重连间隔：够长到不再刷屏，又不至于车机重启后一直连不上。 */
+    /** 判死之后的**最长**重连间隔：够长到不再刷屏，又不至于车机重启后一直连不上。 */
     const val DEAD_RETRY_DELAY_MILLIS = 60_000L
+
+    /**
+     * 判死之后的重连间隔阶梯：20s → 30s → 45s → 60s（之后固定 60s）。
+     *
+     * 旧实现判死后一律 60 秒，实测代价太大：用户当场熄火锁车重启车机，只要赶上
+     * 刚睡下（最长 60s），这一轮就白等了。刚判死时先快一点复核（20s、30s），
+     * 连续多轮仍要不到 0x4301 才认定「它真的不会自己好」，逐步拉长到 60s。
+     *
+     * 下限仍是 20s：必须高于车机的 `mediaDisconnectTimeout`（15s，见
+     * `Iap2BluetoothClient.RETRY_DELAY_MILLIS`），否则每轮重连都会把车机那个
+     * 「设备已移除」计时器续上，它永远不重建会话。
+     */
+    private val DEAD_RETRY_LADDER_MILLIS = longArrayOf(20_000L, 30_000L, 45_000L, 60_000L)
 
     private var consecutiveMisses = 0
     private var everReachedStartSession = false
+
+    /** 判死之后已经睡过几轮（决定下一轮的间隔档位）。 */
+    private var deadSleeps = 0
 
     /** 本轮（或本轮之后）是否见过端口拒绝——由 AirPlay 侧 [notePortRefused] 置位。 */
     private var portRefusedSinceSuccess = false
@@ -41,6 +57,7 @@ object CarPlayUplinkHealth {
     fun noteStartSession() {
         everReachedStartSession = true
         consecutiveMisses = 0
+        deadSleeps = 0
         portRefusedSinceSuccess = false
         isDead = false
     }
@@ -84,8 +101,22 @@ object CarPlayUplinkHealth {
     fun reset() {
         everReachedStartSession = false
         consecutiveMisses = 0
+        deadSleeps = 0
         portRefusedSinceSuccess = false
         isDead = false
+    }
+
+    /**
+     * 判死状态下本轮结束后该睡多久（阶梯见 [DEAD_RETRY_LADDER_MILLIS]）。
+     *
+     * 每调用一次推进一档，到顶后固定 [DEAD_RETRY_DELAY_MILLIS]；一旦拿到 `0x4301`
+     * 或用户重新点连接就回到最短档——「车机刚重启好」这种情形应该被尽快接上。
+     */
+    @Synchronized
+    fun nextDeadRetryDelayMillis(): Long {
+        val delay = DEAD_RETRY_LADDER_MILLIS[deadSleeps.coerceIn(0, DEAD_RETRY_LADDER_MILLIS.size - 1)]
+        if (deadSleeps < DEAD_RETRY_LADDER_MILLIS.size) deadSleeps += 1
+        return delay
     }
 
     /** 给日志/提示用的一句话状态。 */

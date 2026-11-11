@@ -49,6 +49,7 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
+import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -114,6 +115,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var readyCount: TextView
     private lateinit var ssidInput: EditText
     private lateinit var macInput: EditText
+    /** 测试台接收端地址（IP:端口）——见 [SessionController.connectTestSink]。 */
+    private lateinit var mockSinkInput: EditText
     private lateinit var tvMacHint: TextView
     private lateinit var btDesc: TextView
     private lateinit var btBadge: TextView
@@ -466,6 +469,10 @@ class MainActivity : AppCompatActivity() {
      * （都带应用名），看起来就像「一直提示要与 CarPToCarL 配合的设备」。
      */
     private fun ensureBluetoothReady(onReady: () -> Unit) {
+        // 体检先落日志：它是**唯一**在「被权限拦住、根本没走到连接流程」时也会执行的位置，
+        // 那一轮日志里必须留下全景（2026-11-11 别克：位置服务关着却没有任何记录）。
+        // 只读，不影响下面的引导逻辑。
+        ConnectionPreflight.log(this) { line -> log(line) }
         val missing = requiredConnectionPermissions()
         if (missing.isNotEmpty()) {
             if (connectionPermissionDenied.get()) {
@@ -732,6 +739,7 @@ class MainActivity : AppCompatActivity() {
         readyCount = findViewById(R.id.readyCount)
         ssidInput = findViewById(R.id.ssidInput)
         macInput = findViewById(R.id.macInput)
+        mockSinkInput = findViewById(R.id.mockSinkInput)
         tvMacHint = findViewById(R.id.tvMacHint)
         btDesc = findViewById(R.id.btDesc)
         btBadge = findViewById(R.id.btBadge)
@@ -1111,6 +1119,31 @@ class MainActivity : AppCompatActivity() {
             }
             // 保存/清除都直接影响「启动连接」门禁，立刻同步提示行与按钮状态
             refreshMacGate()
+        }
+
+        // 测试台直连（2026-11-11）：把 PC 上跑的 tools/mock/mock_carplay_sink.py 当成
+        // 「车机」，只走 AirPlay（pair-verify → SETUP → 推流），用来验证**我方发送端**
+        // 是否健全。这条路径不碰蓝牙，所以不受「本机蓝牙地址未填」那道门禁限制。
+        mockSinkInput.setText(
+            getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getString("mock_sink_host", "")
+                .orEmpty(),
+        )
+        findViewById<TextView>(R.id.btnConnectMock).setOnClickListener {
+            val raw = mockSinkInput.text.toString().trim().replace('：', ':')
+            val host = raw.substringBeforeLast(':', raw)
+            val port = if (raw.contains(':')) raw.substringAfterLast(':').toIntOrNull() else 7000
+            if (host.isBlank() || port == null || port !in 1..65_535) {
+                snack("格式要写成 IP:端口，例如 192.168.1.11:7000")
+                log("测试台: 地址无效「$raw」——需要 IP:端口")
+                return@setOnClickListener
+            }
+            getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .edit()
+                .putString("mock_sink_host", raw)
+                .apply()
+            snack("测试台直连 $host:$port")
+            SessionController.connectTestSink(this, host, port)
         }
 
         // 「画质增强」（写 CarLife 官方调试配置）入口已按用户要求从首页移除：

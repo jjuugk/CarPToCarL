@@ -69,13 +69,18 @@ class Iap2BluetoothClient(
         private const val RETRY_DELAY_MILLIS = 16_000L
 
         /**
-         * 连续失败（含「连上即被关」）时的退避阶梯：16s → 20s → 30s，之后固定 30s。
+         * 连续失败（含「连上即被关」）时的退避阶梯：16s → 20s → 24s → 30s → 45s → 60s，
+         * 之后固定 60s。
          *
          * 起点就从 16 秒开始（见 [RETRY_DELAY_MILLIS]），别再退回秒级：密集探测既
          * 无用、又会不断把车机的「设备移除」计时器续上。本机的 …cafe 监听一直在跑，
          * 车机想连随时能连，放长间隔不会错过什么。
+         *
+         * 档位以前是 16/20/30 三档就跳到顶，坏目标上「一轮快一轮慢」反差太大；
+         * 参考实现（link_plus `Iap2RetryBackoff`）用 3s 起步的倍增阶梯，那个下限
+         * 在我们这条链路上会踩 15 秒计时器，故保留 16s 起步、把中间档补细。
          */
-        private val RETRY_BACKOFF_MILLIS = longArrayOf(16_000L, 20_000L, 30_000L)
+        private val RETRY_BACKOFF_MILLIS = longArrayOf(16_000L, 20_000L, 24_000L, 30_000L, 45_000L, 60_000L)
 
         /** 会话存活不足这个时长就当作「无效轮」（车机连上就关），计入退避。 */
         private const val SESSION_USEFUL_MILLIS = 3_000L
@@ -585,14 +590,14 @@ class Iap2BluetoothClient(
             val aliveMillis = android.os.SystemClock.uptimeMillis() - sessionStartedAt
             if (CarPlayUplinkHealth.isDead) {
                 // 车机端 CarPlay 已退出：蓝牙侧它照常识别、照常 ACK，只有 0x4301 永远不来。
-                // 这时 16 秒一轮的密集重连既刷屏，也可能打断车机正在进行的恢复，
-                // 拉到 60 秒一轮静候它自己好（用户重启车机后下一轮即可恢复）。
+                // 间隔不再一律 60 秒，而是 20→30→45→60 的阶梯：用户当场重启车机时不必
+                // 白等到下一分钟（CarPlayUplinkHealth.nextDeadRetryDelayMillis）。
+                val deadDelay = CarPlayUplinkHealth.nextDeadRetryDelayMillis()
                 log(
-                    "BT-C: 车机端 CarPlay 已退出——本轮结束，" +
-                        "${CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS / 1000} 秒后再探" +
-                        "（请重启车机；车机恢复后本机会自动接上）",
+                    "BT-C: 车机端 CarPlay 已退出——本轮结束，${deadDelay / 1000} 秒后再探" +
+                        "（${CarPlayUplinkHealth.describe()}；车机重启好会自动接上）",
                 )
-                sleepBackoff(CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS)
+                sleepBackoff(deadDelay)
             } else if (aliveMillis < SESSION_USEFUL_MILLIS) {
                 failStreak++
                 sleepBackoff(backoffMillis(failStreak))
@@ -772,7 +777,8 @@ class Iap2BluetoothClient(
                 log(
                     "BT-C: ⚠ 判定「车机端 CarPlay 已退出」——${CarPlayUplinkHealth.describe()}。" +
                         "这不再是「连不上」：车机的 AirPlay/WiFi 组件没起来，蓝牙侧它照常应答。" +
-                        "重连放慢到 ${CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS / 1000} 秒一轮，" +
+                        "重连先按 20/30/45 秒复核、多轮不过才放到 " +
+                        "${CarPlayUplinkHealth.DEAD_RETRY_DELAY_MILLIS / 1000} 秒一轮，" +
                         "请**重启车机**（或熄火重上电）后再试；车机恢复后本机会自动接上。",
                 )
             }

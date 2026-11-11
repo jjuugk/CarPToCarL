@@ -91,4 +91,31 @@ class CarPlayUplinkHealthTest {
         assertFalse(CarPlayUplinkHealth.finishRound(gotStartSession = false))
         assertEquals("尚未在这台车机上建立过无线会话", CarPlayUplinkHealth.describe())
     }
+
+    @Test
+    fun deadRetryLadderStartsFastThenCapsAtSixty() {
+        // 判死后不再一律 60 秒：刚判死时先 20/30/45 快速复核，多轮不过才放到 60。
+        assertEquals(20_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+        assertEquals(30_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+        assertEquals(45_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+        assertEquals(60_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+        assertEquals(60_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+    }
+
+    @Test
+    fun deadRetryNeverGoesBelowCarDisconnectTimeout() {
+        // 车机断开后要满 15 秒才判成「设备已移除」；任何一档都不能低于它，
+        // 否则每轮重连都会把那个计时器续上，车机永远不重建会话。
+        repeat(8) {
+            assertTrue(CarPlayUplinkHealth.nextDeadRetryDelayMillis() > 15_000L)
+        }
+    }
+
+    @Test
+    fun startSessionResetsDeadLadderToFastestStep() {
+        repeat(3) { CarPlayUplinkHealth.nextDeadRetryDelayMillis() }
+        // 车机好了之后再坏，应该重新从最短档开始复核
+        CarPlayUplinkHealth.noteStartSession()
+        assertEquals(20_000L, CarPlayUplinkHealth.nextDeadRetryDelayMillis())
+    }
 }

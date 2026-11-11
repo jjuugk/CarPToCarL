@@ -55,6 +55,7 @@ import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
+import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
@@ -1887,6 +1888,10 @@ object SessionController {
         wifiWatchdog?.start()
         // 报文录制分界：一次点击 = 一段独立对话，事后按这行切分
         SessionTrace.sessionStart("用户点击启动连接")
+        // 连接前体检（只读，不弹框）：与 MainActivity 的前置检查共用一个入口，
+        // 同类结论 20 秒内只留一行摘要。这一轮日志里因此能直接看到「位置服务开没开」
+        // 「本机蓝牙地址是不是占位」这些以前只能靠猜的东西。
+        ConnectionPreflight.log(context) { line -> appendLog(line) }
         // 新一次用户点击 = 新的 5 分钟等待预算（断链重连不再重置，见 pendingWaitBudgetStartedAt）
         pendingWaitBudgetStartedAt = 0L
         pendingWaitGaveUp = false
@@ -1922,9 +1927,71 @@ object SessionController {
         startAudioProfileGuard()
     }
 
+    /**
+     * 测试台直连：把 PC 上跑的 `tools/mock/mock_carplay_sink.py` 当成一台「车机」，
+     * 跳过蓝牙 iAP2 与热点入网，直接走 AirPlay 配对 → SETUP → 推流。
+     *
+     * 为什么需要（2026-11-11）：别克那几轮每次排障都要上车、等车机、还要被车机的
+     * 状态干扰；而「我方发送端是否健全」本来就与车机无关。有了这条入口，怀疑手机侧
+     * 时在办公室用一台电脑就能钉死——日志里 `[测试台]` 这一段不含任何车机噪声。
+     *
+     * 前提：手机与那台电脑在同一个局域网。这里只把进程绑到当前 WiFi（[WifiCarPlayConnector.adoptCurrentWifi]），
+     * **不加入任何热点**——测试台既不发 0x4301，也没有热点可入。
+     *
+     * 不做的事：不注册 ctrl 广播、不跑蓝牙、不写 lastGoodEndpoint（那条快照只给真车机用，
+     * 写进去会让后续「自动重绑」去连一个不存在的热点）。
+     */
+    fun connectTestSink(
+        context: Context,
+        host: String,
+        port: Int,
+    ) {
+        val targetHost = host.trim()
+        if (targetHost.isEmpty() || port !in 1..65_535) {
+            appendLog("测试台: 地址无效——需要「IP:端口」，例如 192.168.1.11:7000（当前输入 \"$host:$port\"）")
+            return
+        }
+        ensure(context)
+        connectCancelled = false
+        sessionWanted = true
+        compatSuppressed = false
+        idleListening = false
+        pendingWaitBudgetStartedAt = 0L
+        pendingWaitGaveUp = false
+        phaseHint = "测试台：直连 $targetHost:$port…"
+        SessionTrace.sessionStart("测试台直连")
+        CarPlayService.start(context)
+        Bg.run("test-sink-connect") {
+            val bound = wifiConnector?.adoptCurrentWifi()
+            if (bound == null) {
+                appendLog(
+                    "测试台: ⚠ 没绑定到任何 WiFi——测试台直连要求手机与那台电脑在同一局域网。" +
+                        "请先连上同一个 WiFi 再点一次",
+                )
+                return@run
+            }
+            appendLog(
+                "测试台: 目标 $targetHost:$port（已绑定当前 WiFi，跳过蓝牙与热点入网）" +
+                    "——接下来是纯 AirPlay：OPTIONS → /info → pair-verify → SETUP → 推流",
+            )
+            val endpoint =
+                Iap2SenderSession.CarPlayEndpoint(
+                    ssid = CURRENT_WIFI_LABEL,
+                    passphrase = "",
+                    channel = 0,
+                    securityType = 0,
+                    airPlayPort = port,
+                    deviceIdentifier = null,
+                    publicKey = null,
+                    sourceVersion = null,
+                    ipAddresses = listOf(targetHost),
+                )
+            onCarPlayEndpoint(endpoint, "测试台", onCurrentWifi = true)
+        }
+    }
+
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
-    fun disconnect(context: Context) {
-        val hadProjection = CarPlayService.mediaProjection != null
+    fun disconnect(context: Context) {        val hadProjection = CarPlayService.mediaProjection != null
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
         // 兼容模式的常开监听也一并停在这里；记下「用户叫停过」，
