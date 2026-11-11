@@ -140,6 +140,16 @@ object SessionController {
     private const val PROBE_MAX_TIMES = 6
 
     /**
+     * 「SSID 读不到、但手机确实挂在某条 WiFi 上」时用来标识那条网络的标签。
+     *
+     * 只在日志与本轮内部流转用，**永远不要拿它去入网**（它不是真 SSID，
+     * `joinCarWifiSpecifier` 会一直失败）。配套开关是
+     * `onCarPlayEndpoint(..., onCurrentWifi = true)`：告诉交接流程「网络已经绑好了，
+     * 别再走加入热点那一段」。
+     */
+    private const val CURRENT_WIFI_LABEL = "(当前WiFi)"
+
+    /**
      * 等车机 ctrl 邀请的上限（事件驱动，收到即走）。
      * catplay 以邀请为连接触发点；实测邀请在 ctrl 重注册后 ~1.0-1.3s 到达。
      * 车机不发邀请时（旧机型）由「已发现 _airplay._tcp」提前放行，最坏也只等这么久。
@@ -2746,39 +2756,58 @@ object SessionController {
      * 绑定当前 WiFi 是必须的：mDNS 组播跟随进程默认网络，手机同时挂着蜂窝/另一条 WiFi 时
      * 不绑就发不出去，也收不到应答。
      *
-     * @return true = 已发现并放进浏览器的缓存（调用方随后合成端点即可）
+     * @param ssid 真实 SSID；null/空 = 读不到（没给「附近的设备 / 位置」权限），此时只按
+     *   「当前挂着的那条 WiFi」绑定，探测照做——不能因为读不到名字就整段跳过。
+     * @return 发现的 `_airplay._tcp`；null = 没绑定成功或车机没起 AirPlay 服务
      */
     private fun probeAirplayOnCurrentWifi(
-        ssid: String,
+        ssid: String?,
         attempt: Int,
-    ): Boolean {
-        val connector = wifiConnector ?: return false
-        appendLog("PROBE #$attempt: 在 \"$ssid\" 里找车机 _airplay._tcp（最多等 ${PROBE_TIMEOUT_MS / 1000}s）")
-        // 只绑「确实连在目标 SSID 上」的那条网络：以前这里是 bindCurrentWifiBlocking
-        // （泛匹配 TRANSPORT_WIFI），手机同时挂着家里 WiFi 时会绑错，mDNS 自然什么也发现不了。
-        val bound = connector.awaitAssociation(ssid, 4_000L) { connectCancelled }
+    ): android.net.nsd.NsdServiceInfo? {
+        val connector = wifiConnector ?: return null
+        val label = if (ssid.isNullOrEmpty()) CURRENT_WIFI_LABEL else "\"$ssid\""
+        appendLog("PROBE #$attempt: 在 $label 里找车机 _airplay._tcp（最多等 ${PROBE_TIMEOUT_MS / 1000}s）")
+        // 绑定：知道 SSID 就按 SSID 精确绑定（手机双归属时泛匹配会绑到家里那条）；
+        // 读不到 SSID 也不能跳过——那等于把「车机到底有没有起 AirPlay」这个问题
+        // 从日志里彻底抹掉（2026-11-11 别克 E2LB：网关 10.128.57.1，整轮 0 次探测）。
+        val bound =
+            if (ssid.isNullOrEmpty()) {
+                connector.adoptCurrentWifi()?.also {
+                    appendLog(
+                        "PROBE #$attempt: 已绑定当前 WiFi（本机 ${connector.localIpv4Address() ?: "无地址"}" +
+                            " / 网关 ${connector.gatewayAddress() ?: "无"}）",
+                    )
+                }
+            } else {
+                // 只绑「确实连在目标 SSID 上」的那条网络：以前这里是 bindCurrentWifiBlocking
+                // （泛匹配 TRANSPORT_WIFI），手机同时挂着家里 WiFi 时会绑错，mDNS 自然什么也发现不了。
+                connector.awaitAssociation(ssid, 4_000L) { connectCancelled }
+            }
         if (bound == null) {
-            appendLog("PROBE #$attempt: 绑定当前 WiFi 失败——跳过本轮探测（蓝牙保活不受影响）")
-            return false
+            appendLog("PROBE #$attempt: 绑定当前 WiFi 失败（手机没挂在任何 WiFi 上）——跳过本轮探测（蓝牙保活不受影响）")
+            return null
         }
         // 广播跟着同一条网络走，车机才可能发出 ctrl 邀请。
-        ctrlAdvertiser?.ensureForNetwork(ssid, force = true, network = bound)
+        // **这一步比 mDNS 结果更关键**：车机要看到 `_carplay-ctrl._tcp` 才会下发 0x4301，
+        // 而旧实现在 SSID 读不到时连广播都没挪过来，等于双方互相等（别克 E2LB 5 分钟空等）。
+        ctrlAdvertiser?.ensureForNetwork(ssid ?: CURRENT_WIFI_LABEL, force = true, network = bound)
         endpointBrowser?.resetCache()
         endpointBrowser?.start()
         val info = endpointBrowser?.awaitEndpoint(PROBE_TIMEOUT_MS)
         if (info == null) {
             endpointBrowser?.stop()
             appendLog(
-                "PROBE #$attempt: \"$ssid\" 里 ${PROBE_TIMEOUT_MS / 1000}s 内没有 _airplay._tcp ——" +
-                    "车机的 AirPlay 接收端没起来（不是我们 iAP2 帧的问题）；请确认车机上已打开无线 CarPlay / 点过本机图标",
+                "PROBE #$attempt: $label 里 ${PROBE_TIMEOUT_MS / 1000}s 内没有 _airplay._tcp ——" +
+                    "车机的 AirPlay 接收端没起来（不是我们 iAP2 帧的问题）；" +
+                    "请确认车机上已打开无线 CarPlay / 点过本机图标",
             )
-            return false
+            return null
         }
         appendLog(
             "PROBE #$attempt: ✓ 发现 _airplay._tcp ${info.host?.hostAddress}:${info.port}" +
                 "（${info.serviceName}）——车机 AirPlay 已就绪",
         )
-        return true
+        return info
     }
 
     /**
@@ -2845,7 +2874,8 @@ object SessionController {
                             when {
                                 !wifiEnabled -> "已关闭（请打开——车机看不到手机就不会下发凭据）"
                                 currentSsid.isNullOrEmpty() ->
-                                    "已开，SSID 读不到（未连网络，或缺定位/附近设备权限）"
+                                    "已开，SSID 读不到（未连网络，或缺定位/附近设备权限）" +
+                                        "——仍在按当前 WiFi 探测 AirPlay"
                                 else -> "\"$currentSsid\""
                             },
                     )
@@ -2857,9 +2887,15 @@ object SessionController {
                 // 「车机到底有没有把 AirPlay 服务起起来」这个问题在日志里完全查不到。
                 // 这里每 30s 在当前 WiFi 里找一次：找到就直接走 AirPlay（不依赖 0x4301），
                 // 找不到也至少留下一条「它没起服务」的硬证据，不用再靠猜。
-                if (!ssid.isNullOrEmpty()) {
-                    if (probedSsid != ssid) {
-                        probedSsid = ssid
+                //
+                // **判据是「Wi-Fi 开着」而不是「SSID 读得到」**（2026-11-11 别克 E2LB 纠正）：
+                // 用户没给「附近的设备/位置」权限时 SSID 恒为 null，旧写法于是把整段探测
+                // 跳过了 5 分钟一次没探、ctrl 广播也没挪到车机热点上——车机看不到我们，
+                // 我们也看不到它，纯粹对等空等。SSID 只用来做精确绑定，不是探测的前提。
+                if (wifiEnabled) {
+                    val probeKey = ssid ?: CURRENT_WIFI_LABEL
+                    if (probedSsid != probeKey) {
+                        probedSsid = probeKey
                         probeCount = 0
                         lastProbeAt = 0L
                     }
@@ -2867,13 +2903,40 @@ object SessionController {
                     if (probeCount < PROBE_MAX_TIMES && now - lastProbeAt >= PROBE_INTERVAL_MS) {
                         probeCount++
                         lastProbeAt = now
-                        if (probeAirplayOnCurrentWifi(ssid, probeCount)) {
+                        val found = probeAirplayOnCurrentWifi(ssid, probeCount)
+                        val foundHost = found?.host?.hostAddress
+                        if (found != null && !foundHost.isNullOrEmpty()) {
                             if (!connectCancelled && !sessionStarting.get()) {
+                                val label = if (ssid.isNullOrEmpty()) CURRENT_WIFI_LABEL else "\"$ssid\""
                                 appendLog(
-                                    ">>> [$source] \"$ssid\" 里已有车机 AirPlay 服务——" +
+                                    ">>> [$source] $label 里已有车机 AirPlay 服务（$foundHost:${found.port}）——" +
                                         "以该网络合成端点重走连接（不再等 0x4301）",
                                 )
-                                onCarPlayEndpoint(endpoint.copy(ssid = ssid), "$source/热点探测")
+                                // SSID 读得到时**只补 ssid、不带地址**：探测可能是在「家里那条 WiFi」
+                                // 上做的（手机还没加入车机热点），把它的地址带过去就是错地址。
+                                // 交给交接流程在车机热点里重新发现一次才安全。
+                                // SSID 读不到时相反：网络就是探测时绑的那条，地址与 TXT
+                                // （pk/deviceid/srcvers/features）全都现成，直接并进端点；
+                                // 入网那一段由 onCurrentWifi 跳过。
+                                val discovered =
+                                    if (ssid.isNullOrEmpty()) {
+                                        mergeBrowserEndpoint(
+                                            endpoint.copy(
+                                                ssid = CURRENT_WIFI_LABEL,
+                                                airPlayPort = found.port,
+                                            ),
+                                            found,
+                                            "$source/热点探测",
+                                            needPort = false,
+                                        )
+                                    } else {
+                                        endpoint.copy(ssid = ssid)
+                                    }
+                                onCarPlayEndpoint(
+                                    discovered,
+                                    "$source/热点探测",
+                                    onCurrentWifi = ssid.isNullOrEmpty(),
+                                )
                             }
                             return@run
                         }
@@ -4177,6 +4240,15 @@ object SessionController {
     private fun onCarPlayEndpoint(
         endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
+        /**
+         * true = 这个端点是「手机已经挂在当前 WiFi 上、我们从这条网络里实际发现的服务」
+         * 合成的，网络已经绑好，**不要再走加入热点那一段**（[bindToCarPlayNetwork]）。
+         *
+         * 只由保活期的热点探测在「读不到 SSID」时传（2026-11-11 别克 E2LB）：
+         * 那种情况下合成端点里的 `ssid` 是 [CURRENT_WIFI_LABEL] 这个标签，不是真 SSID，
+         * 拿它去 `joinCarWifiSpecifier` 只会一直失败，把刚发现的好端点浪费掉。
+         */
+        onCurrentWifi: Boolean = false,
     ) {
         val context = appContext ?: return
         // 冗余端点防护：接收端控制器（DiPlay 实测）在我们配对推流后才完成既有的
@@ -4217,7 +4289,10 @@ object SessionController {
         // 已结束」分支），改为进入等待态：期间轮询手机 WiFi，用户手动连上车机热点
         // （密码在车机设置里可见，凯迪拉克 CT5 实测）后确认即可用该 SSID 合成端点，
         // 走 mDNS/网关兜底路径；超时再拆链让重连循环接管。
-        if (endpoint.ssid.isEmpty()) {
+        //
+        // onCurrentWifi 例外：端点虽然带着 [CURRENT_WIFI_LABEL] 这个假 SSID，但它来自
+        // 「在当前 WiFi 上真的收到了 `_airplay._tcp`」——直接往下走配对，别再回去等。
+        if (endpoint.ssid.isEmpty() && !onCurrentWifi) {
             appendLog(
                 ">>> [$source] 端点无 AP 信息（车机未在窗口内下发 0x4301）——蓝牙保持保活等待晚到 0x4301；" +
                     "检测到手机已连 WiFi 时会询问是否按车机热点继续",
@@ -4228,19 +4303,28 @@ object SessionController {
             return
         }
         appendLog(
-            ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
-                "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",
+            ">>> [$source] " +
+                if (onCurrentWifi) {
+                    "车机 AirPlay 在${endpoint.ssid}上就绪（${endpoint.ipAddresses.firstOrNull()}:${endpoint.airPlayPort}）——" +
+                        "网络已绑好，跳过入网直接配对"
+                } else {
+                    "拿到接收端热点：SSID=${endpoint.ssid}；" +
+                        "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}"
+                },
         )
         // 记下这一轮的完整端点：进程被系统冻结后车机不会再补发 0x4301，
         // 解冻恢复只能靠这份快照重走交接（见 onProcessResumed）。
-        lastGoodEndpoint = endpoint
+        // onCurrentWifi 的端点不能存：里面的 ssid 是标签，解冻后拿去入网必然失败。
+        if (!onCurrentWifi) lastGoodEndpoint = endpoint
         // 认证归属：先按端点算一次（配对前就失败的轮次——没入网、端口没开——也要能计数，
         // 否则「连不上两次」这类最常见的失败根本进不了认证重做的判据）。
         // 口径与配对阶段一致（[PairingMemory.receiverKey]），那边拿到 mDNS 的 pk 后会覆盖。
         authReceiverKey =
             PairingMemory.receiverKey(endpoint.publicKey, endpoint.deviceIdentifier, endpoint.ssid)
         phaseHint = "蓝牙已连上车机，解析热点地址…"
-        ssidSink?.invoke(endpoint.ssid)
+        // 标签不是 SSID：把它写进 ssidSink 会让首页「WiFi」按钮/自动重绑去连一个
+        // 不存在的网络（"(" 开头的字符串不可能出现在真实 SSID 里）。
+        if (!onCurrentWifi) ssidSink?.invoke(endpoint.ssid)
         // 0x4301 同样带热点密码（BMW iD9 不发 0x5703，AP 信息只走这条路）。
         // 不缓存的话首页「WiFi」按钮会判成「尚未拿到热点密码」，用户连手动加入
         // 都做不了——2026-10-29 日志里连着出现三次这条误导性提示，根因就是这里。
@@ -5448,55 +5532,65 @@ object SessionController {
         // 通用车机根本不发 0x5703，AP 信息只走这条路）。旧实现只在 onWifiCredentials
         // 里记 lastCarWifi —— 这类车型上 onCarWifiLost 永远走「没凭据，只能提示」，
         // 1.2.10 加的自动重绑对它们等于不存在（只有 0x5703 车型才生效）。
-        lastCarWifi = wifiConfig
+        if (!onCurrentWifi) lastCarWifi = wifiConfig
+        // 保活期探测合成的端点：手机已经挂在当前 WiFi 上、网络也在探测里绑好了。
+        // 这里的 ssid 是 [CURRENT_WIFI_LABEL] 标签，绝不能拿去入网。
+        if (onCurrentWifi && wifiConnector?.currentNetwork != null) {
+            appendLog(
+                ">>> [$source] 端点来自当前已绑定的 WiFi（SSID 读不到）——复用该网络，" +
+                    "跳过加入热点（认证照常重做）",
+            )
+            continueWithNetwork(true)
+            return
+        }
         if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定（只复用网络，认证照常重做）")
             continueWithNetwork(true)
-        } else {
-            // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
-            // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
-            // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
-            connectBudget.enter(ConnectStage.WIFI)
-            Bg.run("wifi-join-on-endpoint") {
-                // 第一步永远是登记「WiFi 建议」——幂等、不等结果、不弹框。
-                // 用户授权过一次之后，系统会在进入范围时自动关联车机热点，
-                // 届时下面那条 specifier 请求会立刻拿到 onAvailable（网络已存在，
-                // 系统不再要求确认），整条链路才能真正做到「上车即连」。
-                val connector = wifiConnector
-                connector?.registerSuggestion(wifiConfig.ssid, wifiConfig.passphrase, wifiConfig.securityType)
-                while (!connectCancelled) {
-                    // Shizuku 已移除：没有 shell 特权。
-                    val shellReady = false
-                    when (val result = joinCarWifiSpecifier(wifiConfig, shellReady)) {
-                        is WifiCarPlayConnector.JoinResult.Joined -> {
+            return
+        }
+        // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
+        // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
+        // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
+        connectBudget.enter(ConnectStage.WIFI)
+        Bg.run("wifi-join-on-endpoint") {
+            // 第一步永远是登记「WiFi 建议」——幂等、不等结果、不弹框。
+            // 用户授权过一次之后，系统会在进入范围时自动关联车机热点，
+            // 届时下面那条 specifier 请求会立刻拿到 onAvailable（网络已存在，
+            // 系统不再要求确认），整条链路才能真正做到「上车即连」。
+            val connector = wifiConnector
+            connector?.registerSuggestion(wifiConfig.ssid, wifiConfig.passphrase, wifiConfig.securityType)
+            while (!connectCancelled) {
+                // Shizuku 已移除：没有 shell 特权。
+                val shellReady = false
+                when (val result = joinCarWifiSpecifier(wifiConfig, shellReady)) {
+                    is WifiCarPlayConnector.JoinResult.Joined -> {
+                        continueWithNetwork(true)
+                        return@run
+                    }
+
+                    WifiCarPlayConnector.JoinResult.Unsupported -> {
+                        // WEP 等无法用 specifier 表达：等系统自己关联上（无人工操作）
+                        waitForAssociationThenContinue(wifiConfig) { bound ->
+                            continueWithNetwork(bound)
+                        }
+                        return@run
+                    }
+
+                    WifiCarPlayConnector.JoinResult.Unavailable -> {
+                        // 三层路径（复用 → 静默建议 → 确认框）都没成：静默再试几轮。
+                        // 旧实现在这里弹「重试 / 打开 WLAN 设置」问用户，车上没人点屏
+                        // 就按无人应答中止——现在改成自动做，只是限次。
+                        retryJoinSpecifierSilently(wifiConfig, shellReady)
+                        if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
                             continueWithNetwork(true)
-                            return@run
+                        } else {
+                            sessionStarting.set(false)
                         }
-
-                        WifiCarPlayConnector.JoinResult.Unsupported -> {
-                            // WEP 等无法用 specifier 表达：等系统自己关联上（无人工操作）
-                            waitForAssociationThenContinue(wifiConfig) { bound ->
-                                continueWithNetwork(bound)
-                            }
-                            return@run
-                        }
-
-                        WifiCarPlayConnector.JoinResult.Unavailable -> {
-                            // 三层路径（复用 → 静默建议 → 确认框）都没成：静默再试几轮。
-                            // 旧实现在这里弹「重试 / 打开 WLAN 设置」问用户，车上没人点屏
-                            // 就按无人应答中止——现在改成自动做，只是限次。
-                            retryJoinSpecifierSilently(wifiConfig, shellReady)
-                            if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
-                                continueWithNetwork(true)
-                            } else {
-                                sessionStarting.set(false)
-                            }
-                            return@run
-                        }
+                        return@run
                     }
                 }
-                sessionStarting.set(false)
             }
+            sessionStarting.set(false)
         }
     }
 

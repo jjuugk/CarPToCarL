@@ -1132,7 +1132,15 @@ class MainActivity : AppCompatActivity() {
                 )
             } else {
                 snack("暂无热点密码——蓝牙连上后自动获取")
-                log("WiFi: 尚未拿到热点密码（需蓝牙会话 0x5703）——打开 WLAN 设置手动选择 \"$ssid\"")
+                // ssid 为空时这句会变成「手动选择 ""」，纯误导（车机还没下发热点信息，
+                // 根本没有可选的网络名）。分开写。
+                log(
+                    if (ssid.isEmpty()) {
+                        "WiFi: 尚未拿到热点密码（车机还没下发 0x4301）——等车机给出热点信息后再试"
+                    } else {
+                        "WiFi: 尚未拿到热点密码（需蓝牙会话 0x5703）——打开 WLAN 设置手动选择 \"$ssid\""
+                    },
+                )
             }
             try {
                 startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))

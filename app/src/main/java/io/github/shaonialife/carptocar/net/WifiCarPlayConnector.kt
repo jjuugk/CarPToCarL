@@ -723,6 +723,57 @@ class WifiCarPlayConnector(
         return network
     }
 
+    /**
+     * 绑定「当前系统已连上的那条 WiFi」——**不要求知道 SSID**。
+     *
+     * 为什么必须有这条（2026-11-11 别克 E2LB 现场，网关 10.128.57.1）：用户没给
+     * 「附近的设备 / 位置」权限，[findAssociatedNetwork] 一律返回 null（`<unknown ssid>`
+     * 不能猜），于是整条保活期里 mDNS 一次都没探过、ctrl 广播也从没挪到这条网络上——
+     * 车机在它自己的热点里永远看不到我们，`0x4301` 自然不来，两边对等空等 5 分钟。
+     * 车机到底有没有起 AirPlay 服务，日志里连一条证据都没有。
+     *
+     * 与 [bindCurrentWifi] 的区别（那个也有、但不能用于这里）：它 `requestNetwork`
+     * 泛匹配「任意 WiFi」，还会先 [release] 掉现绑定；这里只做「挑一条已经就绪的、
+     * 把它绑给本进程」，不发请求、不弹框、不打断已注册的 mDNS 广播。
+     *
+     * 挑选顺序：已绑定且仍可用 → `wlan0` 那条 → 任意 TRANSPORT_WIFI 且拿到地址的。
+     * 只认「已拿到地址」的网络：DHCP 没回来时绑上去建 socket 必然失败。
+     *
+     * 不挂 [watchLoss]：调用方（保活轮询）每 5s 会重新调一次，断了自然会拿到 null 或
+     * 换一条新网络；挂上去反而要用一个假 SSID 去触发 [onNetworkLost] 的重绑流程。
+     *
+     * @return 已绑定的网络；手机没挂任何 WiFi 时返回 null
+     */
+    fun adoptCurrentWifi(): Network? {
+        boundNetwork.get()?.let { current ->
+            if (linkReady(current)) return current
+        }
+        val candidates =
+            try {
+                connectivityManager.allNetworks.filter { network ->
+                    val caps = connectivityManager.getNetworkCapabilities(network) ?: return@filter false
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && linkReady(network)
+                }
+            } catch (_: Exception) {
+                return null
+            }
+        if (candidates.isEmpty()) return null
+        val onWlan0 =
+            candidates.firstOrNull { network ->
+                runCatching {
+                    connectivityManager.getLinkProperties(network)?.interfaceName == WLAN_INTERFACE
+                }.getOrDefault(false)
+            }
+        val picked = onWlan0 ?: candidates.first()
+        return try {
+            if (!connectivityManager.bindProcessToNetwork(picked)) return null
+            boundNetwork.set(picked)
+            picked
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun release() {
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }

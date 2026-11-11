@@ -368,6 +368,16 @@ class Iap2SenderSession(
          */
         const val AVAILABILITY_RETRANSMIT_LIMIT = 2
 
+        /**
+         * 首档 `0x4300` 静默后，**同一链路内**最多再补试几档（2026-11-11 别克 E2LB）。
+         *
+         * 为什么不再等下一轮：0x4300 静默后本轮会停在「等 0x4301」的保活窗口里最多 5 分钟，
+         * 而一轮连接里能验证的假设就被钉死成 1 档（实车常常只有一次点击机会）。
+         * 给 2 次 = DUAL_GROUPS / MODERN_NESTED / LEGACY_FLAT 三档在一轮里全走一遍，
+         * 每档只多花一个 8 秒的 0x4301 等待窗口。
+         */
+        const val AVAILABILITY_VARIANT_EXTRA_TRIES = 2
+
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
 
@@ -699,8 +709,39 @@ class Iap2SenderSession(
         // 静默判定只在这条路上有意义：新协议车机（没有 0x5703）+ 声明会发 0x4301 + 没等到。
         // 老协议车机（Audi 等）对 0x4300 的处置不影响后续流程，不做阶梯，避免回归。
         if (startSession == null && declaresStartSession == true && wifiFromExchange == null) {
-            noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow)
-        } else if (startSession != null) {
+            var next = noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow)
+            // ---- 同一链路内把剩下的报文体档位试完（2026-11-11 别克 E2LB）----
+            // 旧行为是「本轮只试一档，下一轮才换」。可 0x4300 静默后本轮会停在「等 0x4301」
+            // 上最多 5 分钟（[SessionController] 的保活窗口），用户点一次连接永远只能验证
+            // 1/3 的假设——三档结论要攒三轮才凑齐，而实车往往只有一次机会。
+            // 这里在第一档静默后立刻补发下一档：每档只多花一个 0x4301 等待窗口。
+            // 上限 2 次 = 最多把 DUAL_GROUPS / MODERN_NESTED / LEGACY_FLAT 三档走完一遍。
+            var extraTries = 0
+            while (startSession == null &&
+                next != null &&
+                next != availabilityVariant &&
+                extraTries < AVAILABILITY_VARIANT_EXTRA_TRIES &&
+                channel.isAlive &&
+                remainingMillis(deadline) > startSessionWindow / 1_000_000 + 2_000
+            ) {
+                extraTries++
+                availabilityVariant = next
+                log(
+                    "iap2 0x4300 换档补试 $extraTries/$AVAILABILITY_VARIANT_EXTRA_TRIES：改用「${next.label}」" +
+                        "——同一链路内再发一次，不再等下一轮重连（本轮三档都要有结论）",
+                )
+                dataFramesBeforeAvailability = channel.peerDataFrameCount
+                lastNudgePeerFrames = channel.peerFrameCount
+                sendAvailability()
+                startSession =
+                    expectOrNull(
+                        Iap2MessageIds.CARPLAY_START_SESSION,
+                        minOf(deadline, System.nanoTime() + startSessionWindow),
+                    )
+                next = if (startSession == null) noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow) else null
+            }
+        }
+        if (startSession != null) {
             availabilityVariant?.let { AvailabilityBodyMemory.recordSuccess(context, receiverIdentity, it) }
         }
         val endpoint =
@@ -1262,14 +1303,14 @@ class Iap2SenderSession(
     private fun noteAvailabilitySilence(
         dataFramesBefore: Int,
         windowNanos: Long,
-    ) {
-        val variant = availabilityVariant ?: return
-        if (variant == AvailabilityBodyMemory.Variant.NONE) return
+    ): AvailabilityBodyMemory.Variant? {
+        val variant = availabilityVariant ?: return null
+        if (variant == AvailabilityBodyMemory.Variant.NONE) return null
         // 只认**业务帧**（len>0）。纯 ACK 会迟到——2026-11-10 BUICK_3138 那轮，0x4300
         // 发出后车机回了 3 个纯 ACK（都是那串问候的迟到确认），用「全部控制帧」判就
         // 变成「还在回帧」→ 不记静默 → 阶梯永远停在第一档，每轮死在同一处。
         val dataFramesAfter = channel.peerDataFrameCount
-        if (dataFramesAfter != dataFramesBefore) return
+        if (dataFramesAfter != dataFramesBefore) return null
         val next =
             AvailabilityBodyMemory.recordSilent(
                 context,
@@ -1292,6 +1333,7 @@ class Iap2SenderSession(
                 "0x4301 与 0x6800 都没发起）——疑似该固件不认这个报文体；" +
                 "已记为静默，$nextLabel",
         )
+        return next
     }
 
     /**
