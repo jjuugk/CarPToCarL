@@ -1439,6 +1439,11 @@ class AirPlayClient(
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
                 keepAliveSendStatsAsBody = (infoRoot?.get("keepAliveSendStatsAsBody") as? Boolean) == true,
+                // 声明类字段一律以 /info 为准（SETUP 响应里没有这几项）；infoRoot 为空
+                // （没拉到 /info）时退回 SETUP 响应，最终还是 null = 未声明。
+                extendedFeatures = CarCapabilityList.extendedFeatures(infoRoot ?: root),
+                keepAliveLowPower = CarCapabilityList.supportsLowPowerKeepAlive(infoRoot ?: root),
+                bluetoothIds = CarCapabilityList.bluetoothIds(infoRoot ?: root),
             )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
@@ -1448,6 +1453,8 @@ class AirPlayClient(
                 (if (info.displayFromCar) "" else "（车机未通告·手机兜底）") +
                 " displayUuid=${info.displayUuid}",
         )
+        // 声明类字段单独一行：它决定「哪些可选键能发」，与上面那行混在一起会被截断。
+        log("AIRPLAY: /info 声明 ${CarCapabilityList.summary(infoRoot ?: root)}")
         return info
     }
 
@@ -1651,6 +1658,17 @@ class AirPlayClient(
          * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
          */
         val keepAliveSendStatsAsBody: Boolean = false,
+        /**
+         * `/info.extendedFeatures` 扩展特性清单（AIS Table 23-33）。
+         *
+         * **null = 车机没声明这个键**（老固件/非无线），不是「什么都不支持」。
+         * 判定统一走 [CarCapabilityList.supportsExtended] 的三态。
+         */
+        val extendedFeatures: List<String>? = null,
+        /** 车机是否声明 `keepAliveLowPower`（23.3.2.7，无媒体流时只发 UDP 保活）。 */
+        val keepAliveLowPower: Boolean = false,
+        /** 车机蓝牙模块 MAC 清单（`bluetoothIDs`；`disableBluetooth` 的前置）。 */
+        val bluetoothIds: List<String> = emptyList(),
     )
 
     /** 屏幕流协商结果。 */
@@ -2531,7 +2549,15 @@ class AirPlayClient(
                                     // 内容就是这条流本身的采样率，所以如实报 sampleRate——
                                     // 报 8000 会让它把满带宽音频当窄带优化。
                                     // **只放在重试版**：现有车机的通话流第一次 200，报文逐字节不变。
-                                    if (negotiation.audioType == AUDIO_TYPE_TELEPHONY) {
+                                    // 发之前先看车机的 extendedFeatures（Table 23-33，无线必填项
+                                    // "vocoderInfo"）：明确声明不含它就不发；整份清单没给（老固件）
+                                    // 则维持原样照发——「清单缺失不等于不支持」。
+                                    if (negotiation.audioType == AUDIO_TYPE_TELEPHONY &&
+                                        CarCapabilityList.supportsExtended(
+                                            negotiatedInfo,
+                                            CarCapabilityList.VOCODER_INFO,
+                                        ) != false
+                                    ) {
                                         put(
                                             "vocoderInfo",
                                             linkedMapOf<String, Any?>(
