@@ -764,6 +764,135 @@ class AirPlayClient(
     /** 心跳线程的存活判据：RTSP socket 仍连着。 */
     private fun isSessionAlive(): Boolean = socket?.isClosed == false
 
+    // ---- 会话拆解（AIS 23.3.1 步骤 9~11：先拆流、再拆会话、最后关 TCP）----
+
+    /**
+     * 已协商成功的流：`connId → stream type`。
+     *
+     * 拆链时**必须按条拆**：单流 `TEARDOWN` 的 descriptor 由「type（整数）+ streamID」构成，
+     * 少了 `type` 车机只能回 200 却**不释放那条 `audioType` 对应的资源**——紧接着的
+     * `SETUP` 照样 400，甚至整条会话被 RST（1.0.35 踩过的坑）。
+     */
+    private val activeStreams = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
+    private fun noteStream(
+        type: Long,
+        connectionId: Long,
+    ) {
+        if (connectionId > 0L) activeStreams[connectionId] = type
+    }
+
+    /** 本会话建过流没有（决定收尾走「先 TEARDOWN 再关 socket」还是直接关）。 */
+    val hasActiveStreams: Boolean get() = activeStreams.isNotEmpty()
+
+    /**
+     * 按规范顺序拆会话：逐条流 `TEARDOWN` → 整会话 `TEARDOWN`。
+     *
+     * 为什么以前可以不做：车机有 `mediaDisconnectTimeout`（实测 15s）会自己回收，
+     * 所以「直接关 socket」在多数车机上看起来也能用。但在这 15 秒里它的 AirPlay 服务
+     * 仍把旧会话当成「还在」，这正好对上现场反复出现的「断开后马上重连，车机给凭据
+     * 却不开 7000 端口」。显式拆是规范第 9~10 步，成本只是两条短 RTSP。
+     *
+     * 失败一律只记日志：部分固件对 `TEARDOWN` 只回 ACK 或直接忽略，那不代表会话有问题。
+     */
+    fun teardownQuietly(): Boolean {
+        val streams = activeStreams.entries.map { it.key to it.value }
+        activeStreams.clear()
+        val host = lastAudioHost ?: endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        var allAccepted = true
+        streams.forEach { (id, type) ->
+            allAccepted = teardownStream(host, type, id) && allAccepted
+        }
+        allAccepted = teardownSession() && allAccepted
+        return allAccepted
+    }
+
+    private fun teardownStream(
+        host: String,
+        type: Long,
+        connectionId: Long,
+    ): Boolean =
+        try {
+            val body =
+                BinaryPlist.encode(
+                    linkedMapOf(
+                        "streams" to
+                            listOf(
+                                linkedMapOf<String, Any?>(
+                                    "type" to type,
+                                    "streamConnectionID" to connectionId,
+                                ),
+                            ),
+                    ),
+                )
+            val (statusLine, _) =
+                request(
+                    "TEARDOWN",
+                    "rtsp://${host}:${endpoint.airPlayPort}/",
+                    body,
+                    timeoutMillis = STREAM_TEARDOWN_TIMEOUT_MILLIS,
+                )
+            log("AIRPLAY: 流 TEARDOWN（type=$type connId=$connectionId）→ $statusLine")
+            statusLine.contains("200")
+        } catch (error: Exception) {
+            log("AIRPLAY: 流 TEARDOWN 异常（type=$type connId=$connectionId）- ${error.message}")
+            false
+        }
+
+    /** 整会话 `TEARDOWN`（空体，与单流拆解的报文形态不同）。 */
+    fun teardownSession(): Boolean =
+        try {
+            val (statusLine, _) =
+                request(
+                    "TEARDOWN",
+                    "/",
+                    ByteArray(0),
+                    timeoutMillis = SESSION_TEARDOWN_TIMEOUT_MILLIS,
+                )
+            log("AIRPLAY: 会话 TEARDOWN → $statusLine")
+            statusLine.contains("200")
+        } catch (error: Exception) {
+            log("AIRPLAY: 会话 TEARDOWN 异常 - ${error.message}")
+            false
+        }
+
+    /**
+     * 优雅收尾：后台线程 `teardownQuietly()` 后再 [close]，另有一根看门狗在
+     * [budgetMillis] 后强制关（`close()` 幂等）。
+     *
+     * **不能在调用方线程上做**：拆链经常发生在 BT 回调 / 事件通道读线程上，
+     * 一次 1.2s 的等待就足以让配对或保活迟到。
+     */
+    fun closeGracefully(budgetMillis: Long = 3_000L) {
+        cancelled = true
+        Thread(
+            {
+                try {
+                    teardownQuietly()
+                } catch (error: Exception) {
+                    log("AIRPLAY: 拆链异常 - ${error.message}")
+                } finally {
+                    close()
+                }
+            },
+            "airplay-teardown",
+        ).apply { isDaemon = true }.start()
+        Thread(
+            {
+                try {
+                    Thread.sleep(budgetMillis)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                if (socket != null) {
+                    log("AIRPLAY: 拆链超过 ${budgetMillis}ms 未完成——强制关闭控制通道")
+                    close()
+                }
+            },
+            "airplay-teardown-deadline",
+        ).apply { isDaemon = true }.start()
+    }
+
     fun close() {
         // 先记下「这次关闭会不会打断某个在飞的请求」：会把等待中的 CSeq 判死，
         // 对配对来说这就是一次「本机打断」，不能算车机的结论。
@@ -941,6 +1070,82 @@ class AirPlayClient(
     /** 主屏当前是否归手机（供交接/UI 判定；车机没声明归属时恒为 true）。 */
     val phoneOwnsScreen: Boolean get() = resourceState.phoneOwnsScreen
 
+    // ---- 本机应用态上报（AIS 23.3.7.5 modesChanged.appStates）----
+
+    /** 是否已经发出过第一轮 `modesChanged`（此前不需要单独上报：初始归属里已经带上）。 */
+    @Volatile
+    private var modesPublishedOnce = false
+
+    private val appStateLock = Any()
+    private var appStatePublisher: Thread? = null
+    private var appStateVersion = 0
+    private var appStatePublishedVersion = 0
+    private var appStateReason = ""
+
+    /**
+     * 报告**本机**应用态：语音（None / Speaking / RecognizingSpeech）与通话。
+     *
+     * 只更新状态 + 排一次发送，不阻塞调用方——语音键来自事件通道读线程、通话状态来自
+     * 通话看门狗，任何一处等 RTSP 应答都会把那条线程拖住最多 10 秒。
+     *
+     * @return 是否有状态真的变了
+     */
+    fun setOwnAppState(
+        speech: AirPlaySpeechMode,
+        phoneCall: Boolean,
+    ): Boolean {
+        val speechChanged = resourceState.setOwnSpeech(speech)
+        val callChanged = resourceState.setOwnPhoneCall(phoneCall)
+        if (!speechChanged && !callChanged) return false
+        scheduleAppStatePublish(
+            "语音态=${speech.name} 通话=${if (phoneCall) "是" else "否"}",
+        )
+        return true
+    }
+
+    private fun scheduleAppStatePublish(reason: String) {
+        // 初始归属还没发过：assertModes 会把当前状态一并带上，这里不抢跑
+        if (!modesPublishedOnce) return
+        synchronized(appStateLock) {
+            appStateVersion++
+            appStateReason = reason
+            if (appStatePublisher?.isAlive == true) return
+            appStatePublisher =
+                Thread({ appStatePublishLoop() }, "airplay-appstate").apply {
+                    isDaemon = true
+                    start()
+                }
+        }
+    }
+
+    /**
+     * 合并窗口 + 发送。语音会话里「收音 → 说话 → 收音」常在百毫秒级连跳，
+     * 每个边沿都发一条 `modesChanged` 只会让车机反复收/放自己的音源。
+     */
+    private fun appStatePublishLoop() {
+        while (true) {
+            try {
+                Thread.sleep(APP_STATE_COALESCE_MILLIS)
+            } catch (_: InterruptedException) {
+                synchronized(appStateLock) { appStatePublisher = null }
+                return
+            }
+            val version: Int
+            val reason: String
+            synchronized(appStateLock) {
+                if (appStatePublishedVersion == appStateVersion) {
+                    appStatePublisher = null
+                    return
+                }
+                version = appStateVersion
+                reason = appStateReason
+            }
+            // 阻塞式 RTSP：只允许在这条后台线程上等
+            publishModes("appState：$reason")
+            synchronized(appStateLock) { appStatePublishedVersion = version }
+        }
+    }
+
     fun assertModes(): Boolean {
         // 真机顺序：先按车机在 /info 里给的初始归属发布，再把主屏要回来——
         // 而不是一上来就宣称永久持有（在不打算让屏的车机上那就是硬抢）。
@@ -996,6 +1201,9 @@ class AirPlayClient(
                     contentType = "application/x-apple-binary-plist",
                 )
             val accepted = commandAccepted(statusLine, body)
+            // 只要车机答了话，`/command` 就是通的：之后本机应用态的变化可以单独上报
+            // （初始那一轮已经把当前状态一起带上了，不重复发）
+            modesPublishedOnce = true
             log("AIRPLAY: modesChanged（$reason）${resourceState.describe()} 接受=$accepted [$statusLine]")
             accepted
         } catch (error: IOException) {
@@ -2038,6 +2246,15 @@ class AirPlayClient(
         /** 主音频流类型（DiPlay STREAM_TYPE_MAIN_AUDIO；PCM 通路）。 */
         const val AUDIO_STREAM_TYPE = 100L
 
+        /** 本机应用态上报的合并窗口（同一窗口内只发最后一条 `modesChanged`）。 */
+        private const val APP_STATE_COALESCE_MILLIS = 120L
+
+        /** 单条流 TEARDOWN 的等待上限：车机不答也无所谓，别把收尾拖长。 */
+        private const val STREAM_TEARDOWN_TIMEOUT_MILLIS = 1_200
+
+        /** 整条会话 TEARDOWN 的等待上限（规范第 10 步：流拆完再拆会话）。 */
+        private const val SESSION_TEARDOWN_TIMEOUT_MILLIS = 1_500
+
         /**
          * 高质量主音频流类型（catplay `StreamType::MainHighAudio`）。
          *
@@ -2270,7 +2487,7 @@ class AirPlayClient(
                 // 352，日志里看着像"PCM 也用 1024"，排障时误导过。
                 "实际 spf=${spfValue ?: "不声明"}）",
         )
-        // 请求体做两版（差别只在末尾的 ct/sr）。**默认发不带的那版**：
+        // 请求体做两版（差别只在末尾的 ct/sr/vocoderInfo）。**默认发不带的那版**：
         // 奥迪/别克/宝马这些已跑通的车机第一次就 200，永远走不到重试，
         // 这次改动对它们零影响；ID7（Cinemo 组件）三档全 400 才需要第二版。
         fun buildAudioBody(withCodecFields: Boolean): ByteArray =
@@ -2309,6 +2526,19 @@ class AirPlayClient(
                                 if (withCodecFields) {
                                     put("ct", compressionTypeOf(negotiation.codec))
                                     put("sr", negotiation.sampleRate.toLong())
+                                    // vocoderInfo（Table 23-40 `Y`，Table 23-41）：通话流必填，
+                                    // 车机据它决定通话播放要不要按窄带处理。我们不是蜂窝声码器，
+                                    // 内容就是这条流本身的采样率，所以如实报 sampleRate——
+                                    // 报 8000 会让它把满带宽音频当窄带优化。
+                                    // **只放在重试版**：现有车机的通话流第一次 200，报文逐字节不变。
+                                    if (negotiation.audioType == AUDIO_TYPE_TELEPHONY) {
+                                        put(
+                                            "vocoderInfo",
+                                            linkedMapOf<String, Any?>(
+                                                "sampleRate" to negotiation.sampleRate.toLong(),
+                                            ),
+                                        )
+                                    }
                                 }
                             },
                         ),
@@ -2425,6 +2655,8 @@ class AirPlayClient(
                 (if (micPort > 0) " 已声明麦克风上行 micPort=$micPort" else "") +
                 " 全字段=$audio",
         )
+        // 登记这条流：拆链时要按 (type, connId) 逐条 TEARDOWN
+        noteStream(profile.streamType, connectionId)
         // 音频通路已建好，但「车机在收数据、喇叭没声」还剩一种很常见的原因：
         // 接收端的 AirPlay 音量处于静音位（-144dB）——真 iPhone 会主动 SET_PARAMETER
         // volume。这里先查一次（顺带把值记进日志），查到静音位就抬到 -25dB。
@@ -3005,6 +3237,8 @@ class AirPlayClient(
             "AIRPLAY: ✓ 主屏流协商成功 dataPort=$dataPort connId=$connectionId " +
                 "加密=${if (cipher is StreamFrameCipher.ChaCha) "ChaCha20" else "AES-128-CTR（未配对会话）"}",
         )
+        // 登记这条流：拆链时要按 (type, connId) 逐条 TEARDOWN
+        noteStream(SCREEN_STREAM_TYPE, connectionId)
         // MIB3：屏幕流 SETUP 200 拿到 dataPort 后，真机此时在控制通道发 detect（Frida
         // 时序：screen SETUP → phone detect on control → HU SYN on control）。见 armMib3VirtualLink。
         armMib3VirtualLink()

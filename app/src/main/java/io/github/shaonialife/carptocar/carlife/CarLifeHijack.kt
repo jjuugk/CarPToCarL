@@ -460,6 +460,23 @@ object CarLifeHijack {
     @Volatile
     var onActualStreamSize: ((Int, Int) -> Unit)? = null
 
+    /**
+     * 引擎语音会话开始/结束（`语音(4)` 模块边沿）。
+     *
+     * 上层据此上报 CarPlay `Speech` 应用态——**这是「手机正在收音」的唯一信源**，
+     * 车机只有收到它才会把自己的音源收起来（AIS Table 23-56）。
+     */
+    @Volatile
+    var onVoiceSession: ((Boolean) -> Unit)? = null
+
+    /**
+     * 语音会话期间收到一包 TTS PCM（9241）。上层据此区分「助手正在说话」与「正在收音」。
+     *
+     * 高频回调（每包一次）：实现里只许更新时间戳，不能做任何阻塞动作。
+     */
+    @Volatile
+    var onSpeechAudio: (() -> Unit)? = null
+
     fun isEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // v3 迁移：画面唯一来源就是 CarLife 劫持，默认改回开启。老安装若被 v2 关掉过，
@@ -748,8 +765,13 @@ object CarLifeHijack {
                 onAudioPcm = { pcm, size -> routeAudio(sink, pcm, size) },
                 // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端
                 onTtsFormat = { rate, channels -> naviSink.configure(rate, channels) },
-                onTtsPcm = { pcm, size -> routeAudio(naviSink, pcm, size) },
+                onTtsPcm = { pcm, size ->
+                    // 只记时间戳：语音会话期间它就是「助手正在对用户说话」的证据
+                    onSpeechAudio?.invoke()
+                    routeAudio(naviSink, pcm, size)
+                },
                 onAudioGate = { active -> onEngineAudioGate(active) },
+                onVoiceSession = { active -> onVoiceSession?.invoke(active) },
                 // 音频沉默看门狗判据：音乐会话确实在播 = 此刻「应该」有声，
                 // 9240 却连续零 PCM 才是异常。读不到会话（null）时按「不确定」放行不重连。
                 audioExpected = { MediaSessionsState.nowPlaying?.playing == true },

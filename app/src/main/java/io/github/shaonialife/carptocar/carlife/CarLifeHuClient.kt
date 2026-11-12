@@ -84,6 +84,16 @@ class CarLifeHuClient(
     private val audioExpected: () -> Boolean = { false },
     /** 收到手机推送的媒体信息（歌名/歌手/封面，0x10035）。 */
     private val onMediaInfo: (info: CarLifeMediaInfo) -> Unit = {},
+    /**
+     * 引擎是否处于**语音会话**（`语音(4)` 模块从 0 变非 0，以及反向）。
+     *
+     * 这是「0x68008 `0x21` 到底有没有被引擎接住」的同一份证据，也是上层唯一能拿到的
+     * 「手机正在收音/正在跟用户说话」的信源——CarPlay 的 `Speech` 应用态要靠它上报
+     * （见 [io.github.shaonialife.carptocar.session.AppStateReporter]）。
+     *
+     * 只在**边沿**回调：模块状态是周期上报的，每次变化都回调会把上层刷爆。
+     */
+    private val onVoiceSession: (active: Boolean) -> Unit = {},
     private val connectTimeoutMs: Int = 3_000,
     /**
      * 向 CarLife 引擎申请的编码帧率（98311 的 fps 字段 + 98316 帧率变更）。
@@ -396,6 +406,9 @@ class CarLifeHuClient(
      */
     private var lastModuleStatus: List<Pair<Int, Int>>? = null
 
+    /** 上一次上报给上层的「引擎在语音会话里」状态（边沿检测用）。 */
+    private var voiceSessionActive = false
+
     /**
      * 从 SPS 解析出的**码流真实分辨率**（0 = 还没解析到）。
      *
@@ -529,6 +542,12 @@ class CarLifeHuClient(
             touchLock.unlock()
         }
         closeAll()
+        // 会话停了就不可能还在语音里：必须显式收尾，否则上层会一直报 Speech
+        // （车机于是永远不把自己的音源放回来）。
+        if (voiceSessionActive) {
+            voiceSessionActive = false
+            onVoiceSession(false)
+        }
     }
 
     // ---- 触控回传（车机 → 手机）----
@@ -810,6 +829,13 @@ class CarLifeHuClient(
                                 "CARLIFE: 语音模块=${vr.second}——引擎已进入语音态（0x68008 0x21 生效）"
                             },
                         )
+                    }
+                    // 只认边沿：非 0 一律当「在语音会话里」（实测出现过 1、2 两种取值）。
+                    // 模块整条消失也算结束——那通常是引擎换了一轮会话表。
+                    val voiceNow = vr != null && vr.second != 0
+                    if (voiceNow != voiceSessionActive) {
+                        voiceSessionActive = voiceNow
+                        onVoiceSession(voiceNow)
                     }
                 }
                 if (modules.any { it.second == 0 }) {

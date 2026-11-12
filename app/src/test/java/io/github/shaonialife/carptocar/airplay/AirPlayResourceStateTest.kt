@@ -132,6 +132,90 @@ class AirPlayResourceStateTest {
         assertEquals(-1L, speech["speechMode"])
     }
 
+    // ---- 本机应用态（AIS Table 23-56 / 23-72）----
+
+    @Test
+    fun `本机既不说话也不通话时，报文与改动前逐字节一致`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        val states = (state.command()["params"] as Map<*, *>)["appStates"] as List<*>
+        // 一个 entity 都不该被我们顶成 Controller，2 那条也不该多出 speechMode
+        assertEquals(listOf(0L, 0L, 0L), states.map { (it as Map<*, *>)["entity"] })
+        assertEquals(null, (states[0] as Map<*, *>)["speechMode"])
+        assertEquals(null, (states[1] as Map<*, *>)["speechMode"])
+        assertEquals(-1L, (states[2] as Map<*, *>)["speechMode"])
+    }
+
+    @Test
+    fun `收音时报 Speech=Controller 且 speechMode 为 RecognizingSpeech`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        assertTrue(state.setOwnSpeech(AirPlaySpeechMode.RECOGNIZING))
+        val speech = appState(state, 1)
+        // entity=1 是 Controller（= 手机），2 是 Accessory（= 车机）；这里必须是手机
+        assertEquals(1L, speech["entity"])
+        assertEquals(2L, speech["speechMode"])
+        // 同值重复设置不该再触发一次上报
+        assertFalse(state.setOwnSpeech(AirPlaySpeechMode.RECOGNIZING))
+    }
+
+    @Test
+    fun `说话时报 Speaking，结束后回到 None`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.setOwnSpeech(AirPlaySpeechMode.SPEAKING)
+        assertEquals(1L, appState(state, 1)["speechMode"])
+        state.setOwnSpeech(AirPlaySpeechMode.NONE)
+        assertEquals(0L, appState(state, 1)["entity"])
+        assertEquals(-1L, appState(state, 1)["speechMode"])
+    }
+
+    @Test
+    fun `通话中报 PhoneCall=Controller，并补上规范要求的 speechMode`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        assertTrue(state.setOwnPhoneCall(true))
+        val call = appState(state, 2)
+        assertEquals(1L, call["entity"])
+        assertEquals("Table 23-72 要求 PhoneCall 带 speechMode", -1L, call["speechMode"])
+        state.setOwnPhoneCall(false)
+        assertEquals(0L, appState(state, 2)["entity"])
+    }
+
+    @Test
+    fun `本机语音态优先于车机自己报的那条`() {
+        val state = AirPlayResourceState()
+        state.initialize(
+            mapOf<Any?, Any?>(
+                "appStates" to listOf(mapOf<Any?, Any?>("appStateID" to 1, "speechMode" to 1)),
+            ),
+        )
+        assertEquals("车机在说话时先照抄", 2L, appState(state, 1)["entity"])
+        state.setOwnSpeech(AirPlaySpeechMode.RECOGNIZING)
+        assertEquals("我们自己收音时以本机为准", 1L, appState(state, 1)["entity"])
+        assertEquals(2L, appState(state, 1)["speechMode"])
+    }
+
+    @Test
+    fun `新一轮初始化会清掉本机上一轮的语音态`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.setOwnSpeech(AirPlaySpeechMode.RECOGNIZING)
+        state.setOwnPhoneCall(true)
+        state.initialize(null)
+        assertEquals(AirPlaySpeechMode.NONE, state.ownSpeechMode)
+        assertFalse(state.ownPhoneCallActive)
+        assertEquals(0L, appState(state, 1)["entity"])
+    }
+
+    private fun appState(
+        state: AirPlayResourceState,
+        id: Int,
+    ): Map<*, *> =
+        ((state.command()["params"] as Map<*, *>)["appStates"] as List<*>)
+            .map { it as Map<*, *> }
+            .first { it["appStateID"] == id.toLong() }
+
     @Test
     fun `claimAll 是回退路径，把两块资源都收回手机`() {
         val state = AirPlayResourceState()

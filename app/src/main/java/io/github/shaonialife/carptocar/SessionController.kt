@@ -57,6 +57,7 @@ import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
+import io.github.shaonialife.carptocar.session.AppStateReporter
 import io.github.shaonialife.carptocar.session.AsyncSessionStop
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.SessionAttemptGate
@@ -433,6 +434,7 @@ object SessionController {
         // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
+        installAppStateBridge()
         startMediaWatchdog()
         // 「车机只认苹果设备」兼容模式（默认开，2026-11-08 起）：App 一起来就挂上
         // 占位 SDP 并常开监听——车机是在 discovery/配对阶段就把设备判成「不支持
@@ -487,6 +489,34 @@ object SessionController {
                 }
             }
         }, "media-watchdog").apply { isDaemon = true }.start()
+    }
+
+    // ---- 本机应用态（Speech / PhoneCall）上报 ----
+
+    /**
+     * 「本机正在干什么」→ AirPlay `modesChanged.appStates`。
+     *
+     * 判据与推导都在 [AppStateReporter] 里（可单测）；这里只负责把三个信源接上：
+     * 引擎语音会话（CarLife `语音(4)` 模块）、语音会话期间的 TTS、以及通话状态。
+     *
+     * 为什么以前没做：`appStates` 只把车机 `changeModes` 里的值抄回来再回显，等于全程只报
+     * 「车机在干什么」。规范里 `Speech` 的硬要求是「**收音期间所有音频输出必须关闭**」——
+     * 我们不报，车机就不会闭嘴，车内音响直接灌进手机麦克风。
+     */
+    private val appStateReporter =
+        AppStateReporter(
+            publish = { speech, call -> currentClient?.setOwnAppState(speech, call) },
+            log = { line -> appendLog(line) },
+        )
+
+    /** 应用态信源是否已经接上（幂等）。 */
+    private var appStateBridgeInstalled = false
+
+    private fun installAppStateBridge() {
+        if (appStateBridgeInstalled) return
+        appStateBridgeInstalled = true
+        CarLifeHijack.onVoiceSession = { active -> appStateReporter.onEngineVoice(active) }
+        CarLifeHijack.onSpeechAudio = { appStateReporter.onSpeechAudio() }
     }
 
     /** 注册 CarLife 媒体信息 → iAP2 0x5001 的桥接（幂等，见 [ensure]）。 */
@@ -2132,8 +2162,19 @@ object SessionController {
         currentHiddenSource = null
         TouchRouter
             .reset()
-        currentClient?.cancelled = true
-        currentClient?.close()
+        // 本机应用态静默收尾（此刻会话正在拆，补发没人收，只会在日志里留一条发送失败）
+        appStateReporter.stop(publishFinal = false)
+        currentClient?.let { retiring ->
+            retiring.cancelled = true
+            // 规范第 9~10 步：先按条拆流、再拆会话，最后才关 TCP。只有真正建过流的会话
+            // 才值得走这条路——配对阶段就失败的会话没有任何东西可拆，直接关 socket 最快。
+            if (retiring.hasActiveStreams) {
+                appendLog("CTRL: 会话仍在——按规范先拆流/拆会话（TEARDOWN）再关控制通道")
+                retiring.closeGracefully()
+            } else {
+                retiring.close()
+            }
+        }
         currentClient = null
         // 注意：这里绝不能 detach BT 控制会话。本方法在每轮配对起步时也会执行，
         // 而 DiPlay 在 WiFi 隧道就绪前看到 RFCOMM 断开即判 bring-up failed、
@@ -3717,6 +3758,8 @@ object SessionController {
         callWatcher =
             Thread {
                 var lastMode = manager.mode
+                // 起手先对齐一次：看门狗可能是在通话中途才起来的（切场景后重建 sender）
+                appStateReporter.onCallActive(isCallMode(lastMode))
                 // 目标状态与连续计数：mode 在通话建立/挂断的瞬间会抖几下（IN_CALL → NORMAL
                 // → IN_COMMUNICATION），只认「连续 2 秒同向」才动手，避免来回换流。
                 var pendingInCall = isCallMode(lastMode)
@@ -3757,6 +3800,8 @@ object SessionController {
                     pendingTicks = 0
                     if (inCall) {
                         appendLog("AUDIO: 进入通话（${audioModeName(mode)}）→ 换到通话音频档")
+                        // 车机的 PhoneCall 应用态：它据此切通话 UI（与我们切音频档是两件事）
+                        appStateReporter.onCallActive(true)
                         val switched =
                             runCatching { switchAudioScene(true, "进入通话") }.getOrElse {
                                 appendLog("AUDIO: 切换通话档异常 - ${it.message}")
@@ -3767,6 +3812,7 @@ object SessionController {
                         }
                     } else {
                         appendLog("AUDIO: 通话结束——重新核对车机音量并补同步包（车机常停在静音位）")
+                        appStateReporter.onCallActive(false)
                         currentClient?.refreshVolume("通话结束")
                         sender.resyncAnchor("通话结束")
                         if (audioInCallMode) {
@@ -4725,6 +4771,10 @@ object SessionController {
                     connectBudget.enter(ConnectStage.PAIRING)
                     var client = newClient()
                     currentClient = client
+                    // 本机应用态上报（Speech/PhoneCall）：收发都在后台线程，这里只是起收敛线程。
+                    // 初始归属那一轮（assertModes）会把当前状态一并带上，不会再单独发一遍。
+                    appStateReporter.start()
+                    appendLog("APPSTATE: ${appStateReporter.describe()}")
                     drainPendingEndpoint(client)
                     // 候选地址全打出来：0x4301 与 mDNS 给的可能既不同族也不同值，
                     // 两者都只是候选，**身份判定靠 pair-verify 的 pk 签名**。连错屏/连不上时

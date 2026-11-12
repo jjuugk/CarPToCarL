@@ -1,6 +1,20 @@
 package io.github.shaonialife.carptocar.airplay
 
 /**
+ * 手机自己的**语音态**（AIS `Table 23-57 Speech mode enum values`）。
+ *
+ * 三个取值都要原样出现在 `modesChanged.appStates[appStateID=1].speechMode` 里：
+ * `-1` = 没有语音相关活动、`1` = 正在对用户说话、`2` = 正在收音做语音识别。
+ */
+enum class AirPlaySpeechMode(
+    val wireValue: Long,
+) {
+    NONE(-1L),
+    SPEAKING(1L),
+    RECOGNIZING(2L),
+}
+
+/**
  * AirPlay 资源归属（`modesChanged` / `changeModes`）状态机。
  *
  * ## 为什么要有这个文件
@@ -46,10 +60,39 @@ class AirPlayResourceState {
 
     private val resources = linkedMapOf(RESOURCE_SCREEN to Resource(), RESOURCE_AUDIO to Resource())
 
-    /** appStateID → entity。1 是带 `speechMode` 的那一条（语音/电话），2、3 是其余应用态。 */
-    private val appStates = linkedMapOf(2 to 0L, 3 to 0L, 1 to 0L)
+    /**
+     * appStateID → entity（AIS `Table 23-56`）。
+     *
+     * 顺序沿用旧常量固定为 **2 / 3 / 1**（电话、导航、语音）：报文顺序不变，老车机就不必
+     * 重新适应；1 是唯一带 `speechMode` 的那一条。
+     */
+    private val appStates =
+        linkedMapOf(APP_STATE_PHONE_CALL to 0L, APP_STATE_TURN_BY_TURN to 0L, APP_STATE_SPEECH to 0L)
 
     private var speechMode = -1L
+
+    /**
+     * **我们自己**的语音态（`appStateID=1`）与通话态（`appStateID=2`）。
+     *
+     * 此前这两个值只从车机的 `changeModes` 抄来再回显，等于全程只报「车机在干什么」，
+     * 从不报「手机在干什么」。AIS 23.3.4 明确要求**两边都要如实上报自己的状态**：
+     * `Speech` 的语义是「某实体正在做语音操作，**收音期间所有音频输出必须关闭**，
+     * 以免干扰识别算法」。车机只能按这条来决定「是不是该把自己的音源闭嘴」——
+     * 我们不报，它就永远不会闭嘴，车内音源直接灌进手机麦克风。
+     */
+    private var ownSpeech = AirPlaySpeechMode.NONE
+
+    /** 我们是否正在通话（`appStateID=2`，entity 报 Controller）。 */
+    private var ownPhoneCall = false
+
+    /**
+     * 车机自己报的 `Speech` / `PhoneCall` 归属（0 = None、2 = Accessory）。
+     *
+     * 单独存一份是为了「我们说完/挂断之后还原成车机那条」：我们有状态时把
+     * `appStates` 顶成 Controller，撤掉时得记得车机原来报的是什么，不能一律写 0。
+     */
+    private var carSpeechEntity = 0L
+    private var carCallEntity = 0L
 
     /** 主屏当前是否归手机。旧行为（车机没声明）下恒为 true。 */
     val phoneOwnsScreen: Boolean get() = synchronized(lock) { resources.getValue(RESOURCE_SCREEN).entity == ENTITY_PHONE }
@@ -72,6 +115,12 @@ class AirPlayResourceState {
             }
             appStates.keys.forEach { appStates[it] = 0L }
             speechMode = -1L
+            // 自己这边的状态也复位：`initialize` 每条控制连接只跑一次（AirPlayClient 每轮
+            // 新建），上一轮留下的「正在识别语音」若带过来，新车机会一直等我们闭嘴。
+            ownSpeech = AirPlaySpeechMode.NONE
+            ownPhoneCall = false
+            carSpeechEntity = 0L
+            carCallEntity = 0L
             // `modes` 本身就是一份 initialPermanentEntity 形态的快照（字段名与事件里的
             // `params` 同构），所以直接复用同一套解析。
             applyCarChangeLocked(modes)
@@ -132,10 +181,45 @@ class AirPlayResourceState {
     }
 
     /**
+     * 报告**本机**语音态（`Speech` / `speechMode`）。
+     *
+     * @return 是否真的变了（没变就别再发一遍 `modesChanged`）
+     */
+    fun setOwnSpeech(mode: AirPlaySpeechMode): Boolean =
+        synchronized(lock) {
+            if (ownSpeech == mode) return false
+            ownSpeech = mode
+            // `Speech` 是「单实体」状态：我们报了自己，就不能再同时报车机。
+            // 撤掉时还原成车机自己报的那条（不是一律 0——车机可能确实在语音态里）。
+            appStates[APP_STATE_SPEECH] =
+                if (mode == AirPlaySpeechMode.NONE) carSpeechEntity else ENTITY_PHONE
+            true
+        }
+
+    /** 报告本机是否在通话（`appStateID=2`）。@return 是否真的变了 */
+    fun setOwnPhoneCall(active: Boolean): Boolean =
+        synchronized(lock) {
+            if (ownPhoneCall == active) return false
+            ownPhoneCall = active
+            appStates[APP_STATE_PHONE_CALL] = if (active) ENTITY_PHONE else carCallEntity
+            true
+        }
+
+    /** 本机语音态（诊断/断言用）。 */
+    val ownSpeechMode: AirPlaySpeechMode get() = synchronized(lock) { ownSpeech }
+
+    /** 本机是否在通话（诊断/断言用）。 */
+    val ownPhoneCallActive: Boolean get() = synchronized(lock) { ownPhoneCall }
+
+    /**
      * 组装一条 `modesChanged` 请求体。
      *
      * 字段与顺序都沿用改动前的常量（appStates 在前、appStateID 升序固定为 2/3/1），
      * 只有取值来自状态机——这样车机侧看到的报文形态没有变化，变的只是内容。
+     *
+     * **本机状态优先**：`Speech`（1）与 `PhoneCall`（2）在「我们自己有话说」时报
+     * `entity=Controller`，否则才回显车机自己的那条。默认（本机既不说话也不通话）时
+     * 报文与改动前逐字节一致，因此对现有车机零影响。
      */
     fun command(): Map<String, Any?> =
         synchronized(lock) {
@@ -145,8 +229,25 @@ class AirPlayResourceState {
                     linkedMapOf(
                         "appStates" to
                             appStates.map { (id, entity) ->
-                                linkedMapOf<String, Any?>("appStateID" to id.toLong(), "entity" to entity).apply {
-                                    if (id == 1) put("speechMode", speechMode)
+                                val ownSpeechActive = ownSpeech != AirPlaySpeechMode.NONE
+                                val claimed =
+                                    when (id) {
+                                        APP_STATE_SPEECH -> if (ownSpeechActive) ENTITY_PHONE else entity
+                                        APP_STATE_PHONE_CALL -> if (ownPhoneCall) ENTITY_PHONE else entity
+                                        else -> entity
+                                    }
+                                linkedMapOf<String, Any?>("appStateID" to id.toLong(), "entity" to claimed).apply {
+                                    // Table 23-72：Speech / PhoneCall 必须带 speechMode。
+                                    // 只在**本机主动报告**时补 2 那条的 speechMode（None），
+                                    // 平时不多写字段，保持既有报文逐字节不变。
+                                    when {
+                                        id == APP_STATE_SPEECH ->
+                                            put(
+                                                "speechMode",
+                                                if (ownSpeechActive) ownSpeech.wireValue else speechMode,
+                                            )
+                                        id == APP_STATE_PHONE_CALL && ownPhoneCall -> put("speechMode", -1L)
+                                    }
                                 }
                             },
                         "resources" to
@@ -161,13 +262,16 @@ class AirPlayResourceState {
             )
         }
 
-    /** 一行诊断：车机到底把哪块资源拿走了，日志里要能一眼看出来。 */
+    /** 一行诊断：车机到底把哪块资源拿走了、我们自己在报什么，日志里要能一眼看出来。 */
     fun describe(): String =
         synchronized(lock) {
             val screen = resources.getValue(RESOURCE_SCREEN)
             val audio = resources.getValue(RESOURCE_AUDIO)
+            val own =
+                "本机语音=${ownSpeech.name}" + if (ownPhoneCall) "/通话中" else ""
             "主屏=${ownerName(screen)} 主音频=${ownerName(audio)}" +
-                " speechMode=$speechMode appStates=${appStates.entries.joinToString(",") { "${it.key}:${it.value}" }}"
+                " $own speechMode=$speechMode" +
+                " appStates=${appStates.entries.joinToString(",") { "${it.key}:${it.value}" }}"
         }
 
     private fun ownerName(resource: Resource): String {
@@ -217,22 +321,32 @@ class AirPlayResourceState {
             val item = raw as? Map<*, *> ?: return@forEach
             val id = (item["appStateID"] as? Number)?.toInt() ?: return@forEach
             if (id !in appStates) return@forEach
-            if (id == 1) {
+            if (id == APP_STATE_SPEECH) {
                 // 带 speechMode 的那条：-1 = 无语音，其余按「正在语音」记为车机侧（2）
                 (item["speechMode"] as? Number)?.toLong()?.let {
                     speechMode = it
-                    appStates[id] = if (it == -1L) 0L else ENTITY_CAR
+                    carSpeechEntity = if (it == -1L) 0L else ENTITY_CAR
+                    appStates[id] = if (ownSpeech == AirPlaySpeechMode.NONE) carSpeechEntity else ENTITY_PHONE
                 }
             } else {
-                (item["state"] as? Boolean)?.let { appStates[id] = if (it) ENTITY_CAR else 0L }
+                (item["state"] as? Boolean)?.let {
+                    val value = if (it) ENTITY_CAR else 0L
+                    if (id == APP_STATE_PHONE_CALL) carCallEntity = value
+                    appStates[id] = if (id == APP_STATE_PHONE_CALL && ownPhoneCall) ENTITY_PHONE else value
+                }
             }
         }
     }
 
     companion object {
-        /** resourceID：1 = 主屏，2 = 主音频。 */
+        /** resourceID（`Table 23-52`）：1 = 主屏，2 = 主音频。 */
         const val RESOURCE_SCREEN = 1
         const val RESOURCE_AUDIO = 2
+
+        /** appStateID（`Table 23-56`）：1 = Speech、2 = PhoneCall、3 = TurnByTurn。 */
+        const val APP_STATE_SPEECH = 1
+        const val APP_STATE_PHONE_CALL = 2
+        const val APP_STATE_TURN_BY_TURN = 3
 
         /** permanentEntity：1 = 手机，2 = 车机。 */
         const val ENTITY_PHONE = 1L
