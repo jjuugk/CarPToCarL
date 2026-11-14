@@ -1,19 +1,25 @@
 package io.github.shaonialife.carptocar.carlife
 
 /**
- * 极简 H.264 SPS 解析：只为拿到**码流真实的编码宽高**。
+ * H.264 SPS 解析：区分宏块对齐编码尺寸（coded）与裁剪后的真实画面尺寸（visible）。
  *
- * 为什么需要它：触摸坐标是回灌给手机 CarLife 引擎的，坐标系必须是**引擎实际编码的画面**。
- * 而 `98311` 申请值 / `65544` 回包值都可能与实际码流不一致（引擎有白名单档位：
- * 申请 1412×654 也可能按 1280×720 编码），一旦拿错基准，等比缩放系数就偏，
- * 车机点哪儿都落不到实处。SPS 是码流自带的真相，只信它。
+ * VideoConfig 的码流声明取 visible；coded 仅用于对齐填充诊断。CarLife 申请值与 65544 回包值
+ * 可能因引擎白名单或用户配置与真实码流不同，不能替代 SPS 中的实际画面尺寸。
  *
  * 只实现 AnnexB + 常见 profile（Baseline/Main/High 及其变体），足够覆盖 CarLife 的 H.264。
  */
 internal object H264Sps {
+    data class Dimensions(
+        val codedWidth: Int,
+        val codedHeight: Int,
+        val visibleWidth: Int,
+        val visibleHeight: Int,
+    ) {
+        val visible: Pair<Int, Int> get() = visibleWidth to visibleHeight
+    }
 
-    /** 从**单个 SPS NAL**（首字节是 NAL 头 0x67，不含起始码）解析宽高。 */
-    fun parseNal(nal: ByteArray): Pair<Int, Int>? {
+    /** 从单个 SPS NAL（含 NAL 头 0x67、不含起始码）解析编码尺寸与裁剪后尺寸。 */
+    fun parseNal(nal: ByteArray): Dimensions? {
         if (nal.size < 8) return null
         return runCatching {
             // 跳过 NAL 头，并剔除 emulation prevention bytes（00 00 03 → 00 00）。
@@ -23,7 +29,7 @@ internal object H264Sps {
         }.getOrNull()
     }
 
-    /** 从 AnnexB 字节流里找 SPS 并解析。返回 null = 没找到或解析失败。 */
+    /** 从 AnnexB 字节流里找 SPS 并返回裁剪后尺寸。返回 null = 没找到或解析失败。 */
     fun parseAnnexB(data: ByteArray): Pair<Int, Int>? {
         var index = 0
         while (index + 5 < data.size) {
@@ -32,15 +38,17 @@ internal object H264Sps {
                 index++
                 continue
             }
-            val scLength = when {
-                data[index + 2] == 1.toByte() -> 3
-                index + 3 < data.size && data[index + 2] == 0.toByte() &&
-                    data[index + 3] == 1.toByte() -> 4
-                else -> {
-                    index++
-                    continue
+            val scLength =
+                when {
+                    data[index + 2] == 1.toByte() -> 3
+                    index + 3 < data.size &&
+                        data[index + 2] == 0.toByte() &&
+                        data[index + 3] == 1.toByte() -> 4
+                    else -> {
+                        index++
+                        continue
+                    }
                 }
-            }
             val nalStart = index + scLength
             if (nalStart >= data.size) return null
             val nalType = data[nalStart].toInt() and 0x1F
@@ -55,7 +63,7 @@ internal object H264Sps {
                     }
                     end++
                 }
-                return parseNal(data.copyOfRange(nalStart, end))
+                return parseNal(data.copyOfRange(nalStart, end))?.visible
             }
             index = nalStart + 1
         }
@@ -118,7 +126,7 @@ internal object H264Sps {
         }
     }
 
-    private fun parseRbsp(rbsp: ByteArray): Pair<Int, Int> {
+    private fun parseRbsp(rbsp: ByteArray): Dimensions {
         val r = BitReader(rbsp)
         val profileIdc = r.u(8)
         r.u(8) // constraint_set0..5 + reserved（8 位，多读一位会让后面全部错位）
@@ -173,16 +181,18 @@ internal object H264Sps {
         }
 
         val subWidthC = if (chromaFormatIdc == 3 || separateColourPlane) 1 else 2
-        val subHeightC = when {
-            chromaFormatIdc == 1 -> 2
-            chromaFormatIdc == 3 || separateColourPlane -> 1
-            else -> 1 // 4:2:2 已经是 1，其它按 1 处理
-        }
-        val width = widthMbs * 16 - (cropLeft + cropRight) * subWidthC
-        val height = (2 - frameMbsOnly) * heightMapUnits * 16 -
-            (cropTop + cropBottom) * subHeightC * (2 - frameMbsOnly)
+        val subHeightC =
+            when {
+                chromaFormatIdc == 1 -> 2
+                chromaFormatIdc == 3 || separateColourPlane -> 1
+                else -> 1 // 4:2:2 已经是 1，其它按 1 处理
+            }
+        val codedWidth = widthMbs * 16
+        val codedHeight = (2 - frameMbsOnly) * heightMapUnits * 16
+        val width = codedWidth - (cropLeft + cropRight) * subWidthC
+        val height = codedHeight - (cropTop + cropBottom) * subHeightC * (2 - frameMbsOnly)
         if (width <= 0 || height <= 0) throw IllegalStateException("bad sps size")
-        return width to height
+        return Dimensions(codedWidth, codedHeight, width, height)
     }
 
     private fun skipScalingList(
