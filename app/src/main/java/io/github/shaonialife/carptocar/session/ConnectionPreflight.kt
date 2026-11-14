@@ -37,6 +37,10 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
  * 取的是同一份 [Report]（[Report.headline] 给界面一行摘要，[Report.describe] 给日志与
  * 详情弹窗），因此界面上看到的那句话，导出的日志里一定有完全相同的一份。
  *
+ * **本对象只读**：它不申请、不弹框、不跳转。体检弹窗里那个「一键获取」由
+ * [PermissionRepair] 规划、`MainActivity` 执行（运行时权限弹框 / 跳系统设置页）。
+ * 之所以分开：体检要能在任何线程、任何时机跑，而申请权限必须挂在 Activity 上。
+ *
  * **不含「投屏授权」**：本版本画面走双屏虚拟屏、声音走 CarLife 引擎 PCM 直通，
  * 都不经 `MediaProjection`（2026-11-11 核对：`AudioSender.start(projection)` 无调用方，
  * `CarPlayService.pendingProjectionResult` 从未被写入）。把它列进体检只会让用户
@@ -339,7 +343,9 @@ object ConnectionPreflight {
                         if (notificationAccess) {
                             "已授权——车机上的歌名/封面可用"
                         } else {
-                            "未授权——车机音乐卡与 0x5001 NowPlaying 拿不到歌名（不影响连接与推流）"
+                            "未授权——车机音乐卡与 0x5001 NowPlaying 拿不到歌名（不影响连接与推流）。" +
+                                "这项**没有系统授权弹窗**（不是运行时权限），只能到「设置 → 通知使用权」" +
+                                "手动打开；本页「一键获取」会直接跳到那一项"
                         },
                     ),
                 )

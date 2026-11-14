@@ -51,6 +51,7 @@ import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
+import io.github.shaonialife.carptocar.session.PermissionRepair
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -233,6 +234,36 @@ class MainActivity : AppCompatActivity() {
     private val pendingStartAfterPermission =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
+
+    /**
+     * 体检页「一键获取缺失权限」用的运行时权限申请。
+     *
+     * 与 [connectionPermissionLauncher] **刻意分开**：那个的失败分支要置
+     * [connectionPermissionDenied] 并弹自家说明，因为它是"连接流程的一部分"；
+     * 这里只是补权限，失败就继续下一项，不该反过来挡住连接。
+     */
+    private val repairPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            log(
+                "PERM: 申请结果 " +
+                    result.entries.joinToString { "${it.key.substringAfterLast('.')}=${it.value}" },
+            )
+            advancePermissionRepair()
+        }
+
+    /** 跳系统设置页 / 系统开关框；用户回来后继续下一项。 */
+    private val repairPageLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            advancePermissionRepair()
+        }
+
+    /** 本轮「一键获取」还没走完的步骤（FIFO，见 [startPermissionRepair]）。 */
+    private val repairQueue = ArrayDeque<PermissionRepair.Step>()
+
+    /** 本轮已经放弃的步骤（页面拉不起来）：记下来避免在同一轮里反复重试。 */
+    private val repairGiveUp = mutableSetOf<PermissionRepair.Step>()
+
+    private var repairRunning = false
 
     /**
      * 本进程内已被拒绝过：**不再重复弹系统框**。
@@ -703,6 +734,116 @@ class MainActivity : AppCompatActivity() {
             getColor(
                 if (subject.blockingMissing.isEmpty()) R.color.m3_mono_dim else R.color.m3_error,
             ),
+        )
+    }
+
+    /**
+     * 一键补齐体检里没通过的权限（2026-11-14 用户要求）。
+     *
+     * 起因：体检一直报「通知使用权未授权」，界面上却从来没有弹过框，用户以为是我们
+     * 没申请。**这项根本没有运行时权限弹窗**——授权存在
+     * `Settings.Secure.enabled_notification_listeners` 里，只能由用户在
+     * 「设置 → 通知使用权」亲手打开；旧实现靠 Shizuku 跑 `cmd notification
+     * allow_listener`，Shizuku 移除后那条命令只会静默失败，于是「检查一直红、
+     * 也没人告诉你该点哪里」。
+     *
+     * 现在的做法是**按计划一步步真的走到系统界面**（[PermissionRepair] 给顺序与 Intent）：
+     * 能弹系统框的直接弹（附近设备 / 通知 / 开蓝牙 / 忽略电池优化），只能跳设置页的
+     * 打开对应页面，回到 App 后自动进下一项。全程只响应用户这一次点击，不做后台申请、
+     * 不弹自家「重试/去设置」框。
+     */
+    private fun startPermissionRepair() {
+        if (repairRunning) return
+        val plan = PermissionRepair.plan(this)
+        if (plan.isEmpty()) {
+            DarkMessageDialog.show(
+                activity = this,
+                title = "没有要补的权限",
+                message = "体检里每一项都已通过，不需要再授权。",
+                actions = listOf(DarkMessageDialog.Action("知道了", DarkMessageDialog.Emphasis.PRIMARY) {}),
+            )
+            return
+        }
+        log("PERM: 一键获取缺失权限——待补 ${plan.joinToString(" → ") { it.title }}")
+        repairQueue.clear()
+        repairQueue.addAll(plan)
+        repairGiveUp.clear()
+        repairRunning = true
+        advancePermissionRepair()
+    }
+
+    /**
+     * 推进「一键获取」：每次只做一项，做完（或用户返回）再走下一项。
+     *
+     * 每一步之前都**现查一次体检**——用户可能在上一个页面里顺手把别的也开了，
+     * 已经通过的直接跳过，不再白跳一次界面。
+     */
+    private fun advancePermissionRepair() {
+        if (!repairRunning) return
+        val stillMissing = runCatching { PermissionRepair.plan(this) }.getOrDefault(emptyList()).toSet()
+        while (true) {
+            val step = repairQueue.removeFirstOrNull() ?: break
+            if (step !in stillMissing || step in repairGiveUp) continue
+            if (step == PermissionRepair.Step.PERMISSIONS) {
+                val missing = PermissionRepair.missingPermissions(this)
+                if (missing.isEmpty()) {
+                    // 12/12L 没有 POST_NOTIFICATIONS 这个运行时权限：通知关着只能去页面开
+                    val notificationsOff =
+                        !androidx.core.app.NotificationManagerCompat
+                            .from(this)
+                            .areNotificationsEnabled()
+                    if (notificationsOff && openRepairPage(PermissionRepair.Step.NOTIFICATION_PAGE)) return
+                    continue
+                }
+                log("PERM: 申请运行时权限 ${missing.joinToString { it.substringAfterLast('.') }}")
+                repairPermissionLauncher.launch(missing.toTypedArray())
+                return
+            }
+            if (openRepairPage(step)) return
+            repairGiveUp += step
+        }
+        finishPermissionRepair()
+    }
+
+    /** 打开一项的设置页/系统框；一个候选都拉不起来时返回 false（由调用方记账跳过）。 */
+    private fun openRepairPage(step: PermissionRepair.Step): Boolean {
+        // 候选逐个试：国产 ROM 常把某个 Settings Action 改成空实现（荣耀 MagicOS 的
+        // 「通知使用权」入口就和 AOSP 不同），拉不起来就换下一个，最后退到应用详情页。
+        for (intent in PermissionRepair.candidates(this, step)) {
+            try {
+                log("PERM: 打开「${step.title}」——${step.hint}")
+                repairPageLauncher.launch(intent)
+                return true
+            } catch (_: Exception) {
+                // ActivityNotFound / SecurityException：换下一个候选
+            }
+        }
+        log("PERM: ⚠ 系统里找不到「${step.title}」对应的设置页——请到系统设置里手动开启")
+        return false
+    }
+
+    /** 收尾：重新体检、刷新摘要行、把结果原样告诉用户（不美化、不藏仍在缺的项）。 */
+    private fun finishPermissionRepair() {
+        repairRunning = false
+        repairQueue.clear()
+        val report = runCatching { ConnectionPreflight.inspect(this) }.getOrNull()
+        report?.let { refreshPreflight(it) }
+        val missing = report?.checks?.filterNot { it.ready }.orEmpty()
+        log("PERM: 补齐结束——${report?.headline() ?: "体检失败"}")
+        val body =
+            buildString {
+                append(report?.headline().orEmpty())
+                if (missing.isNotEmpty()) {
+                    append("\n")
+                    missing.forEach { append("\n· ${it.requirement.title}：${it.detail.orEmpty()}") }
+                    append("\n\n「本机蓝牙地址」「目标车机已配对」这类设置项不在权限里，回主界面处理。")
+                }
+            }
+        DarkMessageDialog.show(
+            activity = this,
+            title = if (missing.isEmpty()) "权限已补齐" else "还有 ${missing.size} 项没通过",
+            message = body,
+            actions = listOf(DarkMessageDialog.Action("知道了", DarkMessageDialog.Emphasis.PRIMARY) {}),
         )
     }
 
@@ -1197,11 +1338,36 @@ class MainActivity : AppCompatActivity() {
                     "\n\n⚠ 阻塞项缺失：现在点「启动连接」必然失败，请先补齐（" +
                         report.blockingMissing.joinToString("、") { it.requirement.title } + "）"
                 }
+            // 「一键获取」只列出**真能自动引导**的项（[PermissionRepair]）：运行时权限弹框、
+            // 开蓝牙/开 WLAN、位置服务、通知使用权、忽略电池优化。本机蓝牙地址、目标车机
+            // 这些设置项不算权限，不放进按钮里冒充。
+            val repairPlan = PermissionRepair.plan(this)
+            val actions =
+                buildList {
+                    if (repairPlan.isNotEmpty()) {
+                        add(
+                            DarkMessageDialog.Action(
+                                "一键获取（${repairPlan.size} 项）",
+                                DarkMessageDialog.Emphasis.PRIMARY,
+                            ) { startPermissionRepair() },
+                        )
+                    }
+                    add(
+                        DarkMessageDialog.Action(
+                            "知道了",
+                            if (repairPlan.isEmpty()) {
+                                DarkMessageDialog.Emphasis.PRIMARY
+                            } else {
+                                DarkMessageDialog.Emphasis.TEXT
+                            },
+                        ) {},
+                    )
+                }
             DarkMessageDialog.show(
                 activity = this,
                 title = "连接前体检 · ${report.headline()}",
                 message = report.dialogText() + blocking,
-                actions = listOf(DarkMessageDialog.Action("知道了", DarkMessageDialog.Emphasis.PRIMARY) {}),
+                actions = actions,
             )
             refreshPreflight(report)
         }
