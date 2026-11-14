@@ -32,6 +32,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -1852,6 +1853,38 @@ class MainActivity : AppCompatActivity() {
                     "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
                 }
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
+        }
+
+        // 导航播报通道（实验）：混音 / alert 独立流 / speechRecognition 独立流。
+        // 只能下次连接起效——audioType 只在 SETUP 里出现一次，一条流建成后改不了语义，
+        // 中途换等于拆掉重建（还会顺带触发 RECORD，正是宝马车机的死点）。
+        val navRow = findViewById<android.view.View>(R.id.rowNavAudio)
+        val navValue = findViewById<TextView>(R.id.navAudioValue)
+        val navNote = findViewById<TextView>(R.id.navAudioNote)
+
+        fun refreshNavAudio() {
+            val route = NavAudioRoute.load(ctx)
+            navValue.text =
+                when (route) {
+                    NavAudioRoute.MIX -> "混音"
+                    NavAudioRoute.ALERT -> "alert"
+                    NavAudioRoute.SPEECH -> "语音识别"
+                }
+            navNote.text = route.detail
+        }
+
+        refreshNavAudio()
+        navRow.setOnClickListener {
+            val next = NavAudioRoute.load(ctx).next()
+            NavAudioRoute.save(ctx, next)
+            refreshNavAudio()
+            snack(
+                if (next == NavAudioRoute.MIX) {
+                    "导航播报已回到混音（下次连接起效）"
+                } else {
+                    "导航播报：${next.label}（下次连接起效；车机没声明该档会自动回退混音）"
+                },
+            )
         }
 
         // 流分辨率缩放（30%–160%，步进 5；下次连接起效）

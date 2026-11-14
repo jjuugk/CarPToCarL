@@ -13,6 +13,11 @@ import io.github.shaonialife.carptocar.audio.AudioSource
  * 现在改为**直通**：直接把引擎的裸 PCM 喂给 [AudioSender.feedPcm]，由其内部完成
  * 采样率/声道对齐 + RTP/ChaCha20 封包发送。不依赖录屏授权、少一次中转。
  *
+ * 唯一的例外是 [io.github.shaonialife.carptocar.audio.NavAudioRoute] 选了 alert /
+ * speechRecognition 的实验分支：那时 9241 改投**第二条独立音频流**（见 [write] 末尾），
+ * 不再进主混音器。默认仍是混音——AirPlay 的 audioType 枚举里没有 navigation，
+ * 手机侧混音才是 CarPlay 的标准做法。
+ *
  * 前提：AirPlay 音频通道已协商成功（[SessionController.audioSender] 正在直通模式运行），
  * 否则直接丢弃（与旧实现的「未开启声音则丢弃」语义一致，由 [CarLifeHijack.routeAudio] 判断）。
  */
@@ -168,6 +173,19 @@ internal class CarLifeAudioSink(
                 if (sampleRate > 0) sampleRate else DEFAULT_RATE,
                 if (channels > 0) channels else 2,
             )
+        }
+        // 导航播报独立流（实验，设置项 NavAudioRoute）：那条流真的在跑时，9241 的 PCM 不
+        // 再进主混音器，直接投给独立发送端。按 MEDIA 喂是刻意的——它的混音器只有这一路
+        // 在跑，NAV 路没人喂；喂 MEDIA 也顺带避开了「自己 duck 自己」。
+        val navSender =
+            if (source == AudioSource.NAV) {
+                io.github.shaonialife.carptocar.SessionController.navAudioSender?.takeIf { it.isRunning }
+            } else {
+                null
+            }
+        if (navSender != null) {
+            navSender.feedPcm(pcm, size, srcRate, srcChannels, AudioSource.MEDIA)
+            return
         }
         val sender = io.github.shaonialife.carptocar.SessionController.audioSender
         if (sender == null || !sender.isRunning) return

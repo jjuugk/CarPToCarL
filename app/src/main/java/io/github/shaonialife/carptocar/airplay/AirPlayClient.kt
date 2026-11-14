@@ -2603,6 +2603,14 @@ class AirPlayClient(
          * 车机会把麦克风音频推到该端口（见 [MicUplink]）。0 = 纯下行（默认，行为不变）。
          */
         micPort: Int = 0,
+        /**
+         * 建完流后要不要顺手核对/纠正接收端音量（[probeAndFixVolume]）。
+         *
+         * 默认 true 保持老行为。同一会话的第二条流（导航播报独立流）要传 **false**：
+         * 音量是会话级的，主音频那条流已经查过了；再查一次只是多两趟 RTSP 往返
+         * （最长 4s×2），用户侧表现成「连上了、导航要等好几秒才出声」。
+         */
+        fixVolume: Boolean = true,
     ): AudioStreamInfo? {
         // 档位由调用方按「车机 /info 声明的候选 + 本车机历史记忆」选定后传进来：
         // 同一台车机上不同 audioType 档位的可用性完全不同（见 AudioProfile 注释），
@@ -2805,9 +2813,10 @@ class AirPlayClient(
         // 音频通路已建好，但「车机在收数据、喇叭没声」还剩一种很常见的原因：
         // 接收端的 AirPlay 音量处于静音位（-144dB）——真 iPhone 会主动 SET_PARAMETER
         // volume。这里先查一次（顺带把值记进日志），查到静音位就抬到 -25dB。
-        probeAndFixVolume(host)
-        return AudioStreamInfo(
-            streamConnectionId = connectionId,
+        // 第二条流（导航独立流）不重复查音量：音量是会话级的，主流已经查过，
+        // 再查只会多两趟 RTSP 往返。
+        if (fixVolume) probeAndFixVolume(host)
+        return AudioStreamInfo(            streamConnectionId = connectionId,
             dataPort = dataPort,
             controlPort = portOf(audio["controlPort"]),
             streamKey = streamKey,
@@ -3019,6 +3028,89 @@ class AirPlayClient(
         }
         log("AIRPLAY: 音频候选（按偏好）=${ordered.map { it.label }}")
         return ordered.distinctBy { it.key }
+    }
+
+    /**
+     * 按**指定的 audioType** 从 `/info` 声明里挑一条下行档位（导航播报独立流用）。
+     *
+     * 与 [audioCandidates] 的分工：那条是「媒体音频」的候选，只认 media / compatibility /
+     * default 三档；这里**只认调用方点名的那一档**，车机没声明就返回 null——绝不退回
+     * media 顶替（退回等于又变回混音，实验结论会被污染成「无效」）。
+     *
+     * 格式顺序与媒体侧刻意不同：**PCM 48k 优先**，AAC 兜底。导航播报对延迟敏感，
+     * 而 AAC 要多一次编码（一帧 1024 样本 ≈21ms）加编码器冷启动；真 iPhone 的 Siri
+     * 音频是 AAC-ELD，我们没有那个编码器，所以「照真 iPhone 用 AAC」在这里不成立。
+     * 只有该档位图里没有 PCM 位时才退到 AAC-LC。
+     */
+    fun audioProfileForType(audioType: String): AudioProfile? {
+        val wanted = audioType.trim().lowercase()
+        if (wanted.isEmpty()) return null
+        val info =
+            negotiatedInfo ?: run {
+                log("AIRPLAY: 未拿到 /info，无法确认 audioType=$wanted 档 —— 不建独立流")
+                return null
+            }
+        val declared =
+            (info["audioFormats"] as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                .orEmpty()
+        // 顺序即优先级：PCM 48k → PCM 44.1k → AAC 48k(102/100) → AAC 44.1k(102/100)。
+        // PCM 优先是因为导航播报对延迟敏感，AAC 要多一次编码（一帧 ≈21ms）加编码器冷启动；
+        // 真 iPhone 的 Siri 走 AAC-ELD，我们没有那个编码器，「照 iPhone 用 AAC」在这里不成立。
+        // PCM 只出现在 type=100 上；AAC-LC 可能落在 102（MainHighAudio）。
+        val ordered =
+            listOf(
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,
+                AUDIO_STREAM_TYPE_MAIN_HIGH to AUDIO_FORMAT_AAC_48K_STEREO,
+                AUDIO_STREAM_TYPE_MAIN_HIGH to AUDIO_FORMAT_AAC_LC_44K_STEREO,
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_48K_STEREO,
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_LC_44K_STEREO,
+            )
+        val hit = pickDeclaredFormat(declared, wanted, ordered)
+        if (hit == null) {
+            val declaredTypes = declared.mapNotNull { (it["audioType"] as? String)?.lowercase() }.distinct()
+            if (wanted in declaredTypes) {
+                log(
+                    "AIRPLAY: audioType=$wanted 档已声明，但位图里没有可用的 PCM 48k/44.1k 或 AAC-LC" +
+                        "（该档 type/output=" +
+                        declared
+                            .filter { (it["audioType"] as? String)?.lowercase() == wanted }
+                            .mapNotNull { (it["type"] as? Number)?.toLong() to (it["audioOutputFormats"] as? Number)?.toLong() } +
+                        "）—— 不建独立流",
+                )
+            } else {
+                log("AIRPLAY: 车机 /info 未声明 audioType=$wanted 档（已声明=$declaredTypes）—— 不建独立流")
+            }
+            return null
+        }
+        val (streamType, bit) = hit
+        val (rate, codec) =
+            when (bit) {
+                AUDIO_FORMAT_PCM_48K_STEREO -> 48_000 to AudioCodec.PCM
+                AUDIO_FORMAT_PCM_44K_STEREO -> 44_100 to AudioCodec.PCM
+                AUDIO_FORMAT_AAC_48K_STEREO -> 48_000 to AudioCodec.AAC_LC
+                else -> 44_100 to AudioCodec.AAC_LC
+            }
+        val channel =
+            declared.firstOrNull {
+                ((it["type"] as? Number)?.toLong()) == streamType &&
+                    (it["audioType"] as? String)?.lowercase() == wanted
+            }
+        val profile =
+            AudioProfile(
+                audioType = wanted,
+                formatBit = bit,
+                sampleRate = rate,
+                latencyMs = latencyFor(info, wanted, streamType),
+                streamType = streamType,
+                codec = codec,
+                // 输入位图照原样带出仅供诊断：麦克风端口**绝不**挂这条流
+                // （输入端口只属于 media 档，挂错会让车机关通道甚至重启整机）
+                inputFormats = (channel?.get("audioInputFormats") as? Number)?.toLong(),
+            )
+        log("AIRPLAY: audioType=$wanted 档可用 → ${profile.label}")
+        return profile
     }
 
     /**

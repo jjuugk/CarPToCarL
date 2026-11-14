@@ -18,6 +18,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
+import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
@@ -1056,6 +1057,24 @@ object SessionController {
     var audioSender: AudioSender? = null
 
     /**
+     * 导航播报的**独立音频流**（实验，见 [io.github.shaonialife.carptocar.audio.NavAudioRoute]）。
+     *
+     * null = 导航与媒体混在 [audioSender] 里（默认行为）。非空 = 设置里选了 alert /
+     * speechRecognition 且车机确实声明了该档、第二条流也建成了——此时 9241 的 PCM 由
+     * [io.github.shaonialife.carptocar.carlife.CarLifeAudioSink] 直接投给它，不再进主混音器。
+     *
+     * 这条流**不需要额外的 RECORD**：RECORD 激活的是整个会话（空 plist），不是某条流，
+     * 所以它刻意在第一次 RECORD **之前** SETUP，一次 RECORD 覆盖两条——宝马车机收到
+     * 第二次 RECORD 会关掉自己的 AirPlay 服务（1.2.45 现场结论），这条红线不能碰。
+     */
+    @Volatile
+    var navAudioSender: AudioSender? = null
+
+    /** 本会话导航独立流实际用的档位（诊断用；null = 没建或已回退混音）。 */
+    @Volatile
+    var activeNavAudioProfile: AudioProfile? = null
+
+    /**
      * 车机麦克风上行监听（收包 + 解密 + 落 wav）。
      *
      * 与 [audioSender] 成对存在：端口在音频 SETUP 里声明，所以必须先有 [MicUplink] 才能建流；
@@ -1146,20 +1165,27 @@ object SessionController {
                 endClientSession(client, "主音频资源取得后 RECORD 激活失败")
                 return false
             }
-            audioSender?.onRecorded()
+            onRecordedAll()
             return true
         }
         // 导航借用归还时若正在通话，通话流不拆
         if (audioInCallMode && client.phoneOwnsAudio) return audioSender?.isRunning == true
         val type = activeCallProfile?.streamType ?: activeAudioProfile?.streamType
+        // 导航独立流的类型可能和主音频不同（alert 若落在 102 上就是 102/100 各一条），
+        // 拆链要按各自类型分别 TEARDOWN，漏掉的那条只能等车机自己超时回收。
+        val navType = activeNavAudioProfile?.streamType
         audioSender?.stop()
         audioSender = null
+        navAudioSender?.stop()
+        navAudioSender = null
+        activeNavAudioProfile = null
         micUplink?.stop()
         micUplink = null
         activeAudioStartedAt = 0L
         audioInCallMode = false
         activeCallProfile = null
         if (type != null) client.teardownStream(type)
+        if (navType != null && navType != type) client.teardownStream(navType)
         appendLog("RESOURCE: 音频传输已退役；主屏状态不变")
         return false
     }
@@ -2454,6 +2480,10 @@ object SessionController {
         ScreenDimmer.setSessionActive(false)
         audioSender?.stop()
         audioSender = null
+        // 导航独立流（实验）随会话一起收：留着会在下一轮被当成「已建好」而跳过重建
+        navAudioSender?.stop()
+        navAudioSender = null
+        activeNavAudioProfile = null
         // 麦克风上行跟着音频流一起收：车机那边流一停就不会再推，留着端口空转没意义。
         // stop() 里会落 wav 并打一行 `MIC: 结论——…`，所以必须在会话日志收尾之前调。
         micUplink?.stop()
@@ -2514,7 +2544,7 @@ object SessionController {
         if (audioSender?.isRunning == true) return
         appendLog("MODE: 会话进行中，动态补启音频通道…")
         if (startAudioChannel(context, client, secret, currentAudioHost) && client.record()) {
-            audioSender?.onRecorded()
+            onRecordedAll()
         }
     }
 
@@ -3886,6 +3916,10 @@ object SessionController {
                 activeAudioStartedAt = 0L
                 false
             } else {
+                // 导航播报独立流（实验，设置项 NavAudioRoute）：必须在第一次 RECORD **之前**
+                // SETUP，一次会话级 RECORD 才能覆盖两条流。宝马车机收到第二次 RECORD 会关掉
+                // 自己的 AirPlay 服务（1.2.45 现场结论），这条红线不能碰。
+                startNavAudioChannel(client, sharedSecret, host, context)
                 startCallWatcher()
                 true
             }
@@ -3896,6 +3930,97 @@ object SessionController {
             activeAudioStartedAt = 0L
             false
         }
+    }
+
+    /**
+     * 给导航播报单独建一条音频流（**实验功能**，设置项 [NavAudioRoute]）。
+     *
+     * 只在三件事同时成立时建流：设置里选了 alert / speechRecognition、车机 `/info` 声明了
+     * 该档、SETUP 回 200 且发送端起得来。任何一步不成立都只打一行日志并**保持混音**——
+     * 导航声音永远有路可走，不会因为实验失败变成没声音。
+     *
+     * 两个刻意为之的约束：
+     *  1. `micPort = 0`：输入端口只属于 media 档。挂到语音/提示音档上，宝马车机会关掉
+     *     这条流甚至重启整机（2026-11-09 G38 `102/media input=0x0` 的现场结论）。
+     *  2. 不在这里发 RECORD：RECORD 激活的是整个会话（空 plist），不是某一条流。本流在
+     *     第一次 RECORD 之前 SETUP，由 [onRecordedAll] 与主音频一起激活，因此不需要
+     *     「补发 RECORD」这个动作——那正是会弄死宝马车机的动作。
+     */
+    @Synchronized
+    private fun startNavAudioChannel(
+        client: AirPlayClient,
+        sharedSecret: ByteArray?,
+        host: String,
+        context: Context,
+    ) {
+        val route = NavAudioRoute.load(context.applicationContext)
+        val audioType = route.audioType ?: return
+        val secret =
+            sharedSecret ?: run {
+                appendLog("AUDIO: 导航播报通道=${route.label} —— 没有会话密钥，保持混音")
+                return
+            }
+        val profile =
+            client.audioProfileForType(audioType) ?: run {
+                appendLog("AUDIO: 导航播报通道=${route.label} —— 车机未声明该档，保持混音（与音乐同一条流）")
+                return
+            }
+        val info =
+            try {
+                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = 0, fixVolume = false)
+            } catch (error: Exception) {
+                appendLog("AUDIO: 导航播报通道协商异常 - ${error.message} —— 保持混音")
+                null
+            }
+        if (info == null) {
+            appendLog("AUDIO: 导航播报通道=${route.label} —— SETUP 失败，回退混音")
+            return
+        }
+        val nav =
+            AudioSender(
+                host = host,
+                dataPort = info.dataPort,
+                streamKey = info.streamKey,
+                log = { line -> appendLog(navLogLine(line)) },
+                context = context.applicationContext,
+                sampleRate = info.sampleRate,
+                codec = profile.codec,
+                streamType = profile.streamType,
+                adtsFrames = AudioTuning.RAW_SPF.adts,
+                controlPort = info.controlPort,
+            )
+        if (!nav.startPassthrough()) {
+            appendLog("AUDIO: 导航播报通道=${route.label} —— 发送端启动失败，回退混音")
+            return
+        }
+        navAudioSender = nav
+        activeNavAudioProfile = profile
+        appendLog(
+            "AUDIO: ✓ 导航播报已独立成流（${route.label}）—— ${profile.label} " +
+                "dataPort=${info.dataPort} controlPort=${info.controlPort}；" +
+                "9241 的 TTS 不再进主混音器，等会话 RECORD 一起激活。" +
+                "若车机导航没声音/音乐不再自动压低，把「导航播报通道」切回混音即可",
+        )
+    }
+
+    /** 第二条流的日志统一加前缀，免得和主音频那几百行混在一起分不清是谁打的。 */
+    private fun navLogLine(line: String): String =
+        if (line.startsWith("AUDIO: ")) {
+            "AUDIO[导航流]: " + line.removePrefix("AUDIO: ")
+        } else {
+            "AUDIO[导航流]: $line"
+        }
+
+    /**
+     * 会话 RECORD 成功后激活**所有**音频发送端。
+     *
+     * 收成一处的原因是：RECORD 有 5 条成功路径（首次、资源取得后、主屏归还、看门狗补发…），
+     * 每条都手写一遍 `audioSender?.onRecorded()` 时，漏掉第二条流就会表现成
+     * 「导航流 SETUP 成功、车机一声不出」——这种漏很难在日志里看出来。
+     */
+    private fun onRecordedAll() {
+        audioSender?.onRecorded()
+        navAudioSender?.onRecorded()
     }
 
     /**
@@ -6176,7 +6301,7 @@ object SessionController {
                                     // 同时纳入视频+音频的那一次，**绝不能再补发**——JYBOX-80
                                     // 对「流后补 RECORD」直接 500 并关掉 AirPlay 服务（issue #14）。
                                     if (audioStartedBeforeRecord && firstRecordOk) {
-                                        audioSender?.onRecorded()
+                                        onRecordedAll()
                                         appendLog("AUDIO: 音频已随本次 RECORD 一同激活（未补发 RECORD）")
                                     }
                                     if (MIC_PROBE_ENABLED && audioStartedBeforeRecord) runMicProbe(client)
@@ -6193,7 +6318,7 @@ object SessionController {
                                         // 都在 1.79~2.19s 之间，窗口 3.5s 够容差）
                                         postRecordWatch.mark(receiverIdentity)
                                         if (client.record()) {
-                                            audioSender?.onRecorded()
+                                            onRecordedAll()
                                         } else {
                                             // 这台接收端受不了「流后补 RECORD」：记住它，下一轮
                                             // 改走音频优先（先 SETUP 音频再一次 RECORD）。本轮
@@ -6207,7 +6332,7 @@ object SessionController {
                                         }
                                         if (MIC_PROBE_ENABLED) runMicProbe(client)
                                     } else if (audioStarted) {
-                                        if (firstRecordOk) audioSender?.onRecorded()
+                                        if (firstRecordOk) onRecordedAll()
                                         // P1 单变量实验（2026-11-09）：不补发那一次 RECORD。
                                         // 宝马 G38/F22 三份日志（18:19 / 18:22 / 18:24）100%
                                         // 复现同一形态——音频 SETUP 200、补发 RECORD 完成，

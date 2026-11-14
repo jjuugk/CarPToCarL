@@ -455,6 +455,10 @@ class AudioSender(
      * 放在这里而不是每条 sink 一个，是因为**只能用一条 RTP 流**（无线 CarPlay 的
      * AltAudio 要 AAC-ELD/OPUS，我们没有），两路必须在我们这侧先合成。
      * 详见 [AudioMixer] 的文件头注释（旧实现「拼接 + 2× 时钟」就是卡顿的根因）。
+     *
+     * 例外：[NavAudioRoute] 选 alert / speechRecognition 时，导航播报由**另一个
+     * [AudioSender] 实例**（`SessionController.navAudioSender`）单独发，这里只剩媒体一路。
+     * 那个实例只收 TTS，混音器仍然照跑（时钟与封包逻辑一行没改），只是 NAV 路空着。
      */
     private val mixer: AudioMixer by lazy {
         AudioMixer(sampleRate = sampleRate, channels = CHANNELS, frameSamples = samplesPerPacket.toInt())
