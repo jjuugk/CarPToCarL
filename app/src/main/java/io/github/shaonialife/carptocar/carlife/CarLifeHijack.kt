@@ -1206,9 +1206,20 @@ object CarLifeHijack {
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastAudioDropLog >= AUDIO_DROP_LOG_MS) {
             lastAudioDropLog = now
+            // 文案要点：这里只说明「没有可用的 AirPlay 音频流」，**不是**「用户没勾声音」。
+            // 旧文案写「本次连接未开启声音（勾选后即可出声）」，可它同样在
+            // 「音频流还没协商出来」「刚拆链」时触发——2026-11-07 与 11-13 的日志里
+            // 都出现过用户被这句话带偏（车机上明明勾了声音）。两种情况分开写。
+            val sender = io.github.shaonialife.carptocar.SessionController.audioSender
+            val why =
+                when {
+                    sender == null -> "本轮还没有音频流（AirPlay 音频通路没协商出来）"
+                    !sender.isRunning -> "音频流已停（拆链/收尾后仍在推的残留 PCM）"
+                    else -> "音频流存在但未就绪"
+                }
             logSink?.invoke(
-                "CARLIFE: 收到 CarLife 音频 ${audioDroppedBytes / 1024}KB，但本次连接未开启声音" +
-                    "（「启动连接」弹窗里勾选后即可出声）；已丢弃",
+                "CARLIFE: 收到 CarLife 音频 ${audioDroppedBytes / 1024}KB，$why——已丢弃" +
+                    "（若此时本应有声，请看上面 AUDIO: 协商/链路体检 两行）",
             )
             audioDroppedBytes = 0
         }

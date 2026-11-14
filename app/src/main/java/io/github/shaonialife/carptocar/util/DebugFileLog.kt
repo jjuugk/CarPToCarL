@@ -17,6 +17,12 @@ object DebugFileLog {
     private val lock = Any()
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
+    /** 文件上限：超过就只保留尾部 [KEEP_BYTES]（不再整份删除）。 */
+    private const val MAX_BYTES = 2_000_000L
+
+    /** 截断后保留的尾部长度：够放一次完整会话的关键过程，又不会让导出文件过大。 */
+    private const val KEEP_BYTES = 1_000_000L
+
     /**
      * 「本次进程启动」标记行。日志文件跨进程保留（最多 2MB），用户反馈问题时
      * 历史轮次的日志会把真正有用的部分淹没——导出默认只取最后一条标记之后的内容。
@@ -74,21 +80,13 @@ object DebugFileLog {
         try {
             synchronized(lock) {
                 val file = File(context.filesDir, "main_debug.log")
-                // 超限直接删会连「本次启动」标记一起丢（导出就退化为全量历史）。
-                // 删后立即重写一条标记，保证截断后的新文件仍能按会话切分。
-                if (file.length() > 2_000_000) {
-                    file.delete()
-                    FileWriter(
-                        file,
-                        true,
-                    ).use {
-                        it
-                            .append('[')
-                            .append(timestamp.format(Date()))
-                            .append("] ")
-                            .append(SESSION_MARKER)
-                            .append('\n')
-                    }
+                // 超限不能整份删：删了连「本次启动」之前的内容一起没了，而文件日志是
+                // 出问题后唯一能回溯的证据。2026-11-13 的会话就是这样丢掉开头的——
+                // 2MB 一到整份清空，音频 SETUP/编码器自检/车机音量查询全没了，
+                // 用户导出时只剩「会话跑了 13 分钟之后」的稳态日志，怎么看都"没问题"。
+                // 现在只保留尾部 [KEEP_BYTES]，并在开头写明"更早的已丢弃"。
+                if (file.length() > MAX_BYTES) {
+                    trimTail(file)
                 }
                 FileWriter(file, true).use { writer ->
                     writer
@@ -100,6 +98,44 @@ object DebugFileLog {
                 }
             }
         } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * 只保留文件尾部 [KEEP_BYTES]，前缀一条截断标记 + 本次启动标记。
+     *
+     * 截断标记是**必须**的：否则导出看起来像"进程刚开始"，会把「日志被滚掉」
+     * 误判成「这轮什么都没发生」。标记以 `=====` 开头，与人眼和脚本都好认。
+     */
+    private fun trimTail(file: File) {
+        val tail =
+            runCatching {
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    val length = raf.length()
+                    val start = (length - KEEP_BYTES).coerceAtLeast(0L)
+                    raf.seek(start)
+                    val buffer = ByteArray((length - start).toInt())
+                    raf.readFully(buffer)
+                    val text = String(buffer, Charsets.UTF_8)
+                    // 从第一个换行之后切：seek 落在多字节字符中间时会先出现一个 U+FFFD
+                    val newline = text.indexOf('\n')
+                    if (newline >= 0) text.substring(newline + 1) else text
+                }
+            }.getOrNull() ?: ""
+        FileWriter(file, false).use { writer ->
+            // 顺序很关键：**先**写启动标记、**再**写截断说明。
+            // 导出「仅本次启动」会取最后一条标记之后的内容，说明放在标记之前会被切掉，
+            // 于是用户在导出里完全看不到「更早的已丢弃」，只会觉得这轮什么都没发生。
+            writer
+                .append('[')
+                .append(timestamp.format(Date()))
+                .append("] ")
+                .append(SESSION_MARKER)
+                .append('\n')
+                .append('[')
+                .append(timestamp.format(Date()))
+                .append("] ===== 日志已截断：更早的内容已滚出（文件上限 2MB，保留最近 1MB）=====\n")
+                .append(tail)
         }
     }
 }

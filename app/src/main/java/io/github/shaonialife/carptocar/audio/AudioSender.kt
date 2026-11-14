@@ -79,6 +79,9 @@ class AudioSender(
         /** 同步包发送间隔（规范：每秒一个）。 */
         const val SYNC_INTERVAL_MILLIS = 1_000L
 
+        /** 「音频链路体检」节拍（30 秒一行；窗口太短会被单帧抖动带偏）。 */
+        private const val HEALTH_INTERVAL_MILLIS = 30_000L
+
         /** 静音保活的检查节拍。 */
         private const val KEEPALIVE_TICK_MILLIS = 100L
 
@@ -147,6 +150,7 @@ class AudioSender(
     private var record: AudioRecord? = null
     private var thread: Thread? = null
     private var syncThread: Thread? = null
+    private var healthThread: Thread? = null
 
     /** 同步包序号（跨重试连续，避免车机把重发当成乱序丢掉）。 */
     private var syncSequence = 0
@@ -162,6 +166,13 @@ class AudioSender(
 
     /** 首个同步包（X 位=1）是否已成功发出。 */
     private var syncFirstSent = false
+
+    /** 上次「链路体检」的时刻与计数快照（算窗口增量，判据必须看增量而不是累计）。 */
+    private var healthAtNanos = 0L
+    private var healthSyncSent = 0L
+    private var healthIcmpSent = 0L
+    private var healthPackets = 0L
+    private var healthSamples = 0L
 
     /** AAC-LC 编码器（仅 [AudioCodec.AAC_LC] 时创建）。 */
     private var aacEncoder: AacLcEncoder? = null
@@ -428,6 +439,12 @@ class AudioSender(
     /** 直通模式下的帧对齐累积缓冲（把任意大小的注入 PCM 切成固定帧长）。 */
     private val passthroughBuffer = java.io.ByteArrayOutputStream()
 
+    /** 有状态重采样器（相位跨块延续，保证 44.1k→48k 的长期比值精确）。 */
+    private val pcmResampler = PcmResampler()
+
+    /** 重采样器当前认定的输入采样率（变了就清相位，0 = 还没用过）。 */
+    private var resampleInRate = 0
+
     /** 最近一次收到**真实** PCM 的时刻（uptimeMillis）；静音保活据此判断要不要补帧。 */
     @Volatile
     private var lastRealFeedAt = 0L
@@ -591,9 +608,8 @@ class AudioSender(
     /**
      * 把一段 PCM 重采样到 [sampleRate] 立体声，返回新数组；无需处理时返回原输入。
      *
-     * 只做两种常见比值的线性重采样（44.1k↔48k）+ 声道扩展，避免引入第三方重采样库：
-     * CarLife 引擎实际只会输出 44.1k 或 48k。其它任意比值退化为按 [sampleRate] 直接
-     * 截断/复读，保证不出错（宁可有轻微音高偏移，也不中断推流）。
+     * 44.1k↔48k 这类小比值交给 [PcmResampler]（线性插值 + 相位跨块延续），不引第三方库：
+     * CarLife 引擎实际只会输出 44.1k 或 48k。任意其它比值同一套逻辑也成立，不会中断推流。
      */
     private fun alignPcm(
         src: ByteArray,
@@ -628,24 +644,19 @@ class AudioSender(
             rateAligned = if (size == src.size) src else src.copyOf(size)
         }
 
-        // 采样率一致直接返回
-        if (inRate == sampleRate) return rateAligned
-
-        // 线性重采样（frame = 所有声道的一组采样）
-        val inFrames = rateAligned.size / (rateChannels * 2)
-        val outFrames = (inFrames.toLong() * sampleRate / inRate).toInt()
-        val out = ByteArray(outFrames * CHANNELS * 2)
-        val chBytes = CHANNELS * 2
-        val inChBytes = rateChannels * 2
-        for (frame in 0 until outFrames) {
-            val srcPos = (frame.toLong() * inRate / sampleRate).toInt()
-            val srcByte = srcPos * inChBytes
-            val dstByte = frame * chBytes
-            if (srcByte + inChBytes <= rateAligned.size) {
-                System.arraycopy(rateAligned, srcByte, out, dstByte, inChBytes.coerceAtMost(chBytes))
-            }
+        // 采样率一致直接返回（顺带清相位：万一中途换过源采样率，别拿上一段的尾巴去插值）
+        if (inRate == sampleRate) {
+            pcmResampler.reset()
+            return rateAligned
         }
-        return out
+
+        // 有状态线性重采样：相位与末帧跨块延续（见 [PcmResampler] 的文件头注释——
+        // 旧实现每块独立截断，实测长期少 0.05% 样本，25 分钟欠 0.7 秒）。
+        if (inRate != resampleInRate) {
+            pcmResampler.reset()
+            resampleInRate = inRate
+        }
+        return pcmResampler.convert(rateAligned, rateAligned.size, inRate, sampleRate, rateChannels)
     }
 
     /** 走与采集循环一致的封包/编码/发送路径（[feedPcm] 与采集循环共用）。 */
@@ -693,15 +704,26 @@ class AudioSender(
         runCatching { syncSocket?.close() }
         syncSocket = null
         syncThread = null
+        healthThread?.interrupt()
+        healthThread = null
         keepAliveThread?.interrupt()
         keepAliveThread = null
         thread = null
         passthroughBuffer.reset()
         restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
+            // 「已就地补发」只说明我们这一侧没丢包，不代表车机收到了：ICMP 端口不可达
+            // 意味着那个端口上**没有监听者**，锚点实际一个都没落地。两种情形要分开说，
+            // 否则日志会把人引向「锚点没问题」（2026-11-13 那样 1476/1482 被拒还写着「锚点未丢」）。
+            val verdict =
+                if (syncIcmpDeferrals * 10 >= syncSent * 9) {
+                    "该端口全程没有监听者——锚点实际没送达，接收端只能按到达时刻排播"
+                } else {
+                    "其余已送达，锚点有效"
+                }
             log(
-                "AUDIO: 同步包共发出 $syncSent 个，其中 $syncIcmpDeferrals 次被车机 controlPort 的 " +
-                    "ICMP 拒绝（已就地补发，锚点未丢）",
+                "AUDIO: 同步包共发出 $syncSent 个，其中 $syncIcmpDeferrals 次被车机 " +
+                    "controlPort $controlPort 的 ICMP 拒绝（我们这侧已就地补发；$verdict）",
             )
         }
         log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB）")
@@ -768,8 +790,9 @@ class AudioSender(
                     syncIcmpDeferrals++
                     if (syncIcmpDeferrals == 1L) {
                         log(
-                            "AUDIO: 车机 controlPort 未监听（ICMP 端口不可达）——每包延后一拍报错，" +
-                                "已就地在同一套接字补发，锚点仍每秒一包（此提示只打一次）",
+                            "AUDIO: 车机 controlPort $controlPort 未监听（ICMP 端口不可达）——" +
+                                "每包延后一拍报错，已就地在同一套接字补发，锚点仍每秒一包" +
+                                "（此提示只打一次；30 秒体检会持续给出窗口内的被拒比例）",
                         )
                     }
                 }
@@ -777,22 +800,9 @@ class AudioSender(
                     log("AUDIO: 同步包恢复（连续失败 $syncFailures 次后发出）——锚点重建")
                     syncFailures = 0
                 }
-                // 每 30 秒报一次「这条流的 controlPort 到底通没通」。
-                // 判据只有一条：`syncIcmpDeferrals` 是否在涨。
-                //  - 全程不涨 = 车机为这条流开了口，锚点有效（此时若仍无声，问题在别处）；
-                //  - 一路在涨 = 车机压根没为这条流监听 → 多半是「流加入会话后没被 RECORD
-                //    纳入」，接收端给了端口号但从不排播（2026-11-11 宝马 MGU-81 实证）。
-                if (syncSent % 30L == 0L) {
-                    log(
-                        "AUDIO: 同步锚点 30s 体检——已发 $syncSent 个，其中 $syncIcmpDeferrals 次" +
-                            "被 ICMP 拒绝" +
-                            if (syncIcmpDeferrals >= syncSent - 1) {
-                                "（车机未为这条流开口：检查 RECORD 是否纳入了音频流）"
-                            } else {
-                                "（车机已在监听 controlPort）"
-                            },
-                    )
-                }
+                // 「这条流的 controlPort 到底通没通」由独立的 30 秒节拍线程报
+                // （见 startHealthTicker → logHealthCheck）：不跟同步包计数绑在一起，
+                // 车机没下发 controlPort 时也要能照常给出发送速率。
                 return true
             } catch (error: Exception) {
                 if (attempt + 1 < SYNC_SEND_ATTEMPTS && isSyncIcmpRejection(error)) {
@@ -818,6 +828,56 @@ class AudioSender(
     }
 
     /**
+     * 每 30 秒一行「音频链路体检」。
+     *
+     * 为什么要有（2026-11-13 日志复盘）：判断「有没有声音」要在四个环节里定位——
+     * ① 引擎给没给真 PCM（`CARLIFE: 音频直通 … 电平`）② 我们发得多快（本行）
+     * ③ 车机收没收到锚点（本行）④ 车机 `/feedback` 的 `sampleTime` 是否按实时推进。
+     * ①④ 各自有日志，②③ 原来散在几十行里，且**判据写反过**：
+     * 旧实现比的是 `syncIcmpDeferrals >= syncSent - 1`——只要开头有几包成功，
+     * 之后 99.6% 被拒也永远判成「车机已在监听 controlPort」，等于把唯一能说明
+     * 「锚点没送达」的证据报成了好消息。现在改成**按 30 秒窗口的增量**比。
+     *
+     * 第二个数字是「实测样本速率」：用 RTP timestamp 的增量除以真实耗时。
+     * 它和声明的 [sampleRate] 不等，就说明送进编码器的样本数与时间轴不匹配
+     * （44.1k→48k 重采样按块截断就踩过这个坑，见 [PcmResampler]）。
+     */
+    private fun logHealthCheck() {
+        val now = System.nanoTime()
+        val windowMs = if (healthAtNanos == 0L) 0L else (now - healthAtNanos) / 1_000_000
+        val sentDelta = syncSent - healthSyncSent
+        val icmpDelta = syncIcmpDeferrals - healthIcmpSent
+        val packetDelta = packetsSent - healthPackets
+        val sampleDelta = timestamp - healthSamples
+        val seconds = windowMs / 1000.0
+        val measured = if (seconds > 0.5) sampleDelta / seconds else 0.0
+        val drift = if (sampleRate > 0) (measured - sampleRate) * 100.0 / sampleRate else 0.0
+        val anchor =
+            when {
+                sentDelta <= 0 -> "锚点本窗口没发（同步线程未跑）"
+                icmpDelta <= 0 -> "锚点 $sentDelta 个全部送达"
+                icmpDelta * 10 >= sentDelta * 9 ->
+                    "锚点 $icmpDelta/$sentDelta 被 controlPort $controlPort 拒绝" +
+                        "（该端口没在监听：接收端只能按到达时刻排播）"
+                else -> "锚点 $icmpDelta/$sentDelta 被拒（其余已送达）"
+            }
+        val rateText =
+            if (seconds > 0.5) {
+                "近 " + String.format(java.util.Locale.US, "%.1f", seconds) + "s 送 " +
+                    "$packetDelta 包、${measured.toInt()} 样本/秒（声明 $sampleRate，差 " +
+                    String.format(java.util.Locale.US, "%.2f", drift) + "%）"
+            } else {
+                "累计 $packetDelta 包、${measured.toInt()} 样本/秒（声明 $sampleRate）"
+            }
+        log("AUDIO: 链路体检 t$streamType/${codec.name} —— 累计 $packetsSent 包；$rateText；$anchor")
+        healthAtNanos = now
+        healthSyncSent = syncSent
+        healthIcmpSent = syncIcmpDeferrals
+        healthPackets = packetsSent
+        healthSamples = timestamp
+    }
+
+    /**
      * 立刻补发一轮同步包，让车机重新对齐 RTP↔NTP。
      *
      * 用在「引擎音频停过一段又恢复」（来电结束、音频路由切回）之后：车机长时间收不到
@@ -834,11 +894,13 @@ class AudioSender(
     private fun startSyncLoop() {
         if (controlPort <= 0) {
             log("AUDIO: 车机未下发 controlPort——不发同步包（只能靠音频包自带时间戳）")
+            startHealthTicker()
             return
         }
         val client = openSyncSocket() ?: return
         syncSocket = client
         log("AUDIO: 同步包已启用 → $host:$controlPort（每 ${SYNC_INTERVAL_MILLIS}ms 一个，建立 RTP↔NTP 锚点）")
+        startHealthTicker()
         val worker =
             Thread(
                 {
@@ -865,6 +927,35 @@ class AudioSender(
         worker.isDaemon = true
         worker.start()
         syncThread = worker
+    }
+
+    /**
+     * 「音频链路体检」节拍（每 30 秒一行，见 [logHealthCheck]）。
+     *
+     * 独立线程而不是复用同步线程的计数：车机没下发 controlPort 时同步线程根本不跑，
+     * 但那时更需要知道「我们到底按多快的速率在发」。
+     */
+    private fun startHealthTicker() {
+        if (healthThread != null) return
+        healthAtNanos = System.nanoTime()
+        val worker =
+            Thread(
+                {
+                    while (running.get()) {
+                        try {
+                            Thread.sleep(HEALTH_INTERVAL_MILLIS)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
+                        if (!running.get()) break
+                        logHealthCheck()
+                    }
+                },
+                "audio-health",
+            )
+        worker.isDaemon = true
+        worker.start()
+        healthThread = worker
     }
 
     // ---- 采集循环 → 封包发送 ----

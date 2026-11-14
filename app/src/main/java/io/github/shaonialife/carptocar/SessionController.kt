@@ -66,6 +66,7 @@ import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
 import io.github.shaonialife.carptocar.util.ConnectStage
+import io.github.shaonialife.carptocar.util.CriticalEvents
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.MicDumpWriter
 import io.github.shaonialife.carptocar.util.SessionTrace
@@ -647,6 +648,9 @@ object SessionController {
                 val stamped = '[' + timestamp.format(Date()) + "] " + clean + '\n'
                 logBuilder.append(stamped)
                 if (logBuilder.length > 40_000) logBuilder.delete(0, logBuilder.length - 20_000)
+                // 关键行另存一份：文件日志会滚动、内存缓冲只留 20k 字符，
+                // 而「音频档位/自检/音量」这些一锤定音的行往往在会话开头（见 CriticalEvents）。
+                CriticalEvents.note(stamped)
                 stamped
             }
         // 增量行直送 UI：此前每行 toString 整个缓冲再 setText 全文，
