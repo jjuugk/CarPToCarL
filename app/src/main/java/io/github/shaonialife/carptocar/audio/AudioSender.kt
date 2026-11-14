@@ -410,16 +410,28 @@ class AudioSender(
             // 静音 STREAM_MUSIC 可能破坏引擎的采集源（采集点不确定，不能赌是 REMOTE_SUBMIX）。
             log(
                 "AUDIO: 已启动直通模式（外部注入 PCM → $host:$dataPort，" +
-                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声）",
+                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声；RECORD 后开始发包）",
             )
-            startSyncLoop()
-            startPump()
             true
         } catch (error: Exception) {
             log("AUDIO: 直通启动失败 - ${error.message}")
             stop()
             false
         }
+    }
+
+    /**
+     * 会话 `RECORD` 成功后才启动同步包与混音泵（幂等，多条 RECORD 成功路径都会调）。
+     *
+     * 接收端在 RECORD 激活会话前还没挂上这条流的播放时钟：抢跑的 RTP/同步包要么被
+     * controlPort 的 ICMP 拒绝，要么提前把 jitter buffer 填偏。
+     */
+    @Synchronized
+    fun onRecorded() {
+        if (!running.get() || record != null || pumpThread != null) return
+        startSyncLoop()
+        startPump()
+        log("AUDIO: RECORD 已激活——开始发同步包与混音帧")
     }
 
     /**
@@ -559,6 +571,9 @@ class AudioSender(
         mixer.feed(source, resampled, 0, resampled.size)
     }
 
+    /** 清空某一路尚未混出的 PCM（车机暂停/静音时立即止声，不影响另一路与 RTP 时间轴）。 */
+    fun clearPcm(source: AudioSource) = mixer.clear(source)
+
     /**
      * 把一段 PCM 重采样到 [sampleRate] 立体声，返回新数组；无需处理时返回原输入。
      *
@@ -665,6 +680,7 @@ class AudioSender(
      * 必须幂等——否则「已恢复手机媒体音量」会打两遍，且在用户于会话期间手动改过
      * 音量时，第二次恢复会用旧值把它覆盖回去。
      */
+    @Synchronized
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         running.set(false)

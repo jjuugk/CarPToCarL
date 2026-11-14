@@ -245,6 +245,17 @@ class AudioMixer(
         // 不重置 lastFrameAtNanos：跨窗口的那一刻不该被算成「停拍」
     }
 
+    /**
+     * 只清空某一路尚未混出的样本（车机暂停/静音、格式切换时），另一路与定拍时钟不受影响。
+     * 与 [mixNextFrame] 共用环形缓冲的锁，泵线程正在混的那一帧结束后才生效。
+     */
+    fun clear(source: AudioSource) {
+        when (source) {
+            AudioSource.MEDIA -> media.clear()
+            AudioSource.NAV -> nav.clear()
+        }
+    }
+
     /** 新一轮会话开始时清干净：环形缓冲、相位、时间原点、增益。 */
     fun reset() {
         media.clear()

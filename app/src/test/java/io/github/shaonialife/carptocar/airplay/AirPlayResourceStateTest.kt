@@ -63,7 +63,7 @@ class AirPlayResourceStateTest {
     fun `takeConstraint 允许时要得回主屏，不允许时不能硬抢`() {
         val allowed = AirPlayResourceState()
         allowed.initialize(audiModes()) // takeConstraint=100 在白名单里
-        allowed.requestPhoneScreen()
+        assertTrue(allowed.acquireScreen(fromRequestUi = false) { true })
         assertTrue("takeConstraint=100 允许申请主屏", allowed.phoneOwnsScreen)
 
         val blocked = AirPlayResourceState()
@@ -73,7 +73,7 @@ class AirPlayResourceStateTest {
                     listOf(mapOf<Any?, Any?>("resourceID" to 1, "transferType" to 1, "takeConstraint" to 300)),
             ),
         )
-        blocked.requestPhoneScreen()
+        assertFalse(blocked.acquireScreen(fromRequestUi = false) { throw AssertionError("约束不允许时不该发布") })
         assertFalse("takeConstraint=300 表示暂不允许，不能硬声明持有", blocked.phoneOwnsScreen)
     }
 
@@ -224,5 +224,121 @@ class AirPlayResourceStateTest {
         state.claimAll()
         assertTrue(state.phoneOwnsScreen)
         assertTrue(state.phoneOwnsAudio)
+    }
+
+    // ---- 手机侧申请与车机借用（宝马 iD8 实车：静音键、倒车 PDC、导航借原车收音机）----
+
+    private fun resource(
+        id: Int,
+        transferType: Int,
+        vararg extra: Pair<String, Any>,
+    ) = mapOf<Any?, Any?>("resources" to listOf(mapOf<Any?, Any?>("resourceID" to id, "transferType" to transferType, *extra)))
+
+    private val muteBorrow = resource(2, 3, "transferPriority" to 500, "unborrowConstraint" to 500)
+
+    @Test
+    fun `车机静音借走主音频时暂停音乐、导航借不回来，解除静音后恢复`() {
+        val state = AirPlayResourceState()
+        val intent = CarPlayAudioIntent()
+        state.initialize(null)
+        intent.setPlayback(media = true, navigation = false)
+
+        val muted = state.applyCarChange(muteBorrow)
+        assertEquals(AirPlayResourceState.CarAudioTransfer.BORROWED_CONSTRAINED, muted)
+        assertFalse(state.phoneOwnsAudio)
+        assertEquals(CarPlayAudioIntent.MediaCommand.PAUSE, intent.onCarAudioTransfer(muted!!))
+        assertFalse(intent.media)
+        // 重复的借用通知不能抹掉「由静音暂停」的记忆
+        assertEquals(CarPlayAudioIntent.MediaCommand.NONE, intent.onCarAudioTransfer(state.applyCarChange(muteBorrow)!!))
+
+        // 导航播报（后台优先级）冲不破 unborrowConstraint=500
+        assertFalse(state.acquireAudio(AirPlayResourceState.PRIORITY_BACKGROUND, temporary = true) { throw AssertionError("不该发布") })
+
+        // 匿名借用按栈归还：两层都还完主音频才回到手机
+        assertEquals(null, state.applyCarChange(resource(2, 4)))
+        val unmuted = state.applyCarChange(resource(2, 4))
+        assertEquals(AirPlayResourceState.CarAudioTransfer.UNBORROWED_TO_PHONE, unmuted)
+        assertTrue(state.phoneOwnsAudio)
+        assertEquals(CarPlayAudioIntent.MediaCommand.RESUME, intent.onCarAudioTransfer(unmuted!!))
+        assertTrue(intent.media)
+    }
+
+    @Test
+    fun `静音前没在播或车机永久切走音源时，归还不会误启动音乐`() {
+        val state = AirPlayResourceState()
+        val intent = CarPlayAudioIntent()
+        state.initialize(null)
+        assertEquals(CarPlayAudioIntent.MediaCommand.NONE, intent.onCarAudioTransfer(state.applyCarChange(muteBorrow)!!))
+        assertEquals(CarPlayAudioIntent.MediaCommand.NONE, intent.onCarAudioTransfer(state.applyCarChange(resource(2, 4))!!))
+
+        intent.setPlayback(media = true, navigation = false)
+        val taken = state.applyCarChange(resource(2, 1, "takeConstraint" to 500))
+        assertEquals(AirPlayResourceState.CarAudioTransfer.TAKEN_PERMANENTLY, taken)
+        assertEquals(CarPlayAudioIntent.MediaCommand.PAUSE, intent.onCarAudioTransfer(taken!!))
+        assertEquals(
+            CarPlayAudioIntent.MediaCommand.NONE,
+            intent.onCarAudioTransfer(AirPlayResourceState.CarAudioTransfer.UNBORROWED_TO_PHONE),
+        )
+    }
+
+    @Test
+    fun `导航临时借原车收音机的主音频，播报结束归还`() {
+        val state = AirPlayResourceState()
+        state.initialize(resource(2, 1, "takeConstraint" to 500, "borrowConstraint" to 100))
+        assertFalse(state.phoneOwnsAudio)
+        assertTrue(state.acquireAudio(AirPlayResourceState.PRIORITY_BACKGROUND, temporary = true) { true })
+        assertTrue(state.phoneOwnsAudio)
+        assertTrue(state.phoneBorrowsAudio)
+        val published = mutableListOf<Map<String, Any?>>()
+        assertTrue(
+            state.releaseAudioBorrow {
+                published += it
+                true
+            },
+        )
+        assertFalse(state.phoneOwnsAudio)
+        val audio = ((published.single()["params"] as Map<*, *>)["resources"] as List<*>)[1] as Map<*, *>
+        assertEquals("归还后报文里主音频回到车机", 2L, audio["entity"])
+    }
+
+    @Test
+    fun `倒车 PDC 高约束借屏期间不私自抢屏，车机 requestUI 才收回`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.applyCarChange(resource(1, 3, "transferPriority" to 500, "unborrowConstraint" to 1000))
+        assertFalse(state.acquireScreen(fromRequestUi = false) { throw AssertionError("不该发布") })
+        assertTrue(state.acquireScreen(fromRequestUi = true) { true })
+        assertTrue(state.phoneOwnsScreen)
+
+        // 车机永久接管且禁止抢占时，requestUI 也不能越过 takeConstraint
+        state.applyCarChange(resource(1, 1, "takeConstraint" to 1000))
+        assertFalse(state.acquireScreen(fromRequestUi = true) { true })
+        assertFalse(state.phoneOwnsScreen)
+    }
+
+    @Test
+    fun `申请主屏不会顺带抢走车机持有的主音频`() {
+        val state = AirPlayResourceState()
+        state.initialize(
+            mapOf<Any?, Any?>(
+                "resources" to listOf(1, 2).map { mapOf<Any?, Any?>("resourceID" to it, "transferType" to 1, "takeConstraint" to 500) },
+            ),
+        )
+        assertTrue(state.acquireScreen(fromRequestUi = false) { true })
+        assertTrue(state.phoneOwnsScreen)
+        assertFalse(state.phoneOwnsAudio)
+    }
+
+    @Test
+    fun `发布期间车机改判时不提交过期申请`() {
+        val state = AirPlayResourceState()
+        state.initialize(resource(2, 1, "takeConstraint" to 500))
+        val acquired =
+            state.acquireAudio(AirPlayResourceState.PRIORITY_USER, temporary = false) {
+                state.applyCarChange(resource(2, 1, "takeConstraint" to 1000))
+                true
+            }
+        assertFalse(acquired)
+        assertFalse(state.phoneOwnsAudio)
     }
 }

@@ -152,6 +152,28 @@ class AudioMixerTest {
     }
 
     @Test
+    fun `只清空一路时另一路的残留照常混出`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        mixer.feed(AudioSource.MEDIA, pcm(frameSamples * 2, 1000), 0, frameSamples * 2 * 4)
+        mixer.feed(AudioSource.NAV, pcm(frameSamples, 300), 0, frameSamples * 4)
+        // 车机暂停媒体：音乐残留立即消失，播报不受影响
+        mixer.clear(AudioSource.MEDIA)
+        val now = System.nanoTime()
+        mixer.mixNextFrame(buffer, now)
+        assertEquals(300, sampleAt(buffer, 0))
+        assertEquals(300, sampleAt(buffer, frameSamples - 1, 1))
+        // 播报通道关闭：清掉播报残留后，新到的音乐在 hold 过后回到原音量（第一帧是 duck 回升斜坡）
+        mixer.feed(AudioSource.NAV, pcm(frameSamples, 300), 0, frameSamples * 4)
+        mixer.clear(AudioSource.NAV)
+        mixer.feed(AudioSource.MEDIA, pcm(frameSamples * 2, 1000), 0, frameSamples * 2 * 4)
+        mixer.mixNextFrame(buffer, now + 1_000_000_000L)
+        mixer.mixNextFrame(buffer, now + 1_030_000_000L)
+        assertEquals(1000, sampleAt(buffer, 0))
+        assertEquals(1000, sampleAt(buffer, frameSamples - 1, 1))
+    }
+
+    @Test
     fun `环形缓冲写满时丢最旧`() {
         // 10ms 容量 = 480 帧
         val mixer = mixer(capacityMillis = 10)

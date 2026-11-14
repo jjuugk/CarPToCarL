@@ -92,6 +92,7 @@ internal class CarLifeAudioSink(
      */
     fun setPlaybackPaused(paused: Boolean) {
         val changed = playbackPaused != paused
+        if (changed && paused && dropWhenPaused) clearPendingPcm()
         playbackPaused = paused
         if (!paused) {
             pausedSince = 0L
@@ -131,6 +132,7 @@ internal class CarLifeAudioSink(
         sampleRate: Int,
         channels: Int,
     ) {
+        if (srcRate > 0 && (srcRate != sampleRate || srcChannels != channels)) clearPendingPcm()
         srcRate = sampleRate.coerceIn(MIN_RATE, MAX_RATE)
         srcChannels = if (channels == 1) 1 else 2
         log("CARLIFE: 音频格式 ${srcRate}Hz ${if (srcChannels == 2) "立体声" else "单声道"} 16bit（直通）")
@@ -143,8 +145,18 @@ internal class CarLifeAudioSink(
         channels: Int,
         pcm: ByteArray,
         size: Int,
+        forwardingAllowed: Boolean = true,
     ) {
         if (size <= 0) return
+        require(size <= pcm.size)
+        sampleLevel(pcm, size)
+        packets++
+        bytes += size
+        reportIfDue()
+        if (!forwardingAllowed) {
+            countDroppedWhenPaused()
+            return
+        }
         // 音乐会话暂停后的一小段窗口内：丢弃引擎仍在推的残留 PCM（避免重复播放）
         val now = android.os.SystemClock.uptimeMillis()
         if (dropWhenPaused && shouldDropPaused(now)) {
@@ -161,10 +173,6 @@ internal class CarLifeAudioSink(
         if (sender == null || !sender.isRunning) return
         // 直通：交给 AudioSender 重采样 + 写入该源的环形缓冲（混音与发送在泵线程）
         sender.feedPcm(pcm, size, srcRate, srcChannels, source)
-        sampleLevel(pcm, size)
-        packets++
-        bytes += size
-        reportIfDue()
     }
 
     /** 抽样统计电平（每 16 个采样点取 1 个，开销可忽略）。 */
@@ -181,6 +189,12 @@ internal class CarLifeAudioSink(
             sampledSinceReport++
             index += 32
         }
+    }
+
+    /** 暂停或 STOP 时仅清空本路音源的排队样本，不影响另一路与输出时钟。 */
+    fun clearPendingPcm() {
+        io.github.shaonialife.carptocar.SessionController.audioSender
+            ?.clearPcm(source)
     }
 
     @Synchronized
@@ -269,11 +283,12 @@ internal class CarLifeAudioSink(
 internal fun carLifeAudioTypeName(type: Int): String =
     when (type) {
         CarLifeProtocol.MUSIC_PKG_INIT -> "INIT"
-        CarLifeProtocol.MUSIC_PKG_START -> "开始"
         CarLifeProtocol.MUSIC_PKG_STOP -> "停止"
+        CarLifeProtocol.MUSIC_PKG_PAUSE -> "暂停"
+        CarLifeProtocol.MUSIC_PKG_RESUME -> "恢复"
         CarLifeProtocol.MUSIC_PKG_NORMAL -> "PCM"
         CarLifeProtocol.TTS_PKG_INIT -> "TTS-INIT"
-        0x40002 -> "TTS-开始"
-        0x40003 -> "TTS-PCM"
+        CarLifeProtocol.TTS_PKG_STOP -> "TTS-停止"
+        CarLifeProtocol.TTS_PKG_NORMAL -> "TTS-PCM"
         else -> "0x%X".format(type)
     }

@@ -23,6 +23,24 @@ class EndpointHostsTest {
     }
 
     @Test
+    fun unspecifiedAddressesCannotBecomeReceiverCandidates() {
+        val unspecified =
+            listOf(
+                "0.0.0.0",
+                "::",
+                "::%wlan0",
+                "0:0:0:0:0:0:0:0",
+                "0000::0000%wlan0",
+                "0000:0000:0000:0000:0000:0000:0000:0000",
+            )
+        assertFalse(EndpointHosts.hasUsable(unspecified))
+        assertEquals(
+            listOf("198.51.100.10", "fe80::1%wlan0"),
+            EndpointHosts.candidates(unspecified + listOf("fe80::1%wlan0", "198.51.100.10")),
+        )
+    }
+
+    @Test
     fun ipv4PreferredThenGlobalIpv6ThenLinkLocal() {
         val ordered =
             EndpointHosts.candidates(

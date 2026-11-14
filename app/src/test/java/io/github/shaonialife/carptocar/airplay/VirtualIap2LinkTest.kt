@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.airplay
 
+import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
@@ -58,9 +59,11 @@ class VirtualIap2LinkTest {
                     eventSent.add(it)
                     true
                 },
-                sendControlIap = {
-                    controlSent.add(it)
-                    allControl.add(it)
+                sendControlIap = { bytes, isCurrentEpoch ->
+                    if (isCurrentEpoch()) {
+                        controlSent.add(bytes)
+                        allControl.add(bytes)
+                    }
                 },
                 tunnelWriter = { null },
                 // 关闭节拍线程：测试内确定性驱动（无重传干扰）
@@ -194,12 +197,14 @@ class VirtualIap2LinkTest {
         val h = Harness()
         h.link.armMib3()
         val detect = h.controlSent.size
-        // 第 1 个：还不判定（MIB3 会再发一次探测重发）
+        // 首个对端 DETECT 立即回显 marker，随后再次收到 DETECT 而仍无 SYN 时升级发会话同步表
         h.link.onCarBytes(Iap2LinkEngine.MARKER)
-        assertEquals("首个 marker 不应额外发字节", detect, h.controlSent.size)
-        // 第 2 个：升级为 marker + 同步包
+        assertEquals(Iap2LinkEngine.MARKER.toList(), h.controlSent.last().toList())
+        assertEquals(detect + 1, h.controlSent.size)
+        val afterFirst = h.controlSent.size
+        h.clock += 1_000
         h.link.onCarBytes(Iap2LinkEngine.MARKER)
-        val sent = h.controlSent.drop(detect)
+        val sent = h.controlSent.drop(afterFirst)
         assertTrue("重复 marker 后必须补发协商字节", sent.isNotEmpty())
         val payload = sent.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
         assertTrue(
@@ -263,6 +268,43 @@ class VirtualIap2LinkTest {
         assertEquals(listOf(0x4158), h.carSends(0x4157))
         assertEquals(listOf(0x4155), h.carSends(0x4154))
         assertEquals(listOf(0x4171), h.carSends(0x4170))
+    }
+
+    @Test
+    fun postAuthDeviceStateUsesNulTerminatedUtf8AndNegotiatedAccessoryLanguage() {
+        AccessoryDeclaration.reset()
+        try {
+            val h = Harness()
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+
+            // 模拟车机在 0x1D01 参数 12 声明当前语言为 en（仅支持 en/de，不支持硬编码 zh）
+            h.carSends(
+                0x1D01,
+                Iap2Csm.string(0, "CarPlay_HU") +
+                    Iap2Csm.string(1, "HU_GEN2") +
+                    Iap2Csm.string(12, "en"),
+            )
+            h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(608)))
+            val burstFrom = h.controlFrames().size
+            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(68)))
+            h.settle()
+
+            val burst = h.controlFrames().drop(burstFrom)
+            assertEquals(listOf(0xAA05, 0x4E0C, 0x4E0A, 0x4E0B, 0x4E09), burst.map { it.second })
+
+            for (msgId in listOf(0x4E0C, 0x4E0A, 0x4E09)) {
+                val raw = h.lastRawFrameOf(msgId)!!
+                val param0 = Iap2Csm.parseParams(raw.copyOfRange(6, raw.size)).first { it.id == 0 }.value
+                assertTrue("0x${msgId.toString(16)} UTF-8 参数必须以 NUL 结尾", param0.isNotEmpty() && param0.last() == 0.toByte())
+            }
+            val langRaw = h.lastRawFrameOf(0x4E0A)!!
+            val langBytes = Iap2Csm.parseParams(langRaw.copyOfRange(6, langRaw.size)).first { it.id == 0 }.value
+            assertEquals(listOf('e'.code.toByte(), 'n'.code.toByte(), 0.toByte()), langBytes.toList())
+        } finally {
+            AccessoryDeclaration.reset()
+        }
     }
 
     @Test
@@ -403,9 +445,9 @@ class VirtualIap2LinkTest {
         h.carSends(0x1D01, Iap2Csm.string(0, "SilCar") + Iap2Csm.string(1, "SilMfr"))
         h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
         assertEquals(listOf(20), h.challengeLengths())
-        // 20B 静默：推进时钟越过 6s 窗口，喂一个 marker 触发节拍检查（drainLocked）
+        // 推进时钟越过 6s 静默窗口并驱动节拍，不注入额外 marker 以免重置已认证链路周期
         h.clock += 7_000
-        h.link.onCarBytes(Iap2LinkEngine.MARKER)
+        h.tick()
         assertEquals(listOf(20, 32), h.challengeLengths())
         // 32B 得到应答 → 0xAA05 + 突发照常
         val after = h.controlFrames().size
@@ -417,6 +459,69 @@ class VirtualIap2LinkTest {
         assertFalse("不应再发 0xFFFA：frames=$emitted", emitted.contains(0xFFFA))
         assertFalse("不应再发 0xFFF0：frames=$emitted", emitted.contains(0xFFF0))
         assertFalse("不应再发 0xA100（对端声明可收也不发）：frames=$emitted", emitted.contains(0xA100))
+    }
+
+    @Test
+    fun allChallengeLengthsSilentStillSendsAuthenticationSucceededLikeBluetoothPath() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "MuteCar") + Iap2Csm.string(1, "MuteMfr"))
+        h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        val before = h.controlFrames().size
+        // 三档都不应答：每次越过该档的静默窗口再驱动节拍
+        repeat(3) {
+            h.clock += 7_000
+            h.tick()
+        }
+        h.settle()
+        assertEquals(listOf(20, 32, 16), h.challengeLengths())
+        val emitted = h.controlFrames().drop(before).map { it.second }
+        assertTrue("挑战全部无应答也要跳过校验发 0xAA05 和问候：frames=$emitted", emitted.containsAll(listOf(0xAA05, 0x4E0C, 0x4E09)))
+        assertTrue(h.link.controlSessionReady)
+    }
+
+    @Test
+    fun ecdsaCertificateSelects32ByteChallengeFirstOnColdStart() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "EcdsaCar") + Iap2Csm.string(1, "EcdsaMfr"))
+        val certWithEcdsaOid =
+            ByteArray(64) +
+                byteArrayOf(0x06, 0x07, 0x2A, 0x86.toByte(), 0x48, 0xCE.toByte(), 0x3D, 0x02, 0x01) +
+                ByteArray(64)
+        h.carSends(0xAA01, Iap2Csm.param(0, certWithEcdsaOid))
+        assertEquals("ECDSA P-256 证书冷启动应直接首选 32B 挑战", listOf(32), h.challengeLengths())
+    }
+
+    @Test
+    fun linkInterruptDuringChallengeHardRejectsStaleSucceededLength() {
+        io.github.shaonialife.carptocar.iap2.MfiLengthMemory
+            .recordSuccess(null, "InterruptCar InterruptMfr tunnel", 20)
+        val first = Harness()
+        first.link.armMib3()
+        first.car.start(0)
+        first.exchangeUntilNormal()
+        first.carSends(0x1D01, Iap2Csm.string(0, "InterruptCar") + Iap2Csm.string(1, "InterruptMfr"))
+        first.carSends(0xAA01, Iap2Csm.param(0, ByteArray(512)))
+        assertEquals(listOf(20), first.challengeLengths())
+        // 20B 挑战等待期间车机拆链关闭：必须按硬拒绝推翻旧的 succeeded=20 记忆
+        first.link.close()
+
+        val second = Harness()
+        second.link.armMib3()
+        second.car.start(0)
+        second.exchangeUntilNormal()
+        second.carSends(
+            0x1D01,
+            Iap2Csm.string(0, "InterruptCar") + Iap2Csm.string(1, "InterruptMfr"),
+        )
+        // RSA 证书的冷启动基线本是 20B 优先：硬拒绝后 20B 必须让位
+        second.carSends(0xAA01, Iap2Csm.param(0, ByteArray(512)))
+        assertEquals("硬拒绝 20B 后下一轮必须首选 32B", listOf(32), second.challengeLengths())
     }
 
     /**

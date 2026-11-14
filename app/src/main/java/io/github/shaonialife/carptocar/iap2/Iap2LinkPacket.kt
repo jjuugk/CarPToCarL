@@ -122,8 +122,8 @@ object Iap2LinkPacket {
             val declared = readU16(bytes, offset + 2)
             val frameLength =
                 when (start) {
-                    // 整帧长度。下限 HEADER_BYTES + CHECKSUM_BYTES，否则是脏数据
-                    START_DATA -> declared.takeIf { it >= HEADER_BYTES + CHECKSUM_BYTES } ?: return listOf(bytes)
+                    // 整帧长度。链路引擎的空载荷 ACK 只有 9B 头，下限 HEADER_BYTES，否则是脏数据
+                    START_DATA -> declared.takeIf { it >= HEADER_BYTES } ?: return listOf(bytes)
                     // 同步标记固定 6 字节，尾部必须是 EE 10（见方法说明）
                     START_SYN -> SYN_MARKER_BYTES.takeIf { canTakeSynMarker(bytes, offset) } ?: return listOf(bytes)
                     else -> return listOf(bytes)

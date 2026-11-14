@@ -35,6 +35,9 @@ class Iap2LinkEngine(
      * 10 次（30 秒）既留出抗抖动的余量，也不会把整轮 60 秒预算耗光。
      */
     private val maxRetransmissions: Int = 10,
+    /** Wi-Fi 隧道底层已有 TCP 保序重传，但仍需保留基于 ACK 的流控窗口。 */
+    private val reliableTransport: Boolean = false,
+    private val declaredWindow: Int = PHONE_DECLARED_MAX_OUTGOING,
 ) {
     enum class State { IDLE, NEGOTIATING, NORMAL, DEAD }
 
@@ -255,6 +258,9 @@ class Iap2LinkEngine(
      */
     var onPeerHandshake: ((PeerHandshake) -> Unit)? = null
 
+    /** 收到完整 DETECT（含粘包/半包重组）时回调，供虚拟链路重置对端周期。 */
+    var onPeerDetect: (() -> Unit)? = null
+
     /**
      * 是否在「对端明显拒绝链路」时立即终止（默认开）。
      *
@@ -274,12 +280,13 @@ class Iap2LinkEngine(
     private val unacknowledged = ArrayList<Packet>()
     private val sendBacklog = ArrayDeque<Packet>()
     private val pendingEvents = ArrayDeque<Event>()
-    private val output = ByteArrayOutputStream()
+    private val output = ArrayDeque<ByteArray>()
     private val receive = ReceiveBuffer()
 
     private var markerDeadline: Long? = null
     private var syncDeadline: Long? = null
     private var retransmitDeadline: Long? = null
+    private var pendingAcknowledgement = false
 
     /** 上一次回显 SYN 时对端的 SYN 序号与我方序号（重传同一 SYN 时原样重放）。 */
     private var lastEchoPeerSequence: Int? = null
@@ -394,6 +401,38 @@ class Iap2LinkEngine(
         state = State.NEGOTIATING
     }
 
+    /**
+     * 在 NORMAL 态收到对端新 DETECT 后忘掉旧链路周期；不丢弃接收缓冲，因为同一批传输字节后部可能紧跟下一轮 SYN。
+     */
+    fun restartResponder() {
+        state = State.NEGOTIATING
+        peerSynchronization = null
+        adoptedSynchronization = null
+        adoptedPeerControlSessionId = null
+        peerRetransmissionTimeoutMillis = null
+        peerHandshakeRejections = 0
+        declaredMaxOutgoing = maxOutgoing
+        originatedSyn = false
+        sentSequence = randomInitialSequence()
+        lastSentAcknowledged = null
+        lastReceivedInOrder = 0
+        lastEchoPeerSequence = null
+        heldSinceMillis = null
+        markerDeadline = null
+        syncDeadline = null
+        retransmitDeadline = null
+        pendingAcknowledgement = false
+        output.clear()
+        unacknowledged.clear()
+        sendBacklog.clear()
+        pendingEvents.clear()
+    }
+
+    /** 仅对收到的 DETECT 单次回显，不挂周期性重发定时器。 */
+    fun respondToDetect() {
+        appendOutput(MARKER)
+    }
+
     fun feed(
         bytes: ByteArray,
         nowMillis: Long,
@@ -418,9 +457,21 @@ class Iap2LinkEngine(
     fun feedEof() = die(null)
 
     fun takeOutput(): ByteArray {
-        val bytes = output.toByteArray()
-        output.reset()
+        flushPendingAcknowledgement()
+        val bytes = ByteArray(output.sumOf { it.size })
+        var offset = 0
+        while (output.isNotEmpty()) {
+            val frame = output.removeFirst()
+            frame.copyInto(bytes, offset)
+            offset += frame.size
+        }
         return bytes
+    }
+
+    /** 报文边界敏感的传输层（如 comm 隧道）按独立帧逐条取出。 */
+    fun pollOutputFrame(): ByteArray? {
+        flushPendingAcknowledgement()
+        return if (output.isEmpty()) null else output.removeFirst()
     }
 
     fun pollEvent(): Event? = if (pendingEvents.isEmpty()) null else pendingEvents.removeFirst()
@@ -649,7 +700,7 @@ class Iap2LinkEngine(
         if (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT != 0) {
             handleExtendedAcknowledgement(ack, nowMillis)
         }
-        if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
+        if (control and CONTROL_ACKNOWLEDGEMENT != 0 && peerSynchronization != null) {
             handleAcknowledgement(ack, nowMillis)
         }
         val isDataFrame =
@@ -658,6 +709,8 @@ class Iap2LinkEngine(
                 (control and CONTROL_SYNCHRONIZE) == 0 &&
                 (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) == 0
         if (isDataFrame) {
+            // DETECT 会作废上一周期链路参数，紧随其后的旧数据帧不再上抛
+            if (peerSynchronization == null) return
             // 控制消息的会话 ID：本国表 10 或采纳表（Audi=1；测试台两者一致）
             if (sessionId == SESSION_CONTROL || sessionId == adoptedPeerControlSessionId) {
                 // 收到对端的数据即代表对端认为链路可用；ACK 帧若丢失/被跳过，这里兜底进入 NORMAL
@@ -691,6 +744,7 @@ class Iap2LinkEngine(
             (0 until MARKER.size).all { receive[it] == MARKER[it] }
         ) {
             receive.discard(MARKER.size)
+            onPeerDetect?.invoke()
             return true
         }
         if (receive.size < 4) return false
@@ -791,8 +845,8 @@ class Iap2LinkEngine(
      * 0x7F）。maxLength 保持对端值（=我们的收包上限，勿放大）。
      */
     private fun ownSyncOf(peer: SynchronizationPayload): SynchronizationPayload =
-        peer.copy(maxOutgoing = PHONE_DECLARED_MAX_OUTGOING).also {
-            declaredMaxOutgoing = PHONE_DECLARED_MAX_OUTGOING
+        peer.copy(maxOutgoing = declaredWindow).also {
+            declaredMaxOutgoing = declaredWindow
         }
 
     private fun sendSynchronizationEcho(
@@ -902,7 +956,7 @@ class Iap2LinkEngine(
      * ACK。若哪天「奥迪忽然连不上」，先回到这里看是不是这一步引起的。
      */
     private fun effectiveSendWindow(peer: SynchronizationPayload?): Int =
-        if (peer != null && peer.maxRetransmissions > 0) {
+        if (peer != null && ((reliableTransport && !echoFirst) || peer.maxRetransmissions > 0)) {
             minOf(declaredMaxOutgoing, peer.maxOutgoing.coerceAtLeast(1))
         } else {
             declaredMaxOutgoing
@@ -957,7 +1011,7 @@ class Iap2LinkEngine(
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
                 retransmitDeadline = packet.deadlineMillis
-            } else {
+            } else if (!reliableTransport || echoFirst) {
                 lastSentAcknowledged = sentSequence
             }
         }
@@ -1024,7 +1078,17 @@ class Iap2LinkEngine(
     }
 
     private fun sendAcknowledgement() {
+        if (reliableTransport) {
+            pendingAcknowledgement = true
+            return
+        }
         writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
+    }
+
+    private fun flushPendingAcknowledgement() {
+        if (pendingAcknowledgement) {
+            writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
+        }
     }
 
     private fun writePacket(
@@ -1034,6 +1098,8 @@ class Iap2LinkEngine(
         sessionId: Int,
     ) {
         if (state == State.DEAD) return
+        // CSM 应答帧自带确认位，无需再单独发一帧空 ACK
+        if (control and CONTROL_ACKNOWLEDGEMENT != 0) pendingAcknowledgement = false
         onFrameSent?.invoke(control, sequence, lastReceivedInOrder, sessionId, payload?.size ?: 0)
         val length = payload?.size?.plus(HEADER_BYTES + 1) ?: HEADER_BYTES
         val frame = ByteArray(length)
@@ -1063,7 +1129,7 @@ class Iap2LinkEngine(
         markerDeadline = null
         syncDeadline = null
         retransmitDeadline = null
-        output.reset()
+        output.clear()
         pendingEvents.clear()
         sendBacklog.clear()
         pendingEvents += Event.Dead(reason)
@@ -1071,7 +1137,7 @@ class Iap2LinkEngine(
 
     private fun appendOutput(bytes: ByteArray): Boolean {
         if (state == State.DEAD) return false
-        output.write(bytes)
+        output.addLast(bytes)
         return true
     }
 

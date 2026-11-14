@@ -65,6 +65,11 @@ class PairingRejectedException(
     val deterministic: Boolean get() = PairingPolicy.isDeterministic(stage, code)
 }
 
+/** 密码学证明校验失败（不属于接收端不支持配对或已配对响应，不可静默降级明文）。 */
+class PairingIntegrityException(
+    message: String,
+) : IOException(message)
+
 /** 一轮配对失败的定性结果，用于日志与界面提示。 */
 data class PairingTrouble(
     val stage: PairingStage,

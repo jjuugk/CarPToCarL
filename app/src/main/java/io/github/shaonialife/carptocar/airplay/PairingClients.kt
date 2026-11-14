@@ -51,7 +51,7 @@ class PairSetupClient(
 
         // M3: 客户端公钥 A + 证明 M1
         val srp = Srp6aClient.start(salt, serverPublic)
-        val clientProof = srp.clientProof() ?: throw IOException("pair-setup: SRP B 非法")
+        val clientProof = srp.clientProof() ?: throw PairingIntegrityException("pair-setup: SRP B 非法")
         val m4 =
             Tlv8.decode(
                 transport.exchange(
@@ -66,9 +66,9 @@ class PairSetupClient(
                 ),
             )
         requireNoError(PairingStage.PAIR_SETUP, m4)
-        val serverProof = m4[Tlv8.TYPE_PROOF] ?: throw IOException("pair-setup M4 缺少 proof")
-        if (!srp.serverProofValid(serverProof)) throw IOException("pair-setup: 服务器证明校验失败")
-        val sessionKey = srp.sessionKey ?: throw IOException("pair-setup: 会话密钥缺失")
+        val serverProof = m4[Tlv8.TYPE_PROOF] ?: throw PairingIntegrityException("pair-setup M4 缺少 proof")
+        if (!srp.serverProofValid(serverProof)) throw PairingIntegrityException("pair-setup: 服务器证明校验失败")
+        val sessionKey = srp.sessionKey ?: throw PairingIntegrityException("pair-setup: 会话密钥缺失")
         log("pair-setup: M4 SRP 互验通过")
 
         // M5: 加密信封提交长期公钥
