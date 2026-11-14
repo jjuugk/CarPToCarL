@@ -42,6 +42,8 @@ import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
+import io.github.shaonialife.carptocar.input.KnobReports
+import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchReports
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -1324,6 +1326,9 @@ object SessionController {
             currentClient = null
             client.cancelled = true
             client.close()
+            // 旋钮的锚点是「上一笔真触摸的位置」，跨会话残留会让新会话的第一次转动
+            // 落在上轮的用户停手处；顺手把积压动作丢掉（此时已经没有触摸通道可走）。
+            KnobRouter.reset()
             retireSessionResources()
             attemptGate.end(reason)
             SessionTrace.sessionEnd(reason)
@@ -5519,6 +5524,11 @@ object SessionController {
                                         val descriptor = uuid?.let { setup.hidDescriptors[it] }
                                         val keyMap =
                                             descriptor?.let(ConsumerKeys::parseDescriptor)
+                                        // 旋钮（iDrive 旋钮/滚轮）：描述符声明 Generic Desktop/Wheel。
+                                        // 触摸(Digitizer)/媒体键(Consumer)/电话(Telephony) 描述符都没有
+                                        // Wheel，所以这个判据不会误伤——与 ConsumerKeys 一样按描述符
+                                        // 判定，不按型号或 uuid 写死（见 KnobReports 的 KDoc）。
+                                        val knobLayout = descriptor?.let(KnobReports::parseLayout)
                                         val rawValue =
                                             report
                                                 ?.takeIf { it.isNotEmpty() }
@@ -5542,7 +5552,20 @@ object SessionController {
                                             } else {
                                                 null
                                             }
-                                        if (consumerUsage != null) {
+                                        if (knobLayout != null && report != null) {
+                                            // 旋钮：转动 → 竖向滑动，按下 → 点一下。
+                                            // CarLife+ 没有焦点引擎，只能把旋钮翻译成触摸
+                                            // （为什么不是硬键，见 KnobRouter 的 KDoc）。
+                                            val knob = KnobReports.parse(report, knobLayout)
+                                            if (knob.steps != 0 || knob.pressed == true) {
+                                                appendLog(
+                                                    "EVENT: 旋钮 uuid=$uuid steps=${knob.steps}" +
+                                                        " 按下=${knob.pressed} 返回=${knob.backPressed}",
+                                                )
+                                            }
+                                            if (knob.steps != 0) KnobRouter.onSteps(knob.steps)
+                                            if (knob.pressed == true) KnobRouter.onPress()
+                                        } else if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                             lastConsumerUsage = consumerUsage
                                             if (keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
@@ -5617,6 +5640,10 @@ object SessionController {
                                             }
                                             touchLogCount++
                                             contacts.forEach {
+                                                // 旋钮动作以「用户最后一次真触摸点」为锚：
+                                                // 用户一般是先点一下列表再转旋钮，锚点跟着手走
+                                                // 比固定屏幕中心好用得多（见 KnobRouter）。
+                                                if (it.down) KnobRouter.noteTouch(it.xPixels, it.yPixels)
                                                 TouchRouter.onContact(
                                                     context.applicationContext,
                                                     it,

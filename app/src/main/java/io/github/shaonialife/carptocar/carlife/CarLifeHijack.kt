@@ -340,6 +340,18 @@ object CarLifeHijack {
     private var viewH = 0
 
     /**
+     * 当前画布尺寸（触摸报文坐标系）；未接管时为 0。
+     *
+     * 给需要**合成**触点的路径用（旋钮 → 滑动手势，见
+     * [io.github.shaonialife.carptocar.input.KnobRouter]）：合成触点没有车机报文可参照，
+     * 只能按画布中心算落点。
+     */
+    val canvasWidthPx: Int get() = viewW
+
+    /** 见 [canvasWidthPx]。 */
+    val canvasHeightPx: Int get() = viewH
+
+    /**
      * 车机真实分辨率（编码分辨率申请）。
      *
      * 缓存原因见 [setRequestedResolution]：AirPlay SETUP 早于 CarLife 握手完成，

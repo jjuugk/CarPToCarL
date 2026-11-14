@@ -41,6 +41,7 @@ import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.input.CarInputClient
+import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
@@ -1466,6 +1467,7 @@ class MainActivity : AppCompatActivity() {
         ScreenDimmer.enabled = true
 
         TouchRouter.logSink = { line -> log(line) }
+        KnobRouter.logSink = { line -> log(line) }
         VirtualLauncher.logSink = { line -> log(line) }
         CarInputClient.logSink = { line -> log(line) }
 
