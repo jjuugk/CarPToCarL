@@ -3967,7 +3967,16 @@ object SessionController {
             }
         val info =
             try {
-                client.runAudioStream(secret, profile, AudioTuning.RAW_SPF, micPort = 0, fixVolume = false)
+                // 3s 超时：第二条流自己慢不要紧，但它挡住的是后面那次 RECORD——
+                // 而 RECORD 必须等两条流都 SETUP 完才发（补发 RECORD 会弄死宝马车机）
+                client.runAudioStream(
+                    secret,
+                    profile,
+                    AudioTuning.RAW_SPF,
+                    micPort = 0,
+                    fixVolume = false,
+                    setupTimeoutMillis = 3_000,
+                )
             } catch (error: Exception) {
                 appendLog("AUDIO: 导航播报通道协商异常 - ${error.message} —— 保持混音")
                 null

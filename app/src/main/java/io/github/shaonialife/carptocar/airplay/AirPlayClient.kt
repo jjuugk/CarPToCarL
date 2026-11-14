@@ -2611,6 +2611,14 @@ class AirPlayClient(
          * （最长 4s×2），用户侧表现成「连上了、导航要等好几秒才出声」。
          */
         fixVolume: Boolean = true,
+        /**
+         * 首次 SETUP 的超时（毫秒）。默认 8s——奥迪音频 SETUP 实测可能 ~2.7s。
+         *
+         * 第二条流（导航独立流）要传短一些：它自己慢不要紧，但不能拖住后面那次 RECORD
+         * ——RECORD 必须等两条流都 SETUP 完才发，否则后加入的流就得补发 RECORD，
+         * 而那正是会弄死宝马车机的动作。
+         */
+        setupTimeoutMillis: Int = 8_000,
     ): AudioStreamInfo? {
         // 档位由调用方按「车机 /info 声明的候选 + 本车机历史记忆」选定后传进来：
         // 同一台车机上不同 audioType 档位的可用性完全不同（见 AudioProfile 注释），
@@ -2711,7 +2719,7 @@ class AirPlayClient(
                     buildAudioBody(false),
                     // 8s：奥迪音频 SETUP 实测可能耗时 ~2.7s（车机侧资源仲裁）；异步读线程
                     // 保证等待期间 feedback 心跳照常发送，长等待不再触发车机看门狗
-                    timeoutMillis = 8_000,
+                    timeoutMillis = setupTimeoutMillis,
                     contentType = "application/x-apple-binary-plist",
                 )
             statusLine = first.first
@@ -2729,7 +2737,7 @@ class AirPlayClient(
                         "SETUP",
                         "rtsp://$host:${endpoint.airPlayPort}/",
                         buildAudioBody(true),
-                        timeoutMillis = 8_000,
+                        timeoutMillis = setupTimeoutMillis,
                         contentType = "application/x-apple-binary-plist",
                     )
                 statusLine = retry.first
