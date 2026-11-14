@@ -1,6 +1,7 @@
 package io.github.shaonialife.carptocar.carlife
 
 import io.github.shaonialife.carptocar.audio.AudioSender
+import io.github.shaonialife.carptocar.audio.AudioSource
 
 /**
  * CarLife 音频桥接（手机 → 车机方向的**直通落地点**）。
@@ -26,6 +27,13 @@ internal class CarLifeAudioSink(
      * （2026-10-27 日志：10:35:04 刚触发暂停丢弃，10:35:14 的导航 TTS 就来了）。
      */
     private val dropWhenPaused: Boolean = true,
+    /**
+     * 这条 sink 对应哪一路：媒体（9240）还是播报（9241）。
+     *
+     * 发送端按它把 PCM 写进各自的环形缓冲、各自重采样，再定拍混音。**必须区分**：
+     * 两路混成一堆字节首尾相接（旧实现）就是「导航与音乐一起放时卡顿」的根因。
+     */
+    private val source: AudioSource = AudioSource.MEDIA,
 ) {
     /** CarLife 引擎宣告的源采样率（CarlifeMusicInit；<=0 表示尚未宣告，按 48k 处理）。 */
     @Volatile
@@ -151,8 +159,8 @@ internal class CarLifeAudioSink(
         }
         val sender = io.github.shaonialife.carptocar.SessionController.audioSender
         if (sender == null || !sender.isRunning) return
-        // 直通：交给 AudioSender 重采样 + 封包 + 发送
-        sender.feedPcm(pcm, size, srcRate, srcChannels)
+        // 直通：交给 AudioSender 重采样 + 写入该源的环形缓冲（混音与发送在泵线程）
+        sender.feedPcm(pcm, size, srcRate, srcChannels, source)
         sampleLevel(pcm, size)
         packets++
         bytes += size

@@ -45,6 +45,7 @@ import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
+import io.github.shaonialife.carptocar.launcher.settings.DevModePrefs
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
@@ -986,21 +987,39 @@ class MainActivity : AppCompatActivity() {
         // ---- 连接准备 ----
         // 启动后自动连接：默认开启。打开 App 即发起连接，不必每次点英雄卡；
         // 需要在连之前改「下次连接起效」的项（分辨率缩放 / CarLife 劫持开关）时关掉它。
+        //
+        // 两个开关同一份偏好：卡片里那个带说明文字，顶部那个是常驻快捷入口
+        // （用户要求「开关放在上方」，省得每次滚下来找）。互相同步靠 syncingAutoConnect
+        // 挡住回环——直接互相 setChecked 会来回触发监听器。
         val autoConnectNote = findViewById<TextView>(R.id.autoConnectNote)
         val switchAutoConnect = findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoConnect)
-        switchAutoConnect.isChecked = AutoConnectPrefs.enabled(this)
+        val switchAutoConnectTop =
+            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoConnectTop)
+        var syncingAutoConnect = false
+        val topSwitches = listOf(switchAutoConnect, switchAutoConnectTop)
+        topSwitches.forEach { it.isChecked = AutoConnectPrefs.enabled(this) }
         autoConnectNote.text =
             if (switchAutoConnect.isChecked) {
                 "打开 App 即自动发起连接（默认开启）"
             } else {
                 "关闭后需手动点「启动连接」"
             }
-        switchAutoConnect.setOnCheckedChangeListener { _, checked ->
-            AutoConnectPrefs.setEnabled(this, checked)
-            autoConnectNote.text =
-                if (checked) "打开 App 即自动发起连接（默认开启）" else "关闭后需手动点「启动连接」"
-            log("AUTOCONNECT: 启动后自动连接已${if (checked) "开启" else "关闭"}")
+        val onAutoConnectChanged: (Boolean) -> Unit = { checked ->
+            if (!syncingAutoConnect) {
+                syncingAutoConnect = true
+                AutoConnectPrefs.setEnabled(this, checked)
+                topSwitches.forEach { if (it.isChecked != checked) it.isChecked = checked }
+                syncingAutoConnect = false
+                autoConnectNote.text =
+                    if (checked) "打开 App 即自动发起连接（默认开启）" else "关闭后需手动点「启动连接」"
+                log("AUTOCONNECT: 启动后自动连接已${if (checked) "开启" else "关闭"}")
+            }
         }
+        switchAutoConnect.setOnCheckedChangeListener { _, checked -> onAutoConnectChanged(checked) }
+        switchAutoConnectTop.setOnCheckedChangeListener { _, checked -> onAutoConnectChanged(checked) }
+
+        // ---- 开发者入口：连点顶部标题 10 次，显示/隐藏「测试台接收端」 ----
+        setupDevUnlock()
 
         // 靠近车机自动启动：后台静默检测（只听系统蓝牙 ACL 事件，不扫描不轮询）。
         // 前提是「目标车机」已指定——否则一律不动作，避免误连测试台/其它已配对设备。
@@ -2388,6 +2407,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ==================== 通用 UI 工具 ====================
+
+    /**
+     * 开发者入口：「测试台接收端」（PC 上的 mock 接收端直连）默认隐藏，连点标题 10 次才出现。
+     *
+     * 为什么要藏（用户 2026-11-14 要求）：那一行填的是 `IP:端口`，误填会顶掉正常车机连接，
+     * 而且普通使用时完全用不上。藏起来之后，正常路径上少一个会让人填错的输入框。
+     *
+     * 「连续」= 相邻两次点击间隔 < 1.5 秒，超时重新计数；解锁状态持久化（[DevModePrefs]），
+     * 再连点 10 次可隐藏回去。
+     */
+    private fun setupDevUnlock() {
+        val row = findViewById<android.view.View>(R.id.rowMockSink) ?: return
+        val title = findViewById<android.view.View>(R.id.titleBrand) ?: return
+        row.visibility = if (DevModePrefs.enabled(this)) android.view.View.VISIBLE else android.view.View.GONE
+        val requiredTaps = 10
+        val tapWindowMillis = 1_500L
+        var taps = 0
+        var lastTapAt = 0L
+        title.setOnClickListener {
+            val now = android.os.SystemClock.uptimeMillis()
+            taps = if (now - lastTapAt > tapWindowMillis) 1 else taps + 1
+            lastTapAt = now
+            if (taps < requiredTaps) return@setOnClickListener
+            taps = 0
+            val show = row.visibility != android.view.View.VISIBLE
+            row.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            DevModePrefs.setEnabled(this, show)
+            log("DEV: 测试台接收端已${if (show) "显示" else "隐藏"}（连点标题 $requiredTaps 次切换）")
+        }
+    }
 
     private fun log(message: String) {
         // 写入进程级缓冲（logcat + 文件 + 挂屏渲染均由 SessionController 统一处理）

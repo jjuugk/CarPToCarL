@@ -82,25 +82,13 @@ class AudioSender(
         /** 「音频链路体检」节拍（30 秒一行；窗口太短会被单帧抖动带偏）。 */
         private const val HEALTH_INTERVAL_MILLIS = 30_000L
 
-        /** 静音保活的检查节拍。 */
-        private const val KEEPALIVE_TICK_MILLIS = 100L
-
         /**
-         * 多久没有真实 PCM 就开始补静音帧。
+         * 「多久没有真实 PCM 就算空转」的阈值。
          *
-         * 取 300ms 而不是 0：正常音乐播放时 7~23ms 一帧，压根不会触发；而「暂停/切歌/
-         * 导航播报间隙」这种短暂停顿也不至于插静音。真正要救的是「连接后长时间没人
-         * 放音乐」这种一分钟级的空转。
+         * 定拍泵始终按实时速率出帧（欠载补静音），所以它现在只用于日志语义；
+         * 留 300ms 是为了保留「引擎报停 → 立即补帧」那套诊断文案的原始含义。
          */
         private const val IDLE_FILL_AFTER_MILLIS = 300L
-
-        /**
-         * 单拍最多补几帧（≈[KEEPALIVE_TICK_MILLIS]/帧长，留一点追赶余量，避免卡顿后猛灌）。
-         *
-         * 16 帧 ≈ 117ms > 一拍 100ms：48k/352 样本一帧 7.33ms，一拍需要 13.6 帧，
-         * 卡在 12 会让补帧永远比实时慢一点，时间戳逐步落后（引擎报停后立即补帧时更明显）。
-         */
-        private const val MAX_KEEPALIVE_FRAMES_PER_TICK = 16
 
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
@@ -427,7 +415,7 @@ class AudioSender(
                     "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声）",
             )
             startSyncLoop()
-            startSilenceKeepAlive()
+            startPump()
             true
         } catch (error: Exception) {
             log("AUDIO: 直通启动失败 - ${error.message}")
@@ -436,173 +424,127 @@ class AudioSender(
         }
     }
 
-    /** 直通模式下的帧对齐累积缓冲（把任意大小的注入 PCM 切成固定帧长）。 */
-    private val passthroughBuffer = java.io.ByteArrayOutputStream()
+    /**
+     * 混音器：媒体（9240）与播报（9241）各一路环形缓冲，由泵线程定拍相加成一条流。
+     *
+     * 放在这里而不是每条 sink 一个，是因为**只能用一条 RTP 流**（无线 CarPlay 的
+     * AltAudio 要 AAC-ELD/OPUS，我们没有），两路必须在我们这侧先合成。
+     * 详见 [AudioMixer] 的文件头注释（旧实现「拼接 + 2× 时钟」就是卡顿的根因）。
+     */
+    private val mixer: AudioMixer by lazy {
+        AudioMixer(sampleRate = sampleRate, channels = CHANNELS, frameSamples = samplesPerPacket.toInt())
+    }
 
-    /** 有状态重采样器（相位跨块延续，保证 44.1k→48k 的长期比值精确）。 */
-    private val pcmResampler = PcmResampler()
+    /** 每个源一份重采样器 + 它认定的输入采样率（+ 相位，见 [PcmResampler]）。 */
+    private val resamplers = arrayOf(PcmResampler(), PcmResampler())
+    private val resampleInRates = IntArray(2)
 
-    /** 重采样器当前认定的输入采样率（变了就清相位，0 = 还没用过）。 */
-    private var resampleInRate = 0
+    /** 混音泵：唯一调用编码/封包/发送的线程（直通模式下）。 */
+    private var pumpThread: Thread? = null
 
-    /** 最近一次收到**真实** PCM 的时刻（uptimeMillis）；静音保活据此判断要不要补帧。 */
+    /** 泵线程复用的输出缓冲，避免每帧 4KB 的垃圾。 */
+    private val mixFrameBuffer = ByteArray(samplesPerPacket.toInt() * CHANNELS * 2)
+
+    /** 最近一次收到**真实** PCM 的时刻（uptimeMillis）；诊断用。 */
     @Volatile
     private var lastRealFeedAt = 0L
 
-    /**
-     * 「多久没有真实 PCM 就补静音」的当前阈值（默认 [IDLE_FILL_AFTER_MILLIS]）。
-     *
-     * 引擎报「音频停」时由 [beginIdleFill] 临时置 0——**立即**开始补，目的是让 RTP 时间戳
-     * 连续，车机的 jitter buffer 不排空（微信提示音、来电那种 300ms 级中断，就是因为
-     * 前 300ms 没有包，恢复瞬间要重新缓冲，听感是「卡一下」）。
-     */
+    /** 「多久没有真实 PCM 就补静音」的阈值——已被定拍泵取代，仅保留给日志语义。 */
     @Volatile
     private var idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
 
-    private var keepAliveThread: Thread? = null
-
     /**
-     * 静音保活：音频流建立后**不能长时间一个包都不发**。
+     * 混音泵：直通模式下**唯一**的编码/封包/发送线程。
      *
-     * 2026-11-04 奥迪 MIB3 实车（`docs/audi-mib3-ea-tunnel-20261104.md`）：音频流 SETUP
-     * 完成后先是 65 秒完全没有 PCM（车机上没人放音乐），第一段音乐（08:27:39，44.1k
-     * 立体声、电平 99%）原样编码发出去了，车机一声不响；而同样的音频在重连后的会话里
-     * （流一建立 0.4 秒就有包）立刻正常。差别只有「流建立后先静默了多久」。
+     * 三件事合到一条线程：
      *
-     * 真 iPhone 的音频流是**连续**的：没声音也一直送静音帧。接收端据此维持解码/播放管线
-     * 与 RTP↔NTP 时钟；停一分钟再突然来音频，管线早已被判空闲，包照收不放。
+     * 1. **定拍**：按 `nanoTime` 反算「现在该产第几帧」，输出严格 [sampleRate] 样本/秒。
+     *    旧实现是「凑满一帧就发」，跟着输入量走——导航与音乐同时播时一秒产出两秒样本，
+     *    RTP 时钟 2×，车机按 1× 消费，缓冲只增不减，几条播报之后溢出 → 丢包/重同步，
+     *    表现就是「一起播放，过一会儿开始卡」（2026-11-14 用户报告）。
+     * 2. **混音 + 播报让路**：见 [AudioMixer]（两路相加、播报时音乐 −12dB）。
+     * 3. **欠载补静音**：两路都没数据时输出静音帧，保持 RTP 时间戳连续、车机 jitter
+     *    buffer 不排空。这就是原来那条 `audio-silence-keepalive` 线程的职责，合并进来
+     *    顺带消掉了「补静音线程与 feedPcm 线程同时进编码器 / 抢着改时间戳」的竞态。
      *
-     * 所以这里在「超过 [IDLE_FILL_AFTER_MILLIS] 没有任何真实 PCM」时按实时速率补静音帧：
-     * 作用只是维持管线与时钟，用户听不到任何声音（AAC 静音帧十几字节，开销可忽略）。
-     * 真实 PCM 一到就立刻停补，避免在音乐中间插入静音帧。
+     * 唤醒频率 = 每秒帧数（AAC 47 次），相比视频编码与推流可忽略。
      */
-    private fun startSilenceKeepAlive() {
-        if (keepAliveThread != null) return
-        lastRealFeedAt = android.os.SystemClock.uptimeMillis()
-        val frameBytes = framePcmBytes
-        val frameMillis = 1000.0 * samplesPerPacket / sampleRate
-        val silence = ByteArray(frameBytes)
+    private fun startPump() {
+        if (pumpThread != null) return
+        mixer.reset()
         val thread =
             Thread(
                 {
-                    var nextFillAt = 0L
-                    var announced = false
                     while (running.get()) {
-                        try {
-                            Thread.sleep(KEEPALIVE_TICK_MILLIS)
-                        } catch (_: InterruptedException) {
-                            break
-                        }
-                        if (!running.get()) break
-                        val now = android.os.SystemClock.uptimeMillis()
-                        if (now - lastRealFeedAt < idleFillAfterMillis) {
-                            nextFillAt = 0L
+                        val now = System.nanoTime()
+                        val due = mixer.dueFrames(now)
+                        if (due <= 0) {
+                            java.util.concurrent.locks.LockSupport.parkNanos(mixer.nanosToNextFrame(now))
                             continue
                         }
-                        if (nextFillAt == 0L) {
-                            nextFillAt = now
-                            if (!announced) {
-                                announced = true
-                                log(
-                                    // 阈值可能是 300ms（常态）或 0（引擎报停后的立即补帧）
-                                    "AUDIO: 无 PCM 超过 ${idleFillAfterMillis}ms——开始补静音帧保活" +
-                                        "（避免车机把音频流判空闲，之后第一段音乐被丢）",
-                                )
-                            }
+                        var produced = 0
+                        while (produced < due && running.get()) {
+                            mixer.mixNextFrame(mixFrameBuffer, System.nanoTime())
+                            dispatchPcm(mixFrameBuffer)
+                            produced++
                         }
-                        var guard = 0
-                        while (running.get() &&
-                            nextFillAt <= now &&
-                            guard < MAX_KEEPALIVE_FRAMES_PER_TICK
-                        ) {
-                            if (android.os.SystemClock.uptimeMillis() - lastRealFeedAt <
-                                idleFillAfterMillis
-                            ) {
-                                break // 真实 PCM 回来了，本拍不再补
-                            }
-                            dispatchPcm(silence)
-                            nextFillAt += frameMillis.toLong().coerceAtLeast(1L)
-                            guard++
-                        }
-                        // 落后太多就不追了：补的静音没必要和历史对齐，重新从当前时刻起算
-                        if (nextFillAt < now) nextFillAt = now
                     }
                 },
-                "audio-silence-keepalive",
+                "audio-mixer-pump",
             )
         thread.isDaemon = true
-        keepAliveThread = thread
+        pumpThread = thread
         thread.start()
     }
 
     /**
-     * 引擎报「音频停」时调用：**立即**开始补静音帧（把 300ms 阈值临时压到 0）。
+     * 引擎报「音频停」时调用。定拍泵本身一直在补静音，这里只留日志语义。
      *
-     * 为什么需要（2026-11-09 实车日志）：微信提示音到达时 CarLife 引擎发 `0x30003`
-     * 停掉媒体通路，311ms 后才 `0x30002` 恢复。这段时间**一个包都不发**，车机的
-     * jitter buffer 被排空，恢复瞬间要重新缓冲——听感就是「音乐卡一下」。
-     * 补静音让 RTP 时间戳保持连续、buffer 不排空，恢复时无缝接上；用户听到的是
-     * 311ms 静音（协议内必然），但不再有「卡」的那一下。
-     *
-     * 真实 PCM 一到，补静音会自动让位（[feedPcm] 更新 [lastRealFeedAt]）。
+     * 2026-11-09 的教训仍然有效：引擎发 `0x30003` 后 311ms 才 `0x30002`，这段空档
+     * **不能一个包都不发**——车机 jitter buffer 会被排空，恢复瞬间重新缓冲，听感是
+     * 「卡一下」。现在泵线程始终按 48000 样本/秒出帧，天然不会再出现空档。
      */
     fun beginIdleFill(reason: String) {
         if (!running.get()) return
-        if (idleFillAfterMillis == 0L) return
         idleFillAfterMillis = 0L
-        log("AUDIO: $reason → 立即补静音帧保持 RTP 连续（车机缓冲不排空，恢复不再卡一下）")
+        log("AUDIO: $reason → 泵线程继续按实时速率补静音帧（RTP 连续，恢复不再卡一下）")
     }
 
-    /** 引擎音频恢复：补静音回到常态阈值（300ms），避免正常播放间隙插入静音。 */
+    /** 引擎音频恢复。阈值已由定拍泵接管，这里只复位日志语义。 */
     fun endIdleFill() {
         if (idleFillAfterMillis == IDLE_FILL_AFTER_MILLIS) return
         idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
-        log("AUDIO: 引擎音频恢复 → 补静音回到 ${IDLE_FILL_AFTER_MILLIS}ms 阈值")
+        log("AUDIO: 引擎音频恢复（泵线程不受影响，仍按实时速率出帧）")
     }
 
     /**
-     * 直通模式下由外部注入一段 PCM（16bit 交织）。
+     * 外部注入 PCM（CarLife 直通）。
      *
-     * 会自动把任意采样率/声道数的输入重采样到 [sampleRate]/[CHANNELS]（立体声），
-     * 再按固定帧长（PCM 通路=每包 [SAMPLES_PER_PACKET] 采样、AAC 通路=每帧
-     * [AacLcEncoder.FRAME_SAMPLES] 采样）累积切帧后走封包/编码/发送。非直通模式
-     * （采集循环在跑）时忽略——两条路径不该同时喂数据。
+     * 只做「重采样 + 写入该源的环形缓冲」，**不编码、不发送、不阻塞**。
+     * 媒体（9240）与播报（9241）是两条独立读线程；旧实现让它们在这里同步跑完
+     * AAC 编码 + ChaCha20 + UDP 发送，网络一抖就反压引擎，引擎再丢音频 = 卡顿。
+     *
+     * 每个源一份 [PcmResampler]：媒体 44.1k 与播报 16k 交替进来时，共用一份会每块
+     * 重置相位（每块丢半样本 + 块边界跳变，听感是持续的毛刺）。
      *
      * @param srcPcm   输入 PCM（16bit 小端交织）
      * @param size     有效字节数
      * @param srcRate  输入采样率（<=0 时按 [sampleRate] 处理，不重采样）
      * @param srcChannels 输入声道数（1 或 2；其它按 2 处理）
+     * @param source   哪一路（媒体/播报），决定进哪个环形缓冲、用哪份重采样器
      */
-    /**
-     * 外部注入 PCM（CarLife 直通）。
-     *
-     * **必须同步**：媒体（9240）与 TTS（9241）是两条独立读线程，2026-10-27 接入导航播报
-     * 后两路会同时进来；[passthroughBuffer] 是非线程安全的 ByteArrayOutputStream，
-     * 不加锁会出现半帧交错（爆音/破音）甚至丢数据。
-     */
-    @Synchronized
     fun feedPcm(
         srcPcm: ByteArray,
         size: Int,
         srcRate: Int = 0,
         srcChannels: Int = 2,
+        source: AudioSource = AudioSource.MEDIA,
     ) {
         if (!running.get() || record != null) return // 采集模式在跑时不接受注入
         if (size <= 0) return
-        // 真实 PCM 到场：静音保活立刻让位（这一行必须在 alignPcm 之前，
-        // 否则重采样失败时空转判定会误以为「一直没声音」）
         lastRealFeedAt = android.os.SystemClock.uptimeMillis()
-        val resampled = alignPcm(srcPcm, size, srcRate, srcChannels) ?: return
-        // 累积到固定帧长，凑满一帧才发（PCM 通路逐包、AAC 通路逐帧）
-        val frameBytes = framePcmBytes
-        passthroughBuffer.write(resampled, 0, resampled.size)
-        while (passthroughBuffer.size() >= frameBytes) {
-            val frame = passthroughBuffer.toByteArray().copyOf(frameBytes)
-            val rest = passthroughBuffer.toByteArray()
-            passthroughBuffer.reset()
-            passthroughBuffer.write(rest, frameBytes, rest.size - frameBytes)
-            dispatchPcm(frame)
-        }
+        val resampled = alignPcm(source, srcPcm, size, srcRate, srcChannels) ?: return
+        mixer.feed(source, resampled, 0, resampled.size)
     }
 
     /**
@@ -612,11 +554,14 @@ class AudioSender(
      * CarLife 引擎实际只会输出 44.1k 或 48k。任意其它比值同一套逻辑也成立，不会中断推流。
      */
     private fun alignPcm(
+        source: AudioSource,
         src: ByteArray,
         size: Int,
         srcRate: Int,
         srcChannels: Int,
     ): ByteArray {
+        val index = source.ordinal
+        val resampler = resamplers[index]
         val inRate = if (srcRate > 0) srcRate else sampleRate
         val inCh = if (srcChannels == 1) 1 else 2
 
@@ -646,17 +591,18 @@ class AudioSender(
 
         // 采样率一致直接返回（顺带清相位：万一中途换过源采样率，别拿上一段的尾巴去插值）
         if (inRate == sampleRate) {
-            pcmResampler.reset()
+            resampler.reset()
             return rateAligned
         }
 
         // 有状态线性重采样：相位与末帧跨块延续（见 [PcmResampler] 的文件头注释——
         // 旧实现每块独立截断，实测长期少 0.05% 样本，25 分钟欠 0.7 秒）。
-        if (inRate != resampleInRate) {
-            pcmResampler.reset()
-            resampleInRate = inRate
+        // **每源一份**：媒体 44.1k 与播报 16k 交替进来时，共用一份会每块 reset 相位。
+        if (inRate != resampleInRates[index]) {
+            resampler.reset()
+            resampleInRates[index] = inRate
         }
-        return pcmResampler.convert(rateAligned, rateAligned.size, inRate, sampleRate, rateChannels)
+        return resampler.convert(rateAligned, rateAligned.size, inRate, sampleRate, rateChannels)
     }
 
     /** 走与采集循环一致的封包/编码/发送路径（[feedPcm] 与采集循环共用）。 */
@@ -670,6 +616,12 @@ class AudioSender(
                     listOf(pcm)
                 }
             if (payloads.isEmpty()) return
+            // 一次性自检只对**真实音频**做：定拍泵在没人放音乐时也会出静音帧，
+            // 拿静音帧去自检只会得到「⚠ 解码为全零」，把「编码器坏了」误报成事实。
+            if (!selfChecked && !isAllZero(pcm)) {
+                selfChecked = true
+                verifyEncodedFrame(payloads.first())
+            }
             var sendFailed = false
             for (payload in payloads) {
                 if (!sendPayload(payload)) {
@@ -682,6 +634,16 @@ class AudioSender(
             log("AUDIO: 直通注入异常 - ${error.message}")
             stop()
         }
+    }
+
+    /** 这一帧是不是全零（静音）。定拍泵空载时持续输出静音帧，自检必须跳过它们。 */
+    private fun isAllZero(pcm: ByteArray): Boolean {
+        var i = 0
+        while (i < pcm.size) {
+            if (pcm[i].toInt() != 0) return false
+            i++
+        }
+        return true
     }
 
     /**
@@ -706,10 +668,9 @@ class AudioSender(
         syncThread = null
         healthThread?.interrupt()
         healthThread = null
-        keepAliveThread?.interrupt()
-        keepAliveThread = null
+        pumpThread = null
         thread = null
-        passthroughBuffer.reset()
+        mixer.reset()
         restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
             // 「已就地补发」只说明我们这一侧没丢包，不代表车机收到了：ICMP 端口不可达
@@ -870,6 +831,20 @@ class AudioSender(
                 "累计 $packetDelta 包、${measured.toInt()} 样本/秒（声明 $sampleRate）"
             }
         log("AUDIO: 链路体检 t$streamType/${codec.name} —— 累计 $packetsSent 包；$rateText；$anchor")
+        // 混音体检：一行回答「两路各自占多少、有没有被 duck、环形缓冲有没有丢」。
+        // 导航+音乐同时播时看这行就能判定是不是混音侧的问题（产出必须 ≈ 每秒帧数）。
+        val mixFrames = mixer.windowFrames
+        if (mixFrames > 0) {
+            val mediaPct = mixer.windowMediaFrames * 100 / mixFrames
+            val navPct = mixer.windowNavFrames * 100 / mixFrames
+            log(
+                "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / ${(mixFrames * samplesPerPacket / (seconds.coerceAtLeast(0.001))).toInt()} 样本每秒；" +
+                    "媒体 $mediaPct% / 播报 $navPct%；duck 已触发 ${mixer.duckedFrames} 帧；" +
+                    "环形缓冲丢 ${mixer.droppedBytes / 1024}KB" +
+                    if (mixer.droppedBytes > 0) "（某一路推得比实时快，正在丢最旧）" else "（无溢出）",
+            )
+            mixer.resetWindow()
+        }
         healthAtNanos = now
         healthSyncSent = syncSent
         healthIcmpSent = syncIcmpDeferrals

@@ -1,6 +1,7 @@
 package io.github.shaonialife.carptocar.carlife
 
 import android.content.Context
+import io.github.shaonialife.carptocar.audio.AudioSource
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSender
@@ -746,7 +747,7 @@ object CarLifeHijack {
             val sink = CarLifeAudioSink(logSink ?: {})
             audioSink = sink
             // 导航播报走 TTS 通道（9241）：独立 sink、不参与暂停丢弃（见字段注释）
-            val naviSink = CarLifeAudioSink(logSink ?: {}, dropWhenPaused = false)
+            val naviSink = CarLifeAudioSink(logSink ?: {}, dropWhenPaused = false, source = AudioSource.NAV)
             ttsSink = naviSink
             // 创建即应用当前播放状态：若此刻音乐已是 PAUSED，立刻截断（否则 listener 只在
             // 状态「变化」时触发，稳态 PAUSED 下新 sink 会漏掉这次联动）。
