@@ -16,6 +16,21 @@ object CarApproachPolicy {
     /** 用户手动断开/取消后，同一段停车期间不再自动拉起（下车断链时自动解除）。 */
     const val SUPPRESS_AFTER_MANUAL_STOP_MILLIS = 10 * 60_000L
 
+    /**
+     * ACL 链路「活不过这么久」就断 = 抖动，不是「人走远了」，也不是「重新靠近」。
+     *
+     * 2026-11-14 一加 15 / 车机 MBUX 实测：车机每 ~30 秒连上来一次、0.3~1.2 秒就断。
+     * 旧逻辑把每次断开都当成「下车」，顺手复位「刚手动断开过」与 90 秒节流，
+     * 于是节流形同虚设、App 被反复拉起、30 秒收摊计时也永远被下一次抖动撤销。
+     */
+    const val ACL_FLAP_MILLIS = 3_000L
+
+    /**
+     * 收摊闹钟到点时，如果「最近 [ACL_FLAP_WINDOW_MILLIS] 内刚有过一次 ACL 连上」，
+     * 说明车机在反复抖动而不是人走远了——这时要按抖动收摊（停会话、留进程、压住自动拉起）。
+     */
+    const val ACL_FLAP_WINDOW_MILLIS = 10_000L
+
     enum class Decision {
         /** 命中：该拉起 App 并开始连接。 */
         TRIGGER,
@@ -29,11 +44,20 @@ object CarApproachPolicy {
         /** 事件里的设备不是目标车机（耳机/手表/别人的手机…）。 */
         NOT_TARGET,
 
-        /** 会话已经在跑（或正在连接），不需要再拉起。 */
+        /** **真正**有会话在跑（已建链/在推流），不需要再拉起。 */
         SESSION_RUNNING,
 
         /** 用户刚手动断开/取消——这一轮停车期间保持安静。 */
         SUPPRESSED,
+
+        /**
+         * 正在重试、但**还没建起会话**。
+         *
+         * 必须在 [SESSION_RUNNING] 之后单独判：旧的判定把「蓝牙客户端在退避重试」
+         * 也算成「已有会话」，车机根本没开无线 CarPlay 时整场都在重试，
+         * 靠近唤醒就被自己永久挡掉（日志里那句误导性的「已有会话」）。
+         */
+        RETRYING,
 
         /** 同一次靠近已经触发过。 */
         THROTTLED,
@@ -64,7 +88,9 @@ object CarApproachPolicy {
     /**
      * @param eventAddress 系统 ACL 广播里带的设备地址（可能为空）
      * @param targetAddress 用户在「目标车机」里选定的地址（null = 未指定）
-     * @param sessionRunning 已有会话在跑或正在连接
+     * @param sessionRunning **真正**有会话在跑（已建链或在推流）。不要把「正在重试」算进来，
+     *   否则车机连不上时靠近唤醒会被自己永久挡掉——那种情况用 [retrying]。
+     * @param retrying 正在退避重试、但还没建起会话
      * @param suppressed 用户手动断开后的抑制窗口内
      * @param lastTriggerAt 上次触发时刻（墙钟毫秒，0 = 从未触发）
      */
@@ -76,6 +102,7 @@ object CarApproachPolicy {
         suppressed: Boolean,
         lastTriggerAt: Long,
         now: Long,
+        retrying: Boolean = false,
     ): Decision {
         if (!enabled) return Decision.DISABLED
         if (targetAddress.isNullOrBlank()) return Decision.NO_TARGET
@@ -83,6 +110,9 @@ object CarApproachPolicy {
         if (!address.equals(targetAddress, ignoreCase = true)) return Decision.NOT_TARGET
         if (sessionRunning) return Decision.SESSION_RUNNING
         if (suppressed) return Decision.SUPPRESSED
+        // 重试中：不拉起界面（那会变成每 30 秒弹一次），但也不再谎称「已有会话」——
+        // 交给调用方去催一轮重连（物理靠近是「现在值得再试一次」的最强信号）。
+        if (retrying) return Decision.RETRYING
         if (lastTriggerAt > 0L) {
             // 用 `<` 而不是区间判断：系统时间被往回调整时 elapsed 为负，
             // 同样按「刚触发过」处理，避免一次靠近连发多次。

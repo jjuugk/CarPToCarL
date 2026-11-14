@@ -93,6 +93,27 @@ object CarIdleGuard {
             }
             return
         }
+        // 「刚连上又断、一直没建起会话」= 车机在抖动，不是人走远了（2026-11-14 一加实测：
+        // 每 ~30 秒连一次、0.3~1.2 秒就断，整场 0 条 IDLE 日志）。
+        // 这种轮次照样要收摊——但**不能退进程**：进程一退，下一次抖动又把界面拉起来，
+        // 30 秒一轮的弹窗比什么都糟。改成停会话 + 压住 10 分钟自动拉起，
+        // 抖动从此变成静默事件，用户真正上车/手动操作仍能立刻恢复。
+        val lastConnectAt = CarApproachPrefs.aclConnectedAt(context)
+        val flapping =
+            lastConnectAt > 0L &&
+                (System.currentTimeMillis() - lastConnectAt) in 0 until CarApproachPolicy.ACL_FLAP_WINDOW_MILLIS
+        if (flapping) {
+            CarApproachPrefs.setSuppressed(context, true)
+            shutdown(
+                context,
+                reason = "车机蓝牙反复抖动且始终没建起会话",
+                killProcess = false,
+                // 抑制已在上一步显式置位（此刻 ACL 状态多半是「刚断」，shutdown 内部的
+                // 「还连着才抑制」条件不会成立，所以不能交给它办）。
+                suppressAutoStart = false,
+            )
+            return
+        }
         shutdown(
             context,
             reason = "车机已远离（蓝牙断开 30 秒未回连）",

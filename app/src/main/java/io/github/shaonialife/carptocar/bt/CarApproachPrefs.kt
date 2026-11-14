@@ -26,6 +26,9 @@ object CarApproachPrefs {
     private const val KEY_OVERLAY_PROMPT_AT = "car_approach_overlay_prompt_at"
     private const val KEY_ACL_CONNECTED = "car_approach_acl_connected"
 
+    /** 最近一次 ACL「连上」的时刻（墙钟毫秒）：用来区分「真上车」和「车机每 30 秒抖一下」。 */
+    private const val KEY_ACL_CONNECTED_AT = "car_approach_acl_connected_at"
+
     /**
      * 「请把本应用加入电池优化白名单」的提醒间隔：7 天。
      * 太长会让用户永远错过（一旦被限流，功能就是静默失效，他自己看不出来）；
@@ -108,13 +111,29 @@ object CarApproachPrefs {
     fun setAclConnected(
         context: Context,
         connected: Boolean,
+        at: Long = System.currentTimeMillis(),
     ) {
+        val editor =
+            context
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_ACL_CONNECTED, connected)
+        // 连上时记时刻；断开时保留上一次连上的时刻，读取方据此算出「这次链路活了多久」。
+        if (connected) editor.putLong(KEY_ACL_CONNECTED_AT, at)
+        editor.apply()
+    }
+
+    /**
+     * 最近一次 ACL 连上的时刻（墙钟毫秒，0 = 从未连过）。
+     *
+     * 用途是分辨两种完全不同的断开：**真下车**（链路连着很久才断）与**车机抖动**
+     * （连上 0.3~1.2 秒就断，每 30 秒一次）。两者如果一视同仁，收摊计时会被
+     * 抖动反复撤销，App 也会被反复拉起。
+     */
+    fun aclConnectedAt(context: Context): Long =
         context
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_ACL_CONNECTED, connected)
-            .apply()
-    }
+            .getLong(KEY_ACL_CONNECTED_AT, 0L)
 
     /**
      * 用户手动断开/取消后置位：同一段停车期间不再自动拉起。

@@ -80,7 +80,24 @@ class CarApproachReceiver : BroadcastReceiver() {
         val target = TargetDevicePrefs.get(context) ?: return
         val address = addressOf(context, intent) ?: return
         if (!address.equals(target.address, ignoreCase = true)) return
+        // 先算出这一轮链路活了多久，再复位状态——顺序不能反。
+        val upMillis = System.currentTimeMillis() - CarApproachPrefs.aclConnectedAt(context)
+        val flapping = upMillis in 0 until CarApproachPolicy.ACL_FLAP_MILLIS
         CarApproachPrefs.setAclConnected(context, false)
+        if (flapping) {
+            // 抖动（连上不到 3 秒就断）既不是「人走远了」，也不是「重新靠近」。
+            // 2026-11-14 一加 15 / MBUX 实测：车机每 ~30 秒连一次、0.3~1.2 秒就断。
+            // 旧实现把每次断开都当成下车，顺手复位「刚手动断开过」和 90 秒节流，
+            // 结果节流形同虚设、App 被反复拉起，而 30 秒收摊计时又被下一次抖动撤销——
+            // 整场再也收不了摊。这里只排计时，不动抑制与节流。
+            CarIdleGuard.schedule(context)
+            DebugFileLog.append(
+                context,
+                "APPROACH: 车机蓝牙链路只维持了 ${upMillis.coerceAtLeast(0)}ms 就断开——按抖动处理" +
+                    "（不当成下车、不复位抑制与节流，收摊交给闹钟判定）",
+            )
+            return
+        }
         if (CarApproachPrefs.suppressed(context) || CarApproachPrefs.lastTriggerAt(context) > 0L) {
             CarApproachPrefs.setSuppressed(context, false)
             CarApproachPrefs.markTriggered(context, 0L)
@@ -100,34 +117,56 @@ class CarApproachReceiver : BroadcastReceiver() {
     ) {
         val target = TargetDevicePrefs.get(context) ?: return
         val address = addressOf(context, intent)
-        // 链路是物理事实：只要连上的是目标车机，就先记状态、撤计时——
+        // 真正有会话 ≠ 正在重试：`isSessionRunning()` 里包含「蓝牙客户端线程在跑」，
+        // 而那个线程会一路跑到底（连不上就退避重试），拿它当「已有会话」的话，
+        // 车机没开无线 CarPlay 时靠近唤醒会被自己永久挡掉。
+        val established = SessionController.isSessionEstablished()
+        // 链路是物理事实：只要连上的是目标车机，就先记状态——
         // 哪怕下面判定为「已有会话 / 刚断开过」不拉起界面，这次回连也算数。
         if (address != null && address.equals(target.address, ignoreCase = true)) {
             CarApproachPrefs.setAclConnected(context, true)
-            CarIdleGuard.cancel(context)
+            // 只有「真有会话」才撤收摊计时。抖动那一轮没有会话，撤掉计时等于让
+            // 收摊永远差几百毫秒被撤销（2026-11-14 一加实测整场 0 条 IDLE 日志）。
+            if (established) CarIdleGuard.cancel(context)
         }
-        val sessionRunning = SessionController.isSessionRunning() || SessionController.sessionStarting
+        val retrying =
+            !established &&
+                (SessionController.isSessionRunning() || SessionController.sessionStarting)
         val decision =
             CarApproachPolicy.onAclConnected(
                 eventAddress = address,
                 targetAddress = target.address,
                 enabled = CarApproachPrefs.enabled(context),
-                sessionRunning = sessionRunning,
+                sessionRunning = established,
                 suppressed = CarApproachPrefs.suppressed(context),
                 lastTriggerAt = CarApproachPrefs.lastTriggerAt(context),
                 now = System.currentTimeMillis(),
+                retrying = retrying,
             )
         if (decision != CarApproachPolicy.Decision.TRIGGER) {
-            // 静默原则：非目标设备、开关关闭等常态一律不写日志（耳机/手表每天都在连）。
-            if (decision == CarApproachPolicy.Decision.SUPPRESSED ||
-                decision == CarApproachPolicy.Decision.SESSION_RUNNING
-            ) {
-                DebugFileLog.append(
-                    context,
-                    "APPROACH: 车机已靠近，但" +
-                        (if (decision == CarApproachPolicy.Decision.SESSION_RUNNING) "已有会话" else "刚手动断开过") +
-                        "——跳过本次自动启动",
-                )
+            when (decision) {
+                CarApproachPolicy.Decision.SESSION_RUNNING, CarApproachPolicy.Decision.SUPPRESSED -> {
+                    // 静默原则：非目标设备、开关关闭等常态一律不写日志（耳机/手表每天都在连）。
+                    DebugFileLog.append(
+                        context,
+                        "APPROACH: 车机已靠近，但" +
+                            (if (decision == CarApproachPolicy.Decision.SESSION_RUNNING) "已有会话" else "刚手动断开过") +
+                            "——跳过本次自动启动",
+                    )
+                }
+
+                CarApproachPolicy.Decision.RETRYING -> {
+                    // 不重复拉起界面（车机每 30 秒抖一次的话会变成弹窗风暴），
+                    // 但物理靠近是「现在值得再试一次」的最强信号：把剩余退避截短。
+                    DebugFileLog.append(
+                        context,
+                        "APPROACH: 车机已靠近，但本机还停在上一轮重试里（尚未建链）" +
+                            "——不重复拉起界面，改为提前催一轮重连",
+                    )
+                    SessionController.requestImmediateRetry("车机蓝牙靠近")
+                }
+
+                else -> Unit
             }
             return
         }

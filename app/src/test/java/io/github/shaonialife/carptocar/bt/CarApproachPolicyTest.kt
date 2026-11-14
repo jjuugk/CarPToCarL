@@ -22,6 +22,7 @@ class CarApproachPolicyTest {
         suppressed: Boolean = false,
         lastTriggerAt: Long = 0L,
         now: Long = 1_000_000L,
+        retrying: Boolean = false,
     ) = CarApproachPolicy.onAclConnected(
         eventAddress = address,
         targetAddress = targetAddress,
@@ -30,6 +31,7 @@ class CarApproachPolicyTest {
         suppressed = suppressed,
         lastTriggerAt = lastTriggerAt,
         now = now,
+        retrying = retrying,
     )
 
     @Test
@@ -66,6 +68,35 @@ class CarApproachPolicyTest {
     @Test
     fun `会话已在跑时不重复拉起`() {
         assertEquals(CarApproachPolicy.Decision.SESSION_RUNNING, decide(sessionRunning = true))
+    }
+
+    @Test
+    fun `正在重试但还没建链时不冒称已有会话`() {
+        // 2026-11-14 一加 15 实测：车机没开无线 CarPlay，蓝牙客户端一路退避重试，
+        // 旧判定把「重试中」当成「已有会话」，靠近唤醒整场都被自己挡掉。
+        assertEquals(CarApproachPolicy.Decision.RETRYING, decide(retrying = true))
+    }
+
+    @Test
+    fun `真会话优先于重试标记`() {
+        assertEquals(
+            CarApproachPolicy.Decision.SESSION_RUNNING,
+            decide(sessionRunning = true, retrying = true),
+        )
+    }
+
+    @Test
+    fun `重试中不拉起界面——优先级低于抑制、高于节流`() {
+        // 抑制是用户意愿，最高优先。
+        assertEquals(
+            CarApproachPolicy.Decision.SUPPRESSED,
+            decide(suppressed = true, retrying = true),
+        )
+        // 节流只管「拉起界面」；重试中的处理是「催一轮重连」，可以照做。
+        assertEquals(
+            CarApproachPolicy.Decision.RETRYING,
+            decide(retrying = true, lastTriggerAt = 999_999L),
+        )
     }
 
     @Test

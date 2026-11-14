@@ -2114,6 +2114,25 @@ object SessionController {
             (resourceStreams != null && currentClient?.controlSessionAlive == true)
 
     /**
+     * 是否**真的建起了会话**（iAP2 链路已就绪或画面已在送）——不是「正在重试」。
+     *
+     * [isSessionRunning] 把「蓝牙客户端线程在跑」也算作有会话，可那个线程会一路
+     * 退避重试到 `stop()` 为止。2026-11-14 一加 15 日志里车机没开无线 CarPlay，
+     * App 整场都在重试，靠近唤醒却被自己判成「已有会话」永久失效；30 秒收摊计时
+     * 也被每次抖动回连撤销，整场 0 条 IDLE 日志。所以「有没有会话」必须单独判。
+     */
+    fun isSessionEstablished(): Boolean =
+        isStreaming() || BtSessionGate.sessionActive || BtSessionGate.iap2Ready
+
+    /**
+     * 车机靠近等外部信号：让蓝牙重试循环提前结束本轮退避（限流见实现）。
+     *
+     * 返回 false = 当前没有在跑的重试循环，或刚催过一次（60 秒内）。
+     */
+    fun requestImmediateRetry(reason: String): Boolean =
+        bluetoothClient?.requestImmediateRetry(reason) ?: false
+
+    /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
      *
      * 后台自动连接时用户面前没有界面，通知栏是唯一可见的界面——那里若只写

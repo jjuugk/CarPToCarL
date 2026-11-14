@@ -90,6 +90,22 @@ class Iap2BluetoothClient(
 
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
 
+        /**
+         * 「车机靠近 → 提前重试」的最长等待：把当前这一轮退避截到这里为止。
+         *
+         * 物理靠近是「现在值得再试一次」的最强信号（车机刚醒/刚进无线配对窗口），
+         * 而退避上限已经拉到 60 秒。截到 10 秒既不错过窗口，也不会变成密集探测。
+         */
+        private const val NUDGE_MAX_WAIT_MILLIS = 10_000L
+
+        /**
+         * 两次「提前重试」的最小间隔。
+         *
+         * 必须限流：车机可能每 30 秒抖一次 ACL，每次都催就等于把退避阶梯作废，
+         * 重新变成密集探测（而密集探测会把车机的「设备移除」计时器一直续上）。
+         */
+        private const val NUDGE_MIN_INTERVAL_MILLIS = 60_000L
+
         /** 目标连不上多少轮后放开限制（16s/轮 → 约 32s 后回退，避免一个死目标堵死整轮）。 */
         private const val TARGET_FALLBACK_ROUNDS = 2
 
@@ -271,22 +287,54 @@ class Iap2BluetoothClient(
     }
 
     /**
-     * 像个人音频设备（耳机/音箱/便携音响）——这类**绝不**为了探 iAP2 去断它的音频。
-     * 车机常见的是 HANDSFREE / CAR_AUDIO / UNCATEGORIZED，都不会命中。
+     * 像个人音频设备（耳机/音箱/便携音响）——这类**绝不**为了探 iAP2 去断它的音频，
+     * 也不该被当成车机候选。
+     *
+     * 车机常见的是 HANDSFREE / CAR_AUDIO / UNCATEGORIZED，都不会命中音频子类；
+     * 但 Android 16 上 `bluetoothClass` 经常拿不到（LE Audio 耳机尤其），旧实现
+     * 「拿不到就当不是耳机」，把 Redmi Buds 5 Pro 放进了车机候选，反复拨 …caff
+     * 还顺手断它的 A2DP/HFP。现在按 [PersonalAudioClassifier] 补一层名字兜底。
      */
     @SuppressLint("MissingPermission")
     private fun looksLikePersonalAudio(device: BluetoothDevice): Boolean {
-        val deviceClass =
-            runCatching { device.bluetoothClass?.deviceClass }.getOrNull() ?: return false
-        return deviceClass == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET ||
-            deviceClass == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES ||
-            deviceClass == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER ||
-            deviceClass == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_PORTABLE_AUDIO ||
-            deviceClass == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_HIFI_AUDIO
+        val deviceClass = runCatching { device.bluetoothClass?.deviceClass }.getOrNull()
+        val name =
+            try {
+                device.name
+            } catch (_: SecurityException) {
+                null
+            }
+        return PersonalAudioClassifier.looksLikePersonalAudio(deviceClass, name)
     }
 
     /** 「蓝牙已连接→已断开」日志节流时间戳。 */
     private var lastProfileLogAt = 0L
+
+    /** 有外部信号（车机蓝牙靠近）要求提前结束本轮退避。 */
+    @Volatile
+    private var nudgePending = false
+
+    /** 上次「提前重试」的时刻（uptimeMillis），用于限流。 */
+    @Volatile
+    private var lastNudgeMillis = 0L
+
+    /**
+     * 车机靠近等外部信号：把本轮剩余退避截到最多 [NUDGE_MAX_WAIT_MILLIS]。
+     *
+     * 为什么需要它：车机刚进无线配对窗口时通常只有很短一段可连期，而退避阶梯
+     * 上限是 60 秒——不催的话最容易错过那一小段。
+     *
+     * @return false = 没有在跑的重试循环，或 60 秒内刚催过一次（限流）
+     */
+    fun requestImmediateRetry(reason: String): Boolean {
+        if (!running) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        if (lastNudgeMillis != 0L && now - lastNudgeMillis < NUDGE_MIN_INTERVAL_MILLIS) return false
+        lastNudgeMillis = now
+        nudgePending = true
+        log("BT-C: $reason——本轮退避最多再等 ${NUDGE_MAX_WAIT_MILLIS / 1000} 秒就重试")
+        return true
+    }
 
     val isRunning: Boolean get() = running
 
@@ -427,7 +475,10 @@ class Iap2BluetoothClient(
                     hit
                 }
             if (candidates.isEmpty()) {
-                log("BT-C: 没有已配对的蓝牙设备——请先在系统设置里与车机完成蓝牙配对")
+                log(
+                    "BT-C: 本轮没有可尝试的候选设备——请确认车机已在系统设置里完成蓝牙配对" +
+                        "（耳机/音箱已按音频设备排除，不再作为车机候选）",
+                )
                 sleepQuietly(RETRY_DELAY_MILLIS)
                 continue
             }
@@ -502,7 +553,15 @@ class Iap2BluetoothClient(
                     // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
                     // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
                     // 无关，断开后不影响 CarPlay 本身（声音走 WiFi 的 AirPlay）。
-                    val dropped = BtProfiles.disconnect(context, device)
+                    //
+                    // 耳机/音箱例外：哪怕被显式选成目标，也不为探 iAP2 断它的音频——
+                    // 正在放的歌会被掐掉，而且它本来就不可能提供 …caff。
+                    val dropped =
+                        if (looksLikePersonalAudio(device)) {
+                            emptyList<String>()
+                        } else {
+                            BtProfiles.disconnect(context, device)
+                        }
                     if (dropped.isNotEmpty()) {
                         val now = android.os.SystemClock.uptimeMillis()
                         if (now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
@@ -687,18 +746,54 @@ class Iap2BluetoothClient(
             }
             // 软回退：目标降级为「优先」，其余已配对设备一并作为候选
             // （按 UUID 提示有 iAP2 服务的排前面，减少无谓的连接尝试）。
-            val ranked =
-                bonded.sortedWith(
-                    compareByDescending<BluetoothDevice> { TargetDevicePrefs.matches(target, it.address) }
-                        .thenByDescending { d -> d.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true },
-                )
-            return ranked
+            //
+            // 但「放开限制」不等于「所有已配对设备都试一遍」（2026-11-14 一加 15 实测）：
+            // 连 Redmi Buds 5 Pro 都被反复拨 …caff，失败后还会被断掉 A2DP/HFP 再试一次，
+            // 用户看到的就是「蓝牙一直在断」。所以回退池要过一道
+            // [keepAsSoftCandidate]：耳机/音箱、以及本轮已经判定「不是车机」的一律排除。
+            //
+            // **显式指定的目标永不排除**：PC 测试台（xcertplay / DiPlay）可能既没有
+            // CarPlay UUID、又拿不到 Class of Device，排掉就再也连不上了。
+            val softPool =
+                bonded.filter { device ->
+                    TargetDevicePrefs.matches(target, device.address) || keepAsSoftCandidate(device)
+                }
+            if (softPool.isEmpty()) return softPool
+            return softPool.sortedWith(
+                compareByDescending<BluetoothDevice> { TargetDevicePrefs.matches(target, it.address) }
+                    .thenByDescending { d -> d.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true },
+            )
         }
         val withService =
             bonded.filter { device ->
                 device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
             }
-        return if (withService.isNotEmpty()) withService else bonded
+        if (withService.isNotEmpty()) return withService
+        // 未指定目标时也不再「全部已配对设备都试」：SDP 里没广播 …caff 的那一堆里，
+        // 耳机/音箱和已经判定过不是车机的都排除掉（同 [keepAsSoftCandidate] 的理由）。
+        return bonded.filter { keepAsSoftCandidate(it) }
+    }
+
+    /**
+     * 软回退池的准入：这台设备还值不值得当车机试一次。
+     *
+     * - 本轮已经判定「不是车机」（跳过过 / SDP 明确说没有 …caff）→ 不再拨，避免每轮都去
+     *   打扰同一台设备；
+     * - SDP 里明确广播了 …caff → 就是车机（哪怕 Class of Device 报成了音频类）；
+     * - 其余靠 [looksLikePersonalAudio] 排除耳机/音箱。
+     */
+    @SuppressLint("MissingPermission")
+    private fun keepAsSoftCandidate(device: BluetoothDevice): Boolean {
+        if (skippedNoService.contains(device.address)) return false
+        if (iap2ServiceCache[device.address] == false) return false
+        val advertisesIap2 =
+            try {
+                device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
+            } catch (_: SecurityException) {
+                false
+            }
+        if (advertisesIap2) return true
+        return !looksLikePersonalAudio(device)
     }
 
     @SuppressLint("MissingPermission")
@@ -874,10 +969,18 @@ class Iap2BluetoothClient(
     /**
      * 退避睡眠：分片检查 [running]，让 stop() 能立刻打断 20 秒的长退避
      * （整段 `Thread.sleep` 会让关闭会话时线程还挂着睡满一轮）。
+     *
+     * 同时消费 [nudgePending]：车机靠近时不干等满一轮，把截止时刻收到最多 10 秒。
      */
     private fun sleepBackoff(millis: Long) {
-        val deadline = android.os.SystemClock.uptimeMillis() + millis
+        val started = android.os.SystemClock.uptimeMillis()
+        var deadline = started + millis
         while (running && android.os.SystemClock.uptimeMillis() < deadline) {
+            if (nudgePending) {
+                nudgePending = false
+                val capped = started + NUDGE_MAX_WAIT_MILLIS
+                if (capped < deadline) deadline = capped
+            }
             sleepQuietly(BACKOFF_POLL_MILLIS)
         }
     }
