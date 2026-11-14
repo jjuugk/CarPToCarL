@@ -298,8 +298,7 @@ class AudioSender(
         if (running.get()) return true
         stopped.set(false)
         return try {
-            val client = DatagramSocket()
-            client.connect(InetAddress.getByName(host), dataPort)
+            val client = openDataSocket()
             socket = client
 
             // AAC 通路先把编码器立起来：编不出来就没必要采集（也避免「有包无声」的假象）
@@ -393,8 +392,7 @@ class AudioSender(
         if (running.get()) return true
         stopped.set(false)
         return try {
-            val client = DatagramSocket()
-            client.connect(InetAddress.getByName(host), dataPort)
+            val client = openDataSocket()
             socket = client
 
             if (codec == AudioCodec.AAC_LC) {
@@ -475,6 +473,20 @@ class AudioSender(
         val thread =
             Thread(
                 {
+                    // 定拍泵晚 21ms 就是接收端一个 21ms 空洞（2026-11-14 WinPlay 侧的
+                    // `pumpGapMs` 出现过 40）。把优先级提到音频级，让 GC/视频编码抢不走
+                    // 这一拍；拿不到高优先级也能跑，只是回到默认调度。
+                    val priority =
+                        runCatching {
+                            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                            "URGENT_AUDIO"
+                        }.getOrElse {
+                            runCatching {
+                                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
+                                "AUDIO"
+                            }.getOrDefault("默认")
+                        }
+                    log("AUDIO: 混音泵线程优先级=$priority")
                     while (running.get()) {
                         val now = System.nanoTime()
                         val due = mixer.dueFrames(now)
@@ -708,6 +720,42 @@ class AudioSender(
     // ---- 音频同步包（RTP 时间戳 ↔ NTP，每秒一个） ----
 
     /**
+     * 打开音频**数据**口（连接式 UDP）。
+     *
+     * 两个 socket 选项是为「链路抖动」设的，都失败也不影响发送，只记一行：
+     * - `sendBufferSize`：默认约 64KB。视频 key frame（50~70KB）与音频挤同一条 WiFi 时，
+     *   内核排队更容易在 burst 里把我们的包丢掉；放大到 256KB 至少不会「我们自己」先丢。
+     * - `trafficClass = 0xB8`（DSCP EF）：WMM 把它映射到语音接入类，AP 侧排队优先于
+     *   视频（AC_VI）。不支持 WMM 的 AP 会忽略，等于没设。
+     *
+     * 2026-11-14 的对照：接收端 `missing` 平均每 7.5 秒涨一串（≈5 包 ≈107ms 空洞），
+     * 而我们这侧 0 丢（`环形缓冲丢 0KB`、样本率 47988/秒），丢包只能发生在链路上。
+     * 这里能做的就是把「我们发得出去」这件事做到最稳。
+     */
+    private fun openDataSocket(): DatagramSocket {
+        val socket = DatagramSocket()
+        socket.connect(InetAddress.getByName(host), dataPort)
+        val wantBuffer = 256 * 1024
+        val bufferOk =
+            runCatching {
+                socket.sendBufferSize = wantBuffer
+                socket.sendBufferSize
+            }.getOrDefault(0)
+        val dscpOk =
+            runCatching {
+                socket.trafficClass = 0xB8
+                true
+            }.getOrDefault(false)
+        val bufferNote = if (bufferOk >= 32 * 1024) "" else "（⚠ 系统限制，按默认走）"
+        val dscpNote = if (dscpOk) "" else "（⚠ 不支持，按默认 QoS）"
+        log(
+            "AUDIO: 数据口 → $host:$dataPort；发送缓冲 ${bufferOk / 1024}KB$bufferNote" +
+                "；DSCP=EF$dscpNote",
+        )
+        return socket
+    }
+
+    /**
      * 打开同步包套接字（连接式 UDP：连上之后才能收到 ICMP 端口不可达）。
      * 失败返回 null（例如车机下发的 controlPort 非法）。
      */
@@ -837,11 +885,27 @@ class AudioSender(
         if (mixFrames > 0) {
             val mediaPct = mixer.windowMediaFrames * 100 / mixFrames
             val navPct = mixer.windowNavFrames * 100 / mixFrames
+            val maxGapMs = mixer.windowMaxGapNanos / 1_000_000
+            val perSecond = (mixFrames * samplesPerPacket / (seconds.coerceAtLeast(0.001))).toInt()
+            val dropText =
+                if (mixer.droppedBytes > 0) {
+                    "环形缓冲丢 ${mixer.droppedBytes / 1024}KB（某一路推得比实时快，正在丢最旧）"
+                } else {
+                    "环形缓冲丢 0KB（无溢出）"
+                }
+            // 「最长停拍」= 我方两次产出之间的最大间隔，正常 ≈21ms（一帧）。
+            // 超过 50ms 就是我们自己晚发了（GC / 调度），接收端那边必然是一个同样长的
+            // 空洞——与「链路丢包」区分开就靠这个数（2026-11-14 WinPlay 对照）。
+            val gapText =
+                if (maxGapMs >= 50) {
+                    "；最长停拍 ${maxGapMs}ms（⚠ 我方泵线程被拖住，不是链路问题）"
+                } else {
+                    "；最长停拍 ${maxGapMs}ms"
+                }
             log(
-                "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / ${(mixFrames * samplesPerPacket / (seconds.coerceAtLeast(0.001))).toInt()} 样本每秒；" +
+                "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / $perSecond 样本每秒；" +
                     "媒体 $mediaPct% / 播报 $navPct%；duck 已触发 ${mixer.duckedFrames} 帧；" +
-                    "环形缓冲丢 ${mixer.droppedBytes / 1024}KB" +
-                    if (mixer.droppedBytes > 0) "（某一路推得比实时快，正在丢最旧）" else "（无溢出）",
+                    dropText + gapText,
             )
             mixer.resetWindow()
         }

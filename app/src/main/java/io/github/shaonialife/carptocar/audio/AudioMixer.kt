@@ -112,6 +112,21 @@ class AudioMixer(
     var windowNavFrames = 0L
         private set
 
+    /**
+     * 本次窗口内两次产出之间**最长的一次间隔**（纳秒）。
+     *
+     * 定拍泵正常应该每 21ms 醒一次；这里出现 50ms 以上就说明泵线程被调度/GC 拖住了
+     * （或者发生了一次「落后太多直接重新对齐」）。接收端只能按到达时刻排播，
+     * 泵晚到 100ms 就是它那边一个 100ms 的空洞——2026-11-14 对 WinPlay 的
+     * `pumpGapMs` 就是看这个数。窗口内取最大值，供 `AUDIO: 混音体检` 打出。
+     */
+    @Volatile
+    var windowMaxGapNanos = 0L
+        private set
+
+    /** 上一次产出帧的时刻（泵线程私有，用于算 [windowMaxGapNanos]）。 */
+    private var lastFrameAtNanos = 0L
+
     /** 读线程注入一段 PCM（目标采样率、16bit 交织）。**不做重采样**，由调用方负责。 */
     fun feed(
         source: AudioSource,
@@ -211,6 +226,11 @@ class AudioMixer(
         emittedFrames++
         framesEmitted++
         windowFrames++
+        if (lastFrameAtNanos != 0L) {
+            val gap = nowNanos - lastFrameAtNanos
+            if (gap > windowMaxGapNanos) windowMaxGapNanos = gap
+        }
+        lastFrameAtNanos = nowNanos
         if (hasMedia) windowMediaFrames++
         if (hasNav) windowNavFrames++
         if (navActive) duckedFrames++
@@ -221,6 +241,8 @@ class AudioMixer(
         windowFrames = 0
         windowMediaFrames = 0
         windowNavFrames = 0
+        windowMaxGapNanos = 0
+        // 不重置 lastFrameAtNanos：跨窗口的那一刻不该被算成「停拍」
     }
 
     /** 新一轮会话开始时清干净：环形缓冲、相位、时间原点、增益。 */
@@ -233,6 +255,7 @@ class AudioMixer(
         lastNavFeedNanos = 0L
         framesEmitted = 0L
         duckedFrames = 0L
+        lastFrameAtNanos = 0L
         resetWindow()
     }
 

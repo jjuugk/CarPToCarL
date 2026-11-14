@@ -211,6 +211,23 @@ class AudioMixerTest {
     }
 
     @Test
+    fun `最长停拍只记真实间隔`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val t0 = 3_000_000_000L
+        mixer.mixNextFrame(buffer, t0)
+        mixer.mixNextFrame(buffer, t0 + 21_000_000L)
+        assertEquals(21, mixer.windowMaxGapNanos / 1_000_000)
+        // 泵线程被拖住 120ms：这就是接收端那边的空洞，必须能看见
+        mixer.mixNextFrame(buffer, t0 + 141_000_000L)
+        assertEquals(120, mixer.windowMaxGapNanos / 1_000_000)
+        // 跨窗口不把「上一次产出的时刻」算成停拍
+        mixer.resetWindow()
+        mixer.mixNextFrame(buffer, t0 + 162_000_000L)
+        assertEquals(21, mixer.windowMaxGapNanos / 1_000_000)
+    }
+
+    @Test
     fun `重置后统计与缓冲都归零`() {
         val mixer = mixer()
         val buffer = ByteArray(frameBytes)
