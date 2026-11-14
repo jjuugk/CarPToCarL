@@ -27,7 +27,9 @@ import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
 import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
+import io.github.shaonialife.carptocar.carlife.LyricLines
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
@@ -37,6 +39,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.iap2.NmeaAssembler
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
+import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.TouchReports
@@ -547,9 +550,11 @@ object SessionController {
         // 的老症若复现，需要把下面这段接回去——原始实现见 git show 81e75a6。
         // CarLifeHijack.onVideoSourceRecovered = { ... assertModes(); record() }
         // 数据源 A：CarLife 内置播放器（0x10035）——兜底，仅其内置播放器会推。
+        // 逐行歌词也走这条（`artist == "<专辑>-<画家>"`），日志里单独标出来。
         CarLifeHijack.addMediaInfoListener { info ->
+            val kind = if (LyricLines.isLyricLine(info)) "歌词行" else "歌名"
             appendLog(
-                "EVENT: CarLife 歌名「${info.song}」→ 补推 iAP2 0x5001 NowPlayingUpdate",
+                "EVENT: CarLife $kind「${info.song}」→ 补推 iAP2 0x5001 NowPlayingUpdate",
             )
             pushNowPlayingAll()
         }
@@ -688,12 +693,31 @@ object SessionController {
      * 优先系统媒体会话（覆盖第三方播放器 + CarLife 内置播放器的绝大多数场景），
      * 读不到再退回 CarLife 0x10035 推来的媒体信息；两者皆无返回 null（不响应）。
      *
+     * **唯一的例外是 CarLife 的逐行歌词**：iAP2 的 NowPlayingUpdate 没有歌词字段，
+     * 歌词只能顶替 title 逐行滚动。但它不能无条件抢（会把荣耀音乐那种「播放器自己
+     * 把歌词写进 MediaSession title」的显示打断，表现为标题一秒来回跳），
+     * 所以交给 [NowPlayingSourcePolicy] 判三条门：确实是歌词行 / CarLife 还在推 /
+     * 两边仍是同一首歌。
+     *
      * [includeArtwork]=false 时不声明封面编号：**蓝牙 iAP2 链路还没有文件传输实现**，
      * 声明了编号却不传图，车机会留着封面位一直等（或反复重试同一个 id）。
      */
     private fun buildNowPlaying(includeArtwork: Boolean = true): CarPlayNowPlaying? {
         val session = MediaSessionsState.nowPlaying
+        val carLifeLatest = CarLifeHijack.latestMediaInfo
+        val carLifeBase = CarLifeHijack.latestSongMediaInfo
         if (session != null && session.title != null) {
+            val lyricTakeover =
+                carLifeLatest != null &&
+                    NowPlayingSourcePolicy.shouldShowCarLifeLyric(
+                        nowMillis = android.os.SystemClock.uptimeMillis(),
+                        lastMediaInfoAtMillis = CarLifeHijack.latestMediaInfoAtMillis,
+                        latest = carLifeLatest,
+                        base = carLifeBase,
+                        sessionTitle = session.title,
+                        sessionArtist = session.artist,
+                    )
+            if (lyricTakeover) return carLifeNowPlaying(carLifeLatest, carLifeBase, includeArtwork)
             return CarPlayNowPlaying(
                 title = session.title,
                 artist = session.artist,
@@ -714,18 +738,37 @@ object SessionController {
                 artworkId = if (includeArtwork) ensureArtwork("${session.title}|${session.artist.orEmpty()}") else null,
             )
         }
-        val info = CarLifeHijack.latestMediaInfo ?: return null
+        val info = carLifeLatest ?: return null
+        return carLifeNowPlaying(info, carLifeBase, includeArtwork)
+    }
+
+    /**
+     * CarLife 侧（0x10035）的 0x5001 载荷。
+     *
+     * 歌词行只借它的 `song` 当标题，**画家/专辑/时长一律取真实歌曲那条**——否则车机上
+     * 画家一栏会显示 `总有春风为你而来 (女版)-悠禾` 这种拼接串。
+     * 封面同理按「专辑|真实画家」归一化：歌词行共用一个键，`ensureArtwork` 直接命中，
+     * 不会每行重编码重传一遍（参考项目当年每行都重传 19.5KB）。
+     */
+    private fun carLifeNowPlaying(
+        info: CarLifeMediaInfo,
+        base: CarLifeMediaInfo?,
+        includeArtwork: Boolean,
+    ): CarPlayNowPlaying {
+        val lyric = LyricLines.isLyricLine(info)
+        val source = if (lyric) base else null
+        val artist = source?.artist ?: info.artist
+        val album = source?.album ?: info.album
+        val duration = source?.duration?.takeIf { it > 0 } ?: info.duration
         return CarPlayNowPlaying(
             title = info.song.takeIf { it.isNotBlank() },
-            artist = info.artist.takeIf { it.isNotBlank() },
-            album = info.album.takeIf { it.isNotBlank() },
-            durationMs = info.duration,
+            artist = artist.takeIf { it.isNotBlank() },
+            album = album.takeIf { it.isNotBlank() },
+            durationMs = duration,
             status = Iap2NowPlaying.STATUS_PLAYING, // CarLife 推歌名即视为播放中
             elapsedMs = 0,
             appName = info.source.takeIf { it.isNotBlank() },
-            // 用「专辑|真实艺术家」而不是歌名：部分播放器把逐行歌词写进 title，
-            // 拿歌名当键会每行换一个 id，等于每一行都重传一遍封面（19KB 起）。
-            artworkId = if (includeArtwork) ensureArtwork("${info.album}|${info.artist}") else null,
+            artworkId = if (includeArtwork) ensureArtwork("$album|$artist") else null,
         )
     }
 

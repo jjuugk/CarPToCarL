@@ -246,6 +246,28 @@ object CarLifeHijack {
     var latestMediaInfo: CarLifeMediaInfo? = null
         private set
 
+    /**
+     * 最近一条**非歌词行**的媒体信息（真实歌名）。
+     *
+     * CarLife 把逐行歌词也当成一条媒体信息推（`artist == "<album>-<artist>"`，
+     * 见 [LyricLines]），[latestMediaInfo] 会很快被歌词行覆盖掉。歌名基线单独留一份，
+     * 用来判断「MediaSession 与 CarLife 是不是同一首歌」——见
+     * [io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy]。
+     */
+    @Volatile
+    var latestSongMediaInfo: CarLifeMediaInfo? = null
+        private set
+
+    /**
+     * 最近一条媒体信息的到达时刻（`SystemClock.uptimeMillis()`；0 = 本轮还没收到过）。
+     *
+     * 歌词行只在「CarLife 还在推」时才有资格顶掉 MediaSession 的歌名，
+     * 窗口长度见 [io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy.LYRIC_WINDOW_MILLIS]。
+     */
+    @Volatile
+    var latestMediaInfoAtMillis: Long = 0L
+        private set
+
     /** 媒体信息变化监听（歌名/歌手变化时触发）。 */
     private val mediaInfoListeners = java.util.concurrent.CopyOnWriteArrayList<(CarLifeMediaInfo) -> Unit>()
 
@@ -1380,9 +1402,13 @@ object CarLifeHijack {
         }
     }
 
-    /** 收到 CarLife 媒体信息（歌名/歌手/封面）：记录并广播，供 iAP2 0x5001 转发。 */
+    /** 收到 CarLife 媒体信息（歌名/歌手/封面，或逐行歌词）：记录并广播，供 iAP2 0x5001 转发。 */
     private fun onMediaInfo(info: CarLifeMediaInfo) {
+        // 歌词行不覆盖「真实歌名」基线：它是判断「MediaSession 与 CarLife 是否同一首歌」
+        // 的唯一凭据（见 NowPlayingSourcePolicy），被歌词顶掉就再也判不出来了。
+        if (!LyricLines.isLyricLine(info)) latestSongMediaInfo = info
         latestMediaInfo = info
+        latestMediaInfoAtMillis = android.os.SystemClock.uptimeMillis()
         mediaInfoListeners.forEach { runCatching { it(info) } }
     }
 

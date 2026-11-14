@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk)**
-> —— 主线固定直链（当前 1.2.42，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk)**
+> —— 主线固定直链（当前 1.2.43，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.42，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.42.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.43，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.43.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.42`（正式版；**CarLife 媒体播放状态机 + 无线 CarPlay 会话状态机合并落地**，合入 PR #26/#27，单测 765 例 0 失败）。① **CarLife 播放周期**：新增 `CarLifeMediaPlayback`，把 `7240` 模块焦点与 `9240` 的 `INIT/PCM/STOP/PAUSE/RESUME` 关联成一个播放周期——跨通道乱序（焦点释放先到、尾随 PAUSE 后到）不再把 `eligible` 锁死，下一次焦点获得能重新起播；协议常量更正为 **`0x30002=STOP` / `0x30003=PAUSE` / `0x30004=RESUME`**（旧代码按「0x30002=START」实现，与车机语义相反）。② **车机播放/暂停键真的能停住手机媒体**：`pauseMediaFromCar`/`resumeMediaFromCar` 同时打 `MediaSession` 与 CarLife 硬键，幂等；暂停时 `AudioMixer.clear` 清掉该路尚未混出的 PCM。未授通知使用权时也走这条路径。③ **9240 静默看门狗**在「本就不该有声」期间持续刷新基线，暂停/静音几十秒后恢复不会被误判成断流去重连。④ **9340 触控通道**改懒连接、写失败自动重连并补发当前触点，不再因一次写失败永久失灵。⑤ **直通音频延后到 RECORD 成功**才启动同步包与混音泵，RECORD 前不向车机发一个包。⑥ **无线 iAP2 报文纠正**：`0x4E0C/0x4E0A/0x4E09` 改 NUL 结尾 UTF-8 字符串（与蓝牙路径一致），`0x4E0A` 的语言按车机 `0x1D01` 声明协商、不再写死 `"zh"`。⑦ **隧道 MFi**：车机声明 `0xAA06` 时先取序列号；ECDSA 证书冷启动首选 32B 挑战；挑战期间断链记硬拒绝；各档均无应答时与蓝牙一致直接 `0xAA05`。⑧ **iAP2 链路引擎**：`DETECT` 按完整帧识别并重启链路周期；WLAN 隧道走可靠传输窗口、合并 ACK；控制通道按帧逐条 POST，旧周期排队中的发送与应答一律丢弃。⑨ **主音频按源端播放意图申请**：媒体永久取得、导航播报临时借用后归还；车机永久接管或静音借用时暂停本机媒体并清残留 PCM，仅静音前在播时解除后恢复。⑩ **倒车雷达/影像借屏**只退役屏幕流、保留控制会话，归还或 `requestUI` 后重建；车机不接受初始归属时回退为「声明手机持有主屏/主音频」。⑪ **已建立的会话被车机关闭**：保留 `wasSessionEstablished` 给收尾回调，转入被动等待车机邀请/蓝牙回连（15 秒避让窗口内不出站拨号），不再 3 秒主动重试；每轮配对起步清 `authReceiverKey`。宣告 `CARPLAY_CONTROL` 的车机须等到本轮新邀请才连接，推流中的邀请只记录不重建。⑫ **蓝牙出入站共享单一控制通道所有权**，旧通道的迟到回调不再影响当前会话；WiFi 断网回调按所有权过滤。⑬ 顺带修：配对验签防静默降级、`BinaryPlist` 负整数编码、9B 空 ACK 拆帧、未指定地址过滤。⑭ 上一版（1.2.41）的专辑封面走 iAP2 会话 12 文件传输逻辑不变。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.43`（正式版；**车机上没有歌词的真正原因：iAP2 根本没有歌词字段，改成「CarLife 歌词行按三条门顶替 title」**，单测 791 例 0 失败）。① iAP2 `0x5001 NowPlayingUpdate` 的 media item 组 17 个字段里**没有歌词**，这台奥迪 `0x5000` 订阅里多出来的 `0x0010/0x0012` 是**流派与作曲者**——「开个开关让车机显示歌词」这条路不存在，歌词唯一能出场的形状是**顶替 `title`**。② CarLife 侧歌词也不走独立通道：`CarlifeMediaInfo` 没有 lyric 字段，逐行歌词是**另起一条 `0x10035`**，签名为 `artist == "<专辑>-<画家>"`；新增 `carlife/LyricLines` 识别（含 `trueArtist()` 剥前缀），命中即在日志里标「（歌词行）」并交给 0x5001。③ 新增 `iap2/NowPlayingSourcePolicy`：MediaSession 与 CarLife 歌词行谁上位要过三条门——**确实是歌词行** / **最后一条媒体信息距今 ≤5s**（暂停或切源后 5 秒内让位）/ **两边仍是同一首歌**（title 一致、artist 双方都有值时一致）。缺第三门会「切到第三方播放器后车机仍显示上一首的歌词」，缺第二门会「暂停后标题永远停在最后一句」。④ `CarLifeHijack` 新增 `latestSongMediaInfo` 与 `latestMediaInfoAtMillis`，歌词行**不覆盖**真实歌名基线（那是判「同一首歌」的唯一凭据）。⑤ 歌词行只借 `song` 当标题，**画家/专辑/时长一律取真实歌曲那条**，车机画家栏不再出现 `专辑-画家` 拼接串；封面键按「专辑|画家」归一化，歌词行共用同一 id，不会每行重编码重传（参考项目当年每行重传 19.5KB）。⑥ 诊断直接可读：新增 `CARLIFE: 媒体信息（歌词行）` 与 `EVENT: CarLife 歌词行「…」` 两行日志，一眼判断歌词通道通没通。⑦ 已知前提与代价：只有 **CarLife 内置播放器**放歌才有歌词（第三方播放器不触发 `0x10035`，那类歌名只能从 MediaSession 拿）；且车机 NowPlaying 只有一行 title，歌词滚动时看不到歌名——这是取舍，不是 bug。⑧ 排查过程与字段表记在 `docs/iap2-lyric-lines.md`：21:35 那份日志里 `CARLIFE: 媒体信息` 计数为 **0**，不是我们丢了歌词，是歌词从没送到。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -829,6 +829,66 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.43 —— 2026-11-14（车机上的歌词：iAP2 没有歌词字段，改成让 CarLife 歌词行按三条门顶替 title，正式版）
+
+起因：车机媒体卡已经能显示歌名/画家/封面，但没有歌词。排查结论是**协议层不存在歌词通道**，
+以及**那一轮歌词根本没送到我们手上**——不是我们把它丢了。单测 **791 例 0 失败**（新增 18 例）。
+
+**一、iAP2 侧：没有歌词这个字段**
+
+`0x5001 NowPlayingUpdate` 的 media item 组共 17 个字段
+（`core/catplay_csm/src/msg/iap2.rs:1950-2003`，与本仓库 `iap2/Iap2NowPlaying.kt:59-71` 一致），
+playback 组只有 status / elapsed / shuffle / repeat / appName。**两组都没有 lyric**；
+`.tmp/mfi/carplay.txt`（Apple 规范摘录）里 `grep -i lyric` 也是 0 命中。
+
+这台奥迪 `0x5000` 订阅点名了 7 个 media item 字段
+（`0x0001/0x0004/0x0006/0x000C/0x0010/0x0012/0x001A`），看着比我们发的多两个，
+但 `0x0010` 是**流派**、`0x0012` 是**作曲者**，都不是歌词。所以「打开某个开关就让车机显示歌词」
+这条路在 CarPlay 侧不存在：歌词唯一能出场的形状是**顶替 `title`**，逐行替换。
+
+**二、CarLife 侧：歌词走 `0x10035`，而且只由内置播放器推**
+
+`CarlifeMediaInfo`（`CarLifeProtocol.kt:752-763`）字段为
+`source/song/artist/album/albumArt/duration/playlistNum/songId/mode`——同样没有 lyric。
+逐行歌词是**另起一条媒体信息**，签名是 `artist == "<专辑>-<画家>"`：
+
+```
+真实歌曲：song=总有春风为你而来 (女版)  artist=悠禾                       album=总有春风为你而来 (女版)
+歌词行：  song=要相信所有缘分上天         artist=总有春风为你而来 (女版)-悠禾  album=总有春风为你而来 (女版)
+```
+
+而 `0x10035` 由 CarLife **内置播放器**的 `sendMusicInfoToVehicle` 发出——第三方播放器
+不会触发它，那类歌名只能从系统媒体会话拿；媒体会话带歌词的前提是播放器自己把歌词写进
+`title`（荣耀音乐就是这么干的）。21:35 那份日志里 `CARLIFE: 媒体信息` 计数为 **0**，
+整轮 66 秒只有视频帧和 PCM，`相思遥 - 魏玉慧` / `侧脸 - 于果` 全部来自 MediaSession——
+**歌词从来没到过我们手上**。
+
+**三、改动**
+
+- 新增 `carlife/LyricLines`：`isLyricLine()`（`artist` 以 `"<专辑>-"` 开头）与
+  `trueArtist()`（剥前缀）。真实歌曲不会长成这个形状，对正常歌名零误伤。
+- `CarLifeHijack` 新增 `latestSongMediaInfo`（最近一条**非**歌词行）与
+  `latestMediaInfoAtMillis`（到达时刻）。歌词行**不覆盖**歌名基线——那是判「同一首歌」的唯一凭据。
+- 新增 `iap2/NowPlayingSourcePolicy.shouldShowCarLifeLyric()`，三条门全过才让歌词顶掉歌名：
+  确实是歌词行 / 最后一条媒体信息距今 ≤ 5s / 两边仍是同一首歌（title 一致、artist 双方都有值时一致）。
+  - 缺第二门 → 暂停后标题永远停在最后一句歌词；
+  - 缺第三门 → 手机切到第三方播放器后，车机仍显示上一首的歌词；
+  - 无条件抢 → 荣耀音乐那种「播放器把歌词写进 title」的显示被顶掉，标题一秒来回跳。
+- `SessionController.buildNowPlaying()` 走仲裁，新增 `carLifeNowPlaying()`：歌词行只借
+  `song` 当标题，**画家/专辑/时长一律取真实歌曲那条**（否则车机画家栏会出现
+  `总有春风为你而来 (女版)-悠禾` 这种拼接串）；封面键按「专辑\|画家」归一化，
+  歌词行共用同一个 id，不会每行重编码重传（参考项目当年每行重传 19.5KB）。
+- 日志：`CARLIFE: 媒体信息（歌词行）…` 与 `EVENT: CarLife 歌词行「…」→ 补推 iAP2 0x5001`，
+  以后一眼能判断歌词通道通没通。
+- 排查与字段表整理成 `docs/iap2-lyric-lines.md`。
+
+**四、前提与已知代价**
+
+- 只有 **CarLife 内置播放器**放歌才有歌词；用 QQ 音乐/网易云那类第三方播放器仍然只有歌名。
+- 车机 NowPlaying 只有一行 title，歌词滚动时**看不到歌名**。参考项目 1.0.6 因此反过来把
+  歌词行过滤掉了。要「同时看到歌名与歌词」需要车机自带歌词控件，MIB3 不接受。
+- 带宽可忽略：一行歌词 ≈ 100B 的 `0x5001`，1~2 行/秒；同一会话里视频就有 2.0 Mbps。
 
 ### 1.2.42 —— 2026-11-14（CarLife 播放状态机 + 无线 CarPlay 会话状态机大修，正式版）
 
