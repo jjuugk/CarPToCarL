@@ -25,8 +25,12 @@ import android.content.Context
  * 也不能只按型号字符串白名单：陌生接收端一样可能回 500。所以两层：
  *
  * 1. **快路径**：已知型号（[KNOWN_AUDIO_FIRST]）直接音频优先，省掉一次失败的连接；
- * 2. **学出来的结论**：RECORD 优先那一轮里，如果「音频 SETUP 之后补发的 RECORD」
- *    返回非 200，就把该接收端记成音频优先（[notePostRecordRejected]），下一轮自动换序。
+ * 2. **学出来的结论**：RECORD 优先那一轮里，只要「音频 SETUP 之后补发的 RECORD」
+ *    出了事，就把该接收端记成音频优先（[notePostRecordRejected]），下一轮自动换序。
+ *    两种「出事」都算：
+ *    - RECORD 直接回非 200（JYBOX-80 那种，还顺手关掉自己的 AirPlay 服务）；
+ *    - RECORD 回 200，但整链在 3.5 秒内被拆（宝马 MGU-81，2026-11-13 一夜 5 次，
+ *      全部落在 1.79~2.19s；见 [PostRecordWatch]）。
  *    代价是一轮失败，换来之后都不再踩——比每次盲试便宜。
  * 3. **反向纠正**：音频优先那一轮若连第一次 RECORD 都非 200，说明这台接收端不是
  *    「补发 RECORD 过敏」而是别的问题，记回 RECORD 优先（[noteRecordFirstForced]），
@@ -113,7 +117,10 @@ object StreamOrderMemory {
     }
 
     /**
-     * 「音频 SETUP 之后补发的 RECORD」返回非 200：记住这台接收端要用音频优先。
+     * 「音频 SETUP 之后补发的 RECORD」出事了：记住这台接收端要用音频优先。
+     *
+     * 两种触发：RECORD 回非 200；或 RECORD 回 200 但整链 3.5s 内被拆
+     * （[PostRecordWatch] 判定，见 [io.github.shaonialife.carptocar.SessionController]）。
      *
      * @return 下一轮将采用的顺序（恒为 [Order.AUDIO_FIRST]）。
      */
@@ -153,7 +160,7 @@ object StreamOrderMemory {
     ): String {
         val why =
             when {
-                learned == Learned.AUDIO_FIRST -> "本机记忆（上次补发 RECORD 被拒）"
+                learned == Learned.AUDIO_FIRST -> "本机记忆（补发 RECORD 被拒/被拆）"
                 learned == Learned.RECORD_FIRST -> "本机记忆（音频优先时 RECORD 也被拒）"
                 order == Order.AUDIO_FIRST -> "已知型号快路径"
                 else -> "默认（奥迪 MIB3 时序）"

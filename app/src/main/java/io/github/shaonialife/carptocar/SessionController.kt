@@ -7,6 +7,7 @@ import io.github.shaonialife.carptocar.airplay.FreshAuthPolicy
 import io.github.shaonialife.carptocar.airplay.PairVerifyClient
 import io.github.shaonialife.carptocar.airplay.PairingGate
 import io.github.shaonialife.carptocar.airplay.PairingMemory
+import io.github.shaonialife.carptocar.airplay.PostRecordWatch
 import io.github.shaonialife.carptocar.airplay.StreamOrderMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
 import io.github.shaonialife.carptocar.audio.AudioProfile
@@ -1072,6 +1073,17 @@ object SessionController {
      * 日志里表现为「连上了又没了」。这里让第一个请求者执行，其余并掉。
      */
     private val sessionStop = AsyncSessionStop(log = { line -> appendLog(line) })
+
+    /**
+     * 「音频流加入后补发的那次 RECORD」之后的怀疑窗口。
+     *
+     * 2026-11-13 宝马 MGU-81：8 轮会话里 5 轮在补发 RECORD 后 **1.79~2.19s** 被车机
+     * 整链拆掉（随后 mDNS 消失、热点掉线 = 用户说的「车机重启」）。命中就记成
+     * 「这台车机对重复 RECORD 过敏」，下一轮改音频优先（全程只发一次 RECORD），
+     * 并且**不把这次拆链算到音频档位头上**——同一个档位当晚被误记 4 次「不兼容」，
+     * 却在另一轮里连续跑了 8.6 分钟。
+     */
+    private val postRecordWatch = PostRecordWatch()
 
     /**
      * 交接流程已在跑、但 AirPlayClient 尚未创建时收到的晚到端点（0x4301）。
@@ -3868,6 +3880,36 @@ object SessionController {
      * 注意只在「确实起过音频」时归因；纯视频会话结束不做任何记忆改写。
      */
     private fun attributeAudioTeardown() {
+        // 用户自己按「断开」不归因：这条路径上的拆链与车机无关。尤其是「补发 RECORD
+        // 过敏」这条结论会改掉下一轮的**整体时序**（改音频优先），代价远大于档位记忆，
+        // 不能靠猜。用户刚连上就放弃的情况（画面不对，3 秒内就断开）正好落在窗口里。
+        if (connectCancelled) {
+            postRecordWatch.clear()
+            return
+        }
+        // 0) 「音频流加入后补发的那次 RECORD」之后 3.5s 内整链被拆 —— 先判这一条，而且
+        //    必须排在档位归因之前。
+        //
+        //    2026-11-13 宝马 MGU-81 一夜 8 轮会话：5 轮死在补发 RECORD 后 1.79~2.19s，
+        //    另外 3 轮同一步骤活着。同一步骤、同一档位、同样的报文，一半死一半活，
+        //    说明死因是接收端内部那次竞态，不是「档位不兼容」。旧逻辑把它记成档位不兼容，
+        //    那一晚同一个 AAC-LC 48k 档被误记 4 次，而它在另一轮里连续跑了 8.6 分钟——
+        //    再连两轮就会把唯一能用的档位拉黑，用户只会看到「越修越没声音」。
+        //
+        //    归因结果直接交给 StreamOrderMemory：这台车机下一轮走音频优先，全程只发一次
+        //    RECORD（先 SETUP 音频，再一次 RECORD 同时激活视频+音频）。
+        postRecordWatch.take()?.let { hit ->
+            StreamOrderMemory.notePostRecordRejected(appContext, hit.identity)
+            appendLog(
+                "AUDIO: 补发 RECORD 后 ${hit.elapsedMillis}ms 整链被车机拆掉——判定为该车机对" +
+                    "「流后补 RECORD」过敏（不是音频档位问题，档位记忆不变）。" +
+                    "下一轮改为音频优先：先 SETUP 音频、再一次 RECORD 同时激活",
+            )
+            uiHintSink?.invoke("车机在补发 RECORD 后断开——下次连接改为只发一次 RECORD")
+            activeAudioProfile = null
+            activeAudioStartedAt = 0L
+            return
+        }
         val profile = activeAudioProfile ?: return
         val startedAt = activeAudioStartedAt
         val identity = activeAudioReceiverKey
@@ -5640,6 +5682,9 @@ object SessionController {
                                         // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
                                         // 音频包持续发送、采集内容非零，车机无声）。
                                         appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
+                                        // 先挂表再发：往返延迟也算进怀疑窗口（宝马那 5 次
+                                        // 都在 1.79~2.19s 之间，窗口 3.5s 够容差）
+                                        postRecordWatch.mark(receiverIdentity)
                                         if (!client.record()) {
                                             // 这台接收端受不了「流后补 RECORD」：记住它，下一轮
                                             // 改走音频优先（先 SETUP 音频再一次 RECORD）。本轮
