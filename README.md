@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.39.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.39/CarPToCarL-1.2.39.apk)**
-> —— 主线固定直链（当前 1.2.39，13.9 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk)**
+> —— 主线固定直链（当前 1.2.40，13.9 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.39.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.39/CarPToCarL-1.2.39.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.39，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.39.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.40，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.40.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.39`（正式版；**导航和音乐同时播放不再越放越卡——两路音频改为定拍混音**。① **定拍混音**：以前媒体（9240）与播报（9241）的 PCM 首尾相接写进同一条流再按 21ms 切帧，一帧里常是「半帧音乐半帧播报」；封包时间戳又跟着产出量走，两路同推 = 一秒产出两秒样本，RTP 时钟 2×，车机按 1× 消费 → 缓冲只增不减，几条播报后溢出重同步，这才是「过一会儿才卡」的真因。现在两路各进一个 500ms 环形缓冲、各自重采样，按 `nanoTime` 反算「该产第几帧」严格 48000 样本/秒定拍输出，相加饱和限幅，播报时音乐 −12dB（21ms 斜坡、停 250ms 恢复）；混音→AAC→密封→UDP 收成单线程，读线程不再被发送反压。② **重采样不再欠样**：44.1k→48k 每块少 0.55 帧（每秒少 ~24 样本），25 分钟欠 0.7 秒会抽干车机抖动缓冲；改为相位跨块延续 + 块边界线性插值。③ **日志自证**：30 秒体检判据纠正（旧写法会把 99.6% 被拒报成「车机已在监听」），新增 `AUDIO: 混音体检`（产出帧数/实测样本率/两路占比/duck 次数/丢包 KB）；2MB 日志改为保尾部 1MB，并留 200 条「关键事件」。④ **RECORD 归因**：补发 RECORD 后 3.5 秒内被拆归因到「重复 RECORD」，不再把车机唯一可用的 AAC-LC 48k 档位记成不兼容。⑤ **界面**：手动填 `IP:端口` 的「测试台接收端」默认隐藏（连点标题 10 次显示）；自动连接开关回到「连接准备」卡里。单测 709 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.39.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.39/CarPToCarL-1.2.39.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.40`（正式版；**体检页加「一键获取缺失权限」，并把音频发送侧的抖动做成可测的**。① **一键获取权限**：通知使用权（`NotificationListenerService`）根本不是运行时权限，授权存在 `Settings.Secure.enabled_notification_listeners` 里，系统永远不会为它弹框——旧实现靠 Shizuku 跑 `cmd notification allow_listener`，Shizuku 移除后这条命令必然静默失败，于是体检那项永远红、界面上却什么都没发生。现在体检弹窗底部有「一键获取（N 项）」，一项一项真的走到系统界面：运行时权限打包申请、蓝牙用 `ACTION_REQUEST_ENABLE`、WLAN/位置服务跳系统页、通知使用权直接带 `EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME` 展开本应用那一条、电池优化弹忽略框；做完返回自动进下一项，推进前重新体检跳过已满足的，最后列清仍缺什么。身份/配对这类设置项刻意不进计划。② **音频发送更稳**：与 PC 接收端双端日志对账后确认「偶尔卡一下」是链路上每 7 秒一次、约 4.5 包（≈96ms）的连续丢包（接收端 `late`/`overflow`/`rebuffer`/`decryptErrors` 全 0，我方环形缓冲丢 0KB）；能控的部分都收紧——混音泵线程提到 `URGENT_AUDIO` 优先级，音频数据口 `SO_SNDBUF` 提到 256KB 并打 DSCP EF（WMM 走语音接入类，排队优先于同链路的视频 TCP）。③ **抖动可量化**：`AUDIO: 混音体检` 新增「最长停拍 XXms」——两次产出之间的最大间隔，≥50ms 会直接标「我方泵线程被拖住，不是链路问题」，下一份日志就能把自家抖动与链路丢包分开。单测 716 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -642,7 +642,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ```bash
 ./gradlew :app:assembleRelease      # 发布包（1.0.0 起为正式版；需联网下载 lint-gradle，曾缺失时用 --offline 会失败）
-./gradlew testDebugUnitTest         # 单元测试（33 个测试文件）
+./gradlew testDebugUnitTest         # 单元测试（96 个测试文件）
 ./gradlew :app:lintDebug            # lint 检查
 ```
 
@@ -762,7 +762,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ### 单元测试
 
-`app/src/test/java/io/github/shaonialife/carptocar/`，共 **95** 个测试文件、709 个用例，重点覆盖协议编解码与密码学：
+`app/src/test/java/io/github/shaonialife/carptocar/`，共 **96** 个测试文件、716 个用例，重点覆盖协议编解码与密码学：
 
 - `airplay/`：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
 - `iap2/`：编解码、Link 引擎、发送端会话
@@ -829,6 +829,51 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.40 —— 2026-11-14（体检页一键补齐缺失权限；音频发送侧把抖动做成可测的，正式版）
+
+**一、通知使用权为什么永远拿不到（`session/PermissionRepair`，新增）**
+
+「通知使用权」不是运行时权限，授权存在 `Settings.Secure.enabled_notification_listeners`，
+系统**永远不会**为它弹框。旧代码只有 `NotificationAccess.ensureGranted()` 去补它，走
+`SysShell.exec("cmd notification allow_listener …")`——那是 Shizuku 时代的写法，Shizuku
+移除后 `SysShell` 已退化为「用应用自身 uid 跑 sh」，这条命令必定失败，而且只写一行日志。
+于是体检里那项永远是红的，界面上却什么都没发生。
+
+- 体检弹窗底部新增主按钮 **「一键获取（N 项）」**，不是弹一段说明，而是**一项一项真的走到
+  系统界面**：运行时权限打包申请 → 蓝牙 `ACTION_REQUEST_ENABLE` → WLAN 设置页 →
+  位置服务设置页 → 通知使用权 → 电池优化忽略框。
+- 每一步给一组候选 Intent，国产 ROM 把某个 `Settings` Action 改成空实现时逐个退让，最后
+  退到应用详情页。
+- 通知使用权用 API 30+ 的 `EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME`，直接把本应用那一条
+  顶到眼前，不必在几十个应用里翻。
+- 做完返回 App 自动进下一项；推进前重新体检，已满足的跳过（在上一个页面顺手开了别的也不
+  会白跳）。全部走完弹一次结果，仍缺的项原样列出。
+- 「本机蓝牙地址 / 蓝牙名 / 目标车机已配对」**刻意不进计划**——它们不是权限，跳哪个页面都
+  补不上。体检里那项的说明也改成明说「这项没有系统弹窗，只能在设置里手动打开」。
+
+**二、音频发送侧：能控的都收紧（`audio/AudioSender`、`audio/AudioMixer`）**
+
+与 PC 接收端（WinPlay 1.2.5）双端日志逐项对账：接收端 `missing` 24→178、
+`discontinuity` 9→43（240 秒）＝**平均每 7.06 秒一个断点、每次约 4.5 包 ≈96ms**；
+`late` / `overflow` / `rebuffer` / `timestampReset` / `decryptErrors` 全为 0，
+`forwarded == packets`。我方同时段：混音体检 47988 样本/秒、环形缓冲丢 0KB、锚点 30/30、
+链路 47954~48059（±0.12%）。**结论是丢在链路上，不在这端**——音频包仅 512B、
+46.9 包/秒、1.4Mbps，不分片也不拥塞，抢带宽的是同一条 Wi-Fi 上的视频 TCP
+（交互时 29.7fps、key frame 50~70KB）会在 802.11 队列里堆成突发。
+
+- `audio-mixer-pump` 线程优先级提到 `URGENT_AUDIO`（拿不到退 `AUDIO`，再退默认），避免
+  GC/编码把 21ms 定拍拖成 40ms。
+- 音频数据口统一走 `openDataSocket()`：`SO_SNDBUF` 提到 256KB、`trafficClass=0xB8`
+  （DSCP EF，WMM 走语音接入类，排队优先于视频）；两项失败都只记一行，不影响发送。
+
+**三、抖动可量化：`AUDIO: 混音体检` 加「最长停拍」**
+
+`AudioMixer` 新增 `windowMaxGapNanos`（两次产出之间的最大间隔，跨窗口不重置），
+体检行多打「最长停拍 XXms」，**≥50ms 直接标注「我方泵线程被拖住，不是链路问题」**。
+下一份日志就能一眼把自家抖动与链路丢包分开，不必再靠猜。
+
+单测 716 例 0 失败（新增 `PermissionRepairTest` 6 例、最长停拍 1 例）。
 
 ### 1.2.39 —— 2026-11-14（导航+音乐同时播放不再卡顿：两路音频改定拍混音，正式版）
 
