@@ -15,7 +15,11 @@ import org.junit.Test
 class StreamOrderMemoryTest {
     private val jybox = "Magic Tec. Magic-Car-Link-1.00"
     private val audi = "Audi MIB3 3810"
-    private val bmw = "BMW NBT-Evo iD6"
+    private val bmwId6 = "BMW F36-NBTEvo-0716"
+
+    /** 非 Evo 的宝马（iD5/NBT）与 MGU（iD7/iD8）都还没被前置，仍走默认 + 学习。 */
+    private val bmwOther = "BMW F20-NBT-0716"
+    private val bmwMgu = "BMW MGU-81"
 
     @Test
     fun `陌生接收端默认 RECORD 优先`() {
@@ -26,12 +30,46 @@ class StreamOrderMemoryTest {
         )
         assertEquals(
             StreamOrderMemory.Order.RECORD_FIRST,
-            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, bmw),
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, bmwOther),
         )
         assertEquals(
             StreamOrderMemory.Order.RECORD_FIRST,
             StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, "unknown"),
         )
+    }
+
+    @Test
+    fun `宝马 iD6 全系第一次连就音频优先`() {
+        // 2026-11-09 G38（NBTevo_Q18491I）：补发 RECORD 回 200 后 17ms 通道关闭，
+        // 3 秒后 mDNS 服务消失 —— 车机 AirPlay 服务重启。2026-11-14 F36 同报文集合
+        // 走「一次 RECORD」稳定 3 分钟。所以 iD6 不靠学，直接前置。
+        assertTrue(StreamOrderMemory.matchesKnown(bmwId6))
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, bmwId6),
+        )
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, "BMW G38-NBTEvo-0716"),
+        )
+        // 自报口径带连字符（NBT-Evo）与大小写混写都要命中。
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, "BMW 5系 NBT-Evo iD6"),
+        )
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.NONE, "bmw f36-nbtevo-0716"),
+        )
+    }
+
+    @Test
+    fun `奥迪与 iD7 的 MGU 不能被型号快路径误伤`() {
+        assertFalse(StreamOrderMemory.matchesKnown(audi))
+        assertFalse(StreamOrderMemory.matchesKnown("Delphi MIB3 4580"))
+        // MGU 是 iD7/iD8，不在本次前置范围：让它继续走「学」的路径。
+        assertFalse(StreamOrderMemory.matchesKnown(bmwMgu))
+        assertFalse(StreamOrderMemory.matchesKnown(bmwOther))
     }
 
     @Test
@@ -55,13 +93,6 @@ class StreamOrderMemoryTest {
     }
 
     @Test
-    fun `奥迪宝马不能被型号快路径误伤`() {
-        assertFalse(StreamOrderMemory.matchesKnown(audi))
-        assertFalse(StreamOrderMemory.matchesKnown(bmw))
-        assertFalse(StreamOrderMemory.matchesKnown("Delphi MIB3 4580"))
-    }
-
-    @Test
     fun `学到的音频优先对陌生型号同样生效`() {
         // 不在快路径名单里的接收端，也可能是「补发 RECORD 过敏」那一类：
         // 只有学出来的结论才救得了它（第一轮付一次失败的代价）。
@@ -78,6 +109,12 @@ class StreamOrderMemoryTest {
         assertEquals(
             StreamOrderMemory.Order.RECORD_FIRST,
             StreamOrderMemory.resolve(StreamOrderMemory.Learned.RECORD_FIRST, jybox),
+        )
+        // iD6 也留同一条逃生门：这台车的第一次 RECORD 就非 200，说明它有别的问题，
+        // 不能因为「型号在名单里」把它反复推回音频优先。反向纠正优先于型号快路径。
+        assertEquals(
+            StreamOrderMemory.Order.RECORD_FIRST,
+            StreamOrderMemory.resolve(StreamOrderMemory.Learned.RECORD_FIRST, bmwId6),
         )
     }
 

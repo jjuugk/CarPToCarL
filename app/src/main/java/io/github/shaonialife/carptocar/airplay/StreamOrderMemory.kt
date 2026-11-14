@@ -62,13 +62,29 @@ object StreamOrderMemory {
     private const val STATE_RECORD_FIRST = "record_first"
 
     /**
-     * 型号快路径：**只放已被实车证实「流后补 RECORD 会 500」的接收端**。
+     * 型号快路径：**只放已被实车证实「流后补 RECORD 会出事」的接收端**。
      *
-     * 目前只有 issue #14 的 JYBOX-80（`/info`：model=`Magic-Car-Link-1.00`、
-     * manufacturer=`Magic Tec.`、固件 2024.03.21，沃尔沃 Sensus 经盒子）。匹配串
-     * 取小写子串，`magic-car-link` 与 `jybox` 两种自报口径都能命中。
+     * - `magic-car-link` / `jybox`：issue #14 的 JYBOX-80（`/info`：model=`Magic-Car-Link-1.00`、
+     *   manufacturer=`Magic Tec.`、固件 2024.03.21，沃尔沃 Sensus 经盒子）。补发 RECORD 直接
+     *   回非 200，并顺手关掉自己的 AirPlay 服务。
+     * - `nbtevo` / `nbt-evo`：宝马 **iD6（NBT Evo）全系**。2026-11-09 17:12 的 G38
+     *   （`G38-NBTEvo-0716` / `NBTevo_Q18491I`）实录：`RECORD 优先` → 音频流后加入 →
+     *   `补发 RECORD` 回 200 → **17ms 后** `EVENT: 通道关闭（EOF）` → 3 秒后
+     *   `NSD: 服务消失 CarPlay`（车机 AirPlay 服务重启）。2026-11-14 的 F36
+     *   （`F36-NBTEvo-0716`）同一份报文集合、同一音频档位（`t102/0x400000/44100/AAC-LC`）
+     *   走「音频优先 + 一次 RECORD」稳定 3 分 15 秒、1290 包、锚点 30/30 —— 两次唯一的
+     *   差异就是那第二次 RECORD。
+     *
+     *   所以 iD6 **不靠"崩一次再学"**：第一次连就直接音频优先。宝马屏幕 SETUP 之后没有
+     *   奥迪那种 2 秒看门狗（F36 实测 SETUP→RECORD 隔了 6.4 秒仍然正常），音频优先在这里
+     *   不会踩链——这一点与奥迪 MIB3 恰好相反，MIB3 仍留在默认的 RECORD 优先。
+     *
+     *   注意 iD7/iD8 的 MGU 不在名单里：它走「学」的路径（`PostRecordWatch` 判到「RECORD
+     *   回 200 但整链 3.5 秒内被拆」就自动换序）。要一并前置，加 `mgu` 即可。
+     *
+     * 匹配串取小写子串，自报口径差异（`NBT-Evo` / `NBTEvo`）都能命中。
      */
-    private val KNOWN_AUDIO_FIRST = listOf("magic-car-link", "jybox")
+    private val KNOWN_AUDIO_FIRST = listOf("magic-car-link", "jybox", "nbtevo", "nbt-evo")
 
     /** 纯函数：结论 → 本轮顺序。便于单测，不需要 Context。 */
     fun resolve(
