@@ -440,6 +440,9 @@ object CarLifeHijack {
     private var gopBytes = 0
     private val gopLock = Any()
 
+    /** 串行化缓存 GOP 回放与实时帧投递，保证 VideoConfig 与首个 IDR 严格先于后续 P 帧；收尾保持无锁以便打断阻塞写。 */
+    private val videoDeliveryLock = Any()
+
     /**
      * 最近一次见到的 SPS+PPS（含起始码）。
      *
@@ -762,59 +765,59 @@ object CarLifeHijack {
      * 「旧 SPS + 新参考帧」的混搭）；不带 SPS 才退回旧行为等当期 IDR。
      * 开关见 [io.github.shaonialife.carptocar.video.FirstFramePolicy]（可一键回退）。
      */
-    fun attach(videoSender: VideoSender, log: (String) -> Unit) {
-        logSink = log
-        val pending = synchronized(gopLock) {
-            val snapshot = gop.toList()
-            gop.clear()
-            gopBytes = 0
-            snapshot
-        }
-        // 缓存 SPS/PPS 只作兜底：当期/回放帧自带 SPS 会覆盖它。
-        spsPps?.let { videoSender.seedCsd(it) }
-        // attach 期间暂存进 GOP 的帧属于上一轮时间基准，一律丢弃（不回放）。
-        val late = synchronized(gopLock) {
-            val snapshot = gop.toList()
-            gop.clear()
-            gopBytes = 0
-            snapshot
-        }
-        sender = videoSender
-        screenReactivateNeeded = true
-        startFirstFrameWatchdog(videoSender)
-        val firstPending = pending.firstOrNull()
-        val replay = FirstFramePolicy.shouldReplay(
-            policyEnabled = FirstFramePolicy.useCachedGop,
-            firstFrameIsKey = firstPending?.second == true,
-            firstFrameHasSps = firstPending?.let { hasSpsNal(it.first) } == true,
-        )
-        if (replay) {
-            log(
-                "CARLIFE: 回放缓存 ${pending.size} 帧立即起播（首帧自带 SPS，" +
-                    "策略=${FirstFramePolicy.describe()}；丢弃 attach 期间 ${late.size} 帧）",
-            )
-            var pushed = 0
-            for ((frame, keyFrame) in pending) {
-                // 缓存帧本来就是旧的，不传 sourceTimestamp（避免被算成排队延迟）
-                if (videoSender.submitH264(frame, keyFrame)) pushed++ else break
+    fun attach(
+        videoSender: VideoSender,
+        log: (String) -> Unit,
+    ): Unit =
+        synchronized(videoDeliveryLock) {
+            if (!videoSender.isRunning) return@synchronized
+            logSink = log
+            val pending =
+                synchronized(gopLock) {
+                    val snapshot = gop.toList()
+                    gop.clear()
+                    gopBytes = 0
+                    snapshot
+                }
+            // 缓存 SPS/PPS 只作兜底：当期/回放帧自带 SPS 会覆盖它。
+            spsPps?.let { videoSender.seedCsd(it) }
+            sender = videoSender
+            screenReactivateNeeded = true
+            startFirstFrameWatchdog(videoSender)
+            val firstPending = pending.firstOrNull()
+            val replay =
+                FirstFramePolicy.shouldReplay(
+                    policyEnabled = FirstFramePolicy.useCachedGop,
+                    firstFrameIsKey = firstPending?.second == true,
+                    firstFrameHasSps = firstPending?.let { hasSpsNal(it.first) } == true,
+                )
+            if (replay) {
+                log(
+                    "CARLIFE: 回放缓存 ${pending.size} 帧立即起播（首帧自带 SPS，" +
+                        "策略=${FirstFramePolicy.describe()}；回放完成后再交接实时帧）",
+                )
+                var pushed = 0
+                for ((frame, keyFrame) in pending) {
+                    // 缓存帧本来就是旧的，不传 sourceTimestamp（避免被算成排队延迟）
+                    if (sender !== videoSender || !videoSender.submitH264(frame, keyFrame)) break
+                    pushed++
+                }
+                log("CARLIFE: 缓存回放已推送 $pushed/${pending.size} 帧——后续实时直通")
+            } else {
+                log(
+                    "CARLIFE: 已跳过 ${pending.size} 帧缓存——" +
+                        when {
+                            !FirstFramePolicy.useCachedGop -> "策略=等当期 IDR（可用偏好回退到立即起播）"
+                            firstPending == null -> "缓存里没有帧，等引擎当期 IDR"
+                            firstPending.second != true -> "缓存首帧不是关键帧，等当期 IDR 更安全"
+                            else -> "缓存首帧不是自带 SPS 的关键帧，等当期 IDR 更安全"
+                        },
+                )
             }
-            log("CARLIFE: 缓存回放已推送 $pushed/${pending.size} 帧——后续实时直通")
-        } else {
-            log(
-                "CARLIFE: 已跳过 ${pending.size + late.size} 帧缓存" +
-                    "（历史 GOP + attach 期间暂存）——" +
-                    when {
-                        !FirstFramePolicy.useCachedGop -> "策略=等当期 IDR（可用偏好回退到立即起播）"
-                        firstPending == null -> "缓存里没有帧，等引擎当期 IDR"
-                        firstPending.second != true -> "缓存首帧不是关键帧，等当期 IDR 更安全"
-                        else -> "缓存首帧不是自带 SPS 的关键帧，等当期 IDR 更安全"
-                    },
-            )
+            // 主动催一个带 SPS 的当期 IDR；startFirstFrameWatchdog 还有 3 秒后的兜底。
+            log("CARLIFE: 请求引擎重建编码器（约 1 秒后出当期首帧）")
+            client?.requestVideoReinit()
         }
-        // 主动催一个带 SPS 的当期 IDR；startFirstFrameWatchdog 还有 3 秒后的兜底。
-        log("CARLIFE: 请求引擎重建编码器（约 1 秒后出当期首帧）")
-        client?.requestVideoReinit()
-    }
 
     /**
      * 帧数据里有没有 SPS（NAL 类型 7）。
@@ -858,11 +861,12 @@ object CarLifeHijack {
     }
 
     /** 会话结束：断开视频通道，回到「只缓存」状态（CarLife 连接保持不断）。 */
-    fun detach() {
-        sender = null
-        firstDeliverLogged = false
-        deliverWindowFrames = 0
-    }
+    fun detach() =
+        synchronized(videoDeliveryLock) {
+            sender = null
+            firstDeliverLogged = false
+            deliverWindowFrames = 0
+        }
 
     /** 完全停止（退出 App / 关闭开关）。 */
     fun stop() {
@@ -900,6 +904,7 @@ object CarLifeHijack {
 
     private fun workerLoop() {
         var announcedWait = false
+        var restartArmed = false
         while (running.get()) {
             // 2026-10-25 回滚：**不再自动拉起** CarLife 引擎。
             // 自动拉起（bindService / startForegroundService / CarlifeActivity）实测能让
@@ -997,7 +1002,19 @@ object CarLifeHijack {
                     initialWidth = initialCanvasW,
                     initialHeight = initialCanvasH,
                 )
+            // start() 在握手返回前就会拉起视频读线程：必须先用旧会话栅栏通知解码状态复位，
+            // 避免新读线程先送出首帧 IDR 后再被复位冲掉。
+            if (!restartArmed) {
+                synchronized(videoDeliveryLock) {
+                    sender?.let { target ->
+                        screenReactivateNeeded = true
+                        target.onSourceRestart("CarLife 会话重建（引擎重连）")
+                        restartArmed = true
+                    }
+                }
+            }
             if (hu.start()) {
+                restartArmed = false
                 client = hu
                 // SETUP 先于 client 创建的边界（requestedW/H 已缓存车机画布）：把它回放为
                 // 「申请值」，让引擎尝试按车机画布编码；确认值（videoWidth）仍由引擎回显，
@@ -1012,11 +1029,9 @@ object CarLifeHijack {
                 // 并等到新 IDR 再送帧，否则「CarPlay 不掉、CarLife 重连后永久没画面」
                 // （2026-10-25 用户实测）。首次劫持时 sender 还是 null，这里是空操作。
                 if (sender != null) {
-                    screenReactivateNeeded = true
-                    sender?.onSourceRestart("CarLife 会话重建（引擎重连）")
                     startSourceRestartWatchdog(hu)
                 }
-                logSink?.invoke("CARLIFE: 劫持成功，已接管本机 CarLife 码流（等待连接车机）")
+                logSink?.invoke("CARLIFE: 协议握手完成，等待真实源首帧（不等于已收到 CarLife 码流）")
             } else {
                 logSink?.invoke("CARLIFE: 握手失败，2 秒后重试（确认 CarLife 停在「正在连接」）")
             }
@@ -1172,50 +1187,49 @@ object CarLifeHijack {
         data: ByteArray,
         keyFrame: Boolean,
         sourceTimestampMs: Long,
-    ) {
-        recvWindowFrames++
-        recvWindowBytes += data.size
-        if (keyFrame) recvWindowKeys++
-        // 停摆检测的打卡点（来电时引擎会整段不出帧，只能靠这里判断「是源没画面」还是链路断）
-        val now = android.os.SystemClock.uptimeMillis()
-        lastSourceFrameAt = now
-        frameSeq++
-        val stalledSince = stallSince
-        if (stalledSince > 0) {
-            stallSince = 0
-            logSink?.invoke("CARLIFE: 画面源恢复（停摆 ${(now - stalledSince) / 1000} 秒）")
-        }
-        if (!hasVideo && data.isNotEmpty()) {
-            hasVideo = true
-            // 独立于一会话：还没连车机时也要能看出「CarLife 到底在不在推流」。
-            // 排查编码器被配置搞挂时，这是唯一的直接证据。
-            logSink?.invoke("CARLIFE: ✓ 收到 CarLife 首帧（${data.size}B，keyFrame=$keyFrame）")
-        }
-        rememberSpsPps(data)
-        val frame = ensureSpsPps(data)
-        val target = sender
-        if (target != null) {
-            if (target.submitH264(frame, keyFrame, sourceTimestampMs)) {
-                noteDelivered(frame.size)
-                maybeReactivateScreen()
+    ): Unit =
+        synchronized(videoDeliveryLock) delivery@{
+            recvWindowFrames++
+            recvWindowBytes += data.size
+            if (keyFrame) recvWindowKeys++
+            // 停摆检测的打卡点（来电时引擎会整段不出帧，只能靠这里判断「是源没画面」还是链路断）
+            val now = android.os.SystemClock.uptimeMillis()
+            lastSourceFrameAt = now
+            frameSeq++
+            val stalledSince = stallSince
+            if (stalledSince > 0) {
+                stallSince = 0
+                logSink?.invoke("CARLIFE: 画面源恢复（停摆 ${(now - stalledSince) / 1000} 秒）")
             }
-            return
-        }
-        synchronized(gopLock) {
-            if (keyFrame) {
-                gop.clear()
-                gopBytes = 0
-            } else if (gop.isEmpty()) {
-                return // 没有关键帧打头，非关键帧单独送过去也解不出画面
+            if (!hasVideo && data.isNotEmpty()) {
+                hasVideo = true
+                logSink?.invoke("CARLIFE: ✓ 收到 CarLife 首帧（${data.size}B，keyFrame=$keyFrame）")
             }
-            gop.addLast(frame to keyFrame)
-            gopBytes += frame.size
-            while (gop.size > MAX_GOP_FRAMES || gopBytes > MAX_GOP_BYTES) {
-                val removed = gop.removeFirstOrNull() ?: break
-                gopBytes -= removed.first.size
+            rememberSpsPps(data)
+            val frame = ensureSpsPps(data)
+            val target = sender
+            if (target != null) {
+                if (target.submitH264(frame, keyFrame, sourceTimestampMs)) {
+                    noteDelivered(frame.size)
+                    maybeReactivateScreen()
+                }
+                return@delivery
+            }
+            synchronized(gopLock) {
+                if (keyFrame) {
+                    gop.clear()
+                    gopBytes = 0
+                } else if (gop.isEmpty()) {
+                    return@delivery
+                }
+                gop.addLast(frame to keyFrame)
+                gopBytes += frame.size
+                while (gop.size > MAX_GOP_FRAMES || gopBytes > MAX_GOP_BYTES) {
+                    val removed = gop.removeFirstOrNull() ?: break
+                    gopBytes -= removed.first.size
+                }
             }
         }
-    }
 
     /** AnnexB 起始码长度（3 或 4），非起始码返回 0。 */
     private fun startCodeLen(
