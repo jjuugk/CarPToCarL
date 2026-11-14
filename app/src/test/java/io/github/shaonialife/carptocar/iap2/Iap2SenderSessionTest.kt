@@ -208,6 +208,9 @@ class Iap2SenderSessionTest {
      *
      * 不实现这一步的现场形态就是 2026-11-10 BUICK_3138：问候逐条 ACK 到最后一条、
      * 0x4301 一帧不来、最后一帧后约 14 秒车机自己关 RFCOMM 重连。
+     *
+     * 注意这条路只对**非**通用系车机生效：通用系（Cinemo 栈）从 2026-11-14 起不在
+     * 本链路重认证，见 [cinemoStackSkipsInlineReauthentication]。
      */
     @Test
     fun firstAvailabilityWithoutAnswerTriggersReauthentication() {
@@ -236,6 +239,70 @@ class Iap2SenderSessionTest {
         phoneChannel.close()
         accessoryChannel.close()
         accessoryThread.join(2_000)
+    }
+
+    /**
+     * 通用系 Cinemo（别克 E2LB / 凯迪拉克）在 `0x4301` 没来时**不许在本链路重认证**。
+     *
+     * 原因（2026-11-14）：下一轮重连本来就从 `0x1D00 + MFi` 重跑一遍，现场这次重认证等于
+     * 提前预支下一轮的工作，最坏吃掉 19 秒；而宽限是从首帧 `0x4300` 起算、不因重发重置的，
+     * 于是「等车机慢慢醒来」的余量被挤到只剩几秒。同源工程 link_plus 对别克也不重认证，
+     * 只留一条 90 秒总预算。
+     *
+     * 断言用「`0x1d00` 只出现一次」：如果哪天把这条门禁去掉，重认证会在 8 秒窗口后
+     * 立刻发出第二帧 `0x1d00`，用例会直接失败，而不是悄悄多花 19 秒。
+     */
+    @Test
+    fun cinemoStackSkipsInlineReauthentication() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory =
+            MockAccessory(accessoryChannel, newProtocol = true, cinemoIdentity = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
+        val updateLatch = CountDownLatch(1)
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:BE:EF:03",
+                onEndpointUpdate = {
+                    updates.set(it)
+                    updateLatch.countDown()
+                },
+            )
+
+        val endpoint = session.run(timeoutMillis = 20_000L)
+        // 不拆链（没抛异常）是第一个结论；mock 在 8.6s 补发 0x4301，而宽限现在有 90 秒，
+        // 所以本轮通常就能把它收下——这正是放宽时限想要的形态。
+        // 慢机器上 0x4301 也可能落在 run() 之后，那就靠保活泵的「晚到补发」接住。
+        if (endpoint.ssid.isEmpty()) {
+            val pumpThread = Thread({ session.pumpIncomingForever() }, "phone-pump")
+            pumpThread.isDaemon = true
+            pumpThread.start()
+            assertTrue("晚到的 0x4301 未在 10s 内经 onEndpointUpdate 回调", updateLatch.await(10, TimeUnit.SECONDS))
+            assertNotNull(updates.get())
+            assertEquals("MockAP", updates.get()!!.ssid)
+            pumpThread.join(2_000)
+        } else {
+            assertEquals("MockAP", endpoint.ssid)
+            assertEquals(49152, endpoint.airPlayPort)
+        }
+
+        assertEquals(
+            "通用系 Cinemo 不许在拆链前重跑识别（第二帧 0x1d00）——" +
+                "实际收到的 0x1d00 次数：${accessory.receivedIds.count { it == Iap2MessageIds.START_IDENTIFICATION }}",
+            1,
+            accessory.receivedIds.count { it == Iap2MessageIds.START_IDENTIFICATION },
+        )
+
+        phoneChannel.close()
+        accessoryChannel.close()
     }
 
     /**
@@ -338,6 +405,13 @@ class Iap2SenderSessionTest {
          * 最后一帧之后约 14 秒车机自己关 RFCOMM。
          */
         private val requireReauthentication: Boolean = false,
+        /**
+         * 通用系（SAIC-GM / Cinemo）身份：0x1D01 的 manufacturer 里带 `Cinemo`。
+         *
+         * 发送端按栈判而不是按品牌判（[Iap2SenderSession] 的 `isCinemoStack`），
+         * 因此这一条就足以让它走「宽限 90 秒 + 拆链前不重认证」那条路。
+         */
+        private val cinemoIdentity: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -356,6 +430,15 @@ class Iap2SenderSessionTest {
         /** 收到过的「车机可收清单未声明」的消息（新协议严格模式下应当一条都收不到）。 */
         private val seenUndeclared = HashSet<Int>()
 
+        /**
+         * 收到的**每一条**控制帧的消息 ID（按到达顺序）。
+         *
+         * 用来数「识别会话被重开过几次」：`0x1d00` 出现两次就说明发送端在本链路里
+         * 又跑了一遍重认证（通用系 Cinemo 不允许这么做，见
+         * [cinemoStackSkipsInlineReauthentication]）。
+         */
+        val receivedIds = java.util.concurrent.CopyOnWriteArrayList<Int>()
+
         fun run() {
             check(channel.awaitReady(10_000)) { "mock link not ready" }
 
@@ -364,7 +447,7 @@ class Iap2SenderSessionTest {
             val identificationBody =
                 Iap2Csm.string(0, "MockCarPlay") +
                     Iap2Csm.string(1, "MU-1") +
-                    Iap2Csm.string(2, "Mock Manufacturer") +
+                    Iap2Csm.string(2, if (cinemoIdentity) "Cinemo Mock Manufacturer" else "Mock Manufacturer") +
                     (
                         if (audiDeclarations) {
                             Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03))
@@ -657,6 +740,7 @@ class Iap2SenderSessionTest {
             pending.firstOrNull()?.let {
                 pending.removeFirst()
                 if (it.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += it.messageId
+                receivedIds += it.messageId
                 noteDeviceName(it)
                 return it
             }
@@ -666,6 +750,7 @@ class Iap2SenderSessionTest {
             frames.forEachIndexed { index, frame -> if (index > 0) pending += frame }
             frames.first().let {
                 if (it.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += it.messageId
+                receivedIds += it.messageId
                 noteDeviceName(it)
             }
             return frames.first()

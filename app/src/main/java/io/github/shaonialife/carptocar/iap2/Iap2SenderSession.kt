@@ -132,7 +132,7 @@ class Iap2SenderSession(
      * 首帧 `0x4300` 发出的时刻，以及那一刻「对端已确认到的我方序号」。
      *
      * 45 秒内这个水位一动不动 / 追不上最后一帧 = 车机已经不读这条链路
-     * （见 [AVAILABILITY_FAST_RETRY_NANOS]），本轮不该再空等保活。
+     * （见 [AvailabilityRetryBudget]），本轮不该再空等保活。
      */
     private var availabilityFirstSentAtNanos = 0L
     private var availabilityAckBaseline: Int? = null
@@ -145,6 +145,15 @@ class Iap2SenderSession(
      * 对这一代发的是 group0（有线标识）+ group1（无线标识）两段。
      */
     private var preferDualAvailability = false
+
+    /**
+     * 本轮车机是不是通用系 Cinemo 栈（[isCinemoStack] 的结果）。
+     *
+     * 与 [preferDualAvailability] 同源，但**语义分开存**：那个决定 `0x4300` 优先发哪种
+     * 报文体，这个决定「等 `0x4301` 的宽限长度」与「拆链前要不要现场重认证」。
+     * 合成一个字段会让以后调报文体阶梯时误伤链路预算（2026-11-14）。
+     */
+    private var cinemoStack = false
 
     /**
      * 车机在 0x1D01「可收清单」里是否声明了 0x4300。
@@ -387,20 +396,6 @@ class Iap2SenderSession(
          */
         const val AVAILABILITY_VARIANT_EXTRA_TRIES = 2
 
-        /**
-         * `0x4300` 连**链路 ACK** 都拿不到时，本轮的总宽限（从首帧 0x4300 发出算起）。
-         *
-         * 为什么要有这条快通道：链路级的 `ack` 一旦不再推进，就说明车机已经不读这条链路
-         * 了——它既不会回 0x4301，也不会回任何业务帧，继续等只是空转。而旧行为是返回空
-         * 端点进 [SessionController] 的 5 分钟保活，一档一小轮、四档二十分钟，实车往往
-         * 只有一次点击机会。
-         *
-         * 45 秒的取法：三档各一个 8 秒窗口（24s）+ 每档 2 次重传的 RTO（≈4s×2）留余量，
-         * 刚好够把三档都试完还多一点。**只看 ACK 水位，不看业务帧**——像奥迪/凯迪拉克
-         * 那种「ACK 正常、只是 0x4301 晚到」的车机水位一直在动，不会被这条判据误伤。
-         */
-        const val AVAILABILITY_FAST_RETRY_NANOS = 45_000_000_000L
-
         /** 等待 0x4301 时保活泵的轮询间隔（也是催问的最小检查粒度）。 */
         const val NUDGE_TICK_MILLIS = 5_000L
 
@@ -493,7 +488,8 @@ class Iap2SenderSession(
         // 别克 E2LB 收到新版嵌套体后控制会话直接停摆）。无 Context（单测）时固定新版。
         receiverIdentity = identityText
         // 通用系（General Motors / Cinemo 组件栈）：0x4300 优先试「双标识体」。
-        preferDualAvailability = isCinemoStack(identification, identityText)
+        cinemoStack = isCinemoStack(identification, identityText)
+        preferDualAvailability = cinemoStack
         // 车机自己声明能收 0x4300 时，历史静默记忆不许把它堵死（见 nextVariant 注释）。
         acceptsAvailability = accessoryDeclaresReceive(Iap2MessageIds.CARPLAY_AVAILABILITY) == true
         // 只有真机（有 Context，可持久化）才启用阶梯；单测/纯 JVM 固定新版嵌套体，
@@ -714,10 +710,18 @@ class Iap2SenderSession(
         // 识别+认证，完成后重发一次 0x4300（只做一次，见 [reauthenticationTried]）。
         // 只对「新协议 + 车机声明会发 0x4301 + 没有 0x5703」这条路上生效：奥迪那类旧协议
         // 车机的 0x4300 本来就只是走个过场，给它重认证会白白打乱已经跑通的序列。
+        //
+        // **通用系（Cinemo）不走这条路**（2026-11-14）：下一轮重连本来就从 0x1D00 + MFi
+        // 重新跑一遍，现场这次重认证等于提前预支下一轮的工作，最坏吃掉 19 秒；而 45 秒
+        // 的总宽限从首帧 0x4300 起算、不因重发而重置，于是「等车机慢慢醒来」的余量被
+        // 挤到只剩几秒。把识别+MFi 留给重连那一轮，本轮把时间全给换档与等待
+        // （link_plus 对别克也不在拆链前重认证，只留一条 90 秒总预算）。
+        val inlineReauthentication = !cinemoStack
         if (startSession == null &&
             declaresStartSession == true &&
             wifiFromExchange == null &&
             !reauthenticationTried &&
+            inlineReauthentication &&
             channel.isAlive &&
             // 车机端 CarPlay 已经判死（连续多轮要不到 0x4301）：重认证只会在同一个死掉的
             // 组件上空转十几秒，省掉它，把节奏交给链路层的长间隔重连（CarPlayUplinkHealth）。
@@ -728,6 +732,17 @@ class Iap2SenderSession(
             dataFramesBeforeAvailability = channel.peerDataFrameCount
             lastNudgePeerFrames = channel.peerFrameCount
             startSession = reauthenticateAndReannounce(deadline)
+        } else if (startSession == null &&
+            declaresStartSession == true &&
+            wifiFromExchange == null &&
+            !reauthenticationTried &&
+            !inlineReauthentication
+        ) {
+            log(
+                "iap2 通用系 Cinemo：首轮 0x4300 未换来 0x4301 —— 不在本链路重认证" +
+                    "（下一轮重连本就从 0x1d00 + MFi 重跑），本轮时间全部留给换档与等待" +
+                    "（宽限 ${AvailabilityRetryBudget.fastRetryNanos(cinemoStack) / 1_000_000_000}s）",
+            )
         }
         // 「本轮拿到过 0x4301」是链路层判定「车机端 CarPlay 是否已死」的唯一正面证据。
         if (startSession != null) noteStartSessionReceived()
@@ -766,7 +781,7 @@ class Iap2SenderSession(
                 next = if (startSession == null) noteAvailabilitySilence(dataFramesBeforeAvailability, startSessionWindow) else null
             }
         }
-        // ---- 车机连链路 ACK 都不给：45 秒内主动重连换档，不再空等保活 ----
+        // ---- 车机连链路 ACK 都不给：到宽限点（标准 45s / 通用系 90s）主动重连换档 ----
         // 2026-11-11 21:12 BUICK_3767：首档 0x4300（seq=46）之后车机不再读任何帧，
         // 后面两档全被丢弃（对端 ack 一直停在 43），而旧行为是返回空端点进 5 分钟保活——
         // 一档一小轮、四档二十分钟，实车往往只有一次点击机会。
@@ -774,17 +789,19 @@ class Iap2SenderSession(
         // 判据只用**链路 ACK 水位**：没追上我们最后发出的那一帧，就说明这一帧根本没被读走，
         // 0x4301 不可能凭空冒出来。奥迪/凯迪拉克那种「ACK 毫秒级、0x4301 晚到 2 分 35 秒」的
         // 车机水位一直是追上的，因此不会被这条误伤——这也正是不拿「零业务帧」当判据的原因。
+        // 秒数按车机栈取值，见 [AvailabilityRetryBudget]。
         if (startSession == null &&
             declaresStartSession == true &&
             wifiFromExchange == null &&
             availabilityFirstSentAtNanos != 0L
         ) {
-            val fastDeadline = availabilityFirstSentAtNanos + AVAILABILITY_FAST_RETRY_NANOS
+            val fastRetryNanos = AvailabilityRetryBudget.fastRetryNanos(cinemoStack)
+            val fastDeadline = availabilityFirstSentAtNanos + fastRetryNanos
             if (!peerCaughtUpWithLastSent() &&
                 channel.isAlive &&
                 System.nanoTime() < fastDeadline
             ) {
-                // 还没到 45 秒：把剩下的时间继续用来等 0x4301（车机也可能只是慢），到点再判。
+                // 还没到宽限点：把剩下的时间继续用来等 0x4301（车机也可能只是慢），到点再判。
                 startSession =
                     expectOrNull(
                         Iap2MessageIds.CARPLAY_START_SESSION,
@@ -803,11 +820,13 @@ class Iap2SenderSession(
                     } else {
                         ""
                     }
+                val cinemoNote = if (cinemoStack) "，通用系 Cinemo" else ""
                 log(
                     "iap2 ⚠ 0x4300 发出 ${waitedSeconds}s 后车机的链路 ACK 仍未追上我们最后一帧" +
                         "（对端 ack=${acked ?: "无"}，我方最后 seq=${channel.lastSentSequence()}" +
                         "$zeroAckNote$beforeNote）——它已经不读这条链路了，0x4301 不会来；" +
-                        "主动拆链重连（下一轮带着下一档报文体重试，不再空等 5 分钟保活）",
+                        "主动拆链重连（本轮宽限 ${fastRetryNanos / 1_000_000_000}s$cinemoNote；" +
+                        "下一轮带着下一档报文体重试，不再空等 5 分钟保活）",
                 )
                 throw IOException(
                     "0x4300 未被车机读走：${waitedSeconds}s 内链路 ACK 没有追上最后一帧" +
