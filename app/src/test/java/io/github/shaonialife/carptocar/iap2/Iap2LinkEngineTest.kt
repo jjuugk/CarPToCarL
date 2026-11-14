@@ -141,6 +141,57 @@ class Iap2LinkEngineTest {
     }
 
     /**
+     * 封面数据报必须发在 **session 12**（文件传输）上。
+     *
+     * 会话 ID 写在帧头偏移 7，而重传发生在 `retransmitDue` 里、那时已没有调用方上下文，
+     * 所以它必须跟着 Packet 一起存下来 —— 本用例锁住「发出去的是 12，不是控制会话」。
+     */
+    @Test
+    fun fileTransferSessionFrameCarriesSession12() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+
+        val datagram = Iap2ArtworkTransfer.setup(7, 4_321)
+        assertTrue(phone.sendOnSession(datagram, Iap2LinkEngine.SESSION_FILE_TRANSFER, 100))
+        val frames = parseFrames(phone.takeOutput())
+        assertEquals(1, frames.size)
+        assertEquals("封面数据报必须发在 session 12 上", 12, frames[0].sessionId)
+        assertArrayEquals("报文体必须原样发出（车机按 [id][cmd] 解析）", datagram, frames[0].payload)
+    }
+
+    /**
+     * 车机的 START/SUCCESS 应答走文件传输回调，**不再被当成「未知会话」丢弃**。
+     *
+     * 这是加封面功能前那条链路的实际行为：session 12 的数据全进
+     * `reportUnknownSessionData`，日志里只留一行丢弃计数，业务层永远等不到 START。
+     */
+    @Test
+    fun fileTransferDataReachesCallbackInsteadOfUnknownSession() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        val unknownSessions = ArrayList<Int>()
+        val transfers = ArrayList<ByteArray>()
+        accessory.onUnknownSessionData = { id, _ -> unknownSessions += id }
+        accessory.onFileTransferData = { transfers += it }
+
+        val response = byteArrayOf(7, Iap2ArtworkTransfer.CMD_START.toByte())
+        assertTrue(phone.sendOnSession(response, Iap2LinkEngine.SESSION_FILE_TRANSFER, 200))
+        accessory.feed(phone.takeOutput(), tick())
+
+        assertEquals("车机 START 应答必须上抛给封面传输状态机", 1, transfers.size)
+        assertArrayEquals(response, transfers[0])
+        assertTrue("接了文件传输回调就不该再报未知会话，实际=$unknownSessions", unknownSessions.isEmpty())
+    }
+
+    /**
      * 发送窗口按**对端声明的 maxOutgoing** 截断，超出的先 hold 住等 ACK。
      *
      * 别克 BUICK_3138 声明 `maxOutgoing=5`，我们旧逻辑回显 0x7F 后一次连发 7 帧
@@ -440,6 +491,10 @@ class Iap2LinkEngineTest {
         val sequence: Int,
         val ack: Int,
         val frameLength: Int,
+        /** 会话 ID（帧内偏移 7）；0 = 控制会话之外的 ACK 帧。 */
+        val sessionId: Int,
+        /** 载荷（已去掉末尾的载荷校验和）；无载荷时为空数组。 */
+        val payload: ByteArray,
     )
 
     /** 解析一段输出里的所有 FF5A 帧（跳过前置 marker）。 */
@@ -472,6 +527,13 @@ class Iap2LinkEngineTest {
             sequence = bytes[offset + 5].toInt() and 0xFF,
             ack = bytes[offset + 6].toInt() and 0xFF,
             frameLength = length,
+            sessionId = bytes[offset + 7].toInt() and 0xFF,
+            payload =
+                if (length <= 9) {
+                    ByteArray(0)
+                } else {
+                    bytes.copyOfRange(offset + 9, offset + length - 1)
+                },
         )
     }
 

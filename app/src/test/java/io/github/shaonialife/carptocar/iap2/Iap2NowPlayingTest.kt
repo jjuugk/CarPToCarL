@@ -75,6 +75,37 @@ class Iap2NowPlayingTest {
         assertEquals("空态帧里 0x001A 必须是 1 字节 u8", 1, media.getValue(0x001A).value.size)
     }
 
+    /**
+     * 有封面时，0x001A 是**单字节编号**，不是字符串、更不是图片本身。
+     *
+     * 车机拿到这个号之后才在 session 12 上要图（见 [Iap2ArtworkTransfer]）。
+     * 写多字节会把它后面的字段全部挤出边界——这正是 2026-11-06 那次
+     * 「仪表概率不显示歌名」的成因。
+     */
+    @Test
+    fun artworkIdGoesIntoField0x1aAsSingleByte() {
+        val body = Iap2NowPlaying.body(sample("专辑").copy(artworkId = 42))
+        val top = Iap2Csm.parseParams(body).associateBy { it.id }
+        val media = Iap2Csm.parseParams(top.getValue(0).value).associateBy { it.id }
+        val value = media.getValue(Iap2NowPlaying.MEDIA_ARTWORK_ID).value
+        assertEquals("0x001A 是 u8，只能 1 字节", 1, value.size)
+        assertEquals(42, value[0].toInt() and 0xFF)
+    }
+
+    /** 越界编号一律当「没有封面」：写 0 或写 256 都会让车机解析错位或等一张永不来的图。 */
+    @Test
+    fun artworkIdOutOfRangeIsNotWritten() {
+        for (id in listOf(0, 256, -1)) {
+            val body = Iap2NowPlaying.body(sample("专辑").copy(artworkId = id))
+            val top = Iap2Csm.parseParams(body).associateBy { it.id }
+            val media = Iap2Csm.parseParams(top.getValue(0).value).associateBy { it.id }
+            assertFalse(
+                "越界 id=$id 不得写进 0x001A（车机按 u8 解析，多余字节会打乱后续参数）",
+                media.containsKey(Iap2NowPlaying.MEDIA_ARTWORK_ID),
+            )
+        }
+    }
+
     @Test
     fun otherMediaItemIdsFollowSpec() {
         val media = mediaParams("专辑")

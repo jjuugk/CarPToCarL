@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.airplay
 import android.content.Context
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2ArtworkTransfer
 import io.github.shaonialife.carptocar.iap2.Iap2CapabilityReport
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
@@ -68,6 +69,13 @@ class VirtualIap2Link(
      * 由 SessionController 注入（数据源 = `AudioManager.mode`，见 `callStateOf`）。
      */
     private val callStateProvider: (() -> Int)? = null,
+    /**
+     * 封面字节提供者：入参是 `0x5001` 里声明的 `artworkId`，返回 JPEG/PNG 原始字节。
+     *
+     * 返回 null 表示「这张图取不到了」——那就只声明编号、不发起传输（车机封面位
+     * 留空，不会卡住链路）。真正的传输在 session 12 上走 [Iap2ArtworkTransfer]。
+     */
+    private val artworkProvider: ((Int) -> ByteArray?)? = null,
 ) {
     private val lock = Any()
     private val engine = Iap2LinkEngine()
@@ -102,6 +110,16 @@ class VirtualIap2Link(
 
     /** 上次周期查询时刻（[nowMillis] 时钟）；0 = 还没查过。 */
     private var lastNowPlayingPollMs = 0L
+
+    // ---- 封面文件传输（session 12）状态 ----
+    /** 正在传的封面 id；0 = 没有在传。 */
+    private var artworkPendingId = 0
+
+    /** 正在传的封面字节 —— 等车机回 START 之后才按块发出去。 */
+    private var artworkPendingBytes: ByteArray? = null
+
+    /** 已传完或被拒的封面 id：同一张图不重传（车机自己也会用缓存 id 直接回 SUCCESS）。 */
+    private var artworkDeliveredId = 0
 
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
@@ -176,6 +194,11 @@ class VirtualIap2Link(
 
     init {
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
+        // 封面文件传输（session 12）：车机在 START 时说「可以发」，收到数据后回 SUCCESS。
+        // 没接这个回调时该会话的数据会被当成「未知会话」丢掉，日志里只留一行丢弃计数。
+        engine.onFileTransferData = { bytes ->
+            synchronized(lock) { handleFileTransferLocked(bytes) }
+        }
         // 非 DETECT 的握手应答（车机侧 sendLackOfBackwardCompatibility 就在这一族）：
         // 旧实现把它当杂字节丢掉，日志里只剩「协商无进展」，只能等预算耗尽。
         engine.onPeerHandshake = { handshake ->
@@ -246,7 +269,7 @@ class VirtualIap2Link(
             if (!mib3Identified && !tunnelIdentified) return
             val nowPlaying = nowPlayingProvider?.invoke() ?: return
             lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
-            sendRawCsmLocked(buildNowPlayingUpdate(nowPlaying))
+            sendNowPlayingLocked(nowPlaying)
             log(
                 "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
                     " 歌手=${nowPlaying.artist ?: "?"}）",
@@ -271,6 +294,9 @@ class VirtualIap2Link(
             np.durationMs,
             np.shuffleMode,
             np.repeatMode,
+            // 封面编号也算内容：歌名不变但从「无封面」变成「有封面」时，
+            // 不带它的 key 会让这次变化被去重吞掉，仪表永远停在占位图。
+            np.artworkId,
         ).joinToString("|")
 
     /**
@@ -293,7 +319,7 @@ class VirtualIap2Link(
         val key = nowPlayingKey(np)
         if (key == lastPushedNowPlayingKey) return
         lastPushedNowPlayingKey = key
-        sendRawCsmLocked(buildNowPlayingUpdate(np))
+        sendNowPlayingLocked(np)
         log(
             "IAPLINK: 0x5000 订阅后周期补推 0x5001（歌名=${np.title ?: "?"}" +
                 " 歌手=${np.artist ?: "?"} 状态=${np.status}）",
@@ -797,7 +823,7 @@ class VirtualIap2Link(
                 val nowPlaying = nowPlayingProvider?.invoke()
                 if (nowPlaying != null) {
                     lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
-                    sendRawCsmLocked(buildNowPlayingUpdate(nowPlaying))
+                    sendNowPlayingLocked(nowPlaying)
                     log(
                         "IAPLINK: MIB3 0x5000 → 0x5001（歌名=${nowPlaying.title ?: "?"}" +
                             " 歌手=${nowPlaying.artist ?: "?"} 状态=${nowPlaying.status})",
@@ -998,6 +1024,105 @@ class VirtualIap2Link(
      */
     private fun buildNowPlayingUpdate(np: CarPlayNowPlaying): ByteArray = Iap2NowPlaying.encode(np)
 
+    /**
+     * 发 `0x5001`，并在带封面编号时紧接着发起 session 12 文件传输。
+     *
+     * **顺序不能反**：必须先把编号告诉车机，它才知道「这个 id 对应哪张图」；
+     * 反过来先发 SETUP，车机回 START 之后也没有可显示的位置，等于白传一轮。
+     *
+     * 三处发 0x5001 的地方（订阅应答 / 事件补推 / 周期补推）全部走这里，
+     * 否则会出现「某条路径带了歌名却漏了封面」这种只有在特定时机才复现的怪相。
+     */
+    private fun sendNowPlayingLocked(np: CarPlayNowPlaying) {
+        sendRawCsmLocked(buildNowPlayingUpdate(np))
+        val id = np.artworkId ?: return
+        if (id == artworkDeliveredId || id == artworkPendingId) return
+        startArtworkTransferLocked(id)
+    }
+
+    /** 发封面 SETUP，把图放进待发槽，等车机回 START 再按块发。 */
+    private fun startArtworkTransferLocked(id: Int) {
+        if (engine.state != Iap2LinkEngine.State.NORMAL) {
+            log("IAPLINK: 封面 id=$id 想传但链路未就绪（${engine.state}）——本轮跳过")
+            return
+        }
+        val bytes = artworkProvider?.invoke(id)
+        if (bytes == null || bytes.isEmpty()) {
+            log("IAPLINK: 封面 id=$id 无字节 —— 只发 0x5001 的编号，不发起传输")
+            return
+        }
+        if (bytes.size > Iap2ArtworkTransfer.MAX_ARTWORK_BYTES) {
+            log("IAPLINK: 封面 id=$id 过大（${bytes.size}B > 16MB）——跳过")
+            return
+        }
+        artworkPendingId = id
+        artworkPendingBytes = bytes
+        val queued =
+            engine.sendOnSession(
+                Iap2ArtworkTransfer.setup(id, bytes.size),
+                Iap2LinkEngine.SESSION_FILE_TRANSFER,
+                nowMillis(),
+                retransmitLimit = ARTWORK_RETRANSMIT_LIMIT,
+                dropWhenExhausted = true,
+            )
+        log(
+            "IAPLINK: 封面传输 SETUP id=$id ${bytes.size}B（已排队=$queued，等车机 START）",
+        )
+    }
+
+    /** 处理车机在 session 12 上的应答：START → 发块；SUCCESS/FAILURE → 收尾。 */
+    private fun handleFileTransferLocked(datagram: ByteArray) {
+        val response = Iap2ArtworkTransfer.parseResponse(datagram) ?: return
+        if (response.transferId != artworkPendingId) {
+            log(
+                "IAPLINK: 封面传输收到未知 id=${response.transferId}" +
+                    "（${response.describe()}）——忽略（可能是上一张图的迟到应答）",
+            )
+            return
+        }
+        when {
+            response.isStart -> {
+                val bytes = artworkPendingBytes ?: return
+                val chunks = Iap2ArtworkTransfer.chunks(response.transferId, bytes)
+                var queuedChunks = 0
+                var queuedBytes = 0
+                for (chunk in chunks) {
+                    if (!engine.sendOnSession(
+                            chunk,
+                            Iap2LinkEngine.SESSION_FILE_TRANSFER,
+                            nowMillis(),
+                            retransmitLimit = ARTWORK_RETRANSMIT_LIMIT,
+                            dropWhenExhausted = true,
+                        )
+                    ) {
+                        break
+                    }
+                    queuedChunks++
+                    queuedBytes += chunk.size - 2
+                }
+                log(
+                    "IAPLINK: 封面传输 START → 已排队 $queuedChunks 块 / $queuedBytes B" +
+                        if (queuedChunks < chunks.size) "（⚠ 链路拒绝，剩余放弃）" else "",
+                )
+            }
+
+            response.isSuccess -> {
+                log("IAPLINK: 封面传输 SUCCESS id=${response.transferId}（车机已收图）")
+                artworkDeliveredId = artworkPendingId
+                artworkPendingBytes = null
+            }
+
+            response.isFailure -> {
+                // 车机拒收（格式不支持/超限/超时）。标记成「已处理」，避免同一张图无限重试。
+                log("IAPLINK: 封面传输 FAILURE id=${response.transferId}（车机拒收，本轮放弃）")
+                artworkDeliveredId = artworkPendingId
+                artworkPendingBytes = null
+            }
+
+            else -> log("IAPLINK: 封面传输 id=${response.transferId} ${response.describe()}")
+        }
+    }
+
     /** 0x4E0B：u64 秒 + s16 时区偏移(分) + u8 夏令时。 */
     private fun mib3DeviceTimeParams(): ByteArray {
         val now = System.currentTimeMillis()
@@ -1087,6 +1212,15 @@ class VirtualIap2Link(
     private var hidDescriptor: ByteArray? = null
 
     companion object {
+        /**
+         * 封面数据报的重传上限（帧自身的，不走链路级的 10 次）。
+         *
+         * 配合 `dropWhenExhausted = true`：一张封面分十几块传，某一块车机没 ACK 时
+         * **绝不能用「重传到链路级上限 → die」的语义**——为一张图把整条 iAP2 会话拆掉，
+         * 车机会当成手机掉线重新走一遍配对。丢块的后果只是这张图花掉，下一首歌重传即可。
+         */
+        private const val ARTWORK_RETRANSMIT_LIMIT = 5
+
         /**
          * 车机订阅 0x5000 后主动查歌名的周期。
          *

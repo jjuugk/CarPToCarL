@@ -2034,6 +2034,16 @@ class AirPlayClient(
     var nowPlayingSource: (() -> CarPlayNowPlaying?)? = null
 
     /**
+     * 封面字节提供者：入参是 `0x5001` 里声明的 `artworkId`，返回 JPEG 原始字节。
+     *
+     * 封面**不走 0x5001 的报文体**（那里只有一个单字节编号），而是在 iAP2 文件传输
+     * 会话（session 12）上把图传过去，见 [io.github.shaonialife.carptocar.iap2.Iap2ArtworkTransfer]。
+     * 由 SessionController 注入（图源 = 系统媒体会话的 album art，缩到车机落盘尺寸）。
+     * null = 只发歌名，不传封面。
+     */
+    var artworkSource: ((Int) -> ByteArray?)? = null
+
+    /**
      * 通话状态提供者（iAP2 `CallState`：0=无通话、1=来电、2=拨出、3=通话中），
      * 供虚拟 iAP2 链路的 0x4155 CallStateUpdate 使用。
      *
@@ -2054,6 +2064,7 @@ class AirPlayClient(
                     alive = { socket?.isClosed == false },
                     nowPlayingProvider = { nowPlayingSource?.invoke() },
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
+                    artworkProvider = { id -> artworkSource?.invoke(id) },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }

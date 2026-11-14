@@ -23,8 +23,10 @@ package io.github.shaonialife.carptocar.iap2
  * `05001a8000`（1 字节数据）可证。我们把 NUL 结尾字符串写进去：专辑名为空时
  * 只发 1 字节 0x00，长度碰巧对得上、车机能勉强解析；专辑名非空时长度撑爆字段，
  * 后续参数边界全乱 → 整帧 0x5001 被判非法 → **车机仪表概率性不显示歌名/歌词**。
- * 正确 ID 是 `0x0006`。本项目不发封面，因此 0x001A 一律不写（写了等于向车机
- * 声明一个并不存在的 artwork 传输）。
+ * 正确 ID 是 `0x0006`。0x001A **只在真的要把封面传过去时才写**——它写出去就等于
+ * 向车机声明「有个编号为 N 的 artwork 会跟着来」，车机随后会在文件传输会话
+ * （session 12）上等这张图。编号给了却不传，车机可能一直等、或者把媒体卡上的
+ * 封面位留空（[Iap2ArtworkTransfer] 是配套的传输实现）。
  *
  * 数据源可以是 CarLife 内置播放器经 0x10035 推来的媒体信息，或系统媒体会话
  * （MediaSessionsState）——由各链路的 provider 决定。
@@ -39,6 +41,13 @@ data class CarPlayNowPlaying(
     val shuffleMode: Int = 0,
     val repeatMode: Int = 0,
     val appName: String?,
+    /**
+     * 封面传输标识符（1..255；null = 本轮没有封面）。
+     *
+     * 换一张图就要换一个 id —— 车机按 id 做缓存，同一个 id 不会重新要图，
+     * 换了 id 才会重新走 SETUP/START/分块那一套。
+     */
+    val artworkId: Int? = null,
 )
 
 object Iap2NowPlaying {
@@ -76,11 +85,14 @@ object Iap2NowPlaying {
      * 后其「接收进程异常」直接退出 → 蓝牙桥接被拆 → 车机不停重连（2026-10-25）。
      */
     fun body(np: CarPlayNowPlaying): ByteArray {
-        val mediaItem =
+        var mediaItem =
             Iap2Csm.string(MEDIA_TITLE, np.title.orEmpty()) +
                 Iap2Csm.u32(MEDIA_DURATION, np.durationMs.toLong()) +
                 Iap2Csm.string(MEDIA_ALBUM, np.album.orEmpty()) +
                 Iap2Csm.string(MEDIA_ARTIST, np.artist.orEmpty())
+        // 只有真要传图时才声明编号：给了编号却不传，车机封面位会一直等一张永不
+        // 到达的图。合法性按 u8 校验，越界（0 或 >255）一律当「没有封面」处理。
+        np.artworkId?.takeIf { it in 1..0xFF }?.let { mediaItem += Iap2Csm.u8(MEDIA_ARTWORK_ID, it) }
         val playback =
             Iap2Csm.u8(PLAYBACK_STATUS, np.status) +
                 Iap2Csm.u32(PLAYBACK_ELAPSED, np.elapsedMs.toLong()) +
@@ -99,5 +111,6 @@ object Iap2NowPlaying {
             add("duration")
             add("elapsed")
             add("status")
+            np.artworkId?.let { add("art#$it") }
         }.joinToString(",")
 }

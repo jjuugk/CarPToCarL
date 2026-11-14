@@ -81,6 +81,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
+ * 传给车机的封面最长边（像素）。
+ *
+ * 与车机侧 `coverArt` 落盘尺寸一致（源图 600×600 → 存储 500×500、单文件上限 1.08MB）。
+ * 按落盘尺寸输出同清晰度下比原图小约 30%，而封面是分块走 iAP2 链路的，每多一字节
+ * 都在和视频抢同一条 Wi-Fi。
+ */
+private const val ARTWORK_MAX_EDGE = 500
+
+/** 封面 JPEG 质量：500px + 85 通常 20~40KB。 */
+private const val ARTWORK_QUALITY = 85
+
+/**
  * 进程级会话中枢：**日志缓冲**与**会话管线所有权**的唯一持有者。
  *
  * 背景（2026-10-11 用户实测发现三个连带问题）：投屏管线运行在 MainActivity 派生线程里，
@@ -566,7 +578,9 @@ object SessionController {
      * 重复 publish。这里按 title+artist 去重，只在真正切歌/切歌词行时推一次。
      */
     private fun pushNowPlayingAll() {
-        val np = buildNowPlaying() ?: return
+        // 这里只要去重键（title|artist），不声明封面编号：真正的 0x5001 由各链路
+        // 各自的 provider 构造（隧道带封面、蓝牙不带），这里先编码一遍纯属浪费。
+        val np = buildNowPlaying(includeArtwork = false) ?: return
         val key = "${np.title}|${np.artist}"
         if (key == lastPushedNowPlayingKey) return
         lastPushedNowPlayingKey = key
@@ -590,13 +604,100 @@ object SessionController {
         lastPushedNowPlayingKey = null
     }
 
+    // ---- 封面（iAP2 session 12 文件传输）----
+
+    /**
+     * 封面缓存键（`歌名|歌手`，CarLife 分支用 `专辑|歌手`）。
+     *
+     * 同一首歌不重复取图/编码：一张 500×500 JPEG 要分 10~30 个块传过去，
+     * 每次补推 0x5001 都重传一遍等于拿封面去挤视频和音频的带宽。
+     */
+    private var artworkKey: String? = null
+
+    /** 当前封面的 JPEG 字节（只留最近一张）。 */
+    @Volatile
+    private var artworkBytes: ByteArray? = null
+
+    /** 当前封面对应的传输标识符（1..255；0 = 本轮无封面）。 */
+    @Volatile
+    private var artworkId: Int = 0
+
+    /** 标识符分配序号，1..255 循环 —— **换了 id 车机才会重新要图**（同 id 走它的缓存）。 */
+    private var artworkSeq: Int = 0
+
+    /**
+     * 为当前这首歌准备封面，返回本次要声明的 `artworkId`（无封面返回 null）。
+     *
+     * 必须由 [buildNowPlaying] 调用：它决定 0x5001 里要不要带
+     * `media_item_artwork_file_transfer_identifier`。
+     *
+     * 加锁的理由：[buildNowPlaying] 会被三条线程调（iAP2 节拍、媒体事件、会话线程），
+     * 编码本身只要几毫秒，但并发进来会重复编码、并且把 `artworkSeq` 自增两次
+     * ——车机就会收到两个连续的 id，前一张图的传输半路被新的顶掉。
+     */
+    @Synchronized
+    private fun ensureArtwork(key: String): Int? {
+        if (key == artworkKey) return artworkId.takeIf { it != 0 && artworkBytes != null }
+        artworkKey = key
+        val bytes =
+            runCatching { encodeArtwork() }
+                .onFailure { appendLog("ART: 封面编码异常 - ${it.message}") }
+                .getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            artworkBytes = null
+            artworkId = 0
+            return null
+        }
+        artworkSeq = artworkSeq % 254 + 1
+        artworkId = artworkSeq
+        artworkBytes = bytes
+        appendLog("ART: 封面就绪 id=$artworkId ${bytes.size}B（$key）")
+        return artworkId
+    }
+
+    /**
+     * 取系统媒体会话的封面并压成车机要的尺寸。
+     *
+     * **500 不是随口定的**：车机侧 `coverArt` 配置把落盘尺寸写死在 500×500
+     * （源图 600×600 → 存储 500×500，单文件上限 1.08MB）。按 500 输出既不掉清晰度，
+     * 又比原图小约 30%——而封面是分块走 iAP2 链路的，每多一字节都在和视频抢带宽。
+     *
+     * 图源是 [MediaSessionsState]（通知监听已缓存的 Bitmap，最长边已缩到 512 以内），
+     * 不做二次网络请求，也不解码本地文件。
+     */
+    private fun encodeArtwork(): ByteArray? {
+        val art = MediaSessionsState.nowPlaying?.art ?: return null
+        val scaled = scaleArtworkForCar(art)
+        val out = java.io.ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, ARTWORK_QUALITY, out)
+        return out.toByteArray()
+    }
+
+    /**
+     * 缩到最长边 [ARTWORK_MAX_EDGE]。
+     *
+     * 返回的 Bitmap **可能与入参是同一个**（本来就够小），所以调用方不许 recycle —
+     * 那张图是 [MediaSessionsState] 与界面共用的，回收会让音乐卡片直接崩。
+     */
+    private fun scaleArtworkForCar(src: android.graphics.Bitmap): android.graphics.Bitmap {
+        val longest = maxOf(src.width, src.height)
+        if (longest <= ARTWORK_MAX_EDGE) return src
+        val ratio = ARTWORK_MAX_EDGE.toFloat() / longest
+        val width = (src.width * ratio).toInt().coerceAtLeast(1)
+        val height = (src.height * ratio).toInt().coerceAtLeast(1)
+        return android.graphics.Bitmap.createScaledBitmap(src, width, height, true)
+    }
+
     /**
      * 合并两个歌名数据源，构造 iAP2 0x5001 载荷。
      *
      * 优先系统媒体会话（覆盖第三方播放器 + CarLife 内置播放器的绝大多数场景），
      * 读不到再退回 CarLife 0x10035 推来的媒体信息；两者皆无返回 null（不响应）。
+     *
+     * [includeArtwork]=false 时不声明封面编号：**蓝牙 iAP2 链路还没有文件传输实现**，
+     * 声明了编号却不传图，车机会留着封面位一直等（或反复重试同一个 id）。
      */
-    private fun buildNowPlaying(): CarPlayNowPlaying? {
+    private fun buildNowPlaying(includeArtwork: Boolean = true): CarPlayNowPlaying? {
         val session = MediaSessionsState.nowPlaying
         if (session != null && session.title != null) {
             return CarPlayNowPlaying(
@@ -616,6 +717,7 @@ object SessionController {
                         .coerceAtMost(Int.MAX_VALUE.toLong())
                         .toInt(),
                 appName = session.pkg,
+                artworkId = if (includeArtwork) ensureArtwork("${session.title}|${session.artist.orEmpty()}") else null,
             )
         }
         val info = CarLifeHijack.latestMediaInfo ?: return null
@@ -627,6 +729,9 @@ object SessionController {
             status = Iap2NowPlaying.STATUS_PLAYING, // CarLife 推歌名即视为播放中
             elapsedMs = 0,
             appName = info.source.takeIf { it.isNotBlank() },
+            // 用「专辑|真实艺术家」而不是歌名：部分播放器把逐行歌词写进 title，
+            // 拿歌名当键会每行换一个 id，等于每一行都重传一遍封面（19KB 起）。
+            artworkId = if (includeArtwork) ensureArtwork("${info.album}|${info.artist}") else null,
         )
     }
 
@@ -1825,7 +1930,9 @@ object SessionController {
             // 兜底 CarLife 内置播放器 0x10035。部分接收端（WinPlay/DiPlay 测试台）在蓝牙
             // bring-up 后即发 0x5000 订阅，歌名必须在这条蓝牙链路上应答；读不到（null）时
             // 静默不回应。
-            val nowPlayingProvider: () -> CarPlayNowPlaying? = { buildNowPlaying() }
+            // 蓝牙 iAP2 链路（Iap2SenderSession）**没有文件传输实现**，因此不声明封面编号：
+            // 声明了却不传图，车机会一直等那张图。
+            val nowPlayingProvider: () -> CarPlayNowPlaying? = { buildNowPlaying(includeArtwork = false) }
             bluetoothServer =
                 Iap2BluetoothServer(
                     context,
@@ -4804,6 +4911,9 @@ object SessionController {
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
+                            // 封面字节：iAP2 文件传输（session 12）按 0x5001 里声明的 id 来取图。
+                            // 只认当前这一张 —— 旧 id 的迟到请求直接给 null，避免传错图。
+                            created.artworkSource = { id -> artworkBytes?.takeIf { id == artworkId } }
                             // 0x4155 CallStateUpdate 的数据源：车机订阅通话状态时按真实值应答，
                             // 否则它认定这台手机永远不打电话，通话时不切音频通路。
                             created.callStateSource = { callStateOf() }

@@ -124,6 +124,13 @@ class Iap2LinkEngine(
         val retransmitLimit: Int? = null,
         /** 重传到上限后的处置：true = 丢掉这一帧、链路继续；false = 按链路级语义 die。 */
         val dropWhenExhausted: Boolean = false,
+        /**
+         * 这一帧发到哪个会话；null = 控制会话（[controlSessionId]，随采纳的对端表变化）。
+         *
+         * 目前只有封面文件传输（session 12）会用到非控制会话。会话 ID 必须跟着帧走，
+         * 因为重传发生在 [retransmitDue] 里、那时已经没有调用方上下文了。
+         */
+        val sessionId: Int? = null,
     )
 
     var state: State = State.IDLE
@@ -188,6 +195,15 @@ class Iap2LinkEngine(
 
     /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
+
+    /**
+     * 文件传输会话（session 12）收到的数据报原样上抛 —— 目前只有「正在播放封面」。
+     *
+     * 车机在这一会话上回 `START`（同意收图）、`SUCCESS`（收完）、`FAILURE`（拒收），
+     * 报文体由 [Iap2ArtworkTransfer] 解析。**设了回调就不会再报成「未知会话」**：
+     * 没设时走 [onUnknownSessionData]，那正是加这个回调之前的行为。
+     */
+    var onFileTransferData: ((ByteArray) -> Unit)? = null
 
     /**
      * 诊断：「可丢弃」的帧重传到上限、被主动放弃时回调（参数为人类可读说明）。
@@ -452,6 +468,31 @@ class Iap2LinkEngine(
         awaitAck: Boolean = true,
         retransmitLimit: Int? = null,
         dropWhenExhausted: Boolean = false,
+    ): Boolean = sendOnSessionInternal(bytes, null, nowMillis, awaitAck, retransmitLimit, dropWhenExhausted)
+
+    /**
+     * 排入一个指定会话的载荷（用于封面文件传输 session 12 等非控制会话）。
+     *
+     * 与控制会话共用同一个发送窗口/重传账本：iAP2 的序号是**整条链路**一个计数器，
+     * 不分会话。区别只在帧头里的 session ID —— 而它必须跟着帧走，
+     * 因为重传发生在 [retransmitDue] 里，那时候已经没有调用方上下文了。
+     */
+    fun sendOnSession(
+        bytes: ByteArray,
+        sessionId: Int,
+        nowMillis: Long,
+        awaitAck: Boolean = true,
+        retransmitLimit: Int? = null,
+        dropWhenExhausted: Boolean = false,
+    ): Boolean = sendOnSessionInternal(bytes, sessionId, nowMillis, awaitAck, retransmitLimit, dropWhenExhausted)
+
+    private fun sendOnSessionInternal(
+        bytes: ByteArray,
+        sessionId: Int?,
+        nowMillis: Long,
+        awaitAck: Boolean,
+        retransmitLimit: Int?,
+        dropWhenExhausted: Boolean,
     ): Boolean {
         if (state == State.DEAD) return false
         val limit = (peerSynchronization?.maxLength ?: 0xFFFF) - HEADER_BYTES - 1
@@ -466,6 +507,7 @@ class Iap2LinkEngine(
                 awaitAck = awaitAck,
                 retransmitLimit = retransmitLimit,
                 dropWhenExhausted = dropWhenExhausted,
+                sessionId = sessionId,
             )
         drainSendWindow(nowMillis)
         return true
@@ -626,6 +668,10 @@ class Iap2LinkEngine(
                 // 上抛给任何消费者。但链路层仍要 ACK——不确认会让对端不停重传同一个包，
                 // 连带把控制会话也拖慢（EA 的序号账法与控制会话独立，只补 ACK 不前移自身序号）。
                 sendAcknowledgement()
+            } else if (sessionId == SESSION_FILE_TRANSFER && onFileTransferData != null) {
+                // 封面文件传输：车机在 session 12 上的 START / SUCCESS / FAILURE。
+                // 链路层 ACK 已在上面的 handleAcknowledgement 里统一处理过，这里只管业务。
+                onFileTransferData?.invoke(payload!!)
             } else {
                 reportUnknownSessionData(sessionId, payload!!.size)
             }
@@ -906,7 +952,7 @@ class Iap2LinkEngine(
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
             packet.deadlineMillis = nowMillis + retransmissionDelayMillis()
-            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
+            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, packet.sessionId ?: controlSessionId())
             if (!packet.awaitAck) continue // 发后不管：不追踪、不重传（见 sendControl 注释）
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
@@ -928,7 +974,7 @@ class Iap2LinkEngine(
             if (!abandonIfDisposable(next)) die("packet ${next.sequence} not acknowledged")
             return
         }
-        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
+        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, next.sessionId ?: controlSessionId())
         retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
     }
 
