@@ -30,6 +30,22 @@ object NotificationAccess {
     /** 本应用监听器组件（`包/类` 形式，`cmd notification allow_listener` 需要的格式）。 */
     fun componentSpec(context: Context): String = ComponentName(context, MediaListenerService::class.java).flattenToString()
 
+    /** 查询系统当前是否授予了通知监听权限；未授权时同步清理过期缓存态。 */
+    fun isGranted(context: Context): Boolean {
+        val allowed =
+            context
+                .getSystemService(android.app.NotificationManager::class.java)
+                .isNotificationListenerAccessGranted(MediaListenerService.componentName(context))
+        granted = allowed
+        if (!allowed) {
+            serviceConnected = false
+            MediaSessionsState.accessGranted = false
+            MediaSessionsState.activeController = null
+            MediaSessionsState.publish(null)
+        }
+        return allowed
+    }
+
     /**
      * 从系统设置串判断本应用是否已在授权列表里。
      *

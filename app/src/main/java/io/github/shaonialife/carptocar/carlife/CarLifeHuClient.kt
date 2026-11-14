@@ -65,15 +65,10 @@ class CarLifeHuClient(
      * 采样率也可能不同（TTS 常见 16k 单声道），所以必须各自带格式送进发送端重采样。
      */
     private val onTtsPcm: (pcm: ByteArray, size: Int) -> Unit = { _, _ -> },
-    /**
-     * 引擎音频**开停信号**（0x30002 开始 / 0x30003 停止，长度 0 的裸类型包）。
-     *
-     * 真机实证（2026-10-26，奥迪 MIB3）：这两个包出现在「引擎音频真正开始/停止推 PCM」
-     * 的同一瞬间——来电期间只有 0x30003、挂断恢复播放时才有 0x30002。上层据此在恢复时
-     * 补发同步包重新对齐车机时钟（[io.github.shaonialife.carptocar.audio.AudioSender.resyncAnchor]）。
-     * 只当「信号」用，不作为是否转发 PCM 的裁决——停止后万一还有 PCM 仍然照常转发。
-     */
-    private val onAudioGate: (active: Boolean) -> Unit = {},
+    /** 媒体通道与模块焦点事件回调（关联为单一播放周期，见 [CarLifeMediaPlayback]）。 */
+    private val onMediaActivity: (activity: CarLifeMediaActivity) -> Unit = {},
+    /** TTS 导航播报起停边沿回调（0x40001/0x40003 置 true，0x40002 或断链置 false）。 */
+    private val onTtsGate: (active: Boolean) -> Unit = {},
     /**
      * 外部「此刻**应该**有声音」的信号（上层按音乐会话是否在播判断）。
      *
@@ -189,12 +184,19 @@ class CarLifeHuClient(
      * 让引擎在「已有编码器」的状态下重建一次。只做一次，避免把引擎打进反复重建。
      */
     private val settleReinit: Boolean = true,
+    private val monotonicMillis: () -> Long = { android.os.SystemClock.uptimeMillis() },
+    private val connectSocket: ((Int) -> Socket)? = null,
 ) {
 
     private val running = AtomicBoolean(false)
     private val sockets = ConcurrentHashMap<Int, Socket>()
     private var cmdOut: OutputStream? = null
+
+    @Volatile
     private var touchOut: OutputStream? = null
+
+    @Volatile
+    private var lastTouchReconnectAt = 0L
 
     /**
      * 低频诊断日志的限流。
@@ -299,16 +301,19 @@ class CarLifeHuClient(
 
         /** 已记录过的开停信号类型（重连后不重复刷屏）。 */
         val controlLogged = HashSet<Int>()
+
+        /** TTS 通道当前是否处于活跃播报期（边沿上报用）。 */
+        @Volatile
+        var playbackActive = false
     }
 
     private val mediaChan = AudioChannel(CarLifeProtocol.PORT_MEDIA, "媒体", isTts = false)
     private val ttsChan = AudioChannel(CarLifeProtocol.PORT_TTS, "TTS", isTts = true)
 
     /**
-     * 引擎音频是否处于「活跃」态（0x30002 开 / 0x30003 停）。
+     * 引擎音频是否处于「活跃」态（0x30004 恢复置位，0x30002/0x30003 停止清位）。
      *
-     * 沉默看门狗的判据之一：引擎刚说过「开始推音频」却一直没有 PCM，是明确的异常。
-     * 只当参考信号，不用来裁决是否转发 PCM（见 [onAudioGate] 注释）。
+     * 沉默看门狗的参考信号之一：引擎刚恢复播放却一直没有 PCM，或上层确认音乐正在播放时才允许沉默重连。
      */
     @Volatile
     private var engineAudioActive = false
@@ -478,14 +483,10 @@ class CarLifeHuClient(
         if (running.get()) return true
         log("CARLIFE: 连接本机车机端口 $host …")
         for (port in PORTS) {
-            val socket = Socket()
             try {
-                socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
-                sockets[port] = socket
+                sockets[port] = openPortSocket(port)
             } catch (error: Exception) {
                 log("CARLIFE: 端口 $port 连接失败 - ${error.message}")
-                runCatching { socket.close() }
             }
         }
         val cmd = sockets[CarLifeProtocol.PORT_CMD]
@@ -497,7 +498,7 @@ class CarLifeHuClient(
         cmdOut = cmd.getOutputStream()
         touchOut = sockets[CarLifeProtocol.PORT_TOUCH]?.getOutputStream()
         running.set(true)
-        lastFrameAt = android.os.SystemClock.uptimeMillis()
+        lastFrameAt = monotonicMillis()
         // 首轮有序初始化的闸门：每条新会话都要从「98386 还没确认、首条 98311 还没发」开始。
         firstInitSent = false
         featureConfigAcked = false
@@ -514,7 +515,7 @@ class CarLifeHuClient(
                     probeQueue.joinToString(",") + "）",
             )
         }
-        if (touchOut != null) startTouchWorker()
+        startTouchWorker()
 
         startReader("carlife-cmd") { cmdReader(cmd.getInputStream()) }
         sockets[CarLifeProtocol.PORT_VIDEO]?.let { video ->
@@ -597,7 +598,7 @@ class CarLifeHuClient(
         y: Int,
         action: Int = -1,
     ) {
-        if (touchOut == null) return
+        if (!running.get()) return
         // 只做安全范围约束，**不按视频分辨率（SPS/协商档位）钳位**：
         // 触摸坐标的域是「车机 display 坐标」，引擎自己乘 getTouchXOffset() 换算到手机屏。
         // 以前按 videoSize 钳位，码流 1280×720 而车机画布 1412×654 时，右侧 132 像素
@@ -671,7 +672,6 @@ class CarLifeHuClient(
         y: Int,
         action: Int,
     ) {
-        val out = touchOut ?: return
         val px = x.coerceIn(0, TOUCH_COORD_MAX)
         val py = y.coerceIn(0, TOUCH_COORD_MAX)
         // 复合动作（0x68001）的负载是 CarlifeTouchAction{action,x,y}，
@@ -684,11 +684,67 @@ class CarLifeHuClient(
             }
         val frame = CarLifeProtocol.packCommand(serviceType, payload)
         sentTouchCount++
-        if (!runCatching { out.write(frame); out.flush() }.isSuccess) {
-            touchWriteFailures++
-            if (touchWriteFailures == 1 || touchWriteFailures % 50 == 0) {
-                log("CARLIFE: 触摸写入失败 ${touchWriteFailures} 次（通道可能已断）")
+        val current = touchOut ?: reopenTouch()
+        if (current != null && writeTouchBytes(current, frame)) return
+        val reopened = reopenTouch(force = true)
+        if (reopened != null && writeTouchBytes(reopened, frame)) return
+        touchWriteFailures++
+        if (touchWriteFailures == 1 || touchWriteFailures % 50 == 0) {
+            log("CARLIFE: 触摸写入失败 $touchWriteFailures 次（通道可能已断）")
+        }
+    }
+
+    private fun openPortSocket(port: Int): Socket {
+        val custom = connectSocket
+        if (custom != null) return custom(port)
+        val socket = Socket()
+        try {
+            socket.tcpNoDelay = true
+            socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+            return socket
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            throw error
+        }
+    }
+
+    private fun writeTouchBytes(
+        out: OutputStream,
+        frame: ByteArray,
+    ): Boolean =
+        runCatching {
+            out.write(frame)
+            out.flush()
+        }.onFailure {
+            if (touchOut === out) touchOut = null
+            runCatching { sockets.remove(CarLifeProtocol.PORT_TOUCH)?.close() }
+        }.isSuccess
+
+    private fun reopenTouch(force: Boolean = false): OutputStream? {
+        if (!running.get()) return null
+        val now = monotonicMillis()
+        if (!force && lastTouchReconnectAt != 0L && now - lastTouchReconnectAt < TOUCH_RECONNECT_COOLDOWN_MS) {
+            return null
+        }
+        if (force && lastTouchReconnectAt != 0L && now - lastTouchReconnectAt < TOUCH_FORCE_RETRY_MIN_MS) {
+            return null
+        }
+        lastTouchReconnectAt = now
+        runCatching { sockets.remove(CarLifeProtocol.PORT_TOUCH)?.close() }
+        return try {
+            val socket = openPortSocket(CarLifeProtocol.PORT_TOUCH)
+            if (!running.get()) {
+                runCatching { socket.close() }
+                return null
             }
+            val out = socket.getOutputStream()
+            sockets[CarLifeProtocol.PORT_TOUCH] = socket
+            touchOut = out
+            log("CARLIFE: 触控通道已重连（${CarLifeProtocol.PORT_TOUCH}）")
+            out
+        } catch (_: Exception) {
+            touchOut = null
+            null
         }
     }
 
@@ -810,6 +866,13 @@ class CarLifeHuClient(
             CarLifeProtocol.MD_MODULE_STATUS -> {
                 val modules = CarLifeProtocol.parseModuleStatus(payload)
                 if (modules.isEmpty()) return
+                modules.firstOrNull { it.first == CarLifeProtocol.Module.MUSIC }?.let { music ->
+                    // 模块状态包可能是增量上报：未出现 MUSIC 不代表释放焦点。
+                    when (music.second) {
+                        0 -> onMediaActivity(CarLifeMediaActivity.FOCUS_RELEASED)
+                        1 -> onMediaActivity(CarLifeMediaActivity.FOCUS_GAINED)
+                    }
+                }
                 if (modules != lastModuleStatus) {
                     val before = lastModuleStatus.orEmpty().toMap()
                     lastModuleStatus = modules
@@ -830,9 +893,8 @@ class CarLifeHuClient(
                             },
                         )
                     }
-                    // 只认边沿：非 0 一律当「在语音会话里」（实测出现过 1、2 两种取值）。
-                    // 模块整条消失也算结束——那通常是引擎换了一轮会话表。
-                    val voiceNow = vr != null && vr.second != 0
+                    // 增量模块包可能不含 VR：缺失时保持原状态，连接断开由 stop() 统一收尾。
+                    val voiceNow = vr?.let { it.second != 0 } ?: voiceSessionActive
                     if (voiceNow != voiceSessionActive) {
                         voiceSessionActive = voiceNow
                         onVoiceSession(voiceNow)
@@ -1337,6 +1399,10 @@ class CarLifeHuClient(
             "CARLIFE: 车机硬键 0x%02X %s".format(
                 keycode,
                 when (keycode) {
+                    CarLifeProtocol.HardKey.SEEK_SUB -> "（上一曲）"
+                    CarLifeProtocol.HardKey.SEEK_ADD -> "（下一曲）"
+                    CarLifeProtocol.HardKey.MEDIA_START -> "（恢复播放）"
+                    CarLifeProtocol.HardKey.MEDIA_STOP -> "（暂停播放）"
                     CarLifeProtocol.HardKey.VR_START ->
                         "（语音识别开始）→ CarLife+ 应起小度；等它的「引擎模块状态 …语音=1」确认"
                     CarLifeProtocol.HardKey.VR_STOP -> "（语音识别结束）"
@@ -1346,6 +1412,9 @@ class CarLifeHuClient(
         )
         return ok
     }
+
+    /** 下发 `MSG_CMD_PAUSE_MEDIA (0x1800E)` 兼容暂停指令（配合硬键 `MEDIA_STOP` 兜底）。 */
+    fun sendPauseMedia(): Boolean = if (running.get()) send(CarLifeProtocol.HU_PAUSE_MEDIA, ByteArray(0)) else false
 
     /**
      * 只重发 98311 编码初始化（**不碰** 98386）。
@@ -1536,6 +1605,7 @@ class CarLifeHuClient(
         // 格式宣告状态挂在 channel 上（不是局部变量）：重连后必须沿用已宣告过的值，
         // 否则新读线程会以为引擎没宣告过，给上层报 48kHz 兜底值把真实的 44.1kHz 覆盖掉。
         var ttsPackets = 0L
+        var ttsActive = false
         try {
             while (running.get()) {
                 val head = ByteArray(CarLifeProtocol.AUDIO_HEAD_LEN)
@@ -1548,86 +1618,103 @@ class CarLifeHuClient(
                 }
                 val payload = ByteArray(length)
                 if (length > 0) data.readFully(payload)
-                if (isTts) {
-                    // TTS 通道（9241）：包类型是 0x4xxxx，但编号与媒体的 INIT/START/STOP
-                    // **不对应**（媒体数据在 0x30006，TTS 数据却在 0x40003）。只认两条铁律：
-                    // 有负载 = 裸 PCM（导航播报），长度 0 = 开停信号（仅记录）。
-                    if (type == CarLifeProtocol.TTS_PKG_INIT) {
-                        val format = parseAudioInit(payload)
-                        if (format != null) {
-                            val (rate, channelConfig, _) = format
-                            channel.rate = rate
-                            channel.channels = channelsOf(channelConfig)
-                            log("CARLIFE: TTS 音频格式宣告 ${channel.rate}Hz ${channel.channels}ch（导航播报通道）")
-                            onTtsFormat(channel.rate, channel.channels)
-                        }
-                    } else if (length > 0) {
-                        if (channel.rate <= 0) {
-                            channel.rate = CarLifeProtocol.TTS_DEFAULT_RATE
-                            channel.channels = 1
-                            log("CARLIFE: TTS 未宣告格式——按 ${channel.rate}Hz 单声道处理（发送端会重采样）")
-                            onTtsFormat(channel.rate, channel.channels)
-                        }
-                        ttsPackets++
-                        if (ttsPackets == 1L) {
-                            log(
-                                "CARLIFE: ✓ 收到导航播报音频（TTS 首包 ${length}B，" +
-                                    "${channel.rate}Hz ${channel.channels}ch）",
-                            )
-                        }
-                        noteAudioPcm(channel)
-                        onTtsPcm(payload, length)
-                    } else if (channel.controlLogged.add(type)) {
-                        log("CARLIFE: TTS 开停信号 0x${type.toString(16)}（长度 0，仅记录）")
-                    }
-                    continue
-                }
-                when (type) {
-                    CarLifeProtocol.MUSIC_PKG_INIT -> {
-                        val format = parseAudioInit(payload)
-                        if (format != null) {
-                            val (rate, channelConfig, sampleFormat) = format
-                            val channels = channelsOf(channelConfig)
-                            log(
-                                "CARLIFE: $label 音频格式宣告 ${rate}Hz " +
-                                    "${channels}ch ${sampleFormat}bit（channelConfig=$channelConfig）",
-                            )
-                            onAudioFormat(rate, channels)
-                            channel.announced = true
-                        }
-                    }
-
-                    CarLifeProtocol.MUSIC_PKG_NORMAL -> {
-                        audioPacketCount++
-                        if (!channel.announced) {
-                            // 手机没宣告格式就直接推 PCM：按 48k 立体声先顶着
-                            channel.announced = true
-                            log("CARLIFE: $label 未收到格式宣告，按 48kHz 立体声处理")
-                            onAudioFormat(DEFAULT_AUDIO_RATE, 2)
-                        }
-                        if (length > 0) {
+                synchronized(channel) {
+                    if (!running.get() || channel.generation != generation) return
+                    if (isTts) {
+                        if (type == CarLifeProtocol.TTS_PKG_INIT) {
+                            val format = parseAudioInit(payload)
+                            if (format != null) {
+                                val (rate, channelConfig, _) = format
+                                channel.rate = rate
+                                channel.channels = channelsOf(channelConfig)
+                                log("CARLIFE: TTS 音频格式宣告 ${channel.rate}Hz ${channel.channels}ch（导航播报通道）")
+                                onTtsFormat(channel.rate, channel.channels)
+                                if (!ttsActive) {
+                                    ttsActive = true
+                                    publishAudioGate(channel, generation, true)
+                                }
+                            }
+                        } else if (type == CarLifeProtocol.TTS_PKG_NORMAL && length > 0) {
+                            if (channel.rate <= 0) {
+                                channel.rate = CarLifeProtocol.TTS_DEFAULT_RATE
+                                channel.channels = 1
+                                log("CARLIFE: TTS 未宣告格式——按 ${channel.rate}Hz 单声道处理（发送端会重采样）")
+                                onTtsFormat(channel.rate, channel.channels)
+                            }
+                            ttsPackets++
+                            if (ttsPackets == 1L) {
+                                log(
+                                    "CARLIFE: ✓ 收到导航播报音频（TTS 首包 ${length}B，" +
+                                        "${channel.rate}Hz ${channel.channels}ch）",
+                                )
+                            }
                             noteAudioPcm(channel)
-                            onAudioPcm(payload, length)
+                            if (!ttsActive) {
+                                ttsActive = true
+                                publishAudioGate(channel, generation, true)
+                            }
+                            onTtsPcm(payload, length)
+                        } else if (type == CarLifeProtocol.TTS_PKG_STOP) {
+                            ttsActive = false
+                            publishAudioGate(channel, generation, false)
+                        } else if (channel.controlLogged.add(type)) {
+                            log("CARLIFE: 未识别 TTS 控制信号 0x${type.toString(16)}（长度 0）")
                         }
+                        return@synchronized
                     }
+                    when (type) {
+                        CarLifeProtocol.MUSIC_PKG_INIT -> {
+                            val format = parseAudioInit(payload)
+                            if (format != null) {
+                                val (rate, channelConfig, sampleFormat) = format
+                                val channels = channelsOf(channelConfig)
+                                log(
+                                    "CARLIFE: $label 音频格式宣告 ${rate}Hz " +
+                                        "${channels}ch ${sampleFormat}bit（channelConfig=$channelConfig）",
+                                )
+                                onAudioFormat(rate, channels)
+                                channel.announced = true
+                                onMediaActivity(CarLifeMediaActivity.INITIALIZED)
+                            }
+                        }
 
-                    // 引擎音频开停信号（长度 0）：来电/路由切换时引擎会先发 STOP，
-                    // 挂断恢复播放再发 START。只上报，不拦截音频。
-                    CarLifeProtocol.MUSIC_PKG_START -> {
-                        log("CARLIFE: $label 引擎音频开始（0x30002）")
-                        engineAudioActive = true
-                        onAudioGate(true)
-                    }
+                        CarLifeProtocol.MUSIC_PKG_NORMAL -> {
+                            audioPacketCount++
+                            if (!channel.announced) {
+                                // 手机没宣告格式就直接推 PCM：按 48k 立体声先顶着
+                                channel.announced = true
+                                log("CARLIFE: $label 未收到格式宣告，按 48kHz 立体声处理")
+                                onAudioFormat(DEFAULT_AUDIO_RATE, 2)
+                            }
+                            if (length > 0) {
+                                noteAudioPcm(channel)
+                                onMediaActivity(CarLifeMediaActivity.PCM)
+                                onAudioPcm(payload, length)
+                            }
+                        }
 
-                    CarLifeProtocol.MUSIC_PKG_STOP -> {
-                        log("CARLIFE: $label 引擎音频停止（0x30003）——来电或音频路由被切走")
-                        engineAudioActive = false
-                        onAudioGate(false)
-                    }
+                        CarLifeProtocol.MUSIC_PKG_RESUME -> {
+                            log("CARLIFE: $label 引擎恢复播放（0x30004）")
+                            engineAudioActive = true
+                            onMediaActivity(CarLifeMediaActivity.RESUME)
+                        }
 
-                    else -> {
-                        if (audioUnknownTypes.add(type)) {
-                            log("CARLIFE: ${carLifeAudioTypeName(type)} 音频包（长度 $length，暂不处理）")
+                        CarLifeProtocol.MUSIC_PKG_STOP, CarLifeProtocol.MUSIC_PKG_PAUSE -> {
+                            log("CARLIFE: $label ${carLifeAudioTypeName(type)}（0x${type.toString(16)}）")
+                            engineAudioActive = false
+                            onMediaActivity(
+                                if (type == CarLifeProtocol.MUSIC_PKG_PAUSE) {
+                                    CarLifeMediaActivity.PAUSE
+                                } else {
+                                    CarLifeMediaActivity.STOP
+                                },
+                            )
+                        }
+
+                        else -> {
+                            if (audioUnknownTypes.add(type)) {
+                                log("CARLIFE: ${carLifeAudioTypeName(type)} 音频包（长度 $length，暂不处理）")
+                            }
                         }
                     }
                 }
@@ -1635,9 +1722,12 @@ class CarLifeHuClient(
         } catch (error: Exception) {
             if (running.get()) log("CARLIFE: $label 音频通道断开 - ${error.message}（看门狗会自动重连）")
         } finally {
-            // 只有「我这一代读线程仍是最新」才允许判死：旧线程被 close() 时也会走到这里，
-            // 若无条件置死就会把刚接上的新通道立刻判死，形成重连死循环。
-            if (channel.generation == generation) channel.dead = true
+            synchronized(channel) {
+                if (channel.generation == generation) {
+                    channel.dead = true
+                    publishAudioGate(channel, generation, false)
+                }
+            }
         }
     }
 
@@ -1672,8 +1762,24 @@ class CarLifeHuClient(
         }
     }
 
+    /** 音乐暂停/恢复切换时刷新沉默计时，避免长时间静音后解除静音瞬间误判超时重连 9240。 */
+    fun noteMediaExpectationChanged() {
+        val now = monotonicMillis()
+        mediaChan.lastPcmAt = now
+        mediaChan.silentReopens = 0
+        mediaChan.nextSilentAt = 0L
+    }
+
+    internal fun notifyVideoFrameForTest() {
+        lastFrameAt = monotonicMillis()
+    }
+
+    internal fun superviseMediaOnceForTest() {
+        superviseAudio(mediaChan)
+    }
+
     private fun superviseAudio(channel: AudioChannel) {
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         val socket = sockets[channel.port]
         if (socket == null || socket.isClosed || channel.dead) {
             // 断链重连：不设次数上限（引擎冷启动期可能连续 reset，重连成功才停）
@@ -1688,6 +1794,14 @@ class CarLifeHuClient(
         }
         // TTS 只做断链重连：没开导航时它本来就该长时间静默，按沉默判会天天误重连。
         if (channel.isTts) return
+        // 「确实该有声音」：引擎刚发过 0x30004，或上层确认音乐会话正在播放。
+        // 暂停/静音期间本来就没有 PCM，持续刷新基线，避免恢复播放瞬间被累计静音时长误触发重连。
+        if (!engineAudioActive && !audioExpected()) {
+            channel.lastPcmAt = now
+            channel.silentReopens = 0
+            channel.nextSilentAt = 0L
+            return
+        }
         val silentFor = now - channel.lastPcmAt
         if (silentFor < SILENT_RECONNECT_MS) return
         // 刚（重新）接上的宽限期：给引擎一点时间把流推起来。
@@ -1695,8 +1809,6 @@ class CarLifeHuClient(
         // 画面还在出帧 = 引擎活着，问题只在这条音频流上。视频也停了说明整条链路有事，
         // 那是会话冻结/断链恢复的活，这里跟着重连只会把水搅浑。
         if (now - lastFrameAt > VIDEO_ALIVE_MS) return
-        // 「确实该有声音」：引擎刚发过 0x30002，或上层确认音乐会话正在播放。
-        if (!engineAudioActive && !audioExpected()) return
         if (now < channel.nextSilentAt) return
         if (channel.silentReopens >= SILENT_MAX_ATTEMPTS) {
             if (channel.nextSilentAt != Long.MAX_VALUE) {
@@ -1722,7 +1834,7 @@ class CarLifeHuClient(
 
     /** 收到 PCM 的打卡点：刷新沉默计时，顺带报告「恢复」。 */
     private fun noteAudioPcm(channel: AudioChannel) {
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         val previous = channel.lastPcmAt
         channel.lastPcmAt = now
         val reopens = channel.silentReopens
@@ -1735,12 +1847,34 @@ class CarLifeHuClient(
         }
     }
 
+    private fun publishAudioGate(
+        channel: AudioChannel,
+        generation: Int,
+        active: Boolean,
+    ) {
+        synchronized(channel) {
+            if (channel.generation != generation) return
+            if (!channel.isTts) {
+                engineAudioActive = false
+                onMediaActivity(CarLifeMediaActivity.TRANSPORT_CLOSED)
+            } else if (channel.playbackActive != active) {
+                channel.playbackActive = active
+                onTtsGate(active)
+            }
+        }
+    }
+
     /** 把一条音频 socket 挂上读线程（媒体 / TTS 共用）。 */
     private fun openAudio(
         channel: AudioChannel,
         socket: Socket,
     ) {
-        val generation = ++channel.generation
+        val generation =
+            synchronized(channel) {
+                channel.generation++
+                publishAudioGate(channel, channel.generation, false)
+                channel.generation
+            }
         val input =
             try {
                 socket.getInputStream()
@@ -1749,7 +1883,7 @@ class CarLifeHuClient(
                 channel.dead = true
                 return
             }
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         channel.dead = false
         channel.openedAt = now
         channel.lastPcmAt = now
@@ -1761,10 +1895,8 @@ class CarLifeHuClient(
     /** 重连音频通道（9240 / 9241）。成功返回 true（已挂上新的读线程）。 */
     private fun reopenAudio(channel: AudioChannel): Boolean {
         runCatching { sockets.remove(channel.port)?.close() }
-        val socket = Socket()
         return try {
-            socket.tcpNoDelay = true
-            socket.connect(InetSocketAddress(host, channel.port), connectTimeoutMs)
+            val socket = openPortSocket(channel.port)
             if (!running.get()) {
                 runCatching { socket.close() }
                 return false
@@ -1772,8 +1904,7 @@ class CarLifeHuClient(
             sockets[channel.port] = socket
             openAudio(channel, socket)
             true
-        } catch (error: Exception) {
-            runCatching { socket.close() }
+        } catch (_: Exception) {
             false
         }
     }
@@ -2030,6 +2161,8 @@ class CarLifeHuClient(
 
         /** 「视频仍在正常出帧」的窗口（毫秒）；超过它说明整条链路都有事，不该只怪音频。 */
         private const val VIDEO_ALIVE_MS = 3_000L
+        private const val TOUCH_RECONNECT_COOLDOWN_MS = 1_000L
+        private const val TOUCH_FORCE_RETRY_MIN_MS = 200L
 
         private val PORTS = intArrayOf(
             CarLifeProtocol.PORT_CMD,

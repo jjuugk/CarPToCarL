@@ -74,8 +74,8 @@ RTP↔NTP 锚点等于没有（第二次会话 10:25:01.501 同样一次就死�
 |---|---|---|
 | 同步包失败不再终止线程：持续每秒重试，失败满 10 次重开套接字 | `audio/AudioSender.kt` | 锚点从「一次就死」变成「一直有」 |
 | 新增 `resyncAnchor(reason)`：补发 3 个同步包 | 同上 | 音频中断后恢复时立刻重新对齐车机时钟 |
-| 识别 `0x30002` / `0x30003` 音频开停信号并落到日志 | `carlife/CarLifeProtocol.kt`、`CarLifeHuClient.kt` | 来电/恢复在日志里变成一行明确结论 |
-| 引擎音频恢复时自动 `resyncAnchor` | `carlife/CarLifeHijack.kt` | 缩短「有数据了但车机还没对齐」的空窗 |
+| 识别 `0x30002`（STOP）/ `0x30003`（PAUSE）/ `0x30004`（RESUME）音频状态信号并落到日志 | `carlife/CarLifeProtocol.kt`、`CarLifeHuClient.kt` | 来电暂停与恢复在日志里变成明确结论 |
+| 模块焦点与 `0x30002`/`0x30003`/`0x30004` 关联成媒体播放状态机，暂停/静音时清空该路残留 PCM | `carlife/CarLifeMediaPlayback.kt`、`CarLifeHijack.kt` | 恢复后由混音泵续上 RTP 时间轴，不再另行补发同步包 |
 | 画面源停摆看门狗：8 秒无帧记一条，恢复时记停摆时长 | 同上 | 下次能直接区分「源没画面」与「车机解码问题」 |
 | 暂停期间丢弃 PCM 计数（30 秒一条） | `carlife/CarLifeAudioSink.kt` | 排查导航音频是否被误判为暂停而丢掉 |
 | 暂停截断改为**15 秒窗口**（原为永久） | 同上 | 连上时手机里常驻一条暂停会话，会把导航/提示音长期吃掉 |

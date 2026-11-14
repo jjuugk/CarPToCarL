@@ -195,18 +195,32 @@ internal object CarLifeProtocol {
     //
     // **25 个字段里前 24 个是 required**：少一个 protobuf 解析就整条丢弃，所以
     // 未知项必须显式补 0，不能省略（[carGps] 已按 proto 顺序全量写出）。
+    const val HU_PAUSE_MEDIA = 98318 // 0x0001800E MSG_CMD_PAUSE_MEDIA（兼容旧版 MD 控制指令）
     const val HU_CAR_GPS = 98320 // 0x00018010
 
     // ---- 车机硬键（0x68008，HU → MD，控制通道）----
     //
     // `CommonParams.MSG_TOUCH_CAR_HARD_KEY_CODE = 0x00068008`，
     // 载荷 `CarlifeCarHardKeyCode{ keycode = 1 }`。
-    // 键值表同在 CommonParams：`KEYCODE_VR_START = 0x21`、`KEYCODE_VR_STOP = 0x22`。
-    // 车机按下方向盘语音键时发 0x21，手机端 CarLife+ 用它自己的麦克风起语音识别
-    // （所以**不需要**我们回传车机麦克风音频）。
+    // CarLife+ 8.8.5 `CarlifeConnectInitUtils` 实际处理的媒体/语音硬键：
+    //   `KEYCODE_SEEK_SUB = 0x0F`（上一曲）· `KEYCODE_SEEK_ADD = 0x10`（下一曲）
+    //   `KEYCODE_MEDIA_START = 0x1F`（开始播放，幂等）· `KEYCODE_MEDIA_STOP = 0x20`（暂停播放，幂等）
+    //   `KEYCODE_VR_START = 0x21`（起语音识别）· `KEYCODE_VR_STOP = 0x22`（停语音识别）
     const val TOUCH_CAR_HARD_KEY_CODE = 425992 // 0x00068008
 
     object HardKey {
+        /** 上一曲。 */
+        const val SEEK_SUB = 0x0F
+
+        /** 下一曲。 */
+        const val SEEK_ADD = 0x10
+
+        /** 开始/恢复音乐播放（幂等，对应 `startMusic(false)`）。 */
+        const val MEDIA_START = 0x1F
+
+        /** 暂停音乐播放（幂等，对应 `pauseMusic(false)`）。 */
+        const val MEDIA_STOP = 0x20
+
         /** 起语音识别（小度）。 */
         const val VR_START = 0x21
 
@@ -221,33 +235,26 @@ internal object CarLifeProtocol {
 
     // ---- 音频（9240 媒体 / 9241 TTS）----
     //
-    // 音频通道是**裸字节流**，不走控制通道的 8B 头，也不走视频的 [len][seq][type]：
-    // 每包 = 12B 包头 + 负载（手机端 PCMPackageHead 逐字节写死）：
+    // 音频通道是**裸字节流**，每包 = 12B 包头 + 负载：
     //   [0..3] 负载长度 BE | [4..7] 时间戳 ms BE | [8..11] 包类型 BE
-    // 包类型来自 AudioUtil.EMusicPackageType：INIT=0x30001（负载是 CarlifeMusicInit
-    // 原型，宣告采样率/声道/位深），NORMAL=0x30006（负载是裸 PCM）。
-    //
-    // 0x30002 / 0x30003 是**长度 0 的开停信号**（2026-10-26 从真机日志反推，见 docs/audio-call-issues.md）：
-    //   0x30002 出现后立刻来首帧 PCM（10:03:16、10:24:19 两次）；
-    //   0x30003 出现后引擎音频归零（10:21:13、10:31:50 两次，均为来电期间）。
-    // 语义按「开始 / 停止」处理，再往上叠一层兜底（停止后仍收 PCM 照常转发，不靠它裁决）。
+    // 手机端 `CommonParams` / `PCMMediaManager` 与官方 Vehicle Lib 一致：
+    //   INIT = 0x30001、STOP = 0x30002、PAUSE = 0x30003、RESUME_PLAY = 0x30004、NORMAL = 0x30006。
     const val AUDIO_HEAD_LEN = 12
     const val MUSIC_PKG_INIT = 0x30001
-    const val MUSIC_PKG_START = 0x30002
-    const val MUSIC_PKG_STOP = 0x30003
+    const val MUSIC_PKG_STOP = 0x30002
+    const val MUSIC_PKG_PAUSE = 0x30003
+    const val MUSIC_PKG_RESUME = 0x30004
     const val MUSIC_PKG_NORMAL = 0x30006
 
     // ---- TTS（9241 端口）：导航播报 / 语音提示 ----
     //
-    // 关键：**这条通道才是导航声音的来源**，与媒体通道（9240 / 0x3xxxx）完全独立。
-    // 2026-10-27 真机日志（WinPlay 测试台）实测：
-    //   0x40001 长度 7    → 格式宣告（CarlifeMusicInit 同构）
-    //   0x40002 长度 0    → 开始
-    //   0x40003 长度 1280 → **裸 PCM（导航播报数据）**
-    // 编号与媒体通道**不对应**（媒体数据包是 0x30006，TTS 却在 0x40003 上带负载），
-    // 所以这里不照搬编号做枚举，只认两条铁律：**有负载就是 PCM，长度 0 就是开停信号**。
-    // 旧实现把 0x4xxxx 全丢进「暂不处理」，症状正是「音乐有声、地图导航没声」。
+    // 与媒体通道完全独立：
+    //   0x40001 → 格式宣告（CarlifeMusicInit 同构）
+    //   0x40002 → 停止（CarLife Vehicle Lib MSG_TTS_STOP，长度 0）
+    //   0x40003 → 裸 PCM（导航播报数据）
     const val TTS_PKG_INIT = 0x40001
+    const val TTS_PKG_STOP = 0x40002
+    const val TTS_PKG_NORMAL = 0x40003
 
     /** TTS 未宣告格式时的兜底采样率（导航播报常见 16k 单声道，AudioSender 会重采样到 48k）。 */
     const val TTS_DEFAULT_RATE = 16_000

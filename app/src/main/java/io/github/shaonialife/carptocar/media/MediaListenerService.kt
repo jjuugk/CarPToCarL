@@ -46,6 +46,9 @@ class MediaListenerService : NotificationListenerService() {
         } catch (_: SecurityException) {
             // 通知使用权被撤销：静默（授权后系统会重新绑定本服务）
             MediaSessionsState.accessGranted = false
+            NotificationAccess.markDisconnected()
+            MediaSessionsState.activeController = null
+            MediaSessionsState.publish(null)
         }
     }
 
@@ -53,6 +56,7 @@ class MediaListenerService : NotificationListenerService() {
         super.onListenerDisconnected()
         MediaSessionsState.accessGranted = false
         NotificationAccess.markDisconnected()
+        MediaSessionsState.activeController = null
         // 必须清空：否则卡片会保留断开前的歌名/播放状态，出现「正在播放 + 未在播放」
         // 甚至「正在播放 + 无法读取播放信息」的自相矛盾显示（2026-10-19 实测：
         // 重装后监听器未被系统绑定，卡片长时间停在旧状态）。
@@ -63,6 +67,9 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(periodicRefresh)
+        NotificationAccess.markDisconnected()
+        MediaSessionsState.accessGranted = false
+        MediaSessionsState.activeController = null
         runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }
         unregisterAll()
         // 静态钩子/线程池都在 object 与实例之间互相持有：不复位就会把已销毁的服务、
@@ -155,11 +162,16 @@ class MediaListenerService : NotificationListenerService() {
 
     /** 从活跃会话提取正在播放态：优先 PLAYING 的会话，否则保留第一个有元数据的。 */
     private fun refresh() {
+        if (!NotificationAccess.isConnected || !NotificationAccess.isGranted(this)) return
         val controllers =
             try {
                 manager.getActiveSessions(componentName(this))
             } catch (_: SecurityException) {
-                emptyList()
+                NotificationAccess.markDisconnected()
+                MediaSessionsState.accessGranted = false
+                MediaSessionsState.activeController = null
+                MediaSessionsState.publish(null)
+                return
             }
         val picked =
             controllers.firstOrNull {

@@ -777,6 +777,9 @@ object SessionController {
         if (action >= 0 && MediaSessionsState.dispatchTransport(action)) {
             return
         }
+        if (CarLifeHijack.sendMediaKey(keyCode)) {
+            return
+        }
         // 回退：无活跃会话 / 动作不受支持时走系统焦点路由
         val ctx = appContext ?: return
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -2331,7 +2334,9 @@ object SessionController {
         }
         if (audioSender?.isRunning == true) return
         appendLog("MODE: 会话进行中，动态补启音频通道…")
-        startAudioChannel(context, client, secret, currentAudioHost)
+        if (startAudioChannel(context, client, secret, currentAudioHost) && client.record()) {
+            audioSender?.onRecorded()
+        }
     }
 
     /**
@@ -3704,7 +3709,7 @@ object SessionController {
         startCallWatcher()
         // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
         // 否则车机对 SETUP 回 200、给端口，但不排播（见 startAudioChannel 同名注释）。
-        client.record()
+        if (client.record()) sender.onRecorded()
         appendLog(
             "AUDIO: 音频流重建完成（新 dataPort=${info.dataPort} " +
                 "controlPort=${info.controlPort}）——若仍无声，说明卡在车机音源选择而非本机",
@@ -3813,7 +3818,7 @@ object SessionController {
         if (!inCall) rejectedCallProfileKey = null
         // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
         // 否则车机对 SETUP 回 200、给端口，但不排播。
-        client.record()
+        if (client.record()) sender.onRecorded()
         appendLog(
             "AUDIO: 音频流已切到 ${target.label}（dataPort=${info.dataPort} " +
                 "controlPort=${info.controlPort}）——音源不变，只换了接收端输出通路",
@@ -5783,7 +5788,8 @@ object SessionController {
                                     // 音频已在本轮 RECORD 之前 SETUP 完成：那次 RECORD 就是
                                     // 同时纳入视频+音频的那一次，**绝不能再补发**——JYBOX-80
                                     // 对「流后补 RECORD」直接 500 并关掉 AirPlay 服务（issue #14）。
-                                    if (audioStartedBeforeRecord) {
+                                    if (audioStartedBeforeRecord && firstRecordOk) {
+                                        audioSender?.onRecorded()
                                         appendLog("AUDIO: 音频已随本次 RECORD 一同激活（未补发 RECORD）")
                                     }
                                     if (MIC_PROBE_ENABLED && audioStartedBeforeRecord) runMicProbe(client)
@@ -5799,7 +5805,9 @@ object SessionController {
                                         // 先挂表再发：往返延迟也算进怀疑窗口（宝马那 5 次
                                         // 都在 1.79~2.19s 之间，窗口 3.5s 够容差）
                                         postRecordWatch.mark(receiverIdentity)
-                                        if (!client.record()) {
+                                        if (client.record()) {
+                                            audioSender?.onRecorded()
+                                        } else {
                                             // 这台接收端受不了「流后补 RECORD」：记住它，下一轮
                                             // 改走音频优先（先 SETUP 音频再一次 RECORD）。本轮
                                             // 已经废了（它多半会顺手关掉 AirPlay 服务），没有
@@ -5812,6 +5820,7 @@ object SessionController {
                                         }
                                         if (MIC_PROBE_ENABLED) runMicProbe(client)
                                     } else if (audioStarted) {
+                                        if (firstRecordOk) audioSender?.onRecorded()
                                         // P1 单变量实验（2026-11-09）：不补发那一次 RECORD。
                                         // 宝马 G38/F22 三份日志（18:19 / 18:22 / 18:24）100%
                                         // 复现同一形态——音频 SETUP 200、补发 RECORD 完成，
