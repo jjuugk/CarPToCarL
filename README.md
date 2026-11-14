@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk)**
-> —— 主线固定直链（当前 1.2.43，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.45.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.45/CarPToCarL-1.2.45.apk)**
+> —— 主线固定直链（当前 1.2.45，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.45.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.45/CarPToCarL-1.2.45.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.43，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.43.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.45，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.45.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.43`（正式版；**车机上没有歌词的真正原因：iAP2 根本没有歌词字段，改成「CarLife 歌词行按三条门顶替 title」**，单测 791 例 0 失败）。① iAP2 `0x5001 NowPlayingUpdate` 的 media item 组 17 个字段里**没有歌词**，这台奥迪 `0x5000` 订阅里多出来的 `0x0010/0x0012` 是**流派与作曲者**——「开个开关让车机显示歌词」这条路不存在，歌词唯一能出场的形状是**顶替 `title`**。② CarLife 侧歌词也不走独立通道：`CarlifeMediaInfo` 没有 lyric 字段，逐行歌词是**另起一条 `0x10035`**，签名为 `artist == "<专辑>-<画家>"`；新增 `carlife/LyricLines` 识别（含 `trueArtist()` 剥前缀），命中即在日志里标「（歌词行）」并交给 0x5001。③ 新增 `iap2/NowPlayingSourcePolicy`：MediaSession 与 CarLife 歌词行谁上位要过三条门——**确实是歌词行** / **最后一条媒体信息距今 ≤5s**（暂停或切源后 5 秒内让位）/ **两边仍是同一首歌**（title 一致、artist 双方都有值时一致）。缺第三门会「切到第三方播放器后车机仍显示上一首的歌词」，缺第二门会「暂停后标题永远停在最后一句」。④ `CarLifeHijack` 新增 `latestSongMediaInfo` 与 `latestMediaInfoAtMillis`，歌词行**不覆盖**真实歌名基线（那是判「同一首歌」的唯一凭据）。⑤ 歌词行只借 `song` 当标题，**画家/专辑/时长一律取真实歌曲那条**，车机画家栏不再出现 `专辑-画家` 拼接串；封面键按「专辑|画家」归一化，歌词行共用同一 id，不会每行重编码重传（参考项目当年每行重传 19.5KB）。⑥ 诊断直接可读：新增 `CARLIFE: 媒体信息（歌词行）` 与 `EVENT: CarLife 歌词行「…」` 两行日志，一眼判断歌词通道通没通。⑦ 已知前提与代价：只有 **CarLife 内置播放器**放歌才有歌词（第三方播放器不触发 `0x10035`，那类歌名只能从 MediaSession 拿）；且车机 NowPlaying 只有一行 title，歌词滚动时看不到歌名——这是取舍，不是 bug。⑧ 排查过程与字段表记在 `docs/iap2-lyric-lines.md`：21:35 那份日志里 `CARLIFE: 媒体信息` 计数为 **0**，不是我们丢了歌词，是歌词从没送到。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.43.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.43/CarPToCarL-1.2.43.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.45`（正式版；**宝马 iD6「一放声音就重启车机」修好了：同一次会话只允许一次 RECORD**，单测 809 例 0 失败；`1.2.44` 按号码规则跳过）。① 根因：AirPlay 的 RECORD 报文体是**空 plist**——它激活的是**会话**，不是某一条流；所以「音频流后加入再补发 RECORD」在协议上没有必要性，只是奥迪 MIB3 需要它当催促。宝马 iD6（NBT Evo）收到第二次就关掉自己的 AirPlay 服务：`22:44:12.355` 补发 RECORD 完成 → **1ms 后** `control EOF` → 6 秒后 `NSD: 服务消失 CarPlay`（用户看到的就是「重启」）；`22:41:47.191` 归还主屏后重发 RECORD 是同一形态；而那台车**第一次** RECORD 之后视频稳稳跑了 106 秒。② 修法：新增 `airplay/RecordBudget`，把「能不能发第二次 RECORD」收口到 `AirPlayClient.record()` 一处——型号快路径命中或学到过音频优先的接收端把预算收紧成一次，之后音频加入/主屏归还/重建/换档全部只推包；奥迪这类需要催促的仍照旧补发（默认 `allowRepeat = true`）。③ 顺带修掉一个「学了也白学」的循环：旧逻辑学到「过敏」只切音频优先，而音频优先要求连上时手机已持有主音频，一放歌就退化成「仅推视频 + 音频后加入 + 补 RECORD」，于是每次都崩。④ iDrive 旋钮可用：车机 `/info` 里旋钮是独立设备 `KnobInput`（`Generic Desktop/Wheel`，byte0=按钮位图、byte1=相对滚轮），旧实现把 `00 01`/`00 ff`（转动 ±1）当「其他 HID 报告」丢掉了。新增 `input/KnobReports` 按**描述符**识别（触摸 Digitizer/媒体键 Consumer/电话 Telephony 都不声明 Wheel，不会误伤；带 Report ID 的直接放弃不猜），`input/KnobRouter` 把转动翻译成**竖向滑动手势**（顺时针 = 内容下滚 = 手指上划）、按下翻译成点击，锚点取「最后一次真触摸点」，没摸过用画布中心。⑤ 为什么不用硬键：CarLife 的 `0x68008` 只被 CarLife+ 处理 6 个键（上一曲/下一曲/播放/暂停/语音），方向键等于没发。⑥ 已知取舍：旋钮是「滚动」不是「焦点移动」——CarLife+ 是纯触摸界面，没有 CarPlay 的焦点引擎，屏幕上也没有可见光标。⑦ 诊断关键词：`STREAM: 本车机只需一次 RECORD`、`AIRPLAY: 跳过重复 RECORD`、`EVENT: 旋钮 steps=…`、`KNOB: 转动 +1 → 向上滑动`。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.45.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.45/CarPToCarL-1.2.45.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,75 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.45 —— 2026-11-14（宝马 iD6 不再因「补发 RECORD」重启车机；iDrive 旋钮可用，正式版）
+
+起因：宝马 F49（NBT Evo）连上之后画面正常，但**一播声音车机就重启**，另外**iDrive 旋钮控制不了
+屏幕**。单测 **809 例 0 失败**。`1.2.44` 按号码规则跳过。
+
+**一、重启的根因：第二次 RECORD**
+
+AirPlay 的 RECORD 报文体是**空 plist**（`AirPlayClient.record()` 里
+`BinaryPlist.encode(linkedMapOf())`）——它激活的是**会话**，不是某一条流。所以
+「音频流后加入会话、再补发一次 RECORD」在协议上**没有必要性**，它只是给奥迪 MIB3 当催促
+（那台不催不排播，2026-10-17 实测）。宝马 iD6 收到第二次就翻脸：
+
+```
+22:44:12.292  音频 SETUP → 200 OK（dataPort=6000）
+22:44:12.355  ✓ RECORD 完成——会话已激活        ← 本轮第二次
+22:44:12.356  远端控制通道结束 - control EOF     ← 1ms 后
+22:44:18.485  NSD: 服务消失 CarPlay              ← 6s 后 AirPlay 服务重启（用户看到的「重启」）
+```
+
+更早还有一次同形态的：`22:41:47.191` 车机发 `requestUI`，我们归还主屏后重新
+SETUP + RECORD → 同一毫秒 `control EOF`。而那台车**第一次** RECORD 之后视频稳稳跑了
+106 秒（`22:42:24.087` → `22:44:12.355` 全程无异常）。这与 2026-11-07 宝马 G38
+「补发 RECORD 后 17ms EOF」是同一条结论，只是这次拿到了同进程内的对照。
+
+**二、还有一个「学了也白学」的循环**
+
+旧逻辑对「对重复 RECORD 过敏」的接收端只是把顺序切成**音频优先**。但音频优先要求
+SETUP 音频那一刻手机**已经持有主音频**——连上时主音频在车机手里，`startAudioChannel`
+直接 `return false`，退化成「本轮仅推视频」；等用户真按播放，音频流照样在会话激活后
+加入、照样补 RECORD。所以**记忆学了也白学，每次放音乐都在同一个地方崩**。
+
+**三、改动**
+
+- 新增 `airplay/RecordBudget`（纯 Kotlin，可单测）：会话级 RECORD 的预算，默认允许重复
+  （奥迪行为完全不变），可运行时收紧成「只放行一次」。
+- `AirPlayClient.record()` 开头过预算：被拦时打
+  `AIRPLAY: 跳过重复 RECORD（…已发 N 次）——会话已激活，按成功处理` 并**返回 true**，
+  于是所有调用方（音频加入 `:1143`/`:2511`、重建、换档 `:3968`/`:4078`、主屏归还
+  `CarPlayResourceStreams.resumeScreen`）都按「激活成功」继续推包，不再重发。
+- `SessionController` 在解析出顺序后收紧预算：型号快路径命中（`matchesKnown`）或学到过
+  `AUDIO_FIRST` 的接收端 → `client.restrictSingleRecord = true`，并打
+  `STREAM: 本车机只需一次 RECORD——后续音频加入/主屏归还都不再补发`。
+- iDrive 旋钮：车机 `/info` 里它是独立设备 `KnobInput`，描述符是 `Generic Desktop/Wheel`
+  （byte0 = 按钮位图：bit0 按下、bit1 返回；byte1 = 相对滚轮）。旧实现既不认这个签名、
+  也解析不出按钮位，整条报文落进「其他 HID 报告」只打一行日志——`00 01` / `00 ff`
+  就是转动 ±1，全被丢掉了。
+  - 新增 `input/KnobReports`：按**描述符**找 `Usage Page 0x01 + Usage 0x38` 的字段
+    （触摸是 Digitizer 页、媒体键是 Consumer 页、电话是 Telephony 页，都不声明 Wheel，
+    所以不会误伤）；带 `Report ID` 的描述符直接放弃，不猜位偏移。
+  - 新增 `input/KnobRouter`：转动 → 一段竖向滑动手势（顺时针 = 内容下滚 = 手指上划），
+    按下 → 在锚点点一下；锚点取**最后一次真触摸点**，没摸过用画布中心。动作串行执行，
+    队列上限 3（滚动是相对量，丢一格只损失一点距离）。
+  - 为什么不是硬键：CarLife 的 `0x68008` 只被 CarLife+ 处理 6 个键（上一曲/下一曲/播放/
+    暂停/语音），方向键发过去等于没发。
+- 已知取舍：旋钮是「滚动」而不是「焦点移动」——CarLife+ 是纯触摸界面，没有 CarPlay 的
+  焦点引擎，屏幕上也没有可见光标（画面是直通，加光标要解码重绘，会掉帧）。
+
+**四、怎么从日志确认**
+
+| 关键词 | 含义 |
+| --- | --- |
+| `STREAM: 本车机只需一次 RECORD` | 本轮按单次 RECORD 走（iD6 应出现） |
+| `AIRPLAY: 跳过重复 RECORD` | 拦截真的生效了：音频加入/主屏归还都没有重发 |
+| `EVENT: 旋钮 steps=1 按下=…` | 旋钮报文认出来了 |
+| `KNOB: 转动 +1 → 向上滑动` | 已经翻译成触摸手势 |
+
+如果结果是「车机不重启了、但放音乐没声音」，说明 iD6 也需要那一次催促——下一轮就把音频流
+彻底前置到 RECORD 之前（连上就先 SETUP 音频，让唯一一次 RECORD 永远是「同时激活视频+音频」）。
 
 ### 1.2.43 —— 2026-11-14（车机上的歌词：iAP2 没有歌词字段，改成让 CarLife 歌词行按三条门顶替 title，正式版）
 
