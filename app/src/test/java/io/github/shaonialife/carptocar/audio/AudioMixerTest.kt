@@ -222,14 +222,44 @@ class AudioMixerTest {
     }
 
     @Test
-    fun `落后太多不追赶`() {
+    fun `落后一秒只补到上限_不重排时间轴`() {
         val mixer = mixer()
         val buffer = ByteArray(frameBytes)
         val t0 = 2_000_000_000L
         mixer.dueFrames(t0)
         mixer.mixNextFrame(buffer, t0)
-        // 一整秒没被调度：不能一口气补 46 帧（RTP 时间戳会瞬间前跳），只补 1 帧并重新对齐
-        assertEquals(1, mixer.dueFrames(t0 + 1_000_000_000L))
+        // 一整秒没被调度（≈47 帧欠账）：这一拍补到上限 8 帧，**绝不丢时间轴**。
+        // 旧实现这里返回 1 并把原点挪到眼前——欠的 46 帧变成永久的空洞，
+        // 听感就是「断一下 + 音乐跳一截」（2026-11-14 实车日志）。
+        assertEquals(AudioMixer.MAX_CATCHUP_FRAMES, mixer.dueFrames(t0 + 1_000_000_000L))
+        assertEquals("两秒以内不许重排", 0L, mixer.resyncCount)
+        assertTrue("欠了多少帧必须能被看见", mixer.windowMaxDueFrames >= 45)
+    }
+
+    @Test
+    fun `落后可追回时按实际欠账出帧`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val t0 = 4_000_000_000L
+        mixer.dueFrames(t0)
+        mixer.mixNextFrame(buffer, t0)
+        // 落后 90ms ≈ 4 帧：没超上限，就精确补 3 帧（已产出 1 帧），不是只补 1 帧
+        val due = mixer.dueFrames(t0 + 90_000_000L)
+        assertEquals(3, due)
+        assertEquals("追赶补回的帧数要记账", 2L, mixer.catchUpFrames)
+    }
+
+    @Test
+    fun `落后超过两秒才重排时间轴`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val t0 = 5_000_000_000L
+        mixer.dueFrames(t0)
+        mixer.mixNextFrame(buffer, t0)
+        // 进程被冻结三秒：追不回来了，这一拍只出 1 帧并从眼前重排
+        assertEquals(1, mixer.dueFrames(t0 + 3_000_000_000L))
+        assertEquals(1L, mixer.resyncCount)
+        assertEquals(1L, mixer.windowResyncs)
     }
 
     @Test

@@ -18,7 +18,7 @@ enum class AudioSource {
  *
  * 旧实现是「两路都写进同一个 `ByteArrayOutputStream`，凑满一帧就发」：
  *
- * 1. 两路字节**只是首尾相接**，没有相加。一帧 1024 样本（21ms）里往往是前 10ms 音乐、
+ * 1. 两路字节**只是首尾相接**，没有相加。一帧 1024 样本（旧帧长 21ms）里往往是前 10ms 音乐、
  *    后 11ms 播报，听感就是持续的碎、卡、糊。
  * 2. 两路同时推时一秒产出两秒样本，而封包侧 `timestamp += samplesPerPacket` 跟着产出走，
  *    RTP 时钟变成 2×。车机按 1× 消费，缓冲只增不减，几条播报之后溢出 → 丢包/重同步，
@@ -55,17 +55,34 @@ class AudioMixer(
         const val GAIN_UNITY_Q = 1024
 
         /**
-         * 单拍最多追几帧。
+         * 单拍最多追几帧（一帧 = `frameSamples` 样本：352 → 7.33ms @48k）。
          *
-         * 进程被调度打断、系统短暂休眠之后，`dueFrames` 可能一次算出几十帧。全部补发会让
-         * RTP 时间戳瞬间前跳一大截（车机侧表现为一段静音后突然快进），所以超过这个数就
-         * **不追**，直接重新对齐——丢的那点时间没人能听出来。
+         * 原先是 3（≈22ms），隐含假设「停拍只有几十毫秒」。2026-11-14 实车日志推翻了
+         * 这个假设：泵线程单次停摆 1400ms，代码却只补 22ms、把剩下 1378ms **整段扔掉**，
+         * 顺带把时间原点挪到眼前。听感就是每次停摆「断一下 + 音乐跳一截」，而且
+         * 音频相对视频持续超前、越积越多（样本率 -0.09% → -4.8% → -14%）。
+         *
+         * 现在取 8（≈59ms/拍）：不追求一拍追平，而是每拍净追 7 帧，1400ms 的积压
+         * 约 27 拍消化完。单拍突发只有 8 个 RTP 包，接收端 jitter buffer 接得住；
+         * 追赶期间输出速率短暂高于实时，这是刻意的——宁可对齐，也不要空档。
          */
-        const val MAX_CATCHUP_FRAMES = 3
+        const val MAX_CATCHUP_FRAMES = 8
+
+        /**
+         * 落后超过这么久才真的放弃追赶、重排时间原点。
+         *
+         * 2 秒以内都算「能被调度打断的停摆」，必须追回来。只有进程被冻结、系统休眠
+         * 这种量级才会超过它——那时硬推两千多帧也没有意义。
+         */
+        const val RESYNC_AFTER_MILLIS = 2_000L
     }
 
     /** 一帧的 PCM 字节数（16bit 交织）。 */
     val frameBytes: Int = frameSamples * channels * 2
+
+    /** [RESYNC_AFTER_MILLIS] 换算成帧数（跟着采样率与帧长走，不写死 272）。 */
+    private val resyncThresholdFrames =
+        (RESYNC_AFTER_MILLIS * sampleRate / 1000 / frameSamples).toInt()
 
     private val bytesPerSample = channels * 2
 
@@ -115,7 +132,8 @@ class AudioMixer(
     /**
      * 本次窗口内两次产出之间**最长的一次间隔**（纳秒）。
      *
-     * 定拍泵正常应该每 21ms 醒一次；这里出现 50ms 以上就说明泵线程被调度/GC 拖住了
+     * 定拍泵正常应该每 7.33ms 醒一次（一帧 352 样本 @48k）；出现 50ms 以上就说明
+     * 泵线程被调度/GC 拖住了
      * （或者发生了一次「落后太多直接重新对齐」）。接收端只能按到达时刻排播，
      * 泵晚到 100ms 就是它那边一个 100ms 的空洞——2026-11-14 对 WinPlay 的
      * `pumpGapMs` 就是看这个数。窗口内取最大值，供 `AUDIO: 混音体检` 打出。
@@ -126,6 +144,32 @@ class AudioMixer(
 
     /** 上一次产出帧的时刻（泵线程私有，用于算 [windowMaxGapNanos]）。 */
     private var lastFrameAtNanos = 0L
+
+    /**
+     * 本次窗口内 [dueFrames] 算出的**最大落后帧数**。
+     *
+     * 正常是 1（一帧 7.33ms）。停在 100 以上就是一次秒级的调度停摆——比
+     * [windowMaxGapNanos] 更进一步：那个只说「晚了多久」，这个说「当时欠了多少帧、
+     * 现在能不能追回来」。
+     */
+    @Volatile
+    var windowMaxDueFrames = 0L
+        private set
+
+    /** 本窗口内因为落后超过 [RESYNC_AFTER_MILLIS] 而重排时间原点的次数。 */
+    @Volatile
+    var windowResyncs = 0L
+        private set
+
+    /** 累计重排次数（跨窗口）。>0 说明真的丢掉过一段时间轴。 */
+    @Volatile
+    var resyncCount = 0L
+        private set
+
+    /** 累计「追赶补回来的帧数」= 原本会被扔掉、现在被补发出去的时间。 */
+    @Volatile
+    var catchUpFrames = 0L
+        private set
 
     /** 读线程注入一段 PCM（目标采样率、16bit 交织）。**不做重采样**，由调用方负责。 */
     fun feed(
@@ -148,6 +192,10 @@ class AudioMixer(
      * 这一拍应该产几帧。
      *
      * 返回 0 = 还没到下一帧的时刻；返回 >0 = 立刻产这么多帧（≤ [MAX_CATCHUP_FRAMES]）。
+     *
+     * **落后时不丢时间轴**：只有超过 [RESYNC_AFTER_MILLIS] 才重排原点，其余情况一律
+     * 用「多发几帧」把积压追回来（缺样本自动补零 = 静音）。改这个行为的原因见
+     * [MAX_CATCHUP_FRAMES] 的注释。
      */
     fun dueFrames(nowNanos: Long): Int {
         if (originNanos == 0L) {
@@ -162,13 +210,22 @@ class AudioMixer(
         val elapsedFrames = elapsedNanos * sampleRate / 1_000_000_000L / frameSamples
         val due = elapsedFrames - emittedFrames
         if (due <= 0) return 0
-        if (due > MAX_CATCHUP_FRAMES) {
-            // 落后太多：不追赶，直接把时间原点挪到眼前，保证长期速率仍准确
+        if (due > windowMaxDueFrames) windowMaxDueFrames = due
+        if (due > resyncThresholdFrames) {
+            // 落后超过 2 秒：追不回来了（进程冻结 / 系统休眠）。这是**唯一**允许丢掉
+            // 一段时间轴的分支，RTP 时间戳从眼前继续走。
             originNanos = nowNanos
             emittedFrames = 0L
+            resyncCount++
+            windowResyncs++
             return 1
         }
-        return due.toInt()
+        // 落后但追得回来：这一拍多发几帧消化积压，**不动时间原点**。
+        // 积压里没样本的部分由 mixNextFrame 按 0 计（补静音），车机看到的是连续流，
+        // 不会因为空洞把 jitter buffer 排空再重缓冲。
+        val take = if (due > MAX_CATCHUP_FRAMES) MAX_CATCHUP_FRAMES else due.toInt()
+        if (take > 1) catchUpFrames += take - 1
+        return take
     }
 
     /** 距离下一帧还有多久（纳秒，已钳到 [1ms, 20ms]，供泵线程 park）。 */
@@ -192,7 +249,7 @@ class AudioMixer(
         var hasNav = false
         var navActive = false
         // 锁两个环形缓冲（顺序固定：media → nav，写侧只锁自己那一个，不会成环）。
-        // 锁粒度是「一整帧」（≈21ms 的样本量，实际执行是几十微秒），争用可以忽略。
+        // 锁粒度是「一整帧」（352 样本 ≈ 7.33ms，实际执行是几十微秒），争用可以忽略。
         synchronized(media) {
             synchronized(nav) {
                 hasMedia = media.size >= bytesPerSample
@@ -204,7 +261,7 @@ class AudioMixer(
                 val stepQ = targetQ - startQ
                 var offset = 0
                 for (frame in 0 until frameSamples) {
-                    // 一帧之内线性走完增益变化（≈21ms 斜坡）：够平滑，又不会漏掉下一个字
+                    // 一帧之内线性走完增益变化（≈7.33ms 斜坡）：够平滑，又不会漏掉下一个字
                     val gain = if (stepQ == 0) startQ else startQ + stepQ * frame / frameSamples
                     for (channel in 0 until channels) {
                         val music = media.readShort()
@@ -242,6 +299,8 @@ class AudioMixer(
         windowMediaFrames = 0
         windowNavFrames = 0
         windowMaxGapNanos = 0
+        windowMaxDueFrames = 0
+        windowResyncs = 0
         // 不重置 lastFrameAtNanos：跨窗口的那一刻不该被算成「停拍」
     }
 
@@ -266,6 +325,8 @@ class AudioMixer(
         lastNavFeedNanos = 0L
         framesEmitted = 0L
         duckedFrames = 0L
+        resyncCount = 0L
+        catchUpFrames = 0L
         lastFrameAtNanos = 0L
         resetWindow()
     }

@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
+import android.os.Debug
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.TimingServer
 import java.io.IOException
@@ -89,6 +90,20 @@ class AudioSender(
          * 留 300ms 是为了保留「引擎报停 → 立即补帧」那套诊断文案的原始含义。
          */
         private const val IDLE_FILL_AFTER_MILLIS = 300L
+
+        /**
+         * 混音泵单拍超过这个时长就打一条「停拍归因」。
+         *
+         * 正常一拍 = 一帧 352 样本 ≈ 7.33ms，park 会被钳到 20ms。100ms 是十倍余量，
+         * 不会把正常的调度抖动也记下来；而实车那次停摆是 1400ms，远超阈值。
+         */
+        private const val STALL_REPORT_NANOS = 100_000_000L
+
+        /** 两次「停拍归因」之间的最小间隔（避免连续停摆时把日志刷爆）。 */
+        private const val STALL_REPORT_GAP_NANOS = 300_000_000L
+
+        /** 每次会话最多报这么多条「停拍归因」。 */
+        private const val STALL_REPORT_LIMIT = 40
 
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
@@ -464,6 +479,26 @@ class AudioSender(
     private var idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
 
     /**
+     * 当前线程累计 CPU 时间（纳秒）。取不到返回 0。
+     *
+     * 「停拍归因」的关键对照：wall clock 走了 1400ms 而本线程 CPU 只涨了 2ms，说明这段
+     * 时间线程根本没在跑（被冻结/让出 CPU）；若 CPU 也涨了 1.3 秒，才是我们自己算得慢。
+     * 两者后续要做的修复完全相反——挪线程 vs 提优先级/减分配。
+     */
+    private fun threadCpuNanos(): Long =
+        runCatching { Debug.threadCpuTimeNanos() }.getOrDefault(0L).coerceAtLeast(0L)
+
+    /**
+     * ART 累计 GC 次数。取不到返回 0。
+     *
+     * 只用差值：一次停拍里「GC +12 次」能直接把嫌疑指向分配压力，而不是网络或发送。
+     */
+    private fun gcCount(): Long =
+        runCatching {
+            Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull() ?: 0L
+        }.getOrDefault(0L)
+
+    /**
      * 混音泵：直通模式下**唯一**的编码/封包/发送线程。
      *
      * 三件事合到一条线程：
@@ -499,19 +534,99 @@ class AudioSender(
                             }.getOrDefault("默认")
                         }
                     log("AUDIO: 混音泵线程优先级=$priority")
-                    while (running.get()) {
+                    var lastLoopEnd = 0L
+                    var lastMixNanos = 0L
+                    var lastSendNanos = 0L
+                    var stallReports = 0
+                    var lastReportAt = 0L
+                    var gcMark = gcCount()
+                    var cpuMarkNanos = threadCpuNanos()
+
+                    // 停拍归因：把一次「晚到」拆成 park / 混音 / 发包 / 循环外四段。
+                    // 没有这个分解，日志里那句「最长停拍 1400ms」只能靠猜——GC？后台限制？
+                    // 还是 UDP 发送阻塞？2026-11-14 排查时三种猜测都成立，无法证伪。
+                    fun reportStall(
+                        totalNanos: Long,
+                        parkNanos: Long,
+                        mixNanos: Long,
+                        sendNanos: Long,
+                        outerNanos: Long,
+                        due: Int,
+                    ) {
+                        if (totalNanos < STALL_REPORT_NANOS || !running.get()) return
                         val now = System.nanoTime()
-                        val due = mixer.dueFrames(now)
+                        if (lastReportAt != 0L && now - lastReportAt < STALL_REPORT_GAP_NANOS) return
+                        if (stallReports >= STALL_REPORT_LIMIT) return
+                        lastReportAt = now
+                        stallReports++
+                        val gcNow = gcCount()
+                        val cpuNow = threadCpuNanos()
+                        val gcDelta = gcNow - gcMark
+                        val cpuDeltaMs = (cpuNow - cpuMarkNanos) / 1_000_000
+                        gcMark = gcNow
+                        cpuMarkNanos = cpuNow
+                        val suspect =
+                            when {
+                                parkNanos * 10 >= totalNanos * 7 ->
+                                    "线程没被按时唤醒（GC/后台限制/CPU 被抢）"
+                                sendNanos * 2 >= totalNanos -> "编码或 UDP 发送慢（dispatchPcm 占大头）"
+                                mixNanos * 2 >= totalNanos -> "混音/锁竞争"
+                                outerNanos * 2 >= totalNanos -> "循环外开销（日志/状态检查）"
+                                else -> "分散，无单一主因"
+                            }
+                        log(
+                            "AUDIO: 停拍 ${totalNanos / 1_000_000}ms —— " +
+                                "park ${parkNanos / 1_000_000} / 混音 ${mixNanos / 1_000_000} / " +
+                                "发包 ${sendNanos / 1_000_000} / 循环外 ${outerNanos / 1_000_000} ms；" +
+                                "本拍 $due 帧；GC +$gcDelta 次、本线程 CPU +${cpuDeltaMs}ms → $suspect",
+                        )
+                    }
+
+                    while (running.get()) {
+                        val loopStart = System.nanoTime()
+                        val outerNanos = if (lastLoopEnd == 0L) 0L else loopStart - lastLoopEnd
+                        val due = mixer.dueFrames(loopStart)
                         if (due <= 0) {
-                            java.util.concurrent.locks.LockSupport.parkNanos(mixer.nanosToNextFrame(now))
+                            val parkStart = System.nanoTime()
+                            java.util.concurrent.locks.LockSupport.parkNanos(mixer.nanosToNextFrame(loopStart))
+                            val parkEnd = System.nanoTime()
+                            val parked = parkEnd - parkStart
+                            reportStall(
+                                outerNanos + parked,
+                                parked,
+                                lastMixNanos,
+                                lastSendNanos,
+                                outerNanos,
+                                0,
+                            )
+                            lastLoopEnd = parkEnd
                             continue
                         }
                         var produced = 0
+                        var mixNanos = 0L
+                        var sendNanos = 0L
                         while (produced < due && running.get()) {
-                            mixer.mixNextFrame(mixFrameBuffer, System.nanoTime())
+                            val mixStart = System.nanoTime()
+                            mixer.mixNextFrame(mixFrameBuffer, mixStart)
+                            val sendStart = System.nanoTime()
                             dispatchPcm(mixFrameBuffer)
+                            val sendEnd = System.nanoTime()
+                            mixNanos += sendStart - mixStart
+                            sendNanos += sendEnd - sendStart
                             produced++
                         }
+                        val loopEnd = System.nanoTime()
+                        reportStall(
+                            outerNanos + (loopEnd - loopStart),
+                            0L,
+                            mixNanos,
+                            sendNanos,
+                            outerNanos,
+                            due,
+                        )
+                        lastLoopEnd = loopEnd
+                        lastMixNanos = mixNanos
+                        lastSendNanos = sendNanos
                     }
                 },
                 "audio-mixer-pump",
@@ -909,7 +1024,7 @@ class AudioSender(
                 } else {
                     "环形缓冲丢 0KB（无溢出）"
                 }
-            // 「最长停拍」= 我方两次产出之间的最大间隔，正常 ≈21ms（一帧）。
+            // 「最长停拍」= 我方两次产出之间的最大间隔，正常 ≈7.33ms（一帧）。
             // 超过 50ms 就是我们自己晚发了（GC / 调度），接收端那边必然是一个同样长的
             // 空洞——与「链路丢包」区分开就靠这个数（2026-11-14 WinPlay 对照）。
             val gapText =
@@ -918,10 +1033,21 @@ class AudioSender(
                 } else {
                     "；最长停拍 ${maxGapMs}ms"
                 }
+            // 落后/追回/重排：回答「停摆有没有变成空洞」。
+            // 旧实现落后 22ms 以上就丢弃并重排原点，所以那时候这三个数根本不存在；
+            // 现在的设计是追回来，`重排` 一旦 >0 就说明真的丢过一段时间轴（2 秒以上）。
+            val lagText =
+                if (mixer.windowMaxDueFrames > 1) {
+                    val lagMs = mixer.windowMaxDueFrames * SAMPLES_PER_PACKET * 1000 / sampleRate
+                    "；最大落后 ${mixer.windowMaxDueFrames} 帧（≈${lagMs}ms）、" +
+                        "本会话累计追回 ${mixer.catchUpFrames} 帧、重排 ${mixer.resyncCount} 次"
+                } else {
+                    "；定拍准（无落后）"
+                }
             log(
                 "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / $perSecond 样本每秒；" +
                     "媒体 $mediaPct% / 播报 $navPct%；duck 已触发 ${mixer.duckedFrames} 帧；" +
-                    dropText + gapText,
+                    dropText + gapText + lagText,
             )
             mixer.resetWindow()
         }
