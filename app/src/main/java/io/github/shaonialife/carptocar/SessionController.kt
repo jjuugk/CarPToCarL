@@ -6020,6 +6020,21 @@ object SessionController {
                                     "STREAM: 顺序 = " +
                                         StreamOrderMemory.describe(streamOrder, orderLearned, receiverIdentity),
                                 )
+                                // 会话级 RECORD 只该有一次：对「重复 RECORD 过敏」的接收端，第二次
+                                // RECORD 会让它关掉自己的 AirPlay 服务（宝马 iD6：一放声音车机重启；
+                                // JYBOX-80：0x4301 直接置 0）。判定口径与顺序记忆同一套——已知型号
+                                // 快路径，或已经学过「音频优先」。收紧后 AirPlayClient.record() 对后续
+                                // 调用直接返回成功（见 RecordBudget），奥迪 MIB3 不受影响。
+                                val avoidRepeatRecord =
+                                    StreamOrderMemory.matchesKnown(receiverIdentity) ||
+                                        orderLearned == StreamOrderMemory.Learned.AUDIO_FIRST
+                                client.restrictSingleRecord = avoidRepeatRecord
+                                if (avoidRepeatRecord) {
+                                    appendLog(
+                                        "STREAM: 本车机只需一次 RECORD——后续音频加入/主屏归还都不再补发" +
+                                            "（第二次 RECORD 会让它重启 AirPlay 服务）",
+                                    )
+                                }
                                 var audioStartedBeforeRecord = false
                                 if (streamOrder == StreamOrderMemory.Order.AUDIO_FIRST) {
                                     // 音频 SETUP 要 ~2s，这里先做完再把 RECORD 一次发出去。

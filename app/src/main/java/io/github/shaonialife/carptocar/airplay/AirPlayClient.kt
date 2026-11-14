@@ -135,6 +135,25 @@ class AirPlayClient(
     @Volatile
     private var negotiatedInfo: Map<*, *>? = null
 
+    /** 会话级 RECORD 预算：默认允许重复；[restrictSingleRecord] 打开后只放行第一次。 */
+    private val recordBudget = RecordBudget()
+
+    /**
+     * 本接收端对「会话激活后再发一次 RECORD」过敏（宝马 iD6 / NBT Evo、JYBOX-80）。
+     *
+     * 由 [io.github.shaonialife.carptocar.SessionController] 在解析出流顺序后设置，口径与
+     * [StreamOrderMemory] 一致（已知型号快路径，或已学到「音频优先」）。这类车机收到第二次
+     * RECORD 会直接关掉自己的 AirPlay 服务（现场表现：一放声音车机重启）。收紧之后
+     * [record] 直接按成功返回，调用方照常推包——第一轮 nudge 仍由奥迪 MIB3 独占，
+     * 它的默认值保持「允许重复」不变。
+     */
+    @Volatile
+    var restrictSingleRecord: Boolean = false
+        set(value) {
+            field = value
+            if (value) recordBudget.restrictToSingle()
+        }
+
     // ---- 对外流程 ----
 
     /** pair-setup 是否被 403 拒绝（真车特征）；主控据此决定是否使用 BT 退役 hack。 */
@@ -3373,8 +3392,15 @@ class AirPlayClient(
     }
 
     /** RECORD：激活会话（接收端 onSessionActive）。路径用相对 `/`（catplay record() 同款）。 */
-    fun record(): Boolean =
-        try {
+    fun record(): Boolean {
+        // 会话级激活只需一次。对重复 RECORD 过敏的接收端（宝马 iD6 / JYBOX-80）收到第二次
+        // 会关掉自己的 AirPlay 服务，这里直接当成功——调用方要的是「会话已激活」这个结论，
+        // 而它确实成立（第一次 RECORD 已经 200）。
+        if (!recordBudget.shouldSend()) {
+            log("AIRPLAY: 跳过重复 RECORD（${recordBudget.describeSkip()}）——会话已激活，按成功处理")
+            return true
+        }
+        return try {
             val (statusLine, _) =
                 request(
                     "RECORD",
@@ -3382,6 +3408,8 @@ class AirPlayClient(
                     BinaryPlist.encode(linkedMapOf<String, Any?>()),
                     contentType = "application/x-apple-binary-plist",
                 )
+            // 报文确实发出去了（拿到应答，不论状态码）：记进预算，后续不再补发。
+            recordBudget.noteSent()
             val ok = statusLine.contains("200")
             log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
             ok
@@ -3389,6 +3417,7 @@ class AirPlayClient(
             log("AIRPLAY: RECORD 失败 - ${error.message}")
             false
         }
+    }
 
     /**
      * 连接事件通道（接收端在 SETUP 应答的 eventPort 上等我们）。
