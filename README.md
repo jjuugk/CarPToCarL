@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk)**
-> —— 主线固定直链（当前 1.2.40，13.9 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk)**
+> —— 主线固定直链（当前 1.2.41，13.9 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.40，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.40.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.41，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.41.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.40`（正式版；**体检页加「一键获取缺失权限」，并把音频发送侧的抖动做成可测的**。① **一键获取权限**：通知使用权（`NotificationListenerService`）根本不是运行时权限，授权存在 `Settings.Secure.enabled_notification_listeners` 里，系统永远不会为它弹框——旧实现靠 Shizuku 跑 `cmd notification allow_listener`，Shizuku 移除后这条命令必然静默失败，于是体检那项永远红、界面上却什么都没发生。现在体检弹窗底部有「一键获取（N 项）」，一项一项真的走到系统界面：运行时权限打包申请、蓝牙用 `ACTION_REQUEST_ENABLE`、WLAN/位置服务跳系统页、通知使用权直接带 `EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME` 展开本应用那一条、电池优化弹忽略框；做完返回自动进下一项，推进前重新体检跳过已满足的，最后列清仍缺什么。身份/配对这类设置项刻意不进计划。② **音频发送更稳**：与 PC 接收端双端日志对账后确认「偶尔卡一下」是链路上每 7 秒一次、约 4.5 包（≈96ms）的连续丢包（接收端 `late`/`overflow`/`rebuffer`/`decryptErrors` 全 0，我方环形缓冲丢 0KB）；能控的部分都收紧——混音泵线程提到 `URGENT_AUDIO` 优先级，音频数据口 `SO_SNDBUF` 提到 256KB 并打 DSCP EF（WMM 走语音接入类，排队优先于同链路的视频 TCP）。③ **抖动可量化**：`AUDIO: 混音体检` 新增「最长停拍 XXms」——两次产出之间的最大间隔，≥50ms 会直接标「我方泵线程被拖住，不是链路问题」，下一份日志就能把自家抖动与链路丢包分开。单测 716 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.40.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.40/CarPToCarL-1.2.40.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.41`（正式版；**车机媒体卡能显示真正的专辑封面了**。① **封面不在 `0x5001` 报文体里**：那里 `0x001A` 只有一个单字节编号（`artworkFileTransferIdentifier`），写个 600×600 的图进去会把后面的 `duration`/`status` 参数全挤掉（2026-11-06 那次「仪表概率不显示歌名」就是这么来的）。真图必须走 **iAP2 会话 12 文件传输**：`0x5001` 声明编号 → `SETUP(id, 总字节, 类型 0x0002)` → **等车机 START**（抢发直接判 FAILURE）→ `FIRST_DATA`/`DATA…`/`LAST_DATA`（每块 2000B，照车机 `maxReceivedPacketLength` 2048 减链路头与校验留余量）→ 车机 `SUCCESS`。② **图源是真的那张图**：取系统媒体会话里正在播放那首歌的 `Bitmap`（QQ音乐/网易云/Apple Music 都一样，通知监听早就把它缓存在内存里），压成 **500×500 JPEG q85**——车机 `coverArt` 落盘尺寸就是 500×500、单文件上限 1.08MB。不二次解码、不发网络请求、**也不 recycle**（音乐卡片还在用同一张 Bitmap）。③ **不做傻事**：同一张图不重传（车机按 id 缓存，id 不变就跳过）；按「歌名\|歌手」做键（CarLife 分支用「专辑\|歌手」，因为部分播放器把逐行歌词写进 title，拿歌名当键会每行重传一遍封面）；封面块重传上限 5 且失败只丢这张图——为一张图把整条 iAP2 会话 `die` 掉，车机会当成手机掉线重新配对；`0x001A` 越界（0/256/负数）一律当无封面。④ **蓝牙 iAP2 链路刻意不声明封面编号**——那条路没有文件传输实现，声明了却不传图，车机会一直等。单测 729 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -642,7 +642,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ```bash
 ./gradlew :app:assembleRelease      # 发布包（1.0.0 起为正式版；需联网下载 lint-gradle，曾缺失时用 --offline 会失败）
-./gradlew testDebugUnitTest         # 单元测试（96 个测试文件）
+./gradlew testDebugUnitTest         # 单元测试（97 个测试文件）
 ./gradlew :app:lintDebug            # lint 检查
 ```
 
@@ -762,7 +762,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ### 单元测试
 
-`app/src/test/java/io/github/shaonialife/carptocar/`，共 **96** 个测试文件、716 个用例，重点覆盖协议编解码与密码学：
+`app/src/test/java/io/github/shaonialife/carptocar/`，共 **97** 个测试文件、729 个用例，重点覆盖协议编解码与密码学：
 
 - `airplay/`：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
 - `iap2/`：编解码、Link 引擎、发送端会话
@@ -829,6 +829,57 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.41 —— 2026-11-14（车机媒体卡能显示真正的专辑封面：走 iAP2 会话 12 文件传输，正式版）
+
+**一、为什么封面不能塞进 `0x5001`**
+
+`0x5001` 的媒体条目里，`0x001A`（`media_item_artwork_file_transfer_identifier`）只是一个
+**单字节编号**，不是图片。以前它一直是 0，所以车机媒体卡只有文字。
+
+把图直接写进去会撑爆报文体：2026-11-06 那次「仪表概率不显示歌名」，根因就是 `0x001A`
+被塞了超长内容，后面的 `duration` / `status` 被挤出边界。
+
+**二、真图走会话 12（`iap2/Iap2ArtworkTransfer`，新增）**
+
+```
+0x5001 声明 artworkId = N
+SETUP(N, 总字节, 文件类型 0x0002)   →   车机 START     ← 必须等，抢发判 FAILURE
+FIRST_DATA / DATA… / LAST_DATA（每块 2000B）
+                                    ←   车机 SUCCESS
+```
+
+- 分块 2000B 是照车机 `maxReceivedPacketLength = 2048` 减 9 字节链路头与 1 字节校验留的余量。
+- `Iap2LinkEngine.Packet` 新增 `sessionId`——重传发生在 `retransmitDue` 里，那时没有调用方
+  上下文，会话 ID 必须跟着帧走；新增 `sendOnSession`；会话 12 的数据改走
+  `onFileTransferData` 回调，不再被当「未知会话」直接丢掉。
+
+**三、图源与压缩（`SessionController.ensureArtwork`）**
+
+- 取系统媒体会话（`MediaSessionsState`）里正在播放那首歌的 **Bitmap**——QQ音乐/网易云/
+  Apple Music 都一样，通知监听早就把它缓存在内存里了。
+- 压成 **500×500 JPEG q85**：车机 `coverArt` 落盘尺寸就是 500×500、单文件上限 1.08MB。
+- 不二次解码、不发网络请求、**也不 `recycle()`**（那张 Bitmap 与界面音乐卡片共用，回收会崩）。
+
+**四、几处不做傻事的地方**
+
+- **同一张图不重传**：车机按 id 缓存，`nowPlayingKey` 纳入 `artworkId`；歌名没变但从
+  「无封面」变「有封面」时不会被去重吞掉。
+- **缓存键选择**：系统媒体会话按「歌名\|歌手」；CarLife 分支按「专辑\|歌手」——部分播放器
+  把逐行歌词写进 `title`，拿歌名当键会每行重传一遍封面。
+- **封面块重传上限 5 且 `dropWhenExhausted`**：为一张图把整条 iAP2 会话 `die` 掉，车机会
+  当成手机掉线重新配对。丢块顶多这张图花掉。
+- **`0x001A` 越界守卫**：0 / 256 / 负数一律当无封面。
+- **蓝牙 iAP2 链路（`Iap2SenderSession`）不声明封面编号**——那条路没有文件传输实现，
+  声明了却不传图，车机会一直等。用 `buildNowPlaying(includeArtwork = false)`。
+
+单测 729 例 0 失败（新增 `Iap2ArtworkTransferTest` 9 例、会话 12 收发 2 例、`0x001A` 编码 2 例）。
+
+> ⚠️ 已知前提：封面只在**车机订阅 `0x5000`** 或我们主动补推时才触发。2026-11-13 那份
+> 宝马 MGU-81 日志整轮没发 `0x5000`，那种车型上可能还看不到封面；台架（WinPlay / DiPlay）
+> 一直在推，可先在那里验证。
+> 验证看三行：`ART: 封面就绪 id=N NNNB` → `IAPLINK: 封面传输 SETUP` →
+> `IAPLINK: 封面传输 SUCCESS`。
 
 ### 1.2.40 —— 2026-11-14（体检页一键补齐缺失权限；音频发送侧把抖动做成可测的，正式版）
 
