@@ -66,33 +66,6 @@
                         android:text="CarLife+ 未启动" />
                 </LinearLayout>
 
-                <!-- 启动后自动连接：常驻顶部。和「连接准备」卡里那个开关是同一个偏好，
-                     两边互相同步（见 MainActivity.bindAutoConnectSwitch）——放这里是因为
-                     用户每次上车最先要按/看的就是它，不该藏在卡片里滚下去。 -->
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:gravity="center_horizontal"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="启动后自连"
-                        android:textColor="#7C8B8B"
-                        android:textSize="10.5sp" />
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchAutoConnectTop"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:thumb="@drawable/sw_thumb"
-                        app:track="@drawable/sw_track" />
-                </LinearLayout>
-
             </LinearLayout>
 
             <!-- 内容区容器：竖屏时 ScrollView 包住英雄卡与详情；

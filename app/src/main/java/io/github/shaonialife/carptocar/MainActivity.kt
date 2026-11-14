@@ -988,35 +988,23 @@ class MainActivity : AppCompatActivity() {
         // 启动后自动连接：默认开启。打开 App 即发起连接，不必每次点英雄卡；
         // 需要在连之前改「下次连接起效」的项（分辨率缩放 / CarLife 劫持开关）时关掉它。
         //
-        // 两个开关同一份偏好：卡片里那个带说明文字，顶部那个是常驻快捷入口
-        // （用户要求「开关放在上方」，省得每次滚下来找）。互相同步靠 syncingAutoConnect
-        // 挡住回环——直接互相 setChecked 会来回触发监听器。
+        // 只有一个开关，就在「连接准备」卡里。顶部标题栏那个快捷开关已按用户要求移除
+        // （2026-11-14：加了之后嫌顶部多一块，还是回卡片里）。
         val autoConnectNote = findViewById<TextView>(R.id.autoConnectNote)
         val switchAutoConnect = findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoConnect)
-        val switchAutoConnectTop =
-            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoConnectTop)
-        var syncingAutoConnect = false
-        val topSwitches = listOf(switchAutoConnect, switchAutoConnectTop)
-        topSwitches.forEach { it.isChecked = AutoConnectPrefs.enabled(this) }
+        switchAutoConnect.isChecked = AutoConnectPrefs.enabled(this)
         autoConnectNote.text =
             if (switchAutoConnect.isChecked) {
                 "打开 App 即自动发起连接（默认开启）"
             } else {
                 "关闭后需手动点「启动连接」"
             }
-        val onAutoConnectChanged: (Boolean) -> Unit = { checked ->
-            if (!syncingAutoConnect) {
-                syncingAutoConnect = true
-                AutoConnectPrefs.setEnabled(this, checked)
-                topSwitches.forEach { if (it.isChecked != checked) it.isChecked = checked }
-                syncingAutoConnect = false
-                autoConnectNote.text =
-                    if (checked) "打开 App 即自动发起连接（默认开启）" else "关闭后需手动点「启动连接」"
-                log("AUTOCONNECT: 启动后自动连接已${if (checked) "开启" else "关闭"}")
-            }
+        switchAutoConnect.setOnCheckedChangeListener { _, checked ->
+            AutoConnectPrefs.setEnabled(this, checked)
+            autoConnectNote.text =
+                if (checked) "打开 App 即自动发起连接（默认开启）" else "关闭后需手动点「启动连接」"
+            log("AUTOCONNECT: 启动后自动连接已${if (checked) "开启" else "关闭"}")
         }
-        switchAutoConnect.setOnCheckedChangeListener { _, checked -> onAutoConnectChanged(checked) }
-        switchAutoConnectTop.setOnCheckedChangeListener { _, checked -> onAutoConnectChanged(checked) }
 
         // ---- 开发者入口：连点顶部标题 10 次，显示/隐藏「测试台接收端」 ----
         setupDevUnlock()
