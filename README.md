@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk)**
-> —— 主线固定直链（当前 1.2.41，13.9 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk)**
+> —— 主线固定直链（当前 1.2.42，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.41，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.41.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.42，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.42.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.41`（正式版；**车机媒体卡能显示真正的专辑封面了**。① **封面不在 `0x5001` 报文体里**：那里 `0x001A` 只有一个单字节编号（`artworkFileTransferIdentifier`），写个 600×600 的图进去会把后面的 `duration`/`status` 参数全挤掉（2026-11-06 那次「仪表概率不显示歌名」就是这么来的）。真图必须走 **iAP2 会话 12 文件传输**：`0x5001` 声明编号 → `SETUP(id, 总字节, 类型 0x0002)` → **等车机 START**（抢发直接判 FAILURE）→ `FIRST_DATA`/`DATA…`/`LAST_DATA`（每块 2000B，照车机 `maxReceivedPacketLength` 2048 减链路头与校验留余量）→ 车机 `SUCCESS`。② **图源是真的那张图**：取系统媒体会话里正在播放那首歌的 `Bitmap`（QQ音乐/网易云/Apple Music 都一样，通知监听早就把它缓存在内存里），压成 **500×500 JPEG q85**——车机 `coverArt` 落盘尺寸就是 500×500、单文件上限 1.08MB。不二次解码、不发网络请求、**也不 recycle**（音乐卡片还在用同一张 Bitmap）。③ **不做傻事**：同一张图不重传（车机按 id 缓存，id 不变就跳过）；按「歌名\|歌手」做键（CarLife 分支用「专辑\|歌手」，因为部分播放器把逐行歌词写进 title，拿歌名当键会每行重传一遍封面）；封面块重传上限 5 且失败只丢这张图——为一张图把整条 iAP2 会话 `die` 掉，车机会当成手机掉线重新配对；`0x001A` 越界（0/256/负数）一律当无封面。④ **蓝牙 iAP2 链路刻意不声明封面编号**——那条路没有文件传输实现，声明了却不传图，车机会一直等。单测 729 例 0 失败；版本号唯一来源是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.41.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.41/CarPToCarL-1.2.41.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.42`（正式版；**CarLife 媒体播放状态机 + 无线 CarPlay 会话状态机合并落地**，合入 PR #26/#27，单测 765 例 0 失败）。① **CarLife 播放周期**：新增 `CarLifeMediaPlayback`，把 `7240` 模块焦点与 `9240` 的 `INIT/PCM/STOP/PAUSE/RESUME` 关联成一个播放周期——跨通道乱序（焦点释放先到、尾随 PAUSE 后到）不再把 `eligible` 锁死，下一次焦点获得能重新起播；协议常量更正为 **`0x30002=STOP` / `0x30003=PAUSE` / `0x30004=RESUME`**（旧代码按「0x30002=START」实现，与车机语义相反）。② **车机播放/暂停键真的能停住手机媒体**：`pauseMediaFromCar`/`resumeMediaFromCar` 同时打 `MediaSession` 与 CarLife 硬键，幂等；暂停时 `AudioMixer.clear` 清掉该路尚未混出的 PCM。未授通知使用权时也走这条路径。③ **9240 静默看门狗**在「本就不该有声」期间持续刷新基线，暂停/静音几十秒后恢复不会被误判成断流去重连。④ **9340 触控通道**改懒连接、写失败自动重连并补发当前触点，不再因一次写失败永久失灵。⑤ **直通音频延后到 RECORD 成功**才启动同步包与混音泵，RECORD 前不向车机发一个包。⑥ **无线 iAP2 报文纠正**：`0x4E0C/0x4E0A/0x4E09` 改 NUL 结尾 UTF-8 字符串（与蓝牙路径一致），`0x4E0A` 的语言按车机 `0x1D01` 声明协商、不再写死 `"zh"`。⑦ **隧道 MFi**：车机声明 `0xAA06` 时先取序列号；ECDSA 证书冷启动首选 32B 挑战；挑战期间断链记硬拒绝；各档均无应答时与蓝牙一致直接 `0xAA05`。⑧ **iAP2 链路引擎**：`DETECT` 按完整帧识别并重启链路周期；WLAN 隧道走可靠传输窗口、合并 ACK；控制通道按帧逐条 POST，旧周期排队中的发送与应答一律丢弃。⑨ **主音频按源端播放意图申请**：媒体永久取得、导航播报临时借用后归还；车机永久接管或静音借用时暂停本机媒体并清残留 PCM，仅静音前在播时解除后恢复。⑩ **倒车雷达/影像借屏**只退役屏幕流、保留控制会话，归还或 `requestUI` 后重建；车机不接受初始归属时回退为「声明手机持有主屏/主音频」。⑪ **已建立的会话被车机关闭**：保留 `wasSessionEstablished` 给收尾回调，转入被动等待车机邀请/蓝牙回连（15 秒避让窗口内不出站拨号），不再 3 秒主动重试；每轮配对起步清 `authReceiverKey`。宣告 `CARPLAY_CONTROL` 的车机须等到本轮新邀请才连接，推流中的邀请只记录不重建。⑫ **蓝牙出入站共享单一控制通道所有权**，旧通道的迟到回调不再影响当前会话；WiFi 断网回调按所有权过滤。⑬ 顺带修：配对验签防静默降级、`BinaryPlist` 负整数编码、9B 空 ACK 拆帧、未指定地址过滤。⑭ 上一版（1.2.41）的专辑封面走 iAP2 会话 12 文件传输逻辑不变。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.42.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.42/CarPToCarL-1.2.42.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -829,6 +829,47 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 ---
 
 ## 十一、版本历史
+
+### 1.2.42 —— 2026-11-14（CarLife 播放状态机 + 无线 CarPlay 会话状态机大修，正式版）
+
+合入 PR [#26](https://github.com/jjuugk/CarPToCarL/pull/26)（`956307c`）与
+[#27](https://github.com/jjuugk/CarPToCarL/pull/27)（`c12d30e`）。#27 的历史本身包含 #26，
+因此直接合并 #27 即同时带入两者，不产生重复提交。单测 **765 例 0 失败**。
+
+**CarLife 媒体播放（#26）**
+
+- 新增 `carlife/CarLifeMediaPlayback`：把 `7240` 模块焦点与 `9240` 的
+  `INIT / PCM / STOP / PAUSE / RESUME` 关联成一个**播放周期**。跨通道乱序（焦点释放先到、
+  尾随 PAUSE 后到）不再把 `eligible` 锁死，下一次焦点获得能重新起播。
+- `CarLifeProtocol` 更正常量语义：**`0x30002 = STOP`、`0x30003 = PAUSE`、`0x30004 = RESUME`**
+  （旧实现按「`0x30002` = START」跑，方向是反的），TTS 包类型命名一并校正。
+- 新增 `pauseMediaFromCar` / `resumeMediaFromCar`：同时打 `MediaSession` 与 CarLife 硬键、
+  幂等；暂停时 `AudioMixer.clear` 清掉该路尚未混出的 PCM。车机播放/暂停键改走这条路径，
+  **未授通知使用权时也能真正停住**。
+- `9240` 静默看门狗在「本就不该有声」期间持续刷新基线——暂停几十秒后恢复不会被误判成
+  断流而重连。
+- `9340` 触控通道改懒连接、写失败自动重连并补发当前触点，不再因一次写失败永久失灵。
+- 直通音频延后到 **RECORD 成功之后**才启动同步包与混音泵，RECORD 前不向车机发一个包。
+
+**无线 CarPlay 会话（#27）**
+
+- 无线 iAP2 认证后 `0x4E0C / 0x4E0A / 0x4E09` 改为 NUL 结尾 UTF-8 字符串（与蓝牙路径一致），
+  `0x4E0A` 的语言按车机 `0x1D01` 声明协商，不再写死 `"zh"`。
+- 隧道 MFi：车机声明 `0xAA06` 时先取序列号；ECDSA 证书冷启动首选 32B 挑战；挑战期间断链
+  记硬拒绝；各档均无应答时与蓝牙路径一致，直接 `0xAA05`。
+- `Iap2LinkEngine`：`DETECT` 按完整帧识别并重启链路周期；WLAN 隧道走**可靠传输窗口**、
+  合并 ACK；控制通道按帧逐条 POST，旧周期排队中的发送与应答一律丢弃。
+- 主音频改按**源端播放意图**申请：媒体永久取得、导航播报临时借用后归还；车机永久接管或
+  静音借用时暂停本机媒体并清掉残留 PCM，仅在静音前正在播放的情况下才在解除后恢复。
+- 倒车雷达/影像借屏时**只退役屏幕流、保留控制会话**，归还或 `requestUI` 后重建；车机不接受
+  初始归属时回退为「声明手机持有主屏/主音频」。
+- 已建立的会话被车机关闭：保留 `wasSessionEstablished` 给收尾回调，转入**被动等待**车机
+  邀请/蓝牙回连（15 秒避让窗口内不出站拨号），不再 3 秒主动重试；每轮配对起步清
+  `authReceiverKey`。宣告 `CARPLAY_CONTROL` 的车机必须等到本轮新邀请才连接，推流中的邀请
+  只记录不重建。
+- 蓝牙出入站共享**单一控制通道所有权**，旧通道的迟到回调不再影响当前会话；WiFi 断网回调
+  按所有权过滤。
+- 顺带修：配对验签防静默降级、`BinaryPlist` 负整数编码、9B 空 ACK 拆帧、未指定地址过滤。
 
 ### 1.2.41 —— 2026-11-14（车机媒体卡能显示真正的专辑封面：走 iAP2 会话 12 文件传输，正式版）
 
