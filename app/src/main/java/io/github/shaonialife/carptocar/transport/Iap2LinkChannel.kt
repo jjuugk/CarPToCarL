@@ -25,6 +25,11 @@ class Iap2LinkChannel(
     private var terminated = false
     private var readySignalled = false
 
+    /** 本端主动退役关闭时置 true，避免上层误判成对端新发起的断链。 */
+    @Volatile
+    var closedLocally = false
+        private set
+
     /** 原始字节转储预算（每方向每连接），真车字节级对照用。 */
     private var rxDumpBudget = RAW_DUMP_LIMIT
     private var txDumpBudget = RAW_DUMP_LIMIT_TX
@@ -180,7 +185,10 @@ class Iap2LinkChannel(
     }
 
     override fun close() {
-        finish(null)
+        synchronized(lock) {
+            closedLocally = true
+            finishLocked(null)
+        }
     }
 
     // ---- 内部 ----

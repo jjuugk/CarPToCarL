@@ -89,6 +89,17 @@ class BinaryPlistTest {
     }
 
     @Test
+    fun negativeSpeechModeUsesSigned64BitWireInteger() {
+        // Apple bplist00 规范：负整数必须按 8 字节有符号补码编码，单字节 0xFF 会被接收端读成 +255。
+        val encoded = BinaryPlist.encode(-1L)
+        assertArrayEquals(
+            byteArrayOf(0x13, -1, -1, -1, -1, -1, -1, -1, -1),
+            encoded.copyOfRange(8, 17),
+        )
+        assertEquals(-1L, BinaryPlist.parse(encoded))
+    }
+
+    @Test
     fun encodeLongAndUnicodeStrings() {
         val longAscii = "x".repeat(300)
         assertEquals(longAscii, BinaryPlist.parse(BinaryPlist.encode(longAscii)))

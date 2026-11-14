@@ -49,6 +49,19 @@ class Iap2LinkFrameSplitTest {
         assertArrayEquals(b, parts[1])
     }
 
+    @Test
+    fun headerOnlyAcknowledgementDoesNotMergeFollowingControlMessages() {
+        val expected =
+            listOf(
+                "ff5a00094036e30045",
+                "ff5a00104037e3013c404000061d025b",
+                "ff5a00104038e3013b40400006aa00d0",
+            ).map { hex -> hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }
+        val parts = Iap2LinkPacket.splitFrames(expected[0] + expected[1] + expected[2])
+        assertEquals(3, parts.size)
+        expected.indices.forEach { assertArrayEquals(expected[it], parts[it]) }
+    }
+
     /** 协商期 MARKER（`FF 55 02 00 EE 10`）与数据帧连着时，标记必须单独成段。 */
     @Test
     fun syncMarkerIsItsOwnFrame() {

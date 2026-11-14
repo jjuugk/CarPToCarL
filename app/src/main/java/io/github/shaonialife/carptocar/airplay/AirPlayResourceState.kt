@@ -47,18 +47,76 @@ enum class AirPlaySpeechMode(
  * 「车机明确表达过归属」的车机上生效，对奥迪现有行为零影响。
  */
 class AirPlayResourceState {
+    /** 车机 `changeModes` 对主音频的转移：驱动本机媒体暂停/恢复。 */
+    enum class CarAudioTransfer {
+        /** 永久接管（transferType=1，如切到原车收音机）。 */
+        TAKEN_PERMANENTLY,
+
+        /** 带 unborrowConstraint>=500 的借用（车机静音键、原车通话）。 */
+        BORROWED_CONSTRAINED,
+
+        /** 借用结束，主音频回到手机。 */
+        UNBORROWED_TO_PHONE,
+    }
+
     private class Resource(
         var permanentEntity: Long = ENTITY_PHONE,
         var takeConstraint: Int? = null,
-        val borrowers: MutableSet<String> = linkedSetOf(),
+        /** borrowID（匿名为 null）→ unborrowConstraint；匿名借用按栈逐层归还，具名借用重复到达幂等。 */
+        val borrowers: MutableList<Pair<String?, Int>> = mutableListOf(),
+        var borrowConstraint: Int? = null,
+        /** 手机临时借用车机持有的主音频（导航播报），永久归属不变。 */
+        var phoneBorrowing: Boolean = false,
     ) {
         /** 有借用者时当前归属是车机（2），否则跟随永久归属。 */
-        val entity: Long get() = if (borrowers.isEmpty()) permanentEntity else ENTITY_CAR
+        val entity: Long
+            get() =
+                when {
+                    borrowers.isNotEmpty() -> ENTITY_CAR
+                    phoneBorrowing -> ENTITY_PHONE
+                    else -> permanentEntity
+                }
+
+        fun copy() = Resource(permanentEntity, takeConstraint, borrowers.toMutableList(), borrowConstraint, phoneBorrowing)
+
+        fun reset() {
+            permanentEntity = ENTITY_PHONE
+            takeConstraint = null
+            borrowConstraint = null
+            borrowers.clear()
+            phoneBorrowing = false
+        }
+
+        /**
+         * 手机申请持有。车机借用中受 unborrowConstraint 约束——只有车机自己发 `requestUI`
+         * （[overrideBorrow]，如倒车 PDC 结束请回手机画面）才能收回；车机永久持有时受 takeConstraint 约束。
+         */
+        fun claim(
+            priority: Int,
+            overrideBorrow: Boolean = false,
+        ): Boolean {
+            if (borrowers.isNotEmpty() && !overrideBorrow && !allows(priority, borrowers.maxOf { it.second })) return false
+            if (permanentEntity != ENTITY_PHONE && !allows(priority, takeConstraint)) return false
+            reset()
+            return true
+        }
+
+        /** 临时借用车机持有的资源：可借原车收音机，冲不破车机静音/通话。 */
+        fun borrowForPhone(priority: Int): Boolean {
+            if (entity == ENTITY_PHONE) return true
+            if (permanentEntity == ENTITY_PHONE) return claim(priority)
+            if (borrowers.isNotEmpty() || !allows(priority, borrowConstraint)) return false
+            phoneBorrowing = true
+            return true
+        }
     }
 
     private val lock = Any()
 
     private val resources = linkedMapOf(RESOURCE_SCREEN to Resource(), RESOURCE_AUDIO to Resource())
+
+    /** 车机侧每次改判 +1：手机申请在发布期间若遇到车机改判，就不再提交（以车机最新决定为准）。 */
+    private var carRevision = 0L
 
     /**
      * appStateID → entity（AIS `Table 23-56`）。
@@ -100,6 +158,9 @@ class AirPlayResourceState {
     /** 主音频当前是否归手机。 */
     val phoneOwnsAudio: Boolean get() = synchronized(lock) { resources.getValue(RESOURCE_AUDIO).entity == ENTITY_PHONE }
 
+    /** 手机是否只是临时借用着车机的主音频（导航播报结束后要归还）。 */
+    val phoneBorrowsAudio: Boolean get() = synchronized(lock) { resources.getValue(RESOURCE_AUDIO).phoneBorrowing }
+
     /**
      * 每条控制连接独立初始化：先把状态复位成「手机持有」，再采纳 `/info` 的初始归属。
      *
@@ -108,11 +169,7 @@ class AirPlayResourceState {
      */
     fun initialize(modes: Map<*, *>?) {
         synchronized(lock) {
-            resources.values.forEach {
-                it.permanentEntity = ENTITY_PHONE
-                it.takeConstraint = null
-                it.borrowers.clear()
-            }
+            resources.values.forEach { it.reset() }
             appStates.keys.forEach { appStates[it] = 0L }
             speechMode = -1L
             // 自己这边的状态也复位：`initialize` 每条控制连接只跑一次（AirPlayClient 每轮
@@ -127,31 +184,52 @@ class AirPlayResourceState {
         }
     }
 
-    /**
-     * 启动阶段只申请**主音频**。
-     *
-     * 主屏不在这里抢：真 iPhone 是先按车机给的归属发布，再单独用 [requestPhoneScreen]
-     * 把屏要回来。一上来就宣称「永久持有主屏」，在不打算让出屏的车机上就是硬抢。
-     */
-    fun claimAudio() {
-        synchronized(lock) {
-            resources.getValue(RESOURCE_AUDIO).permanentEntity = ENTITY_PHONE
-        }
-    }
+    /** 申请主屏；[fromRequestUi] = 车机 `requestUI` 主动请回手机画面，可收回车机的临时借屏。 */
+    fun acquireScreen(
+        fromRequestUi: Boolean,
+        publish: (Map<String, Any?>) -> Boolean,
+    ): Boolean = claimAndPublish(RESOURCE_SCREEN, publish) { it.claim(PRIORITY_USER, overrideBorrow = fromRequestUi) }
 
     /**
-     * 请求把主屏交回手机（对应车机的 `requestUI`，以及启动阶段的第二步）。
-     *
-     * 只在「没有借用者、且接管约束允许」时才改永久归属——车机正借着的屏，
-     * 我们声明成自己的会让它下次归还时报错。
+     * 申请主音频：媒体按用户优先级永久取得；导航按后台优先级 [temporary] 借用，
+     * 播报结束用 [releaseAudioBorrow] 归还。
      */
-    fun requestPhoneScreen() {
+    fun acquireAudio(
+        priority: Int,
+        temporary: Boolean,
+        publish: (Map<String, Any?>) -> Boolean,
+    ): Boolean = claimAndPublish(RESOURCE_AUDIO, publish) { if (temporary) it.borrowForPhone(priority) else it.claim(priority) }
+
+    fun releaseAudioBorrow(publish: (Map<String, Any?>) -> Boolean): Boolean =
+        claimAndPublish(RESOURCE_AUDIO, publish) { audio -> audio.phoneBorrowing.also { audio.phoneBorrowing = false } }
+
+    /**
+     * 先按申请后的归属发 `modesChanged`，车机接受且期间没有新的 `changeModes` 才提交。
+     * 发布不持锁：事件线程要能同时处理车机的 `changeModes`。
+     */
+    private fun claimAndPublish(
+        id: Int,
+        publish: (Map<String, Any?>) -> Boolean,
+        change: (Resource) -> Boolean,
+    ): Boolean {
+        val next: Resource
+        val expected: Long
+        val announcement: Map<String, Any?>
         synchronized(lock) {
-            val screen = resources.getValue(RESOURCE_SCREEN)
-            val allowed = screen.takeConstraint.let { it == null || it == 100 || it == 500 }
-            if (screen.borrowers.isEmpty() && allowed) {
-                screen.permanentEntity = ENTITY_PHONE
-            }
+            val current = resources.getValue(id)
+            next = current.copy()
+            if (!change(next)) return false
+            expected = carRevision
+            // 用申请后的归属组一份报文（锁可重入），本地状态先不动
+            resources[id] = next
+            announcement = command()
+            resources[id] = current
+        }
+        if (!publish(announcement)) return false
+        synchronized(lock) {
+            if (carRevision != expected) return false
+            resources[id] = next
+            return true
         }
     }
 
@@ -163,11 +241,8 @@ class AirPlayResourceState {
      */
     fun claimAll() {
         synchronized(lock) {
-            resources.values.forEach {
-                it.permanentEntity = ENTITY_PHONE
-                it.takeConstraint = null
-                it.borrowers.clear()
-            }
+            resources.values.forEach { it.reset() }
+            carRevision++
         }
     }
 
@@ -176,9 +251,7 @@ class AirPlayResourceState {
      *
      * 未知 `transferType` 一律忽略：宁可维持旧归属，也不要猜错方向。
      */
-    fun applyCarChange(params: Map<*, *>?) {
-        synchronized(lock) { applyCarChangeLocked(params) }
-    }
+    fun applyCarChange(params: Map<*, *>?): CarAudioTransfer? = synchronized(lock) { applyCarChangeLocked(params) }
 
     /**
      * 报告**本机**语音态（`Speech` / `speechMode`）。
@@ -281,17 +354,23 @@ class AirPlayResourceState {
         return "$base$borrow/$permanent"
     }
 
-    private fun applyCarChangeLocked(params: Map<*, *>?) {
+    private fun applyCarChangeLocked(params: Map<*, *>?): CarAudioTransfer? {
+        carRevision++
+        var audioTransfer: CarAudioTransfer? = null
         (params?.get("resources") as? List<*>)?.forEach { raw ->
             val item = raw as? Map<*, *> ?: return@forEach
             val id = (item["resourceID"] as? Number)?.toInt() ?: return@forEach
             val resource = resources[id] ?: return@forEach
             val transfer = (item["transferType"] as? Number)?.toInt()
+            val wasBorrowed = resource.borrowers.isNotEmpty()
+            val unborrowConstraint = (item["unborrowConstraint"] as? Number)?.toInt() ?: 100
             when (transfer) {
                 // 1 接管：车机成为永久归属方，并可能带一个接管约束
                 1 -> {
                     resource.permanentEntity = ENTITY_CAR
                     resource.takeConstraint = (item["takeConstraint"] as? Number)?.toInt()
+                    resource.borrowConstraint = (item["borrowConstraint"] as? Number)?.toInt()
+                    resource.phoneBorrowing = false
                 }
                 // 2 归还：永久归属还给手机
                 2 -> {
@@ -299,9 +378,20 @@ class AirPlayResourceState {
                     resource.takeConstraint = null
                 }
                 // 3 开始借用：只是临时占用，永久归属不变
-                3 -> resource.borrowers.add(item["borrowID"]?.toString().orEmpty())
+                3 -> {
+                    val borrowId = item["borrowID"]?.toString()
+                    if (borrowId == null || resource.borrowers.none { it.first == borrowId }) {
+                        resource.borrowers += borrowId to unborrowConstraint
+                    }
+                }
                 // 4 结束借用
-                4 -> resource.borrowers.remove(item["borrowID"]?.toString().orEmpty())
+                4 -> {
+                    val borrowId = item["borrowID"]?.toString()
+                    resource.borrowers
+                        .indexOfLast { it.first == borrowId }
+                        .takeIf { it >= 0 }
+                        ?.let(resource.borrowers::removeAt)
+                }
                 // 没有 transferType = `/info` 的初始快照形态，直接读声明字段。
                 // 有 transferType 时不看这些字段：两套语义混在一起时以转移指令为准。
                 null -> {
@@ -309,11 +399,22 @@ class AirPlayResourceState {
                         resource.permanentEntity = it
                     }
                     (item["takeConstraint"] as? Number)?.toInt()?.let { resource.takeConstraint = it }
+                    (item["borrowConstraint"] as? Number)?.toInt()?.let { resource.borrowConstraint = it }
                 }
                 // 未知 transferType：什么也不改（猜错方向比不动更糟）
             }
+            if (id == RESOURCE_AUDIO) {
+                audioTransfer =
+                    when {
+                        transfer == 1 -> CarAudioTransfer.TAKEN_PERMANENTLY
+                        transfer == 3 && unborrowConstraint >= 500 -> CarAudioTransfer.BORROWED_CONSTRAINED
+                        transfer == 4 && wasBorrowed && resource.entity == ENTITY_PHONE -> CarAudioTransfer.UNBORROWED_TO_PHONE
+                        else -> audioTransfer
+                    }
+            }
         }
         applyAppStatesLocked(params)
+        return audioTransfer
     }
 
     private fun applyAppStatesLocked(params: Map<*, *>?) {
@@ -351,5 +452,15 @@ class AirPlayResourceState {
         /** permanentEntity：1 = 手机，2 = 车机。 */
         const val ENTITY_PHONE = 1L
         const val ENTITY_CAR = 2L
+
+        /** transferPriority：100 = 后台（导航播报），500 = 用户发起（主屏、媒体播放）。 */
+        const val PRIORITY_BACKGROUND = 100
+        const val PRIORITY_USER = 500
+
+        /** 约束 100 = 随时可拿；500 = 只让用户发起的申请；其余（如 1000）= 不让。 */
+        private fun allows(
+            priority: Int,
+            constraint: Int?,
+        ) = constraint == null || constraint == 100 || (constraint == 500 && priority == PRIORITY_USER)
     }
 }

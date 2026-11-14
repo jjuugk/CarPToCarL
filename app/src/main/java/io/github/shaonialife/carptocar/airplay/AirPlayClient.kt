@@ -68,6 +68,7 @@ class AirPlayClient(
      * 主控用它做「叫醒」：重发 `0x4e0e + 0x4300` 并重新公告 ctrl mDNS（限次、限频）。
      */
     private val onPortRefused: ((refused: Int) -> Unit)? = null,
+    private val onTransportClosed: ((AirPlayClient, String) -> Unit)? = null,
 ) {
 
     /** 音频 SETUP 时用的车机地址（会话中途要重新核对音量时复用）。 */
@@ -84,7 +85,24 @@ class AirPlayClient(
     @Volatile
     private var endpointGeneration = 0
 
+    @Volatile
     private var socket: Socket? = null
+    private val transportLock = Any()
+
+    @Volatile
+    var sessionEstablished: Boolean = false
+        private set
+
+    /** 本实例生命周期内是否曾完成过会话级 SETUP（供对端断链收尾在传输清理后仍能识别已建立会话）。 */
+    @Volatile
+    var wasSessionEstablished: Boolean = false
+        private set
+    val controlSessionAlive: Boolean get() = !cancelled && socket?.isClosed == false
+    private val modesPublicationLock = Any()
+
+    @Volatile
+    private var screenUuid: String? = null
+    private var connectionRefused = false
     private var cSeq = 0
 
     /**
@@ -161,6 +179,11 @@ class AirPlayClient(
      */
     @Volatile
     var pairingTerminal: Boolean = false
+        private set
+
+    /** 配对密码学完整性校验失败（SRP 证明/密钥异常，不可降级明文）。 */
+    @Volatile
+    var pairingIntegrityFailed: Boolean = false
         private set
 
     /**
@@ -247,14 +270,14 @@ class AirPlayClient(
         private set
 
     /**
-     * 最近一次 [close] **打断在飞请求**的时刻（`SystemClock.uptimeMillis()`；0 = 从没发生）。
+     * 本机 [close] **打断在飞请求**的累计次数（代次比较，不受时钟粒度影响）。
      *
      * 配对循环用它把「本机掐断」与「车机拒绝」分开：前者只重试同一阶段，后者才写进
      * [PairingMemory] 的 15 分钟记忆。2026-11-06 实车就是没分清这两种，把端点热更新
      * 造成的中断记成了「车机不认这台手机」，顺手锁死 15 分钟。
      */
     @Volatile
-    private var interruptedExchangeAtUptime: Long = 0L
+    private var localCloseGeneration = 0L
 
     /** 当前端点（主控合并晚到端点时用作兜底，避免 0x4301 不带 IP 时把可用地址抹掉）。 */
     val currentEndpoint: Iap2SenderSession.CarPlayEndpoint get() = endpoint
@@ -350,6 +373,7 @@ class AirPlayClient(
                 // 「车机 7000 连续拒绝」会让主控反复去叫醒一个活得好好的车机，还掩盖了
                 // 「我们根本没有地址」这个真问题（2026-11-11 宝马 iD8：四十多条连自己的
                 // ECONNREFUSED，被读成车机没起 AirPlay 服务）。
+                if (cancelled) return null
                 if (EndpointHosts.candidates(endpoint.ipAddresses).isEmpty()) {
                     if (attempt == 1 || attempt % 5 == 0) {
                         log(
@@ -360,8 +384,8 @@ class AirPlayClient(
                     Thread.sleep(2_000)
                     continue
                 }
-                refusedStreak++
-                if (refusedStreak % PORT_REFUSED_WAKE_EVERY == 0) {
+                refusedStreak = if (connectionRefused) refusedStreak + 1 else 0
+                if (refusedStreak > 0 && refusedStreak % PORT_REFUSED_WAKE_EVERY == 0) {
                     runCatching { onPortRefused?.invoke(refusedStreak) }
                 }
                 if (attempt == 1 || attempt % 5 == 0) {
@@ -373,13 +397,15 @@ class AirPlayClient(
             refusedStreak = 0
             attemptedPairing = true
             // 本轮起点：用于判定失败到底是车机给的，还是我们自己 close() 掐断的。
-            val attemptStartedAt = SystemClock.uptimeMillis()
+            val localCloseAtStart = localCloseGeneration
             val transport = TlvTransport { path, body -> postPairing(path, body) }
             try {
                 val setupStatus =
                     try {
                         PairSetupClient(identity, transport, log).run()
                         null
+                    } catch (invalid: PairingIntegrityException) {
+                        throw invalid
                     } catch (rejected: PairingRejectedException) {
                         // 车机明确回了错误码：这是**协议层**的拒绝，不是「端口没开」。
                         // 先落一条带错误码的日志（旧代码这里只有「M4 缺少 proof」这种误导文案），
@@ -398,7 +424,7 @@ class AirPlayClient(
                     } catch (error: IOException) {
                         // 被本机打断（端点热更新 / 重连 / 用户取消）：错误码不是车机给的，
                         // 既不能退避也不能据此判「车机拒绝」，直接重来一轮。
-                        if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                        if (localCloseGeneration != localCloseAtStart) {
                             log(
                                 "AIRPLAY: pair-setup 被本机打断（${error.message}）" +
                                     "——不计入车机拒绝，重试",
@@ -469,6 +495,13 @@ class AirPlayClient(
                 log("AIRPLAY: 控制通道加密已启用")
                 pairingTrouble = null
                 return keys
+            } catch (invalid: PairingIntegrityException) {
+                pairingIntegrityFailed = true
+                pairingTerminal = true
+                pairingTrouble = null
+                log("AIRPLAY: 配对完整性校验失败（${invalid.message}）——本轮终止认证，保持加密要求")
+                close()
+                return null
             } catch (rejected: PairingRejectedException) {
                 // 走到这里的是 pair-verify 段的拒绝（pair-setup 段的在里层单独处理），
                 // 典型现场：`pair-verify` M4 回 `{Error:2, State:4}` —— 车机不认这台手机的
@@ -476,7 +509,7 @@ class AirPlayClient(
                 // 静默丢弃 10s，最后降级明文（无共享密钥 → 没有声音、没有触摸）。
                 // 但**本机打断**（端点热更新 / 重连）造成的失败不是车机的结论：尤其不能
                 // 把随之而来的 Error=2 记成「确定性拒绝」（那会锁 15 分钟 + 降级明文）。
-                if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                if (localCloseGeneration != localCloseAtStart) {
                     log("AIRPLAY: pair-verify 被本机打断（${rejected.message}）——不计入车机拒绝，重试")
                     pairingTrouble = null
                     continue
@@ -494,7 +527,7 @@ class AirPlayClient(
                 Thread.sleep(if (rejected.code == PairingErrorCode.BACKOFF) 5_000L else 1_000L)
             } catch (error: IOException) {
                 val message = error.message.orEmpty()
-                if (interruptedExchangeAtUptime >= attemptStartedAt) {
+                if (localCloseGeneration != localCloseAtStart) {
                     log("AIRPLAY: 配对第 $attempt 次尝试被本机打断（$message）——不计入车机拒绝，重试")
                     pairingTrouble = null
                     continue
@@ -798,39 +831,32 @@ class AirPlayClient(
     fun teardownQuietly(): Boolean {
         val streams = activeStreams.entries.map { it.key to it.value }
         activeStreams.clear()
-        val host = lastAudioHost ?: endpoint.ipAddresses.firstOrNull() ?: "receiver"
         var allAccepted = true
         streams.forEach { (id, type) ->
-            allAccepted = teardownStream(host, type, id) && allAccepted
+            allAccepted = teardownStreamDescriptor(type, id) && allAccepted
         }
         allAccepted = teardownSession() && allAccepted
         return allAccepted
     }
 
-    private fun teardownStream(
-        host: String,
+    private fun teardownStreamDescriptor(
         type: Long,
-        connectionId: Long,
+        connectionId: Long?,
+        displayUuid: String? = null,
     ): Boolean =
         try {
-            val body =
-                BinaryPlist.encode(
-                    linkedMapOf(
-                        "streams" to
-                            listOf(
-                                linkedMapOf<String, Any?>(
-                                    "type" to type,
-                                    "streamConnectionID" to connectionId,
-                                ),
-                            ),
-                    ),
-                )
+            val stream = linkedMapOf<String, Any?>("type" to type)
+            if (connectionId != null) stream["streamConnectionID"] = connectionId
+            if (type == SCREEN_STREAM_TYPE) {
+                (screenUuid ?: displayUuid)?.let { stream["uuid"] = it }
+            }
             val (statusLine, _) =
                 request(
                     "TEARDOWN",
-                    "rtsp://${host}:${endpoint.airPlayPort}/",
-                    body,
+                    "/",
+                    BinaryPlist.encode(mapOf("streams" to listOf(stream))),
                     timeoutMillis = STREAM_TEARDOWN_TIMEOUT_MILLIS,
+                    contentType = "application/x-apple-binary-plist",
                 )
             log("AIRPLAY: 流 TEARDOWN（type=$type connId=$connectionId）→ $statusLine")
             statusLine.contains("200")
@@ -893,35 +919,59 @@ class AirPlayClient(
         ).apply { isDaemon = true }.start()
     }
 
-    fun close() {
-        // 先记下「这次关闭会不会打断某个在飞的请求」：会把等待中的 CSeq 判死，
-        // 对配对来说这就是一次「本机打断」，不能算车机的结论。
-        val inFlight = pendingResponses.isNotEmpty()
-        runCatching { socket?.close() }
-        socket = null
-        activeHost = null
-        activeAddress = null
-        // 新连接总是从**明文**开始（pair-verify 成功后才切加密）：旧连接的 cipher 必须
-        // 清掉，否则重连后的读线程会把明文应答当密文帧解，后续所有请求超时。
-        cipher = null
-        synchronized(rtspWriteLock) {
-            readerSocket = null
-            readerThread = null
-            readerGeneration++
-        }
-        failAllPending("控制通道关闭")
-        if (inFlight) {
-            interruptedExchangeAtUptime = SystemClock.uptimeMillis()
-            if (pairingInProgress) {
-                log("AIRPLAY: 本次 close() 打断了在飞的配对交换——按「本机打断」处理，不计入车机拒绝")
+    fun close() = closeTransport(local = true)
+
+    private fun closeTransport(local: Boolean) {
+        synchronized(transportLock) {
+            // 先记下「这次关闭会不会打断某个在飞的请求」：会把等待中的 CSeq 判死，
+            // 对配对来说这就是一次「本机打断」，不能算车机的结论。
+            val inFlight = pendingResponses.isNotEmpty()
+            runCatching { socket?.close() }
+            socket = null
+            activeHost = null
+            activeAddress = null
+            // 新连接总是从**明文**开始（pair-verify 成功后才切加密）：旧连接的 cipher 必须
+            // 清掉，否则重连后的读线程会把明文应答当密文帧解，后续所有请求超时。
+            cipher = null
+            sessionEstablished = false
+            screenUuid = null
+            synchronized(rtspWriteLock) {
+                readerSocket = null
+                readerThread = null
+                readerGeneration++
             }
+            failAllPending("控制通道关闭")
+            if (inFlight && local) {
+                localCloseGeneration++
+                if (pairingInProgress) {
+                    log("AIRPLAY: 本次 close() 打断了在飞的配对交换——按「本机打断」处理，不计入车机拒绝")
+                }
+            }
+            // 事件通道随控制通道一起收：旧事件读线程不能再向新会话派发车机命令
+            runCatching { eventCommandSocket?.close() }
+            eventCommandSocket = null
+            iapLink?.close()
+            runCatching { iapTunnel?.socket?.close() }
+            iapTunnel = null
+            iapLink = null
+            // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
+            // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
+            // 守护线程常驻的代价可忽略（每客户端实例一根）
         }
-        runCatching { iapTunnel?.socket?.close() }
-        iapTunnel = null
-        iapLink = null
-        // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
-        // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
-        // 守护线程常驻的代价可忽略（每客户端实例一根）
+    }
+
+    private fun transportEnded(
+        owner: Socket,
+        event: Boolean,
+        reason: String,
+    ) {
+        synchronized(transportLock) {
+            if (cancelled || if (event) eventCommandSocket !== owner else socket !== owner) return
+            log("AIRPLAY: 远端${if (event) "事件" else "控制"}通道结束 - $reason")
+            if (sessionEstablished) cancelled = true
+            closeTransport(local = false)
+        }
+        onTransportClosed?.invoke(this, reason)
     }
 
     /**
@@ -1038,16 +1088,20 @@ class AirPlayClient(
      * 回出畸形行 "OK 200 OK"；我们再回 → 无限回声，日志雪崩且空耗加密通道。
      * 通道写与 postEventCommand 共用一把锁，避免两线程加密帧交叉。
      */
-    private fun respondEventRequest(cseq: String?) {
+    private fun respondEventRequest(
+        cseq: String?,
+        body: ByteArray = ByteArray(0),
+    ) {
         val socket = eventCommandSocket ?: return
         val cipher = eventCommandCipher
         try {
             synchronized(eventCommandLock) {
                 val head =
-                    "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n" +
+                    "RTSP/1.0 200 OK\r\nContent-Length: ${body.size}\r\n" +
+                        (if (body.isNotEmpty()) "Content-Type: application/x-apple-binary-plist\r\n" else "") +
                         (cseq?.let { "CSeq: $it\r\n" } ?: "") + "\r\n"
-                SessionTrace.rtsp(SessionTrace.Dir.TX, "airplay-event", head)
-                val plaintext = head.toByteArray(Charsets.US_ASCII)
+                SessionTrace.rtsp(SessionTrace.Dir.TX, "airplay-event", head + SessionTrace.binary(body))
+                val plaintext = head.toByteArray(Charsets.US_ASCII) + body
                 socket.getOutputStream().apply {
                     write(cipher?.encrypt(plaintext) ?: plaintext)
                     flush()
@@ -1069,6 +1123,12 @@ class AirPlayClient(
 
     /** 主屏当前是否归手机（供交接/UI 判定；车机没声明归属时恒为 true）。 */
     val phoneOwnsScreen: Boolean get() = resourceState.phoneOwnsScreen
+    val phoneOwnsAudio: Boolean get() = resourceState.phoneOwnsAudio
+    val phoneBorrowsAudio: Boolean get() = resourceState.phoneBorrowsAudio
+    val resourceDescription: String get() = resourceState.describe()
+
+    /** 车机在 `changeModes` 中完成主音频永久接管、受限借用（如静音）或归还时回调。 */
+    var onCarAudioTransfer: ((AirPlayResourceState.CarAudioTransfer) -> Unit)? = null
 
     // ---- 本机应用态上报（AIS 23.3.7.5 modesChanged.appStates）----
 
@@ -1141,49 +1201,60 @@ class AirPlayClient(
                 reason = appStateReason
             }
             // 阻塞式 RTSP：只允许在这条后台线程上等
-            publishModes("appState：$reason")
+            synchronized(modesPublicationLock) { publishModes("appState：$reason") }
             synchronized(appStateLock) { appStatePublishedVersion = version }
         }
     }
 
-    fun assertModes(): Boolean {
-        // 真机顺序：先按车机在 /info 里给的初始归属发布，再把主屏要回来——
-        // 而不是一上来就宣称永久持有（在不打算让屏的车机上那就是硬抢）。
-        resourceState.claimAudio()
-        val initial = publishModes("初始归属")
-        if (!initial) {
-            // 车机不接受「按它给的归属复述」→ 这套仲裁在它身上不成立，退回改动前的行为
-            // （主屏+主音频都声明手机永久持有）。保证最坏情况与 1.2.34 一致，不因本条改动退化。
-            log("AIRPLAY: 车机不接受初始归属 → 回退为「声明手机持有主屏/主音频」")
-            resourceState.claimAll()
-            return publishModes("回退：声明手机持有")
+    // 手机侧申请与 appState 上报共用一把锁：两路 modesChanged 不交叉，车机看到的归属按序演进
+    fun acquireScreenResource(fromRequestUi: Boolean = false): Boolean =
+        synchronized(modesPublicationLock) {
+            resourceState.acquireScreen(fromRequestUi) { publishModes("申请主屏", it) }
         }
-        val before = resourceState.command().toString()
-        resourceState.requestPhoneScreen()
-        // 状态没变就不重发（/info 未给 modes 时会走这里，报文与改动前逐字节一致）
-        if (resourceState.command().toString() == before) return true
-        return publishModes("申请主屏")
+
+    fun acquireAudioResource(
+        priority: Int,
+        temporary: Boolean,
+    ): Boolean =
+        synchronized(modesPublicationLock) {
+            resourceState.acquireAudio(priority, temporary) { publishModes("申请主音频", it) }
+        }
+
+    fun releaseAudioBorrow(): Boolean =
+        synchronized(modesPublicationLock) { resourceState.releaseAudioBorrow { publishModes("归还临时借用的主音频", it) } }
+
+    /** 车机改判后复述当前归属；不走 [assertModes] 的初始回退（那会把车机正借着的屏抢回来）。 */
+    fun republishModes(): Boolean = synchronized(modesPublicationLock) { publishModes("车机改判后复述") }
+
+    /** 单流 `TEARDOWN`（只拆指定类型的流，不拆整条控制会话）。 */
+    fun teardownStream(
+        type: Long,
+        displayUuid: String? = null,
+    ): Boolean {
+        val streams = activeStreams.entries.filter { it.value == type }.map { it.key }
+        if (streams.isEmpty()) return teardownStreamDescriptor(type, null, displayUuid)
+        var allAccepted = true
+        for (id in streams) {
+            val accepted = teardownStreamDescriptor(type, id, displayUuid)
+            if (accepted) activeStreams.remove(id, type)
+            allAccepted = accepted && allAccepted
+        }
+        return allAccepted
     }
 
-    /**
-     * 车机的资源仲裁请求（`changeModes` / `requestUI`）→ 更新归属后**如实回报**。
-     *
-     * 关键点：回的是「当前实际归属」，不是「手机接管」。旧实现对这两条一律回
-     * 手机永久持屏，正是 link_plus 注释里点名要避免的反模式。
-     *
-     * @return 车机是否接受了这次回报
-     */
-    fun handleModeCommand(command: Map<*, *>): Boolean {
-        val type = command["type"]?.toString() ?: return false
-        when (type) {
-            "changeModes" -> resourceState.applyCarChange(command["params"] as? Map<*, *>)
-            "requestUI" -> resourceState.requestPhoneScreen()
-            else -> return false
+    fun assertModes(): Boolean =
+        synchronized(modesPublicationLock) {
+            // 主屏/主音频改为按需申请（acquireScreenResource / acquireAudioResource），这里只复述当前归属
+            val initial = publishModes("当前归属")
+            if (!initial) {
+                // 车机不接受「按它给的归属复述」→ 这套仲裁在它身上不成立，退回改动前的行为
+                // （主屏+主音频都声明手机永久持有）。保证最坏情况与 1.2.34 一致，不因本条改动退化。
+                log("AIRPLAY: 车机不接受初始归属 → 回退为「声明手机持有主屏/主音频」")
+                resourceState.claimAll()
+                return@synchronized publishModes("回退：声明手机持有")
+            }
+            true
         }
-        val accepted = publishModes(type)
-        log("EVENT: $type 接受=$accepted ${resourceState.describe()}")
-        return accepted
-    }
 
     /**
      * 发布一次 `modesChanged`。
@@ -1191,13 +1262,16 @@ class AirPlayClient(
      * 成功判定**不只看 RTSP 200**：车机会回 `200 OK` + `{status: -1}` 表示「收到了但不同意」。
      * 旧实现只看状态行，把这种拒绝当成功继续往下走，现场表现是「都成功了，过一会儿断」。
      */
-    private fun publishModes(reason: String): Boolean =
+    private fun publishModes(
+        reason: String,
+        command: Map<String, Any?> = resourceState.command(),
+    ): Boolean =
         try {
             val (statusLine, body) =
                 request(
                     "POST",
                     "/command",
-                    BinaryPlist.encode(resourceState.command()),
+                    BinaryPlist.encode(command),
                     contentType = "application/x-apple-binary-plist",
                 )
             val accepted = commandAccepted(statusLine, body)
@@ -1238,6 +1312,7 @@ class AirPlayClient(
      * 清单对照 catplay（真车验证的发送端，含 viewAreas/uiContext 等视频必需项）。
      */
     fun runSetup(): SetupInfo? {
+        if (cancelled) return null
         // 计时端口：catplay 真车实现始终绑定真实 UDP timing server 通告给车机
         // （媒体时钟同步源）；timingPort=0 曾是我们的屏幕流 400 头号嫌疑。
         if (!timingServer.start()) {
@@ -1298,6 +1373,11 @@ class AirPlayClient(
                 )
             }
             return null
+        }
+        synchronized(transportLock) {
+            if (!controlSessionAlive) return null
+            sessionEstablished = true
+            wasSessionEstablished = true
         }
         val root =
             try {
@@ -2062,6 +2142,7 @@ class AirPlayClient(
                     sendControlIap = ::postControlIap,
                     tunnelWriter = { iapTunnel },
                     alive = { socket?.isClosed == false },
+                    mfiContext = context,
                     nowPlayingProvider = { nowPlayingSource?.invoke() },
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                     artworkProvider = { id -> artworkSource?.invoke(id) },
@@ -2149,35 +2230,43 @@ class AirPlayClient(
         }
     private var controlIapCount = 0
 
-    fun postControlIap(frame: ByteArray) {
+    fun postControlIap(
+        frame: ByteArray,
+        isCurrentEpoch: () -> Boolean = { true },
+    ) {
         controlIapTx.execute {
             try {
-                val body =
-                    BinaryPlist.encode(
-                        linkedMapOf(
-                            "type" to "iAPSendMessage",
-                            "params" to linkedMapOf<String, Any?>("data" to frame),
-                        ),
-                    )
-                val (statusLine, reply) =
-                    request(
-                        "POST",
-                        "/command",
-                        body,
-                        contentType = "application/x-apple-binary-plist",
-                    )
-                controlIapCount++
-                val head =
-                    "IAPLINK: tx(控制通道) #$controlIapCount ${frame.size}B [$statusLine]" +
-                        (if (reply.isEmpty()) "" else " resp=${reply.size}B hex=" + hexPrefix(reply))
-                if (controlIapCount <= 10 || controlIapCount % 50 == 0 || reply.isNotEmpty()) {
-                    log(head)
-                }
-                // 车机可能把链路字节直接塞在应答体里（而不是另发事件通道）：认出来就喂给
-                // 链路引擎，别让它白躺在响应里。
-                if (reply.isNotEmpty() && looksLikeIapLink(reply)) {
-                    log("IAPLINK: 控制通道应答内含链路字节 ${reply.size}B → 喂给链路引擎")
-                    iapLink?.onCarBytes(reply)
+                // 每个链路包单独一次 iAPSendMessage：车机按 POST 边界取包，粘在一起的 9B 空 ACK 会被当成脏数据
+                for (packet in Iap2LinkPacket.splitFrames(frame)) {
+                    // 链路已重启/关闭：排队中的旧周期字节不再发出
+                    if (!isCurrentEpoch()) return@execute
+                    val body =
+                        BinaryPlist.encode(
+                            linkedMapOf(
+                                "type" to "iAPSendMessage",
+                                "params" to linkedMapOf<String, Any?>("data" to packet),
+                            ),
+                        )
+                    val (statusLine, reply) =
+                        request(
+                            "POST",
+                            "/command",
+                            body,
+                            contentType = "application/x-apple-binary-plist",
+                        )
+                    controlIapCount++
+                    val head =
+                        "IAPLINK: tx(控制通道) #$controlIapCount ${packet.size}B [$statusLine]" +
+                            (if (reply.isEmpty()) "" else " resp=${reply.size}B hex=" + hexPrefix(reply))
+                    if (controlIapCount <= 10 || controlIapCount % 50 == 0 || reply.isNotEmpty()) {
+                        log(head)
+                    }
+                    // 车机可能把链路字节直接塞在应答体里（而不是另发事件通道）：认出来就喂给
+                    // 链路引擎，别让它白躺在响应里。
+                    if (reply.isNotEmpty() && looksLikeIapLink(reply)) {
+                        log("IAPLINK: 控制通道应答内含链路字节 ${reply.size}B → 喂给链路引擎")
+                        iapLink?.onCarBytes(reply, isCurrentEpoch)
+                    }
                 }
             } catch (error: IOException) {
                 log("IAPLINK: 控制通道 POST 失败 - ${error.message}")
@@ -2581,7 +2670,7 @@ class AirPlayClient(
                         ),
                 ),
             )
-        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val host = receiverHost() ?: return null
         lastAudioHost = host
         val startedAt = SystemClock.uptimeMillis()
         var statusLine: String
@@ -2729,7 +2818,7 @@ class AirPlayClient(
      * 阻塞（RTSP 往返，最长 4s×2），请从后台线程调用。
      */
     fun refreshVolume(reason: String) {
-        val host = lastAudioHost ?: endpoint.ipAddresses.firstOrNull() ?: return
+        val host = lastAudioHost ?: receiverHost() ?: return
         log("AIRPLAY: $reason → 重新核对车机音量（$host）")
         runCatching { probeAndFixVolume(host) }
     }
@@ -3056,7 +3145,7 @@ class AirPlayClient(
         sampleRate: Int,
         listenMillis: Long = 6_000,
     ): Int {
-        val host = endpoint.ipAddresses.firstOrNull()
+        val host = receiverHost()
         if (host == null) {
             log("MIC: 无端点地址，跳过本次探针")
             return 0
@@ -3279,6 +3368,7 @@ class AirPlayClient(
         // MIB3：屏幕流 SETUP 200 拿到 dataPort 后，真机此时在控制通道发 detect（Frida
         // 时序：screen SETUP → phone detect on control → HU SYN on control）。见 armMib3VirtualLink。
         armMib3VirtualLink()
+        screenUuid = streamUuid
         return ScreenStreamInfo(connectionId, dataPort, cipher)
     }
 
@@ -3351,6 +3441,7 @@ class AirPlayClient(
             registerEventCommandChannel(socket, cipher)
             Thread({
                 val input = socket.getInputStream()
+                var ended = "EOF"
                 val accumulator = RtspAccumulator()
                 var pending = ByteArray(0)
                 val buffer = ByteArray(8192)
@@ -3399,7 +3490,7 @@ class AirPlayClient(
                             if (!isRequest) continue
                             // 车机请求：立即回 200（echo 请求 CSeq）；/command 走分发，其余节流留痕
                             val cseq = CSEQ_REGEX.find(message.head)?.groupValues?.get(1)
-                            respondEventRequest(cseq)
+                            if (!firstLine.contains("/command")) respondEventRequest(cseq)
                             if (!firstLine.contains("/command")) {
                                 unknownEventRequests++
                                 if (unknownEventRequests <= 10) {
@@ -3423,6 +3514,7 @@ class AirPlayClient(
                                 }
                             val command = parsed as? Map<*, *>
                             if (command == null) {
+                                respondEventRequest(cseq)
                                 // 车机每秒都会 POST 一条解不出来的 /command——按「体型指纹」
                                 // 去重，每种体型留一次全文（原因 + 报文头 + 完整 hex），其余只计数。
                                 badEventCommands++
@@ -3444,6 +3536,25 @@ class AirPlayClient(
                                 }
                                 continue
                             }
+                            var audioTransfer: AirPlayResourceState.CarAudioTransfer? = null
+                            // changeModes 在事件应答里直接回仲裁后的归属（不另发一轮阻塞的 modesChanged）
+                            val reply =
+                                if (command["type"] == "changeModes") {
+                                    audioTransfer = resourceState.applyCarChange(command["params"] as? Map<*, *>)
+                                    log("EVENT: changeModes ${resourceState.describe()}")
+                                    BinaryPlist.encode(linkedMapOf("status" to 0L, "params" to resourceState.command()["params"]))
+                                } else {
+                                    ByteArray(0)
+                                }
+                            respondEventRequest(cseq, reply)
+                            if (cancelled) continue
+                            if (audioTransfer != null) {
+                                try {
+                                    onCarAudioTransfer?.invoke(audioTransfer)
+                                } catch (error: Exception) {
+                                    log("EVENT: 音频归属变更通知异常 - ${error.message}")
+                                }
+                            }
                             try {
                                 onCommand(command)
                             } catch (error: Exception) {
@@ -3453,6 +3564,10 @@ class AirPlayClient(
                     }
                 } catch (error: IOException) {
                     log("EVENT: 读取结束 - ${error.message}")
+                    ended = error.message ?: "IOException"
+                } finally {
+                    transportEnded(socket, event = true, reason = "event $ended")
+                    runCatching { socket.close() }
                 }
             }, "event-reader").apply {
                 isDaemon = true
@@ -3527,7 +3642,9 @@ class AirPlayClient(
     // ---- RTSP 请求 ----
 
     private fun ensureConnected(timeoutMillis: Int = 5_000): Boolean {
+        if (cancelled) return false
         if (socket?.isConnected == true && socket?.isClosed == false) return true
+        connectionRefused = false
         // 快照端点与代数：连接期间主控可能换端点（0x4301 晚到），
         // 若用旧地址建好连接再被请求，会一直连错机器到本轮超时。
         val target = endpoint
@@ -3578,6 +3695,11 @@ class AirPlayClient(
                 log("AIRPLAY: TCP 已连通 $activeHost:${target.airPlayPort}（本机 ${newSocket.localAddress.hostAddress}）")
                 return true
             } catch (error: IOException) {
+                if (error is java.net.ConnectException &&
+                    error.message.orEmpty().contains("refused", ignoreCase = true)
+                ) {
+                    connectionRefused = true
+                }
                 failures += "$host（${error.message}）"
             }
         }
@@ -3689,7 +3811,8 @@ class AirPlayClient(
         extraHeaders: List<Pair<String, String>> = emptyList(),
     ): Pair<String, ByteArray> {
         val client = socket ?: throw IOException("未连接")
-        val startedAt = SystemClock.uptimeMillis()
+        // System.nanoTime：单调时钟，JVM 单测里也可用
+        val startedAt = System.nanoTime()
         startReader(client)
         val queue = java.util.concurrent.LinkedBlockingQueue<Pair<String, ByteArray>>(1)
         val cseq: Int
@@ -3739,7 +3862,7 @@ class AirPlayClient(
                 pendingResponses.remove(cseq)
             }
         // 慢应答留痕：>1.5s 说明车机在内部仲裁（同类问题排查的第一手证据）
-        val elapsed = SystemClock.uptimeMillis() - startedAt
+        val elapsed = (System.nanoTime() - startedAt) / 1_000_000
         if (elapsed > 1_500) {
             log("AIRPLAY: 慢应答 ${elapsed}ms（$method $path，CSeq=$cseq）——等待期间心跳未中断")
         }
@@ -3770,6 +3893,7 @@ class AirPlayClient(
         generation: Int,
     ) {
         var cipherPending = ByteArray(0)
+        var ended = "EOF"
         var buffer = ByteArray(0)
         var encryptedMode = false
         try {
@@ -3793,7 +3917,7 @@ class AirPlayClient(
                             try {
                                 synchronized(encryption) { encryption.decrypt(cipherPending) }
                             } catch (error: Exception) {
-                                log("AIRPLAY: 控制通道解密失败 - ${error.message}")
+                                ended = "decrypt ${error.message}"
                                 break
                             }
                         cipherPending = decrypted.rest
@@ -3807,12 +3931,14 @@ class AirPlayClient(
                     dispatchResponse(parsed.statusLine, parsed.body, parsed.head)
                 }
             }
-        } catch (_: IOException) {
+        } catch (error: Exception) {
+            ended = "${error.javaClass.simpleName}: ${error.message}"
         } finally {
             // 只由「当前」读线程清账：重连会换 socket 与新读线程，旧线程不得误伤新会话
             if (generation == readerGeneration) {
-                failAllPending("控制通道读线程结束")
+                transportEnded(client, event = false, reason = "control $ended")
             }
+            runCatching { client.close() }
         }
     }
 
