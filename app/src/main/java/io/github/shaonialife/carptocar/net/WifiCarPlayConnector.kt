@@ -108,6 +108,18 @@ class WifiCarPlayConnector(
     var onNetworkLost: ((ssid: String, isCurrentLoss: () -> Boolean) -> Unit)? = null
 
     /**
+     * 网络**一就绪**（已绑定到本进程、已拿到地址）就回调一次，**早于**
+     * [joinCarPlayNetwork] 返回。
+     *
+     * 为什么需要（2026-11-15 21:34 日志）：系统 `onAvailable` 在 21:34:41 就给了
+     * `172.16.222.105`，而 `joinCarPlayNetwork` 一直到 21:34:47 才返回——
+     * 中间这 6 秒网络完全可用、车机的 ctrl 邀请已经打进来（21:37:44 那轮同型），
+     * 界面文案却还挂在「正在加入车机热点」。会话层接到这个回调就能立刻改口。
+     */
+    @Volatile
+    var onReady: ((ssid: String, network: Network, localIpv4: String?) -> Unit)? = null
+
+    /**
      * 当前绑定网络的**全部**默认网关（车机热点场景 = 车机 IP），**IPv4 排在最前**。
      *
      * mDNS 发现失败时的兜底路径。
@@ -157,9 +169,11 @@ class WifiCarPlayConnector(
      * 用于 mDNS 结果过滤：手机双归属（连车机热点 + 自己开热点共享给电脑）时，
      * mDNS 会跨网发现电脑的 AirPlay 接收器——非本网段地址一律不是车机。
      */
-    fun localIpv4Address(): String? {
-        val network = boundNetwork.get() ?: return null
-        return try {
+    fun localIpv4Address(): String? = boundNetwork.get()?.let { ipv4Of(it) }
+
+    /** 指定网络上的本机 IPv4（[localIpv4Address] 的单网络版本，入网回调里用）。 */
+    private fun ipv4Of(network: Network): String? =
+        try {
             connectivityManager
                 .getLinkProperties(network)
                 ?.linkAddresses
@@ -169,7 +183,6 @@ class WifiCarPlayConnector(
         } catch (_: Exception) {
             null
         }
-    }
 
     /**
      * 本机在当前绑定网络上的全部 IPv6 地址。
@@ -220,7 +233,21 @@ class WifiCarPlayConnector(
         val specifier =
             buildSpecifier(ssid, passphrase, securityType)
                 ?: return JoinResult.Unsupported
-        release()
+        // **不再无条件 release**：进程可能已经绑着一条**能用**的网络（上一轮的应用专属
+        // 网络、系统自动关联的那条），而这里先拆后建会在系统即将建好/已经建好的那一刻
+        // 把它拆掉——2026-11-15 21:34:35 的日志正是如此：`>>> 以应用专属网络加入` 之后
+        // 636ms 就 `onLost`，原本好好的 `172.16.222.106` 没了，4~6 秒后才以 `.105` 回来。
+        // 用户看到的是「明明连上了，App 还说正在加入热点，热点还掉了一下」。
+        // 现在：手上有可用网络就先留着，新网络真的到位再换；新请求失败就原样还回去。
+        val keptNetwork = currentUsableNetwork()
+        val keptCallback =
+            if (keptNetwork == null) {
+                release()
+                null
+            } else {
+                log("WiFi: 已有一条可用网络（$keptNetwork）——入网期间先留着，新网络到位再换，不提前拆")
+                callback.get()
+            }
         val request =
             NetworkRequest
                 .Builder()
@@ -230,6 +257,7 @@ class WifiCarPlayConnector(
         val latch = CountDownLatch(1)
         val result = AtomicReference<Network?>(null)
         val unavailable = AtomicBoolean(false)
+        val readyReported = AtomicBoolean(false)
         val newCallback =
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
@@ -237,7 +265,29 @@ class WifiCarPlayConnector(
                     boundNetwork.set(network)
                     result.set(network)
                     log("WiFi: 已加入应用专属网络 \"$ssid\"（$network bindProcessToNetwork=$bound）——不影响其它应用联网")
+                    // 旧网络的监听到此为止：绑定已经换到新的这条，断线改由本回调负责
+                    if (keptCallback != null && keptCallback !== this) {
+                        runCatching { connectivityManager.unregisterNetworkCallback(keptCallback) }
+                    }
+                    reportReady(network)
                     latch.countDown()
+                }
+
+                /**
+                 * 地址可能比 [onAvailable] 晚一拍到（DHCP 还没回来时绑上去建不了 socket）。
+                 * 两个回调都试，[readyReported] 保证只报一次。
+                 */
+                override fun onLinkPropertiesChanged(
+                    network: Network,
+                    linkProperties: android.net.LinkProperties,
+                ) {
+                    reportReady(network)
+                }
+
+                private fun reportReady(network: Network) {
+                    if (!linkReady(network)) return
+                    if (!readyReported.compareAndSet(false, true)) return
+                    onReady?.invoke(ssid, network, ipv4Of(network))
                 }
 
                 override fun onUnavailable() {
@@ -260,7 +310,7 @@ class WifiCarPlayConnector(
                 false
             }
         if (!accepted) {
-            releaseIfOwned(newCallback)
+            restoreOrRelease(newCallback, keptNetwork, keptCallback)
             return JoinResult.Unavailable
         }
         val deadline = SystemClock.uptimeMillis() + timeoutMillis
@@ -275,7 +325,7 @@ class WifiCarPlayConnector(
             state = awaitJoin(latch, SystemClock.uptimeMillis() + graceMillis, isCancelled)
         }
         if (state < 0) {
-            releaseIfOwned(newCallback)
+            restoreOrRelease(newCallback, keptNetwork, keptCallback)
             return JoinResult.Unavailable
         }
         val network = result.get()
@@ -289,10 +339,32 @@ class WifiCarPlayConnector(
             val why =
                 if (unavailable.get()) "——系统已判定不可用" else "——系统确认框可能仍在前台"
             log("WiFi: 等待加入 \"$ssid\" 超时（$window）$why")
-            releaseIfOwned(newCallback)
+            restoreOrRelease(newCallback, keptNetwork, keptCallback)
             return JoinResult.Unavailable
         }
         return JoinResult.Joined(network)
+    }
+
+    /**
+     * 本轮入网没成：把进来之前那条**可用**网络原样还回去（绑定 + 断线监听），
+     * 而不是留一个空绑定让整条会话失去网络。没有可还的才照旧 [releaseIfOwned]。
+     */
+    @Synchronized
+    private fun restoreOrRelease(
+        attempt: ConnectivityManager.NetworkCallback,
+        keptNetwork: Network?,
+        keptCallback: ConnectivityManager.NetworkCallback?,
+    ) {
+        runCatching { connectivityManager.unregisterNetworkCallback(attempt) }
+        if (keptNetwork != null && keptCallback != null) {
+            callback.set(keptCallback)
+            boundNetwork.set(keptNetwork)
+            val rebound =
+                runCatching { connectivityManager.bindProcessToNetwork(keptNetwork) }.getOrDefault(false)
+            log("WiFi: 本轮入网未成——把原来那条可用网络还回去（$keptNetwork，重绑=$rebound）")
+            return
+        }
+        if (callback.get() === attempt) releaseIfOwned(attempt)
     }
 
     /**

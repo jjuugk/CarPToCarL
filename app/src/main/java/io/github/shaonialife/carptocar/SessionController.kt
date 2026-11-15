@@ -59,6 +59,7 @@ import io.github.shaonialife.carptocar.net.CarNetworkReadiness
 import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
+import io.github.shaonialife.carptocar.net.HotspotHint
 import io.github.shaonialife.carptocar.net.NetworkReusePolicy
 import io.github.shaonialife.carptocar.net.SilentJoinPolicy
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
@@ -1543,9 +1544,31 @@ object SessionController {
     /**
      * 当前连接阶段的一句话提示（英雄卡副标题用，详细过程看日志）。
      * 由各阶段显式设置；null 时 UI 显示默认文案。
+     *
+     * **读的时候做一次事实校正**（2026-11-15 用户反馈「App 显示正在加入车机热点，
+     * 但其实已经连上了」，1.2.46 / 1.2.48 / 1.2.50 都碰到）：
+     * 文案只在入网流程**返回之后**才由各分支重写，而系统 `onAvailable` 往往早好几秒
+     * （21:34:41 网络已通 `.105`，21:34:47 流程才结束），`WifiJoinGate` 的 Wait 分支
+     * 最长还要再等 40 秒。这段空窗里网络完全可用，车机的 ctrl 邀请甚至已经打进来，
+     * 唯独这句话还写着「正在加入」。这里在网络确实可用时直接改口，任何走到
+     * 「加入车机热点」分支而网络已通的路径都被覆盖，不必逐个分支去补。
      */
+    var phaseHint: String?
+        get() = phaseHintValue?.let { correctedPhaseHint(it) }
+        set(value) {
+            phaseHintValue = value
+        }
+
     @Volatile
-    var phaseHint: String? = null
+    private var phaseHintValue: String? = null
+
+    /** 入网类文案（「正在加入 / 正在自动加入 / 正在重试加入车机热点」）在网络已通时改口。 */
+    private fun correctedPhaseHint(hint: String): String {
+        if (!HotspotHint.isJoining(hint)) return hint
+        val connector = wifiConnector ?: return hint
+        if (connector.currentUsableNetwork() == null) return hint
+        return HotspotHint.ready(connector.localIpv4Address())
+    }
 
     /** 取消「连接中」：停链路 + 置取消标志，卡在错误网络/等待回连时用户可主动脱身。 */
     fun cancelConnecting(context: Context) {
@@ -2150,6 +2173,17 @@ object SessionController {
                     // 网络销毁，不重绑的话连 CarLife 引擎都会一直断着（实测重绑后 8 秒
                     // 内引擎会掉线一次，重绑回来它才自己恢复）。
                     connector.onNetworkLost = { ssid, isCurrentLoss -> onCarWifiLost(ssid, isCurrentLoss) }
+                    // 网络一就绪就改口：入网流程还要收尾（绑定后的 ctrl 广播重注册、
+                    // 门闸记账），但「连没连上热点」这一刻就有答案了。见 phaseHint 注释。
+                    connector.onReady = { ssid, _, ip ->
+                        if (HotspotHint.isJoining(phaseHintValue)) {
+                            phaseHint = HotspotHint.ready(ip)
+                            appendLog(
+                                "WIFI: 网络已就绪 \"$ssid\"（IP=${ip ?: "未取到"}）——" +
+                                    "文案切到「已连上」，入网流程仍在收尾",
+                            )
+                        }
+                    }
                 }
             wifiWatchdog =
                 WifiLinkWatchdog(

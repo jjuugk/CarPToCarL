@@ -11,8 +11,10 @@ import org.junit.Test
  * 状态 → 动作的映射必须与「能不能复用」严格对应。
  *
  * 最容易做错的一条：把「网络在但没就绪」也当成「重新入网」。那会调用
- * `joinCarPlayNetwork`，而它第一行就是 `release()`——把正在建立的网络拆掉，
- * 于是「再等两秒就好」变成「白等一轮 15 秒超时」。
+ * `joinCarPlayNetwork`，让系统重新关联一遍——于是「再等两秒就好」变成「白等一轮
+ * 15 秒超时」，期间车机的 ctrl 邀请全打空。
+ * （1.2.51 起 `joinCarPlayNetwork` 不再无条件 `release()`，手上有可用网络时会留着，
+ * 但它仍然会重新发一次 specifier，能省掉这一轮就该省掉。）
  */
 class NetworkReusePolicyTest {
     private fun decide(
