@@ -7,6 +7,7 @@ import android.view.Surface
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.BinaryPlist
 import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
+import io.github.shaonialife.carptocar.carlife.H264Sps
 import io.github.shaonialife.carptocar.net.TcpLiveness
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
@@ -52,24 +53,13 @@ class VideoSender(
      */
     private val keepAliveWithStats: Boolean = false,
     /**
-     * **车机画布**（`/info displays[0].widthPixels×heightPixels`），VideoConfig 头声明的契约值。
-     *
-     * 真车（Audi/DELPHI、BMW/Cinemo 同款行为）按这个声明的尺寸建解码器与 surface，
-     * 与车机实际画布不符就解不出画面——会话、触摸、心跳全正常，日志一个错都没有。
-     * 所以它优先于任何「码流侧」的尺寸（引擎码流、SPS）。
-     *
-     * 不能省：直通模式下码流尺寸由 CarLife 引擎决定，引擎白名单会降档
-     * （申请 1412×654 实编 1280×720，2026-11-04 奥迪 3810 实测），
-     * 此时若照码流声明，车机拿到的是 720p 画布（≠ 1412×654）→ 整屏黑。
+     * 显式「车机画布」实验模式的声明覆盖值（`/info displays[0]`）。
+     * 不传时优先按当前 SPS 的裁剪后画面尺寸声明，避免被陈旧协商档位带偏。
      */
     private val canvasSize: (() -> Pair<Int, Int>)? = null,
     /**
-     * 直通模式下**实时**取「引擎实际编码分辨率」的回调（返回 98311 上报的宽高）。
-     *
-     * 只在**没有画布信息**时兜底（`canvasSize` 为空/0）。含义是「码流实际多少」，
-     * 用来跟随引擎中途重建编码器；它不是画布契约——把它当声明值用，就会在
-     * 「画布 ≠ 码流」的车机上黑屏（2026-11-04 奥迪 3810 实测）。
-     * 每次发 config 都现取，就永远跟得上。
+     * SPS 不可解析时的实时尺寸兜底。CarLife 的协商档位可能与实编尺寸不同，
+     * 因而不能覆盖当前 VideoConfig 携带的 SPS。
      */
     private val liveSize: (() -> Pair<Int, Int>)? = null,
     /**
@@ -90,11 +80,17 @@ class VideoSender(
      * 少写一个字段就少一处与车机固件理解不一致的风险。
      */
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
+    private val clockMillis: () -> Long = { defaultMonotonicMillis() },
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
     @Volatile
     private var socket: Socket? = null
+    private val socketLifecycleLock = Any()
+
+    @Volatile
+    private var socketGeneration = 0
+    private var connectingSocket: Socket? = null
 
     /** 正在重连数据口：保活线程据此跳过写入，避免抢在 socket 置空窗口期抛错自杀。 */
     @Volatile
@@ -148,6 +144,7 @@ class VideoSender(
      * `attributeAudioTeardown` 会重复记账，日志也会重复成两条）。
      */
     private val ended = AtomicBoolean(false)
+    private val stoppedLocally = AtomicBoolean(false)
     private var frameCounter = 0L
 
     /**
@@ -161,6 +158,10 @@ class VideoSender(
      */
     @Volatile
     private var configSent = false
+
+    /** 源重启后待在下一帧新 IDR 前补发 VideoConfig；期间保持 [configSent] 为 true 以放行旧 IDR 保活。 */
+    @Volatile
+    private var configRefreshPending = false
 
     @Volatile
     private var passthrough = false
@@ -218,8 +219,10 @@ class VideoSender(
      * 不认 CarLife 侧的握手/进程状态——UI 与提示逻辑都用它，避免「显示已劫持却没画面」。
      */
     val isVideoFlowing: Boolean
-        get() = running.get() && lastFrameAtMs > 0 &&
-            android.os.SystemClock.uptimeMillis() - lastFrameAtMs < 5_000
+        get() =
+            running.get() &&
+                lastFrameAtMs > 0 &&
+                monotonicMillis() - lastFrameAtMs < 5_000
 
     /**
      * 送帧闸门：帧龄（排队延迟）+ 写入耗时。
@@ -279,7 +282,7 @@ class VideoSender(
     fun noteWriteStall() {
         val startedAt = writeStartedAt
         if (startedAt == 0L) return
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         val inFlight = now - startedAt
         if (inFlight < WRITE_STALL_LOG_MILLIS) return
         if (now - lastWriteStallLogAt < WRITE_STALL_LOG_GAP_MILLIS) return
@@ -300,18 +303,47 @@ class VideoSender(
         val existing = socket
         if (existing != null && !existing.isClosed) return true
         return try {
-            val client = Socket()
-            client.connect(InetSocketAddress(host, dataPort), 5_000)
-            client.tcpNoDelay = true
-            // 视频口是单向长写：对端静默消失时写窗口会一直「写成功」直到内核缓冲填满，
-            // keepalive 让断链在 ~19s 内可见（进而触发 [reconnectDataPort] 的 8s 窗口补救）
-            TcpLiveness.configure(client, "视频数据口", log)
-            socket = client
+            if (!connectDataSocket(5_000, "视频数据口", socketGeneration)) return false
             log("VIDEO: 数据端口已连通 $host:$dataPort（等 RECORD 后启动编码器）")
             true
         } catch (error: Exception) {
             log("VIDEO: 数据端口连接失败 - ${error.message}")
             false
+        }
+    }
+
+    private fun connectDataSocket(
+        timeoutMillis: Int,
+        label: String,
+        generation: Int,
+    ): Boolean {
+        val client = Socket()
+        synchronized(socketLifecycleLock) {
+            if (stoppedLocally.get() || generation != socketGeneration) {
+                client.close()
+                return false
+            }
+            connectingSocket = client
+        }
+        try {
+            client.connect(InetSocketAddress(host, dataPort), timeoutMillis)
+            client.tcpNoDelay = true
+            TcpLiveness.configure(client, label, log)
+            synchronized(socketLifecycleLock) {
+                if (stoppedLocally.get() || generation != socketGeneration) {
+                    client.close()
+                    return false
+                }
+                socket = client
+                connectingSocket = null
+            }
+            return true
+        } catch (error: Exception) {
+            runCatching { client.close() }
+            synchronized(socketLifecycleLock) {
+                if (connectingSocket === client) connectingSocket = null
+            }
+            throw error
         }
     }
 
@@ -331,27 +363,30 @@ class VideoSender(
     private fun reconnectDataPort(): Boolean {
         reconnecting = true
         try {
-            runCatching { socket?.close() }
-            socket = null
+            val generation =
+                synchronized(socketLifecycleLock) {
+                    if (stoppedLocally.get() || !running.get()) return false
+                    runCatching { socket?.close() }
+                    socket = null
+                    socketGeneration
+                }
             synchronized(writeLock) {
                 configSent = false
+                configRefreshPending = false
                 frameCounter = 0L
                 lastIdrNals = null
                 // 新通道 = 接收端重建解密与解码状态：同样要等一个 IDR 再喂帧。
                 beginAwaitingKeyFrame()
             }
             var attempt = 0
-            while (running.get() && attempt < DATA_RECONNECT_ATTEMPTS) {
+            while (running.get() && generation == socketGeneration && attempt < DATA_RECONNECT_ATTEMPTS) {
                 attempt++
                 try {
-                    val client = Socket()
-                    client.connect(InetSocketAddress(host, dataPort), 2_000)
-                    client.tcpNoDelay = true
-                    TcpLiveness.configure(client, "视频数据口(重连)", log)
-                    socket = client
+                    if (!connectDataSocket(2_000, "视频数据口(重连)", generation)) return false
                     log("VIDEO: 视频通道已重连（第 $attempt 次）——重发 VideoConfig，等下一个 IDR")
                     return true
                 } catch (error: Exception) {
+                    if (stoppedLocally.get() || generation != socketGeneration) return false
                     log("VIDEO: 视频通道重连失败（第 $attempt 次）- ${error.message}")
                     try {
                         Thread.sleep(DATA_RECONNECT_GAP_MS)
@@ -393,9 +428,15 @@ class VideoSender(
             codec.start()
             encoder = codec
             inputSurface = surface
-            ended.set(false)
-            running.set(true)
-            lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
+            synchronized(socketLifecycleLock) {
+                if (stoppedLocally.get()) {
+                    releaseResources()
+                    return false
+                }
+                ended.set(false)
+                running.set(true)
+            }
+            lastKeepAliveAt = monotonicMillis()
 
             onSurfaceReady(surface)
 
@@ -485,15 +526,25 @@ class VideoSender(
         }
 
     fun stop() {
+        stoppedLocally.set(true)
+        releaseResources()
+    }
+
+    private fun releaseResources() {
         running.set(false)
         passthrough = false
+        synchronized(socketLifecycleLock) {
+            socketGeneration++
+            runCatching { connectingSocket?.close() }
+            connectingSocket = null
+            runCatching { socket?.close() }
+            socket = null
+        }
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
         encoder = null
         runCatching { inputSurface?.release() }
         inputSurface = null
-        runCatching { socket?.close() }
-        socket = null
     }
 
     /**
@@ -512,10 +563,13 @@ class VideoSender(
     fun startPassthrough(): Boolean {
         if (running.get()) return true
         if (!openDataPort()) return false
-        passthrough = true
-        ended.set(false)
-        running.set(true)
-        lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
+        synchronized(socketLifecycleLock) {
+            if (stoppedLocally.get() || socket?.isClosed != false) return false
+            passthrough = true
+            ended.set(false)
+            running.set(true)
+        }
+        lastKeepAliveAt = monotonicMillis()
         // 新一轮会话：上一轮的「最后一帧」不能拿来重发（车机解码器已重建，
         // 旧 IDR 的 SPS/PPS 与本轮 avcC 可能不一致）。
         lastIdrNals = null
@@ -526,7 +580,7 @@ class VideoSender(
         cachedCsd = null
         sentSps = null
         configSent = false
-        // **必须等 IDR**（2026-11-03 ID7 实测）：此前这里是 false，配合下面 attach() 后
+        configRefreshPending = false
         // `seedCsd()` 预置的 cachedCsd，submitH264 会走「用缓存 csd 重发 VideoConfig」
         // 分支把**当前这一帧 P 帧当成新流的首帧**发出去。车机解码器刚重建、一帧参考都没有，
         // 收到 P 帧直接拆整轮会话：15 次断流里有 8 次是「首帧 NAL=1 → 0.1~0.2 秒被 reset」，
@@ -560,12 +614,12 @@ class VideoSender(
                 Thread.sleep(200)
             }
         } catch (error: Exception) {
+            if (stoppedLocally.get()) return
             log("VIDEO: 直通 keepAlive 中止 - ${error.message}")
             // 车机侧的会话已经没了（EOF/Broken pipe）：必须复位 running，否则
             // `isRunning` 会一直为 true，接收端重发 0x4301 时被「会话推流中」挡掉，
             // 表现为「车机重连了但画面永远不再出现」（2026-10-24 日志实测）。
-            stop()
-            // 这条路径同样意味着「会话真的结束了」，必须通知上层——否则
+            releaseResources()
             // `BtSessionGate.sessionActive` 永远停在 true（蓝牙探测被门闸挡住，车机
             // 再邀请也不会重连）、暗幕 45s 后把手机屏变黑、横屏覆盖不复原。
             // 旧实现只在 `drainEncoder` 的 finally 里回调，而当前产品只走直通，
@@ -588,25 +642,31 @@ class VideoSender(
      */
     private fun maybeResendIdleFrame(output: java.io.OutputStream) {
         val nals = lastIdrNals ?: return
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         if (lastFrameAtMs == 0L || now - lastFrameAtMs < IDLE_RESEND_AFTER_MS) return
         if (now - lastIdleResendAt < IDLE_RESEND_INTERVAL_MS) return
         lastIdleResendAt = now
         suppressFrameLog = true
         try {
-            sendFrameFromNals(nals, true, output)
-            idleResendCount++
-            if (idleResendCount == 1L || idleResendCount % 30L == 0L) {
-                log(
-                    "VIDEO: 已 ${(now - lastFrameAtMs) / 1000}s 没有新画面——重发最后一个 IDR " +
-                        "维持车机连接（第 $idleResendCount 次）",
-                )
+            if (sendFrameFromNals(nals, keyFrame = true, output = output, idleResend = true)) {
+                idleResendCount++
+                if (idleResendCount == 1L || idleResendCount % 30L == 0L) {
+                    log(
+                        "VIDEO: 已 ${(now - lastFrameAtMs) / 1000}s 没有新画面——重发最后一个 IDR " +
+                            "维持车机连接（第 $idleResendCount 次）",
+                    )
+                }
             }
         } catch (error: Exception) {
             log("VIDEO: 空闲保活重发失败 - ${error.message}")
         } finally {
             suppressFrameLog = false
         }
+    }
+
+    internal fun resendIdleFrameForTest() {
+        val out = socket?.getOutputStream() ?: return
+        maybeResendIdleFrame(out)
     }
 
     /**
@@ -632,13 +692,13 @@ class VideoSender(
      */
     fun onSourceRestart(reason: String) {
         if (!running.get()) return
-        configSent = false
+        // 标记「下一帧新 IDR 到来前必须重发 VideoConfig」，但不要在此刻把 configSent 清成 false：
+        // 若车机解码器已吃过上一份 avcC 且手里还有配套的 lastIdrNals，源重建空窗期仍靠旧 IDR 保活，
+        // 否则 sendFrameFromNals 会以「config 尚未发送」把所有保活帧拦掉，30 秒零帧即被车机拆链。
+        configRefreshPending = true
         beginAwaitingKeyFrame()
-        // 不在这里清 lastIdrNals：源重启到新源出首帧之间可能有几秒空窗，
-        // 旧 IDR 还能继续喂保活，避免车机因「视频静默」拆掉整轮会话。
-        // 一旦真的发出新 config，sendConfigFromNals 会立刻把它作废。
-        lastFrameAtMs = android.os.SystemClock.uptimeMillis()
-        log("VIDEO: 检测到 CarLife 源重启（$reason）——重置配置、等待新 IDR（帧计数保持，nonce 不复用）")
+        lastFrameAtMs = monotonicMillis()
+        log("VIDEO: 检测到 CarLife 源重启（$reason）——等待新 IDR 刷新配置（保活继续，帧计数保持）")
     }
 
     /**
@@ -649,7 +709,7 @@ class VideoSender(
      * 拿上一轮的旧时刻比较，`submitH264` 会在刚置位的瞬间就判定「已超时」把 P 帧放行。
      */
     private fun beginAwaitingKeyFrame() {
-        awaitingKeyFrameSince = android.os.SystemClock.uptimeMillis()
+        awaitingKeyFrameSince = monotonicMillis()
         awaitingKeyFrameAfterRestart = true
         droppedBeforeRestartKey = 0
         // 等 IDR = 换了一路码流的时间基准，排队延迟的基线必须跟着重来。
@@ -711,7 +771,7 @@ class VideoSender(
             val hasSps = nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
             val isIdr = nalUnits.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 5 }
             if (awaitingKeyFrameAfterRestart) {
-                val waitedMs = android.os.SystemClock.uptimeMillis() - awaitingKeyFrameSince
+                val waitedMs = monotonicMillis() - awaitingKeyFrameSince
                 if (!isIdr && waitedMs < WAIT_KEY_FRAME_TIMEOUT_MS) {
                     droppedBeforeRestartKey++
                     if (droppedBeforeRestartKey == 1L || droppedBeforeRestartKey % 30 == 0L) {
@@ -732,18 +792,23 @@ class VideoSender(
                     )
                 }
             }
+            if (hasSps && isIdr) {
+                // CarLife 只在编码器（重）初始化后的首帧 IDR 携带 SPS；此时 PTS 起点可能重置。
+                deliveryGate.onCodecReinit()
+            }
             // 会话中途 SPS 变了（用户在车联里改分辨率 / 引擎重建编码器）：
             // 车机手里的 avcC 已经不对，必须重发一份新的。
             if (configSent && hasSps && !spsMatchesSent(nalUnits)) {
                 log("VIDEO: 检测到 SPS 变化——重发 VideoConfig（分辨率/档位已变）")
-                configSent = false
+                configRefreshPending = true
             }
-            if (!configSent && diagRejects < 3) {
+            val needConfig = !configSent || configRefreshPending
+            if (needConfig && diagRejects < 3) {
                 diagRejects++
                 log("VIDEO: 等 SPS 中——本帧 NAL 类型=" +
                     nalUnits.joinToString(",") { "${it[0].toInt() and 0x1F}" } + " hasSps=$hasSps")
             }
-            if (!configSent) {
+            if (needConfig) {
                 if (hasSps) {
                     sendConfigFromNals(nalUnits, output, "当期帧自带SPS")
                 } else {
@@ -759,9 +824,9 @@ class VideoSender(
                     }
                 }
             }
-            val writeStartMs = android.os.SystemClock.uptimeMillis()
+            val writeStartMs = monotonicMillis()
             sendFrameFromNals(nalUnits, keyFrame, output)
-            val writtenAtMs = android.os.SystemClock.uptimeMillis()
+            val writtenAtMs = monotonicMillis()
             // 写入耗时本身就是背压指标：socket 写不动时会直接阻塞在这里，
             // 而这条调用链跑在 CarLife 的读线程上，一卡就是一整条视频通路在卡。
             val verdict = deliveryGate.onFrame(
@@ -783,11 +848,13 @@ class VideoSender(
             }
             true
         } catch (error: Exception) {
+            if (stoppedLocally.get()) return false
             log("VIDEO: 直通送帧失败 - ${error.message}")
             // 先试着在接收端的 8s 恢复窗口内重连视频通道；连不回来才认输复位，
             // 让下一轮 0x4301 重新起会话。
             if (reconnectDataPort()) return false
-            stop()
+            releaseResources()
+            endOnce()
             false
         }
     }
@@ -879,11 +946,11 @@ class VideoSender(
         } catch (error: Exception) {
             // 视频数据口断开（如接收端屏幕关闭收摊会话）：只终止推流，绝不冒泡——
             // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
-            log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
+            if (!stoppedLocally.get()) log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
         } finally {
-            stop()
+            releaseResources()
             // 会话真实结束信号（静默降噪解除 / 状态收尾）
-            endOnce()
+            if (!stoppedLocally.get()) endOnce()
         }
     }
 
@@ -893,6 +960,7 @@ class VideoSender(
      * 两条收尾路径都可能到达：直通保活线程写失败、编码帧线程退出。
      */
     private fun endOnce() {
+        if (stoppedLocally.get()) return
         if (!ended.compareAndSet(false, true)) return
         runCatching { onEnded?.invoke() }
     }
@@ -908,7 +976,7 @@ class VideoSender(
      */
     private fun maybeSendKeepAlive(output: java.io.OutputStream) {
         if (!running.get()) return
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = monotonicMillis()
         if (now - lastKeepAliveAt < KEEPALIVE_INTERVAL_MS) return
         val elapsedNanos = (now - lastKeepAliveAt).coerceAtLeast(1L) * 1_000_000.0
         val frames = framesSinceKeepAlive
@@ -965,48 +1033,26 @@ class VideoSender(
         // 记住这份 csd：源重启后新 IDR 若不带 SPS/PPS，靠它兜底重发 config。
         cachedCsd = listOf(sps, pps)
         sentSps = sps.copyOf()
-        // 换参数后旧 IDR 与新车机 avcC 不再匹配，不能再用它做空闲重发。
-        lastIdrNals = null
-        // 关键：VideoConfig 头部声明的宽高**必须与车机解码器画布一致**，否则真车
-        // （Audi/DELPHI）按声明画布建解码器后解不出画面（概率性黑屏，2026-10-19 实测）。
-        //
-        // 取值优先级：
-        //  **车机画布（[canvasSize]）> 引擎码流（[liveSize]）> 构造值 > SPS**，SPS 仅作诊断。
-        //
-        //  默认（`VideoCanvasMode` = raw，对齐 AMCar）**不传 [canvasSize]**，于是实际走
-        //  「引擎码流 → 构造值 → SPS」，与 AMCar `explicitVideoGeometry=false` 那条分支一致：
-        //  只声明一个尺寸、且跟随实际码流，不写视口、不猜画布。
-        //
-        //  2026-10-25 曾改成「SPS 优先」（理由：声明应等于码流真实尺寸，否则拉伸），
-        //  真机复测出问题已回滚。原因：车机是**按 1412×654 建解码器与 surface** 的，
-        //  声明改成 SPS 的 1920×1080 后，车机侧画布/纹理对不上 → 画面异常。
-        //  结论：这条链路里「车机画布」才是契约，不能让码流尺寸反过来改写声明。
-        //
-        //  2026-11-04 奥迪 3810（1412×654 画布）黑屏复盘：直通模式把优先级做成
-        //  「引擎码流优先」，引擎白名单把 1412×654@60 降档成 1280×720@20，于是
-        //  声明变成 720p ≠ 画布 → 车机建了 720p 解码器 → 整屏黑；而会话、送帧、
-        //  写入耗时全部正常，测试台（WinPlay/DiPlay 不校验这几个头字段）照样有画面。
+        // 不依赖源侧异步尺寸回调，使缓存 GOP 回放与实时帧声明始终与同代 SPS 一致。
         val canvas = canvasSize?.invoke()
         val live = liveSize?.invoke()
-        val parsed = parseSpsDimensions(sps)
-        val spsSane = parsed != null &&
-            parsed.visibleWidth in 320..4096 && parsed.visibleHeight in 180..2304
-        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, parsed?.visible)
-        // SPS 诊断**每次发 config 都打**，包括解析失败的情况。
-        // 旧实现只在「解析出来且与声明不一致」时打，于是「解析失败」和「恰好一致」
-        // 在日志里长得一模一样——排查时无法判断车机在让屏那一刻拿到的 avcC 究竟
-        // 是 1412×654 还是别的东西（2026-11-06 14:00 日志踩过这个坑）。
+        val parsed = H264Sps.parseNal(sps)
+        val visible = parsed?.visible
+        val spsSane =
+            parsed != null &&
+                parsed.visibleWidth in 320..4096 &&
+                parsed.visibleHeight in 180..2304
+        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, visible)
         log(
             describeSpsConfig(parsed, cfgWidth to cfgHeight, csdSource, spsSane) +
                 "\n  ↳ SPS ${sps.size}B=" + sps.joinToString(" ") { "%02x".format(it) },
         )
-        val streamSize = live?.takeIf { it.first > 0 && it.second > 0 } ?: (width to height)
+        val streamSize = visible ?: live?.takeIf { it.first > 0 && it.second > 0 } ?: (width to height)
         if (!canvasMismatchLogged && (streamSize.first != cfgWidth || streamSize.second != cfgHeight)) {
             canvasMismatchLogged = true
             log(
-                "VIDEO: ⚠ 声明的画布 ${cfgWidth}x$cfgHeight 与码流 ${streamSize.first}x${streamSize.second} 不一致" +
-                    "——车机按画布建解码器，画面由车机侧缩放；若仍黑屏，说明这台车要求码流尺寸本身等于画布" +
-                    "（需让 CarLife 引擎按 ${cfgWidth}x$cfgHeight 编码）",
+                "VIDEO: ⚠ 显式声明 ${cfgWidth}x$cfgHeight 与码流 ${streamSize.first}x${streamSize.second} 不一致" +
+                    "——当前画布覆盖模式未按实际 SPS 声明解码尺寸",
             )
         }
         val avcc = ByteArrayOutputStream(8 + sps.size + pps.size)
@@ -1035,11 +1081,14 @@ class VideoSender(
         val viewArea = viewAreaSize?.invoke()?.takeIf { it.first > 0 && it.second > 0 }
         val header = buildVideoConfigHeader(body.size, cfgWidth, cfgHeight, viewArea)
         synchronized(writeLock) {
+            // 换参数后旧 IDR 与新车机 avcC 不再匹配，与写新 config 原子更新，防止保活线程插队发出旧 IDR。
+            lastIdrNals = null
             // config 帧是明文，但同样不能插在别的帧中间（否则接收端按半帧解析）。
             output.write(header)
             output.write(body)
             output.flush()
             configSent = true
+            configRefreshPending = false
         }
         log(
             "VIDEO: ✓ VideoConfig 已发送 avcC=${body.size}B（SPS ${sps.size}B/PPS ${pps.size}B，" +
@@ -1048,146 +1097,6 @@ class VideoSender(
                     .format(header[6].toInt() and 0xFF) +
                 "\n  ↳ 头部前 48 字节=" + header.take(48).joinToString(" ") { "%02x".format(it) },
         )
-    }
-
-    /**
-     * 从 H.264 SPS NAL 解析画面宽高（去掉 0x67 起始码后的 RBSP）。
-     *
-     * 返回**两个**尺寸，这是参考 OcarPlay 的做法后补上的一项诊断（2026-11-08）：
-     *  - `coded`：宏块对齐后的编码尺寸（`pic_width_in_mbs * 16` 那一层，未裁剪）；
-     *  - `visible`：再减掉 `frame_cropping` 之后的真实画面（1412×654 就出在这一层）。
-     *
-     * 只报 visible 时，日志里分不清「车机看到的是 1424×656 还是 1412×654」——而这恰好
-     * 是黑屏/拉伸排查里最常要回答的问题。两个都给，再和 `declared` 并排，一眼能看出
-     * 声明取的到底是哪一层。
-     *
-     * 按 ITU-T H.264 语法：跳过 profile/constraints/level（3 字节）→ 读 exp-Golomb
-     * 得到 seq_parameter_set_id → 若 profile 是 100/110/122/244/44/83/86/118/128/138/139/134
-     * 则先读 chroma_format_idc + 可能的扩展 → log2_max_frame_num_minus4 →
-     * pic_order_cnt_type 相关 → max_num_ref_frames → gaps_in_frame_num_value_allowed_flag →
-     * pic_width_in_mbs_minus1 → pic_height_in_map_units_minus1 → frame_mbs_only_flag 等。
-     * 解析失败返回 null。
-     */
-    private fun parseSpsDimensions(sps: ByteArray): SpsSize? {
-        if (sps.size < 8) return null
-        return runCatching {
-            // 1) 重建 RBSP：跳过 NAL 头，并剔除 emulation prevention bytes（00 00 03 → 00 00）。
-            //    这步是必须的——SPS 里普遍存在 `… 00 00 03 00 01 …` 的转义字节，不去掉会让
-            //    bit 流整体错位（2026-10-25 实测：漏这步解出 272x112 之类的垃圾值）。
-            val rbsp = ArrayList<Byte>(sps.size)
-            var zeroRun = 0
-            for (k in 1 until sps.size) {
-                val b = sps[k].toInt() and 0xFF
-                if (zeroRun >= 2 && b == 0x03) {
-                    zeroRun = 0
-                    continue
-                }
-                rbsp.add(b.toByte())
-                zeroRun = if (b == 0) zeroRun + 1 else 0
-            }
-            val d = rbsp.toByteArray()
-            val totalBits = d.size * 8
-            var bit = 0
-
-            fun readBit(): Int {
-                require(bit < totalBits) { "SPS 越界" }
-                val v = (d[bit / 8].toInt() ushr (7 - (bit % 8))) and 1
-                bit++
-                return v
-            }
-
-            fun readBits(n: Int): Int {
-                var v = 0
-                repeat(n) { v = (v shl 1) or readBit() }
-                return v
-            }
-
-            /** exp-Golomb 无符号（ue(v)）：`[zeros 个 0] 1 [zeros 位 info]`。 */
-            fun readUe(): Int {
-                var zeros = 0
-                while (readBit() == 0) zeros++
-                var info = 0
-                repeat(zeros) { info = (info shl 1) or readBit() }
-                return (1 shl zeros) - 1 + info
-            }
-
-            /** exp-Golomb 有符号（se(v)）：偶数映射负、奇数映射正。 */
-            fun readSe(): Int {
-                val ue = readUe()
-                val mag = (ue + 1) / 2
-                return if (ue % 2 == 0) -mag else mag
-            }
-
-            val profileIdc = readBits(8)
-            readBits(8) // constraint_set0..5 + reserved
-            readBits(8) // level_idc
-            readUe() // seq_parameter_set_id
-
-            // High 系列 profile 才有 chroma_format_idc / scaling matrix 扩展
-            if (profileIdc in intArrayOf(
-                    100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135,
-                )
-            ) {
-                val chromaFormatIdc = readUe()
-                if (chromaFormatIdc == 3) readBit() // separate_colour_plane_flag
-                readUe() // bit_depth_luma_minus8
-                readUe() // bit_depth_chroma_minus8
-                readBit() // qpprime_y_zero_transform_bypass_flag
-                if (readBit() == 1) { // seq_scaling_matrix_present_flag
-                    val count = if (chromaFormatIdc != 3) 8 else 12
-                    repeat(count) { idx ->
-                        if (readBit() == 1) { // seq_scaling_list_present_flag
-                            val size = if (idx < 6) 16 else 64
-                            var lastScale = 8
-                            var nextScale = 8
-                            repeat(size) {
-                                if (nextScale != 0) {
-                                    nextScale = (lastScale + readSe() + 256) % 256
-                                }
-                                lastScale = if (nextScale == 0) lastScale else nextScale
-                            }
-                        }
-                    }
-                }
-            }
-
-            readUe() // log2_max_frame_num_minus4
-            when (readUe()) { // pic_order_cnt_type
-                0 -> readUe() // log2_max_pic_order_cnt_lsb_minus4
-                1 -> {
-                    readBit() // delta_pic_order_always_zero_flag
-                    readSe() // offset_for_non_ref_pic
-                    readSe() // offset_for_top_to_bottom_field
-                    val numRefFrames = readUe()
-                    require(numRefFrames in 0..255) { "num_ref_frames 异常 $numRefFrames" }
-                    repeat(numRefFrames) { readSe() }
-                }
-            }
-            readUe() // max_num_ref_frames
-            readBit() // gaps_in_frame_num_value_allowed_flag
-            val widthMbs = readUe() + 1
-            val heightMapUnits = readUe() + 1
-            val frameMbsOnly = readBit()
-            if (frameMbsOnly == 0) readBit() // mb_adaptive_frame_field_flag
-            readBit() // direct_8x8_inference_flag
-
-            var width = widthMbs * 16
-            var height = heightMapUnits * 16 * (if (frameMbsOnly == 1) 1 else 2)
-            // coded = 裁剪前的宏块对齐值，先留一份；visible 才是画面真实尺寸。
-            val codedWidth = width
-            val codedHeight = height
-            // frame_cropping：编码器常把画面 padding 到宏块边界，再用裁剪字段声明真实尺寸。
-            // 例如 1412x654 会被编码成 1424x656，再裁掉 12x2——不处理就会得到对齐值。
-            if (readBit() == 1) {
-                val cropLeft = readUe()
-                val cropRight = readUe()
-                val cropTop = readUe()
-                val cropBottom = readUe()
-                width -= (cropLeft + cropRight) * 2
-                height -= (cropTop + cropBottom) * 2 * (if (frameMbsOnly == 1) 1 else 2)
-            }
-            SpsSize(codedWidth, codedHeight, width, height)
-        }.getOrNull()
     }
 
     private fun sendVideoFrame(
@@ -1206,12 +1115,13 @@ class VideoSender(
         nalUnits: List<ByteArray>,
         keyFrame: Boolean,
         output: java.io.OutputStream,
-    ) {
+        idleResend: Boolean = false,
+    ): Boolean {
         if (!configSent) {
             log("VIDEO: 丢弃一帧（config 尚未发送）")
-            return
+            return false
         }
-        if (nalUnits.isEmpty()) return
+        if (nalUnits.isEmpty()) return false
         val size = nalUnits.sumOf { it.size + 4 }
 
         val packed = ByteArrayOutputStream(size)
@@ -1234,9 +1144,10 @@ class VideoSender(
         // writeStartedAt 打在**进锁之前**：如果有人在里面卡着（config/keepalive 的写、
         // 或上一帧的写还没返回），本帧在等锁的时间同样属于「这一笔还没飞出去」，
         // 看门狗据此才能看出「画面不动」是卡在写路径上。
-        writeStartedAt = android.os.SystemClock.uptimeMillis()
+        writeStartedAt = monotonicMillis()
         try {
             synchronized(writeLock) {
+                if (!configSent || (idleResend && lastIdrNals !== nalUnits)) return false
                 val header =
                     buildHeader(
                         OP_FRAME,
@@ -1266,6 +1177,7 @@ class VideoSender(
         if (!suppressFrameLog && (keyFrame || framesSent <= 3 || framesSent % 150 == 0L)) {
             log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key)" else ""} 已发送")
         }
+        return true
     }
 
     /** 128 字节消息头：u32LE body 长度、opcode、NTP 32.32 LE 时间戳，其余为零。 */
@@ -1336,27 +1248,7 @@ class VideoSender(
         return units
     }
 
-    /**
-     * SPS 解析结果：**coded 与 visible 是两个不同的数**。
-     *
-     *  - [codedWidth]/[codedHeight]：宏块对齐后的编码尺寸（1424×656 这一层）；
-     *  - [visibleWidth]/[visibleHeight]：减掉 `frame_cropping` 的真实画面（1412×654）。
-     *
-     * 参考 OcarPlay 的 `coded= / visible= / declared=` 三值口径——它判「声明是否可信」
-     * 比的是 **visible vs declared**，coded 只作对齐诊断（宏块 padding 不是画面）。
-     */
-    data class SpsSize(
-        val codedWidth: Int,
-        val codedHeight: Int,
-        val visibleWidth: Int,
-        val visibleHeight: Int,
-    ) {
-        val coded: Pair<Int, Int> get() = codedWidth to codedHeight
-        val visible: Pair<Int, Int> get() = visibleWidth to visibleHeight
-
-        /** 裁剪掉的像素数（宽, 高）；都 0 表示编码尺寸本身就是对齐的。 */
-        val cropped: Pair<Int, Int> get() = (codedWidth - visibleWidth) to (codedHeight - visibleHeight)
-    }
+    private fun monotonicMillis(): Long = clockMillis()
 
     companion object {
         private const val HEADER_LEN = 128
@@ -1365,6 +1257,9 @@ class VideoSender(
         private const val OP_KEEP_ALIVE = 2
         private const val OP_KEEP_ALIVE_WITH_BODY = 5
         private const val TAG_SIZE = 16
+        private val CLOCK_ORIGIN_NANOS = System.nanoTime()
+
+        private fun defaultMonotonicMillis(): Long = ((System.nanoTime() - CLOCK_ORIGIN_NANOS) / 1_000_000L) + 1L
 
         /** 视频通道被重置后的重连尝试次数（接收端只等 8s，2s 超时 × 3 次刚好留余量）。 */
         private const val DATA_RECONNECT_ATTEMPTS = 3
@@ -1479,7 +1374,7 @@ class VideoSender(
          * 判据是 **declared vs visible**（对齐值只是编码器的 padding，不是画面尺寸）。
          */
         internal fun describeSpsConfig(
-            parsed: SpsSize?,
+            parsed: H264Sps.Dimensions?,
             cfg: Pair<Int, Int>,
             csdSource: String,
             sane: Boolean,
@@ -1488,7 +1383,8 @@ class VideoSender(
             val visibleText = parsed?.let { "${it.visibleWidth}x${it.visibleHeight}" } ?: "解析失败"
             val cropText =
                 parsed?.let {
-                    val (dw, dh) = it.cropped
+                    val dw = it.codedWidth - it.visibleWidth
+                    val dh = it.codedHeight - it.visibleHeight
                     if (dw != 0 || dh != 0) "（宏块对齐裁剪 ${dw}x$dh）" else "（无裁剪）"
                 } ?: ""
             val delta = { d: Int -> if (d > 0) "+$d" else "$d" }
@@ -1506,13 +1402,10 @@ class VideoSender(
         }
 
         /**
-         * 决定 VideoConfig 头里声明的画布尺寸（纯函数，便于单测）。
+         * 决定 VideoConfig 声明尺寸。
          *
-         * 优先级：车机画布 → 引擎码流 → 构造值 → SPS 解析值。
-         *
-         * 前两级的先后顺序是这个函数的全部意义：真车按声明建解码器，画布是契约；
-         * 引擎码流只是「实际编出来多少」，它比画布小的时候（白名单降档）如果拿它
-         * 去声明，车机就会拿着一个比屏幕小的画布去建解码器 → 黑屏。
+         * 优先级：显式车机画布覆盖 → 当前 SPS 裁剪后尺寸 → 引擎协商值 → 构造值。
+         * RAW/SPLIT 不传画布覆盖，必须以同一份 avcC 的裁剪后尺寸为准，避免陈旧协商值错配解码器。
          */
         internal fun resolveConfigSize(
             canvas: Pair<Int, Int>?,
@@ -1522,9 +1415,8 @@ class VideoSender(
             sps: Pair<Int, Int>?,
         ): Pair<Int, Int> {
             canvas?.let { if (it.first > 0 && it.second > 0) return it }
-            live?.let { if (it.first > 0 && it.second > 0) return it }
-            if (fallbackWidth > 0 && fallbackHeight > 0) return fallbackWidth to fallbackHeight
             sps?.let { if (it.first > 0 && it.second > 0) return it }
+            live?.let { if (it.first > 0 && it.second > 0) return it }
             return fallbackWidth to fallbackHeight
         }
 

@@ -174,6 +174,21 @@ internal class VideoDeliveryGate(
         resetWindow(0L)
     }
 
+    /**
+     * 编码器原地重建（收到新一批带 SPS 的 IDR）时重置时间戳基线。
+     *
+     * CarLife 引擎收到 `98311` 重建 MediaCodec 后（例如倒车雷达退回触发重编），
+     * 新编码器的 PTS 起点经常比上一代编码器回退几秒，此时 socket 写入完全正常（几毫秒），
+     * 若继续沿用上一代 `baselineOffset` 会在 2 秒后误判成「排队延迟 >1500ms」而误丢 P 帧。
+     */
+    @Synchronized
+    fun onCodecReinit() {
+        baselineOffset = Long.MAX_VALUE
+        lastSourceTs = Long.MIN_VALUE
+        nonMonotonic = 0
+        staleSince = 0L
+    }
+
     /** 到点就返回本窗口画像并开新窗口；没到点返回 null。 */
     @Synchronized
     fun summaryIfDue(nowMs: Long): Summary? {
