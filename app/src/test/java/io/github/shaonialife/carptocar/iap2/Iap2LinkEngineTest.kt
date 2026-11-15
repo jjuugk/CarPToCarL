@@ -279,6 +279,77 @@ class Iap2LinkEngineTest {
         assertTrue("不该出现停发", holds.isEmpty())
     }
 
+    /**
+     * 「发后不管」的帧**不吃窗口配额**：对端一条 ACK 都不回，也不能把链路顶死。
+     *
+     * 2026-11-15 奥迪 MIB3 实车：18:04:45 之后车机不再回 ACK（它把 iAP2 搬到了 WiFi
+     * 隧道），我们仍在往蓝牙那条链路推 0x5001（发后不管）。旧实现里这些帧照样推进
+     * `sentSequence`，5 帧就把对端窗口顶满 → 18:05:20 报一次 `holding 等 ACK`，
+     * 之后**整份日志再没有一次发送**，而 0x5001 全是「发后不管」——本来就不该等 ACK。
+     */
+    @Test
+    fun fireAndForgetFramesDoNotConsumeThePeerWindow() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(maxOutgoing = 5)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+
+        val holds = ArrayList<Int>()
+        phone.onSendWindowHold = { _, _, backlog -> holds += backlog }
+
+        // 车机此后静默：我们不再把 phone 的输出喂给它，也拿不到任何 ACK
+        repeat(12) { index ->
+            assertTrue(
+                "排入第 $index 帧就失败了",
+                phone.sendControl(Iap2Csm.encode(0x5000 + index), 100L + index, awaitAck = false),
+            )
+        }
+
+        assertEquals(
+            "发后不管的帧不该被对端窗口截住（对端窗口 5，发了 12 帧）",
+            12,
+            parseFrames(phone.takeOutput()).size,
+        )
+        assertTrue("发后不管的帧不该触发停发", holds.isEmpty())
+    }
+
+    /**
+     * 窗口停满 3 秒还没被 ACK 推进，必须报一次「这条链路可能已停摆」。
+     *
+     * 这段日志存在的唯一目的：把「车机已经不读这条链路」与「刚排队等一拍」分开。
+     * 2026-11-15 奥迪 MIB3 的日志里只有 `对端窗口 5 帧 … holding 等 ACK`，
+     * 停摆 20 分钟与停摆 100 毫秒长得一模一样。
+     */
+    @Test
+    fun stalledSendWindowIsReportedOncePerEpisode() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine(maxOutgoing = 5)
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+        phone.takeOutput()
+
+        val stalls = ArrayList<Long>()
+        phone.onSendWindowStalled = { heldMillis, _ -> stalls += heldMillis }
+
+        // 需要 ACK 的帧照旧受窗口约束：7 帧只能先发出 5 帧（时间取同一个点，
+        // 好让「停发起点」= 100，断言才能精确卡在 3 秒门槛两侧）
+        repeat(7) { index -> phone.sendControl(Iap2Csm.encode(0x5000 + index), 100L) }
+        phone.takeOutput()
+        assertTrue("5 帧已把窗口顶满", stalls.isEmpty())
+
+        phone.advanceTime(100L + Iap2LinkEngine.SEND_STALL_WARN_MILLIS - 1)
+        assertTrue("还没到门槛不该报", stalls.isEmpty())
+
+        phone.advanceTime(100L + Iap2LinkEngine.SEND_STALL_WARN_MILLIS + 1)
+        assertEquals("过门槛必须报一次", 1, stalls.size)
+
+        phone.advanceTime(100L + Iap2LinkEngine.SEND_STALL_WARN_MILLIS + 5_000)
+        assertEquals("同一段停发只报一次", 1, stalls.size)
+    }
+
     // ---- 协商细节回归 ----
 
     /**

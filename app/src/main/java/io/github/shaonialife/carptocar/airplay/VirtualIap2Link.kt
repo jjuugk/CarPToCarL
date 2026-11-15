@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.airplay
 import android.content.Context
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport
 import io.github.shaonialife.carptocar.iap2.Iap2ArtworkTransfer
 import io.github.shaonialife.carptocar.iap2.Iap2CapabilityReport
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
@@ -127,6 +128,15 @@ class VirtualIap2Link(
 
     /** 已传完或被拒的封面 id：同一张图不重传（车机自己也会用缓存 id 直接回 SUCCESS）。 */
     private var artworkDeliveredId = 0
+
+    /**
+     * `SETUP` 发出的时刻（[nowMillis] 时钟）；0 = 当前没有待确认的传输。
+     *
+     * 用途：车机**既不 START 也不 FAILURE** 时（奥迪 MIB3 就是这样），必须有个兜底判断，
+     * 否则每一帧 0x5001 都在替它挂一张永远不来的图（见
+     * [io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport]）。
+     */
+    private var artworkSetupAtMs = 0L
 
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
@@ -417,6 +427,12 @@ class VirtualIap2Link(
             mib3WirelessSessionId = null
             eventCsmStarted = false
             eventLinkArmed = false
+            // 新链路 = 新的文件传输上下文：编号、待确认状态、已交付记录全部作废，
+            // 否则第一首歌会拿着上一条链路的 id 让车机走缓存，封面永远不来。
+            artworkPendingId = 0
+            artworkPendingBytes = null
+            artworkDeliveredId = 0
+            artworkSetupAtMs = 0L
             nowPlayingSubscribed = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
@@ -536,6 +552,7 @@ class VirtualIap2Link(
         flushOutputLocked()
         maybeStartControlCsmLocked()
         checkMfiTimeoutLocked()
+        checkArtworkTimeoutLocked()
         // 订阅后的歌名补推要赶在同一次 flush 出去，否则要白等下一拍
         maybePollNowPlayingLocked()
         flushOutputLocked()
@@ -559,6 +576,35 @@ class VirtualIap2Link(
         log("IAPLINK: 隧道 MFi ${failed}B 静默 ${mfiWindowMillis}ms——记入记忆，换下一档重试")
         mfiCurrentLength = 0
         startNextMfiChallengeLocked()
+    }
+
+    /**
+     * 封面 `SETUP` 静默超时：车机既不 `START` 也不 `FAILURE` 时，认定它不取封面。
+     *
+     * 2026-11-15 奥迪 MIB3（`Audi_MMI_3232` / `AUDI 4930`）实测：`0x5001` 带封面编号、
+     * `SETUP` 也发了，车机 19 次一条回应都没有。这种「沉默」比拒收更坏——每一帧 0x5001
+     * 都替它挂上一张永远不会到的图，媒体卡看着像一直在等封面。所以超时后记进
+     * [Iap2ArtworkSupport]，此后 `0x5001` 不再声明编号（宁可不放封面）。
+     *
+     * 只判**一次**：标记成功后 [session][io.github.shaonialife.carptocar.SessionController]
+     * 就不再传编号进来，这里自然也不会再挂待确认状态。
+     */
+    private fun checkArtworkTimeoutLocked() {
+        val id = artworkPendingId
+        if (id == 0 || artworkSetupAtMs == 0L) return
+        val waited = nowMillis() - artworkSetupAtMs
+        if (waited < ARTWORK_START_TIMEOUT_MILLIS) return
+        artworkPendingId = 0
+        artworkPendingBytes = null
+        artworkSetupAtMs = 0L
+        // 标成「已处理」，避免同一张图在收尾时又被重排一次 SETUP
+        artworkDeliveredId = id
+        if (Iap2ArtworkSupport.markUnsupported("封面 SETUP id=$id 等了 ${waited}ms 没有 START")) {
+            log(
+                "IAPLINK: 车机不取封面（id=$id 的 SETUP 等了 ${waited}ms 没有 START）" +
+                    "——此后 0x5001 不再声明封面编号，歌名/歌词照推",
+            )
+        }
     }
 
     /**
@@ -1096,6 +1142,7 @@ class VirtualIap2Link(
         }
         artworkPendingId = id
         artworkPendingBytes = bytes
+        artworkSetupAtMs = nowMillis()
         val queued =
             engine.sendOnSession(
                 Iap2ArtworkTransfer.setup(id, bytes.size),
@@ -1121,6 +1168,8 @@ class VirtualIap2Link(
         }
         when {
             response.isStart -> {
+                // 车机答应了：这条「它收不收封面」的记忆就没意义了，超时判定同步撤掉
+                artworkSetupAtMs = 0L
                 val bytes = artworkPendingBytes ?: return
                 val chunks = Iap2ArtworkTransfer.chunks(response.transferId, bytes)
                 var queuedChunks = 0
@@ -1149,6 +1198,7 @@ class VirtualIap2Link(
                 log("IAPLINK: 封面传输 SUCCESS id=${response.transferId}（车机已收图）")
                 artworkDeliveredId = artworkPendingId
                 artworkPendingBytes = null
+                artworkSetupAtMs = 0L
             }
 
             response.isFailure -> {
@@ -1156,6 +1206,7 @@ class VirtualIap2Link(
                 log("IAPLINK: 封面传输 FAILURE id=${response.transferId}（车机拒收，本轮放弃）")
                 artworkDeliveredId = artworkPendingId
                 artworkPendingBytes = null
+                artworkSetupAtMs = 0L
             }
 
             else -> log("IAPLINK: 封面传输 id=${response.transferId} ${response.describe()}")
@@ -1259,6 +1310,15 @@ class VirtualIap2Link(
          * 车机会当成手机掉线重新走一遍配对。丢块的后果只是这张图花掉，下一首歌重传即可。
          */
         private const val ARTWORK_RETRANSMIT_LIMIT = 5
+
+        /**
+         * 封面 `SETUP` 等 `START` 的最长时间（超过就认定这台车不取封面）。
+         *
+         * 8 秒：够慢车机把文件传输会话排完（真机 START 一般 100ms 内），又足够短——
+         * 判早了只是这张图不显示，判晚了（一直等）则每帧 0x5001 都在替车机挂一张
+         * 永远不来的图，媒体卡一直像在等封面（2026-11-15 奥迪 MIB3 就是这样）。
+         */
+        internal const val ARTWORK_START_TIMEOUT_MILLIS = 8_000L
 
         /**
          * 车机订阅 0x5000 后主动查歌名的周期。

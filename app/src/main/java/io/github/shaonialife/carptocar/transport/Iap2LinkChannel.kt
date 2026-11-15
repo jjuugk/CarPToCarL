@@ -101,6 +101,15 @@ class Iap2LinkChannel(
         engine.onSendWindowReleased = { effective, heldMillis ->
             log("LINK: 对端窗口放行（窗口 $effective，停发 ${heldMillis}ms）——继续发积压帧")
         }
+        // 停摆告警：窗口满了却一直没被 ACK 推进。只有这一行才能把「车机已经不读这条
+        // 链路」与「刚排队等一拍」区分开——2026-11-15 奥迪 MIB3 的日志里缺的就是它，
+        // 蓝牙链路 18:05:20 起再没发出去一帧，而日志看起来一切正常。
+        engine.onSendWindowStalled = { heldMillis, backlog ->
+            log(
+                "LINK: ⚠ 车机 ${heldMillis}ms 没推进 ACK（发送窗口仍满，积压 $backlog 帧）" +
+                    "——这条链路可能已停摆：检查车机是否把 iAP2 搬到了别的通道",
+            )
+        }
         // 非 DETECT 的握手应答（车机侧 sendLackOfBackwardCompatibility 就在这一族）。
         // 以前这类字节被帧头扫描逐字节丢弃，日志里只能看到「协商无进展」。
         engine.onPeerHandshake = { handshake ->

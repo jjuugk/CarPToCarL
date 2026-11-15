@@ -34,7 +34,9 @@ import io.github.shaonialife.carptocar.carlife.LyricLines
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
+import io.github.shaonialife.carptocar.iap2.ArtworkDedupe
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
@@ -604,6 +606,16 @@ object SessionController {
      */
     fun resetNowPlayingDedupe() {
         lastPushedNowPlayingKey = null
+        // 封面同理：新会话是新的车机上下文，编号与缓存都得从头来（车机侧按 id 缓存，
+        // 沿用旧 id 会让它直接用缓存、根本不来要图）。
+        artworkKey = null
+        artworkBytes = null
+        artworkId = 0
+        artworkSeq = 0
+        lastEncodedSource = null
+        lastEncodedBytes = null
+        // 「这台车不取封面」是**一轮连接一次**的判断：换链路/换车都可能不一样，重新试。
+        Iap2ArtworkSupport.reset()
     }
 
     // ---- 封面（iAP2 session 12 文件传输）----
@@ -628,6 +640,16 @@ object SessionController {
     private var artworkSeq: Int = 0
 
     /**
+     * 上次编码用的**源图对象**与它的编码结果。
+     *
+     * 歌词行会把 `title` 每 5~8 秒改一次，但图还是同一张：只要源图是同一个实例，
+     * 就直接复用上次的字节，省掉一次 JPEG 压缩（25KB 图压缩一次要几毫秒，
+     * 而这发生在媒体事件线程上）。
+     */
+    private var lastEncodedSource: android.graphics.Bitmap? = null
+    private var lastEncodedBytes: ByteArray? = null
+
+    /**
      * 为当前这首歌准备封面，返回本次要声明的 `artworkId`（无封面返回 null）。
      *
      * 必须由 [buildNowPlaying] 调用：它决定 0x5001 里要不要带
@@ -636,25 +658,56 @@ object SessionController {
      * 加锁的理由：[buildNowPlaying] 会被三条线程调（iAP2 节拍、媒体事件、会话线程），
      * 编码本身只要几毫秒，但并发进来会重复编码、并且把 `artworkSeq` 自增两次
      * ——车机就会收到两个连续的 id，前一张图的传输半路被新的顶掉。
+     *
+     * **同一张图不换编号**（[ArtworkDedupe]）：歌词行走 [key] / [ArtworkDedupe.shouldReuseId]
+     * 两条闸挡住——否则每滚一行歌词就重新编码、重新排队一次 25KB 传输（2026-11-15
+     * 奥迪 MIB3 实测 2 分钟里 19 次 SETUP、车机 0 次 START）。
      */
     @Synchronized
     private fun ensureArtwork(key: String): Int? {
         if (key == artworkKey) return artworkId.takeIf { it != 0 && artworkBytes != null }
-        artworkKey = key
         val bytes =
-            runCatching { encodeArtwork() }
+            encodedArtworkForCurrent()
                 .onFailure { appendLog("ART: 封面编码异常 - ${it.message}") }
                 .getOrNull()
+        artworkKey = key
         if (bytes == null || bytes.isEmpty()) {
             artworkBytes = null
             artworkId = 0
             return null
+        }
+        if (ArtworkDedupe.shouldReuseId(artworkBytes, artworkId, bytes)) {
+            // 压出来和上一张一模一样（换了源图实例，图没变）：沿用旧编号，
+            // 车机那边已经在用这张图，再换 id 只会让它重新要一遍。
+            appendLog("ART: 封面与上一张相同 ${bytes.size}B —— 沿用 id=$artworkId（不重传）")
+            return artworkId
         }
         artworkSeq = artworkSeq % 254 + 1
         artworkId = artworkSeq
         artworkBytes = bytes
         appendLog("ART: 封面就绪 id=$artworkId ${bytes.size}B（$key）")
         return artworkId
+    }
+
+    /**
+     * 当前媒体会话封面的 JPEG 字节，**源图没换就复用上次结果**。
+     *
+     * 返回值带着失败信息（`Result`）：编码异常既要让上层记一行日志，又不能把
+     * 「这一轮没有封面」变成「永远没有封面」——所以异常不缓存，下次还会重试。
+     */
+    private fun encodedArtworkForCurrent(): Result<ByteArray> {
+        val art = MediaSessionsState.nowPlaying?.art
+        if (art != null && art === lastEncodedSource) {
+            lastEncodedBytes?.let { return Result.success(it) }
+        }
+        val outcome = runCatching { encodeArtwork() }
+        outcome
+            .getOrNull()
+            ?.let {
+                lastEncodedSource = art
+                lastEncodedBytes = it
+            }
+        return outcome.map { it ?: ByteArray(0) }
     }
 
     /**
@@ -738,7 +791,14 @@ object SessionController {
                         .coerceAtMost(Int.MAX_VALUE.toLong())
                         .toInt(),
                 appName = session.pkg,
-                artworkId = if (includeArtwork) ensureArtwork("${session.title}|${session.artist.orEmpty()}") else null,
+                artworkId =
+                    if (includeArtwork && !Iap2ArtworkSupport.unsupported) {
+                        // 键按**图**算，不按 title 算：播放器把逐行歌词写进 title 时，
+                        // 拿 title 当键等于每句歌词换一张封面（见 [ArtworkDedupe]）。
+                        ensureArtwork(ArtworkDedupe.key(session.title, session.artist, session.art))
+                    } else {
+                        null
+                    },
             )
         }
         val info = carLifeLatest ?: return null
@@ -771,7 +831,12 @@ object SessionController {
             status = Iap2NowPlaying.STATUS_PLAYING, // CarLife 推歌名即视为播放中
             elapsedMs = 0,
             appName = info.source.takeIf { it.isNotBlank() },
-            artworkId = if (includeArtwork) ensureArtwork("$album|$artist") else null,
+            artworkId =
+                if (includeArtwork && !Iap2ArtworkSupport.unsupported) {
+                    ensureArtwork("$album|$artist")
+                } else {
+                    null
+                },
         )
     }
 

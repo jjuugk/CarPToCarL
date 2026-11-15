@@ -170,6 +170,9 @@ class Iap2LinkEngine(
     /** 本轮「窗口满、停发等 ACK」的起始时刻（null = 没在停）；只用于诊断日志去重。 */
     private var heldSinceMillis: Long? = null
 
+    /** 本段停发是否已经报过「停摆」告警（[onSendWindowStalled]）；开闸时复位。 */
+    private var stallWarned = false
+
     /**
      * 采纳的对端控制会话 ID（收到对端 sync 载荷时确定）。
      * Audi 真车字节级实测（2026-10-09）：车机（MIB3）以发起方姿态发 SYN，声明
@@ -227,6 +230,15 @@ class Iap2LinkEngine(
 
     /** 诊断：停发结束（重新开闸）时回调一次，带这段停发的持续时间（毫秒）。 */
     var onSendWindowReleased: ((effective: Int, heldMillis: Long) -> Unit)? = null
+
+    /**
+     * 诊断：窗口**停摆**——停发超过 [SEND_STALL_WARN_MILLIS] 仍没有一条 ACK 推进时回调一次。
+     *
+     * 与 [onSendWindowHold] 的区别：那条只说「窗口满了在等」，而这条说「等了这么久
+     * 还没动」。2026-11-15 奥迪 MIB3 的日志里只有前者，于是「链路已经停摆 20 分钟」
+     * 与「刚刚排队等一拍」长得一模一样。每段停发只报一次，重新开闸后复位。
+     */
+    var onSendWindowStalled: ((heldMillis: Long, backlog: Int) -> Unit)? = null
 
     /** 诊断：每个入向链路帧的摘要（control/seq/ack/sessionId/载荷长度），真车排查用。 */
     var onFrameReceived: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
@@ -418,6 +430,7 @@ class Iap2LinkEngine(
         lastReceivedInOrder = 0
         lastEchoPeerSequence = null
         heldSinceMillis = null
+        stallWarned = false
         markerDeadline = null
         syncDeadline = null
         retransmitDeadline = null
@@ -503,6 +516,21 @@ class Iap2LinkEngine(
             retransmitDeadline = null
             if (state == State.NORMAL) retransmitDue(nowMillis)
         }
+        noteSendStall(nowMillis)
+    }
+
+    /**
+     * 停发看门狗：窗口满了且一直没被 ACK 推进时，报一次「这条链路已经停摆」。
+     *
+     * 只报一次（[stallWarned]），重新开闸时由 [noteWindowRelease] 复位。
+     */
+    private fun noteSendStall(nowMillis: Long) {
+        val since = heldSinceMillis ?: return
+        if (stallWarned) return
+        val held = nowMillis - since
+        if (held < SEND_STALL_WARN_MILLIS) return
+        stallWarned = true
+        onSendWindowStalled?.invoke(held, sendBacklog.size)
     }
 
     /**
@@ -976,6 +1004,7 @@ class Iap2LinkEngine(
         if (window >= declaredMaxOutgoing) return
         if (heldSinceMillis != null) return
         heldSinceMillis = nowMillis
+        stallWarned = false
         onSendWindowHold?.invoke(peer?.maxOutgoing ?: 0, window, sendBacklog.size)
     }
 
@@ -986,6 +1015,7 @@ class Iap2LinkEngine(
     ) {
         val since = heldSinceMillis ?: return
         heldSinceMillis = null
+        stallWarned = false
         onSendWindowReleased?.invoke(window, nowMillis - since)
     }
 
@@ -995,13 +1025,20 @@ class Iap2LinkEngine(
             val packet = sendBacklog.first()
             val peer = peerSynchronization
             val window = effectiveSendWindow(peer)
-            if (lastSentAcknowledged != null &&
-                sequenceDistance(sentSequence, lastSentAcknowledged!!) >= window
-            ) {
+            val windowFull =
+                lastSentAcknowledged != null &&
+                    sequenceDistance(sentSequence, lastSentAcknowledged!!) >= window
+            // **发后不管的帧不受窗口约束**：它们本来就不进 `unacknowledged` 账本、
+            // 不重传、也不指望 ACK，让它们占用「未确认配额」毫无意义——反而会出事：
+            // 对端一旦停止 ACK（2026-11-15 奥迪 MIB3：18:04:45 之后车机不再回 ACK，
+            // 车机把 iAP2 搬到了 WiFi 隧道），连续 `window` 条 0x5001（发后不管）就能
+            // 把窗口永久顶死，此后连真需要 ACK 的帧也发不出去，而日志里只有一行
+            // 「对端窗口 5 帧 … holding 等 ACK」，整份日志再没有一次发送。
+            if (windowFull && packet.awaitAck) {
                 noteWindowHold(window, peer, nowMillis)
                 return
             }
-            noteWindowRelease(window, nowMillis)
+            if (!windowFull) noteWindowRelease(window, nowMillis)
             sendBacklog.removeFirst()
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
@@ -1227,6 +1264,15 @@ class Iap2LinkEngine(
         private fun randomInitialSequence(): Int = java.security.SecureRandom().nextInt(0x100)
         private const val MARKER_RESEND_MILLIS = 1_000L
         private const val SYNC_RESEND_MILLIS = 500L
+
+        /**
+         * 窗口停发多久算「链路停摆」（[onSendWindowStalled] 的触发门槛）。
+         *
+         * 3 秒：正常链路的 ACK 是毫秒级的，隔 3 秒还没推进只可能是车机已经不在读这条
+         * 链路（2026-11-15 奥迪 MIB3 在 WiFi 隧道建好后就再也不 ACK 蓝牙那条）。
+         * 只报警不拆链——那条链路可能只是被车机降级成了备用。
+         */
+        internal const val SEND_STALL_WARN_MILLIS = 3_000L
         private const val ACK_SLACK = 10
 
         /** 重传间隔的夹取区间：对端声明值离谱（0 或 60000）时仍要有可用节拍。 */
