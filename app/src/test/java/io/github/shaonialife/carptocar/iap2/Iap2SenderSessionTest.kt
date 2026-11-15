@@ -200,6 +200,75 @@ class Iap2SenderSessionTest {
     }
 
     /**
+     * 宝马 MGU iD8.5（2026-11-15 实车日志）：新协议车机、发送清单 14 项里**没有 0x4301**、
+     * 也没有 0x5702/0x5703。
+     *
+     * 旧实现在这条形态上是：`tx=0x4300` → 1ms 跳过等待 → 3ms 抛「未拿到车机热点凭据」
+     * → 3ms 拆链。iAP2 识别、MFi 认证、0x4e0d 问候全都过了，死在最后一步，而且我们
+     * **从没给过车机一次机会**（所以那一轮日志无法回答「它到底会不会发 0x4301」）。
+     *
+     * 1.2.48 `#wait4301` 起：未声明也照样给 8s 窗口；窗口内没到**不拆链**，返回空端点
+     * 进保活，晚到的 0x4301 由保活泵接住。本用例锁住这两条——这是那一版实验的全部改动。
+     */
+    @Test
+    fun undeclaredStartSessionStillGetsWindowAndKeepsLink() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory =
+            MockAccessory(
+                accessoryChannel,
+                newProtocol = true,
+                undeclaredStartSession = true,
+                // 窗口内故意不发：走「窗口到点 → 不拆链 → 保活期补发」这条真实时序
+                lateStartSession = true,
+            )
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
+        val updateLatch = CountDownLatch(1)
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "88:54:8E:67:2F:C4",
+                onEndpointUpdate = {
+                    updates.set(it)
+                    updateLatch.countDown()
+                },
+            )
+
+        val startedAt = System.nanoTime()
+        val endpoint = session.run(timeoutMillis = 20_000L)
+        val waitedMillis = (System.nanoTime() - startedAt) / 1_000_000L
+        // 不抛异常、返回空端点：旧实现这里会抛「未拿到车机热点凭据」
+        assertEquals("", endpoint.ssid)
+        // 未声明也该给满窗口（原来 1ms 就跳过）。留 1.5s 余量给调度与 mock 的准备工作。
+        assertTrue(
+            "未声明会发 0x4301 的车机也应给满 8s 窗口，实际只等了 ${waitedMillis}ms",
+            waitedMillis >= 6_500L,
+        )
+
+        val pumpThread = Thread({ session.pumpIncomingForever() }, "phone-pump")
+        pumpThread.isDaemon = true
+        pumpThread.start()
+        assertTrue(
+            "晚到 0x4301 未在 10s 内经 onEndpointUpdate 回调（不拆链这条没生效）",
+            updateLatch.await(10, TimeUnit.SECONDS),
+        )
+        val late = updates.get()
+        assertNotNull(late)
+        assertEquals("MockAP", late!!.ssid)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+        pumpThread.join(2_000)
+    }
+
+    /**
      * 首轮 0x4300 没换来 0x4301 时，必须在同一链路重开一轮识别+认证，再重发 0x4300。
      *
      * iAP2 的无线流程里，手机首次在某个配件上启用无线 CarPlay、以及传输通道切换后，
@@ -393,6 +462,12 @@ class Iap2SenderSessionTest {
          */
         private val newProtocol: Boolean = false,
         /**
+         * 宝马 MGU（iD8.5，2026-11-15 实车）：新协议车机，但发送清单 14 项里**没有 0x4301**，
+         * 也没有 0x5702/0x5703。旧实现在这种形态上「跳过等待 + 无 AP 信息 → 抛异常拆链」，
+         * 从没给过车机一次机会。用于锁住 1.2.48「未声明也给窗口、且不拆链」。
+         */
+        private val undeclaredStartSession: Boolean = false,
+        /**
          * 车机先回 0xAA06（MFi 序列号）、再给完整证书——真 iPhone 与参考实现的
          * modernBootstrap 分支都是这个次序（别克 E2LB 的发送清单里就列着 0xAA06）。
          */
@@ -456,7 +531,18 @@ class Iap2SenderSessionTest {
                             // 两个清单都不含 0x57xx —— AP 信息只能在 0x4301 里
                             Iap2Csm.u16List(
                                 6,
-                                intArrayOf(0xaa06, 0x6800, 0x6802, 0x6803, 0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x5000, 0x5002, 0x4301),
+                                if (undeclaredStartSession) {
+                                    // 宝马 MGU iD8.5 的 14 项发送清单（2026-11-15 实车日志）：
+                                    // 0x5000 0x5002 0x5003 0x6800 0x6802 0x6803 0x4c00 0x4c02
+                                    // 0x4c03 0x4c05 0x4c07 0xae00 0xae02 0xea03 —— 没有 0x4301
+                                    intArrayOf(
+                                        0x5000, 0x5002, 0x5003, 0x6800, 0x6802, 0x6803,
+                                        0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x4c07,
+                                        0xae00, 0xae02, 0xea03,
+                                    )
+                                } else {
+                                    intArrayOf(0xaa06, 0x6800, 0x6802, 0x6803, 0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x5000, 0x5002, 0x4301)
+                                },
                             ) +
                                 Iap2Csm.u16List(
                                     7,
