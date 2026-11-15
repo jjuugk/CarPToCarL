@@ -365,24 +365,27 @@ class Iap2SenderSession(
         const val START_SESSION_WAIT_NEW_PROTOCOL_NANOS = 8_000_000_000L
 
         /**
-         * 「车机发送清单里没有 0x4301」时，是否仍然给它一次等待窗口（1.2.48 `#wait4301` 实验）。
+         * 「车机发送清单里没有 0x4301」时，是否仍然给一次等待窗口——**只发给有能力收的车机**。
          *
-         * 旧行为：清单没声明 = 直接跳过等待（奥迪实测每轮白等 10s），并且在没有 0x5703 时
-         * 直接抛「未拿到车机热点凭据」拆链。
+         * 判据换过一次，两次都有实车日志支撑，别再改回去：
          *
-         * 2026-11-15 宝马 MGU iD8.5（iD8.5 / 26.16.3）把这个判据打穿了：它的 14 项发送清单
-         * 里没有 0x4301，于是 `tx=0x4300` 之后 **1ms 跳过等待、3ms 抛异常、3ms 拆链**——
-         * iAP2 识别、MFi 认证、0x4e0d 问候全都过了，死在最后一步，而且我们**从没给它机会**。
-         * 参照 0x5702 那轮的教训：清单只能证明「有」，不能证明「没有」。
+         * **1.2.48（已废弃）**：无条件给 8 秒窗口、没到还进保活。2026-11-15 宝马 MGU iD8.5
+         * 的完整日志否掉了它：九轮 0x1D01 **全部** `0x4301=不发`，而「等 0x4301」用时逐轮都是
+         * **0.0s**——只有第一轮会触发那个窗口，而第一轮车机参24（无线 CarPlay 组件）
+         * 是 `false`、26 项清单里没有 0x57xx：它那一刻**自己声明没有无线 CarPlay 能力**，
+         * 等 8 秒不会有回音。真正救回来的是 2.5 分钟后第二次连接——车机重新报了
+         * `参24=已声明` + 清单带 0x5702/0x5703，87ms 回 0x5703 就通了。
+         * 更糟的是「没到就进保活」会占住连接槽 5 分钟，反而挡住那次真正的重连。
          *
-         * 置 true 的效果只有两条，都只在「未声明 + 无 0x5703」这条路上生效：
-         *  1. 照样等 [START_SESSION_WAIT_NEW_PROTOCOL_NANOS]（8s），窗口内到了就照常解析；
-         *  2. 窗口内没到**不拆链**，返回空端点进保活（与「声明会发但晚到」同一条路），
-         *     晚到的 0x4301 由 [handleLateStartSession] 接住重新触发配对。
-         * 别的分支（重认证、静默阶梯、ACK 水位拆链）仍只对 `declaresStartSession == true`
-         * 生效，不做改动——本版是单变量实验，只回答「它到底会不会发 0x4301」。
+         * **1.2.49**：只在车机**自己声明有无线 CarPlay 组件（`0x1D01` 参24）**时才给窗口。
+         * 有能力的车机，清单漏列 0x4301 是可能的（清单只能证明「有」，不能证明「没有」）；
+         * 连参24 都没有的车机，等多久都不会发——那不是「清单漏了」，是它的无线栈没起来。
+         * 窗口给满仍没到就**快速失败拆链**，让车机重新建链报一份完整清单（宝马车就是这么通的）。
+         *
+         * 注意：这条只影响「未声明 0x4301」且「没有 0x5703 凭据」这一条窄路。车机**声明会发**
+         * 时走的是另一条分支（奥迪 MMI 9310 靠它等 2 分 35 秒的晚到），一行没动。
          */
-        const val WAIT_START_SESSION_WHEN_UNDECLARED = true
+        const val WAIT_UNDECLARED_IF_WIRELESS_DECLARED = true
 
         /**
          * 旧协议分支里「先单独等 0x5703」的短窗口：窗口内没回就**并行**把 0x4300 发出去。
@@ -708,29 +711,33 @@ class Iap2SenderSession(
         } else {
             log("iap2 0x4300 已在 0x5702 之后提前发出——此处不重发（0x4301 若早到已在暂存区）")
         }
-        // 车机声明里没有 0x4301 时，旧行为直接跳过等待（Audi 实测每轮白等 10s）：
+        // 车机声明里没有 0x4301 时跳过等待（Audi 实测每轮白等 10s）：
         // 真 iPhone 对这类车机也不等——AirPlay 端点经 mDNS/网关合成。
-        // 没拿到 0x5703（新协议车机）时，0x4301 是**唯一**的 AP 信息来源——窗口给足；
-        // 真有 0x5703 的旧协议车机保持 3 秒短窗口（应答都在毫秒级）。
-        //
-        // 1.2.48：未声明 + 没有 0x5703（0x4301 是唯一 AP 来源）时也给它一个窗口，
-        // 见 [WAIT_START_SESSION_WHEN_UNDECLARED]。2026-11-15 宝马 MGU iD8.5 就是
-        // 在「跳过等待」这条道上 3ms 被判死的。已有 0x5703 凭据时仍然秒过——
-        // 那种车机本来就不靠 0x4301 拿 AP 信息，等它纯属浪费。
+        // 1.2.49：只有**车机自己声明了无线 CarPlay 组件（参24）**时才破例给窗口。
+        // 有能力的车机清单漏列 0x4301 是可能的；参24 都没有的车机等多久都不会发
+        // （2026-11-15 宝马 iD8.5 九轮实证：全部 `0x4301=不发`，等 0x4301 用时 0.0s）。
         val startSessionWindow =
             if (wifiFromExchange == null) START_SESSION_WAIT_NEW_PROTOCOL_NANOS else START_SESSION_WAIT_NANOS
         val undeclaredStartSession = declaresStartSession == false
+        val wirelessCarPlayDeclared = AccessoryDeclaration.components().wirelessCarPlayDeclared
         val giveUndeclaredAChance =
-            undeclaredStartSession && WAIT_START_SESSION_WHEN_UNDECLARED && wifiFromExchange == null
+            undeclaredStartSession &&
+                WAIT_UNDECLARED_IF_WIRELESS_DECLARED &&
+                wifiFromExchange == null &&
+                wirelessCarPlayDeclared
         var startSession: Iap2Csm.Frame? = null
         if (undeclaredStartSession && !giveUndeclaredAChance) {
-            log("iap2 车机未声明会发 0x4301——跳过等待（AirPlay 端点走 mDNS/网关）")
+            log(
+                "iap2 车机未声明会发 0x4301——跳过等待（参24 无线CarPlay组件=" +
+                    (if (wirelessCarPlayDeclared) "已声明" else "未声明") +
+                    "，0x5703 凭据=" + (if (wifiFromExchange == null) "无" else "有") +
+                    "；AirPlay 端点走 mDNS/网关）",
+            )
         } else {
             if (giveUndeclaredAChance) {
                 log(
-                    "iap2 车机未声明会发 0x4301——本版仍给 ${startSessionWindow / 1_000_000_000}s 窗口" +
-                        "（#wait4301 单变量实验：清单只能证明「有」，不能证明「没有」；宝马 iD8.5 就死在这条" +
-                        "「跳过」上，1ms 跳过 / 3ms 拆链）",
+                    "iap2 车机未声明会发 0x4301，但它声明了无线 CarPlay 组件（参24）——" +
+                        "给 ${startSessionWindow / 1_000_000_000}s 窗口（清单只能证明「有」，不能证明「没有」）",
                 )
             }
             // 车机可能只发 0x4301 而完全不回答 0x5702：发送后先等一轮，
@@ -879,15 +886,24 @@ class Iap2SenderSession(
                 // 不能断言「该车机不发」：Audi MMI 0000 声明会发、也确实发，只是晚到
                 // 2 分 35 秒（2026-10-18 日志）。措辞必须保留「稍后可能补发」的预期，
                 // 否则排查时会被这句话误导成「这条路对本车不通」。
+                // 措辞必须与事实对齐，四种情况分开写——旧版在「压根没等」时也说
+                // 「在 8s 窗口内未到」，和「卡在等车机连接信息 0.0s」是同一种误导
+                // （2026-11-15 宝马日志里就是这么读错的）。
                 log(
-                    if (declaresStartSession == true) {
-                        "iap2 0x4301 在 ${startSessionWindow / 1_000_000_000}s 窗口内未到" +
-                            "（车机声明会发——可能稍后补发，保活期间收到会重新触发配对）——" +
-                            "先用 mDNS/网关"
-                    } else {
-                        "iap2 0x4301 在 ${startSessionWindow / 1_000_000_000}s 窗口内未到" +
-                            "（车机未声明会发——本版不据此判死，继续保活等它自己发；" +
-                            "#wait4301）"
+                    when {
+                        wifiFromExchange != null ->
+                            "iap2 0x4301 未到（0x5703 凭据已在手，本就不依赖它）——继续用 0x5703 的 AP 信息"
+                        declaresStartSession == true ->
+                            "iap2 0x4301 在 ${startSessionWindow / 1_000_000_000}s 窗口内未到" +
+                                "（车机声明会发——可能稍后补发，保活期间收到会重新触发配对）——" +
+                                "先用 mDNS/网关"
+                        giveUndeclaredAChance ->
+                            "iap2 0x4301 在 ${startSessionWindow / 1_000_000_000}s 窗口内未到" +
+                                "（车机未声明会发，但声明了无线 CarPlay 组件参24，已给满窗口）" +
+                                "——直接失败让车机重新建链报完整清单"
+                        else ->
+                            "iap2 0x4301 未等就判失败（车机未声明会发，且参24 无线 CarPlay 组件未声明）" +
+                                "——它这一刻没有无线能力，省掉空等，让车机重新建链"
                     },
                 )
                 if (wifiFromExchange == null) {
@@ -921,33 +937,29 @@ class Iap2SenderSession(
                             sourceVersion = null,
                             ipAddresses = emptyList(),
                         )
-                    } else if (WAIT_START_SESSION_WHEN_UNDECLARED) {
-                        // 未声明会发 0x4301 **且**没有 0x5703。旧行为在这里抛异常拆链，
-                        // 2026-11-15 宝马 MGU iD8.5 就是这样 3ms 收场的（iAP2 与 MFi 全过）。
-                        // 本版不拆链：与「声明会发但晚到」走同一条路，返回空端点进保活，
-                        // 晚到的 0x4301 由 handleLateStartSession → onEndpointUpdate 接住。
-                        // 代价是「真不会发」的车机也要白等保活窗口——那正是这一轮要测的结论。
-                        log(
-                            "iap2 0x4301 窗口内未到（车机未声明会发）——本版不拆链，返回空端点进入保活；" +
-                                "晚到 0x4301 将重新触发配对（#wait4301：旧行为在这里直接抛异常拆链）",
-                        )
-                        awaitingStartSession = true
-                        CarPlayEndpoint(
-                            ssid = "",
-                            passphrase = "",
-                            channel = 0,
-                            securityType = 0,
-                            airPlayPort = 0,
-                            deviceIdentifier = null,
-                            publicKey = null,
-                            sourceVersion = null,
-                            ipAddresses = emptyList(),
-                        )
                     } else {
-                        // 一点线索都没有（车机也没承诺会发 0x4301），继续等只会空转。
+                        // 未声明会发 0x4301，也没有 0x5703 凭据——两条 AP 来源同时缺席。
+                        //
+                        // 1.2.48 曾在这里「不拆链、返回空端点进保活，等它自己发」
+                        // （[WAIT_UNDECLARED_IF_WIRELESS_DECLARED] 的历史）。被 2026-11-15
+                        // 宝马 iD8.5 的完整日志否掉：那台车九轮全是 `0x4301=不发`、
+                        // 「等 0x4301」用时逐轮 0.0s；真正通的是 2.5 分钟后车机重新报了
+                        // 一份完整清单那一轮（参24 由 false 变「已声明」、清单多了 0x5702/0x5703）。
+                        // 保活 5 分钟只会占住连接槽、挡住那次重连，所以这里**快速失败**。
+                        if (wirelessCarPlayDeclared) {
+                            throw IOException(
+                                "未拿到车机热点凭据：车机声明了无线 CarPlay 组件（参24），" +
+                                    "但 ${startSessionWindow / 1_000_000_000}s 内既没回 0x4301、也没有 0x5703" +
+                                    "——请确认车机已把本机设为 CarPlay 设备" +
+                                    "（iDrive：移动设备 → 本机 → Apple CarPlay），然后重连",
+                            )
+                        }
                         throw IOException(
-                            "未拿到车机热点凭据：本轮 0x5702/0x4301 都没给出 AP 信息，" +
-                                "且车机没有声明会发 0x4301（请先在车机上重新选择本机）",
+                            "车机无线 CarPlay 未就绪：0x1D01 未声明无线 CarPlay 组件（参24），" +
+                                "清单里也没有 0x5702/0x5703、没声明会发 0x4301" +
+                                "——这一刻它自己就没有这个能力，等多久都不会有回音。" +
+                                "请等 30 秒左右让车机的无线栈起来，再重新选一次本机" +
+                                "（2026-11-15 宝马 iD8.5 实测：第 2 次连接时清单才完整，87ms 回 0x5703 即通）",
                         )
                     }
                 } else {

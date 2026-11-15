@@ -166,6 +166,7 @@ class ConnectBudget(
             if (!active) return null
             val now = clock()
             val stage = current?.stage ?: ConnectStage.ENDPOINT
+            val stageAt = current?.atMillis ?: startedAt
             // 总耗时留给紧跟其后的小结行，结论行只说「卡在哪、为什么」——两行各司其职，
             // 同一条「共 60s」不要在相邻两行里重复。
             verdict =
@@ -173,6 +174,10 @@ class ConnectBudget(
                     "STAGE: 本轮结束（已推流）" + causeSuffix(cause)
                 } else {
                     "STAGE: ✗ 本轮未连上，卡在「${stage.label}」" +
+                        // 本段停留时长必须写出来：它是区分「真的卡在这里」和「刚进入就结束」
+                        // 的唯一依据。2026-11-15 宝马日志里那句「卡在（等车机连接信息 0x4301）」
+                        // 对应的该段用时是 0.0s——照字面排查会走偏一整轮。
+                        stageDwell(now - stageAt) +
                         causeSuffix(cause) +
                         if (keywords.isBlank()) "" else "｜关键词：$keywords"
                 }
@@ -188,6 +193,20 @@ class ConnectBudget(
     }
 
     private fun causeSuffix(cause: String): String = if (cause.isBlank()) "" else "：$cause"
+
+    /**
+     * 结论行里的「本段停留多久」。
+     *
+     * 不到 1 秒要显式加「未停留」：那种情况说明这一轮是**刚进这个阶段就结束了**，
+     * 失败原因在别处（多半在冒号后面那句），阶段名只是巧合。
+     * 不写这一笔，读者会照阶段名去翻日志，白白排查一整轮。
+     */
+    private fun stageDwell(millis: Long): String =
+        if (millis < 1_000L) {
+            "（本段 ${seconds(millis)}，未停留——原因看冒号后）"
+        } else {
+            "（本段 ${seconds(millis)}）"
+        }
 
     /** 持锁调用：小结正文（[summary] 与 [end] 共用，避免两处格式漂移）。 */
     private fun summaryLocked(now: Long): String {

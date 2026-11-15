@@ -201,17 +201,17 @@ class Iap2SenderSessionTest {
 
     /**
      * 宝马 MGU iD8.5（2026-11-15 实车日志）：新协议车机、发送清单 14 项里**没有 0x4301**、
-     * 也没有 0x5702/0x5703。
+     * 也没有 0x5702/0x5703，而且 `0x1D01` 参 24（无线 CarPlay 组件）**未声明**。
      *
-     * 旧实现在这条形态上是：`tx=0x4300` → 1ms 跳过等待 → 3ms 抛「未拿到车机热点凭据」
-     * → 3ms 拆链。iAP2 识别、MFi 认证、0x4e0d 问候全都过了，死在最后一步，而且我们
-     * **从没给过车机一次机会**（所以那一轮日志无法回答「它到底会不会发 0x4301」）。
+     * 这一形态下「等 8 秒」是无意义的：车机自己声明没有无线能力，等多久都不会发
+     * 0x4301。1.2.48 的 `#wait4301` 曾无条件等 8 秒、没到还进保活占住连接槽 5 分钟，
+     * 反而挡住了车机重新建链那次真正的成功（第二轮 `参24=已声明` 后 87ms 回 0x5703）。
      *
-     * 1.2.48 `#wait4301` 起：未声明也照样给 8s 窗口；窗口内没到**不拆链**，返回空端点
-     * 进保活，晚到的 0x4301 由保活泵接住。本用例锁住这两条——这是那一版实验的全部改动。
+     * 1.2.49 起：参 24 未声明 → **不等待、立即失败**，把连接槽让给下一轮。
+     * 本用例锁住「快速」这一条：耗时必须远小于 8s 窗口。
      */
     @Test
-    fun undeclaredStartSessionStillGetsWindowAndKeepsLink() {
+    fun undeclaredStartSessionWithoutWirelessComponentFailsFast() {
         val pair = InMemoryStreamPair()
         val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
         val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
@@ -220,7 +220,7 @@ class Iap2SenderSessionTest {
                 accessoryChannel,
                 newProtocol = true,
                 undeclaredStartSession = true,
-                // 窗口内故意不发：走「窗口到点 → 不拆链 → 保活期补发」这条真实时序
+                wirelessComponentDeclared = false, // 参 24 未声明：车机这一刻没有无线能力
                 lateStartSession = true,
             )
 
@@ -228,44 +228,85 @@ class Iap2SenderSessionTest {
         accessoryThread.isDaemon = true
         accessoryThread.start()
 
-        val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
-        val updateLatch = CountDownLatch(1)
         val session =
             Iap2SenderSession(
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
                 bluetoothMac = "88:54:8E:67:2F:C4",
-                onEndpointUpdate = {
-                    updates.set(it)
-                    updateLatch.countDown()
-                },
             )
 
         val startedAt = System.nanoTime()
-        val endpoint = session.run(timeoutMillis = 20_000L)
-        val waitedMillis = (System.nanoTime() - startedAt) / 1_000_000L
-        // 不抛异常、返回空端点：旧实现这里会抛「未拿到车机热点凭据」
-        assertEquals("", endpoint.ssid)
-        // 未声明也该给满窗口（原来 1ms 就跳过）。留 1.5s 余量给调度与 mock 的准备工作。
-        assertTrue(
-            "未声明会发 0x4301 的车机也应给满 8s 窗口，实际只等了 ${waitedMillis}ms",
-            waitedMillis >= 6_500L,
-        )
+        var failure: Throwable? = null
+        try {
+            session.run(timeoutMillis = 20_000L)
+        } catch (error: Throwable) {
+            failure = error
+        }
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
 
-        val pumpThread = Thread({ session.pumpIncomingForever() }, "phone-pump")
-        pumpThread.isDaemon = true
-        pumpThread.start()
+        assertNotNull("参24 未声明 + 无 0x5703 时必须判失败，而不是返回空端点进保活", failure)
         assertTrue(
-            "晚到 0x4301 未在 10s 内经 onEndpointUpdate 回调（不拆链这条没生效）",
-            updateLatch.await(10, TimeUnit.SECONDS),
+            "失败原因要说清「车机无线 CarPlay 未就绪」，实际：${failure!!.message}",
+            failure.message.orEmpty().contains("未就绪"),
         )
-        val late = updates.get()
-        assertNotNull(late)
-        assertEquals("MockAP", late!!.ssid)
+        // 原来会等满 8s；现在必须秒失败（留 3s 余量给 mock 的识别+MFi 握手）
+        assertTrue(
+            "参24 未声明时不该等 0x4301 窗口，实际耗时 ${elapsedMillis}ms",
+            elapsedMillis < 3_000L,
+        )
 
         phoneChannel.close()
         accessoryChannel.close()
-        pumpThread.join(2_000)
+    }
+
+    /**
+     * 车机**声明了**参 24（有无线 CarPlay 能力）但发送清单漏列 0x4301、也没有 0x5703。
+     *
+     * 清单只能证明「有」，不能证明「没有」——这种车机值得给一次窗口。窗口到点仍没有回音就
+     * 直接失败（不再进保活占槽）。本用例锁住「等满窗口」这一条。
+     */
+    @Test
+    fun undeclaredStartSessionWithWirelessComponentWaitsThenFails() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory =
+            MockAccessory(
+                accessoryChannel,
+                newProtocol = true,
+                undeclaredStartSession = true,
+                wirelessComponentDeclared = true, // 有无线能力，只是清单没列 0x4301
+                lateStartSession = true,
+            )
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "88:54:8E:67:2F:C4",
+            )
+
+        val startedAt = System.nanoTime()
+        var failure: Throwable? = null
+        try {
+            session.run(timeoutMillis = 20_000L)
+        } catch (error: Throwable) {
+            failure = error
+        }
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
+
+        assertNotNull("窗口到点仍没有 0x4301 时必须判失败（不再进保活占连接槽）", failure)
+        assertTrue(
+            "声明了参24 的车机应给满 8s 窗口，实际只等了 ${elapsedMillis}ms",
+            elapsedMillis >= 6_500L,
+        )
+
+        phoneChannel.close()
+        accessoryChannel.close()
     }
 
     /**
@@ -468,6 +509,14 @@ class Iap2SenderSessionTest {
          */
         private val undeclaredStartSession: Boolean = false,
         /**
+         * `0x1D01` 参 24（无线 CarPlay 组件）是否声明。
+         *
+         * 1.2.49 起这条是「未声明 0x4301 时要不要给等待窗口」的唯一判据：
+         * 2026-11-15 宝马 iD8.5 实测第一轮 `参24=false`（车机自己说没有无线能力），
+         * 第二轮起 `参24=已声明` 才连上——所以只给「有能力的车机」留窗口。
+         */
+        private val wirelessComponentDeclared: Boolean = false,
+        /**
          * 车机先回 0xAA06（MFi 序列号）、再给完整证书——真 iPhone 与参考实现的
          * modernBootstrap 分支都是这个次序（别克 E2LB 的发送清单里就列着 0xAA06）。
          */
@@ -551,7 +600,13 @@ class Iap2SenderSessionTest {
                         } else {
                             ByteArray(0)
                         }
-                    )
+                    ) +
+                    if (wirelessComponentDeclared) {
+                        // 参 24 = 无线 CarPlay 组件组（组内子参 1 是组件名）
+                        Iap2Csm.param(24, Iap2Csm.u8(0, 3) + Iap2Csm.string(1, "WirelessCarPlay"))
+                    } else {
+                        ByteArray(0)
+                    }
             send(Iap2MessageIds.IDENTIFICATION_INFORMATION, identificationBody)
             expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
 
