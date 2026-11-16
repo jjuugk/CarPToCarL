@@ -48,6 +48,7 @@ import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.HidDescriptorSummary
 import io.github.shaonialife.carptocar.input.KnobReports
 import io.github.shaonialife.carptocar.input.KnobRouter
+import io.github.shaonialife.carptocar.input.MediaKeyRoute
 import io.github.shaonialife.carptocar.input.TouchReports
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -875,16 +876,25 @@ object SessionController {
     /**
      * 派发系统媒体键。桌面音乐卡的按钮与车机/方向盘媒体键（Consumer HID）共用这一路径。
      *
-     * 优先级：**先直投当前活跃音乐会话的 transportControls**（不依赖焦点路由，精确命中
-     * 手机音乐 App，避开 CarPToCarL 自身 AudioTrack 抢占焦点导致的「暂停不生效」），
-     * 直投失败再回退到 AudioManager 全局路由。
+     * 三条路，按顺序：
+     * 1. **直投当前活跃音乐会话的 `transportControls`**（不依赖焦点路由，精确命中手机音乐
+     *    App，避开 CarPToCarL 自身 AudioTrack 抢占焦点导致的「暂停不生效」）；
+     * 2. **只有播放/暂停类**交给 CarLife `0x68008` 硬键（见 [MediaKeyRoute.carLifeHardKeyTakes]）；
+     * 3. 回退 `AudioManager` 系统焦点路由（交给持有媒体焦点的音乐 App，**不需要通知使用权**）。
+     *
+     * **切歌（上一曲/下一曲）绝不能走第 2 条**——1.2.42 把 NEXT/PREVIOUS 也塞进硬键，
+     * 方控因此彻底失灵，1.2.57 撤回。硬键在这台车机的引擎上是「写出成功、没有回执」：
+     * 2026-11-16 那份日志里 9 次 `CARLIFE: 车机硬键 0x10/0x0F` 之后，没有任何 `0x10035`
+     * 媒体信息、没有新的音频格式宣告、PCM 电平也不变。而 [CarLifeHijack.sendMediaKey]
+     * 的返回值只是「socket 写成功」，却被当成「已接管」直接 `return`，把第 3 条——通知
+     * 使用权坏掉（`requestRebind` 在某些 ROM 上无效）时**唯一还能用**的那条路——挡死了。
      */
     fun dispatchMediaKey(keyCode: Int) {
         val action = MediaSessionsState.transportActionFor(keyCode)
         if (action >= 0 && MediaSessionsState.dispatchTransport(action)) {
             return
         }
-        if (CarLifeHijack.sendMediaKey(keyCode)) {
+        if (MediaKeyRoute.carLifeHardKeyTakes(keyCode) && CarLifeHijack.sendMediaKey(keyCode)) {
             return
         }
         // 回退：无活跃会话 / 动作不受支持时走系统焦点路由
@@ -892,6 +902,9 @@ object SessionController {
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        // 这一行是「按键最终落到哪」的唯一凭据：只有直投与硬键都没接管才会出现。
+        // 缺席即代表直投生效；出现且用户仍说没反应，才该去查系统焦点归属。
+        appendLog("MEDIA: 直投未生效 → 系统焦点路由 ${MediaKeyRoute.label(keyCode)}")
     }
 
     /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */

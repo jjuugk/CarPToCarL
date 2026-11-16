@@ -530,6 +530,15 @@ object CarLifeHijack {
 
     /**
      * 车机媒体键 → CarLife 硬键（0x68008），供无通知监听授权或第三方播放器场景兜底。
+     *
+     * **只该用于播放/暂停类**（调用方 [SessionController.dispatchMediaKey] 用
+     * [io.github.shaonialife.carptocar.input.MediaKeyRoute.carLifeHardKeyTakes] 做白名单）。
+     * 切歌走这里等于把按键丢掉：硬键在本车机的引擎上是「写出成功、没有回执」——
+     * 2026-11-16 日志里 9 次 `车机硬键 0x10/0x0F` 之后无 `0x10035`、无音频格式重告、
+     * PCM 电平不变。1.2.42 曾让切歌也走这里并直接 `return`，方控因此整体失灵。
+     *
+     * @return 播放/暂停类为「源侧确实在播（或确实在放）」；其余键为**报文是否写出成功**，
+     *   **不代表引擎执行了**。调用方不能拿它当前置门禁挡住后面的系统焦点路由。
      */
     fun sendMediaKey(androidKeyCode: Int): Boolean {
         val hardKey =
