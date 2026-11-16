@@ -12,6 +12,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkPacket
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.input.HidDescriptorSummary
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.util.DeviceIdentity
@@ -1057,6 +1058,27 @@ class AirPlayClient(
      */
     private val badEventSignatures = LinkedHashSet<String>()
 
+    /**
+     * 车机对我们 `/command` 的**非 200 应答**（状态行）去重集合 + 累计数。
+     *
+     * 为什么要记：`hidSetInputMode` / `iAPSendMessage` 都是发后不管——车机哪怕回
+     * 400/422/455 我们也只是「发出去了」。2026-11-16 宝马 MGU-81 的方向盘按键排查里，
+     * 「命令是否被接受」是唯一无法从日志回答的问题，补上这一行才能闭环。
+     */
+    private val eventRejectSignatures = LinkedHashSet<String>()
+
+    @Volatile
+    private var eventRejects = 0
+
+    /**
+     * 车机下发过的 `/command` 类型（每种只留痕一次）。
+     *
+     * 触摸/按键都走 `hidSendReport`，但**同一台车可能换别的 type**（例如只发
+     * `hidReport`、或把按键塞进 `requestSiri` 之外的私有命令）。旧代码对未知 type
+     * 只计数不落名，等于最关键的线索被静默吞掉。
+     */
+    private val eventCommandTypes = LinkedHashSet<String>()
+
     /** 事件通道建立后由 connectEventChannel 调用。cipher=null 表示明文通道。 */
     private fun registerEventCommandChannel(
         socket: Socket,
@@ -1456,6 +1478,9 @@ class AirPlayClient(
         val parsedHidUuids = ArrayList<String>()
         // uuid → HID 描述符（媒体键记录需按下标取 Usage，触摸记录不需要但一并留存）
         val parsedHidDescriptors = HashMap<String, ByteArray>()
+        // 每台设备的画像（「触摸 / 媒体键 / 旋钮 / 电话键」）——方向盘切歌有没有承载通路，
+        // 只看这一行就够，不必再去人肉翻描述符十六进制
+        val hidVerdicts = ArrayList<Pair<String, HidDescriptorSummary.Verdict>>()
         infoRoot?.let { root ->
             val skipped = setOf("displays")
             val summary =
@@ -1499,7 +1524,8 @@ class AirPlayClient(
                                 else -> null
                             }
                         if (uuid != null) parsedHidUuids += uuid
-                        (h["hidDescriptor"] as? ByteArray)?.let { descriptor ->
+                        val descriptor = h["hidDescriptor"] as? ByteArray
+                        if (descriptor != null) {
                             log(
                                 "AIRPLAY: hidDescriptor[$index] ${descriptor.size}B hex=" +
                                     descriptor.take(96).joinToString(" ") { "%02x".format(it) },
@@ -1507,12 +1533,51 @@ class AirPlayClient(
                             // 媒体键（Consumer Control）的 Usage 数组顺序只能从描述符得到：
                             // Array 报告的字节是「下标」而非 Usage ID（见 ConsumerKeys 注释）
                             if (uuid != null) parsedHidDescriptors[uuid] = descriptor
+                            // 一行画像：这台设备到底是触摸、媒体键、还是 iDrive 旋钮。
+                            // 宝马 MGU-81（2026-11-16）两个设备都**没有**媒体键 Usage，
+                            // 这就是「方向盘切歌没反应」在协议层的全部答案。
+                            val verdict = HidDescriptorSummary.describe(descriptor)
+                            val name = h["name"]?.toString() ?: "?"
+                            log("AIRPLAY: hidDevices[$index] uuid=${uuid ?: "?"} name=$name → ${verdict.text()}")
+                            if (uuid != null) hidVerdicts += uuid to verdict
+                        } else {
+                            log(
+                                "AIRPLAY: hidDevices[$index] uuid=${uuid ?: "?"} name=${h["name"]} " +
+                                    "→ 车机没给 hidDescriptor（报告语义只能按长度猜）",
+                            )
                         }
                     }
                 }
             }
         }
         log("AIRPLAY: hidDevices 解析结果 uuids=$parsedHidUuids")
+        // 结论行：方向盘媒体键在这台车上到底有没有承载通路。
+        // 没有媒体键设备 ≠ 一定收不到按键——车机还能走 iAP2 0x6800/0x6802（Cinemo HID 组件），
+        // 但那条路要车机主动发 StartHID；两条都空的时候日志必须说得明白，别再让人猜。
+        val mediaKeyUuids = hidVerdicts.filter { it.second.hasMediaKeys }.map { it.first }
+        if (parsedHidUuids.isNotEmpty()) {
+            val profiled =
+                hidVerdicts.joinToString(" / ") { (uuid, verdict) ->
+                    val kind =
+                        when (verdict.kind) {
+                            HidDescriptorSummary.Kind.MEDIA_KEYS -> "媒体键"
+                            HidDescriptorSummary.Kind.TOUCH -> "触摸"
+                            HidDescriptorSummary.Kind.KNOB -> "旋钮"
+                            HidDescriptorSummary.Kind.TELEPHONY -> "电话键"
+                            HidDescriptorSummary.Kind.NONE -> "未识别"
+                        }
+                    "uuid=$uuid $kind"
+                }
+            log("AIRPLAY: HID 设备画像 = $profiled")
+            if (mediaKeyUuids.isEmpty()) {
+                log(
+                    "AIRPLAY: ⚠ HID 无媒体键设备——方向盘切歌只能靠 iAP2 0x6800/0x6802；" +
+                        "车机不发 StartHID 这台车就永远收不到按键（不是 1.2.52 的位图解析问题）",
+                )
+            } else {
+                log("AIRPLAY: ✓ HID 媒体键设备 uuid=${mediaKeyUuids.joinToString("/")}——方向盘切歌走事件通道 hidSendReport")
+            }
+        }
         val info =
             SetupInfo(
                 eventPort = portOf(root["eventPort"]),
@@ -1534,6 +1599,9 @@ class AirPlayClient(
                 // 兜底值必须在源头保留「未声明」这一个状态。参考 CarVeX 的参数决策：
                 // 取「接收端声明」与「宿主能力」的较小值，未声明就别替它编一个。
                 maxFps = selected?.maxFps ?: 0,
+                // 「这台车有没有能承载方向盘媒体键的 HID 设备」——由描述符画像判定。
+                // 会话层据此在「一直没收到按键」时把结论写成实话（不是我们的解析问题）。
+                hasMediaKeyHid = mediaKeyUuids.isNotEmpty(),
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
                 // 奥迪 MMI 0000 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
@@ -1745,6 +1813,12 @@ class AirPlayClient(
          * 有值跟随、0 按 60 声明。
          */
         val maxFps: Int,
+        /**
+         * 车机有没有声明「能承载方向盘媒体键」的 HID 设备（画像判据见
+         * [HidDescriptorSummary]）。false 表示这台车的媒体键只能走 iAP2
+         * `0x6800`/`0x6802`——车机不发 StartHID 就永远收不到。
+         */
+        val hasMediaKeyHid: Boolean = false,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
         val hidDeviceUuids: List<String> = emptyList(),
         /**
@@ -3610,8 +3684,21 @@ class AirPlayClient(
                             )
                             val firstLine = message.firstLine
                             // (a) 状态行（"RTSP/1.0 200 OK" 等）= 车机对**我们命令**的应答：
-                            //     静默跳过——不回、不记录（回应答会触发乒乓回声，见 respondEventRequest）
-                            if (firstLine.startsWith("RTSP/") || firstLine.startsWith("HTTP/")) continue
+                            //     一律不回（回应答会触发乒乓回声，见 respondEventRequest）。
+                            //     但**非 200 必须留痕**：`hidSetInputMode` 是发后不管，
+                            //     车机若回 400/422（例如 uuid 类型或值不匹配），
+                            //     旧代码把它静默丢掉，现场只能看到「命令发了、按键不来」。
+                            if (firstLine.startsWith("RTSP/") || firstLine.startsWith("HTTP/")) {
+                                val status = firstLine.substringAfter(' ').trim().take(48)
+                                if (!status.startsWith("200")) {
+                                    if (eventRejectSignatures.add(status) && eventRejectSignatures.size <= 8) {
+                                        log("EVENT: ⚠ 车机拒绝命令 [$firstLine]（首次出现，同类只记一次）")
+                                    } else {
+                                        eventRejects += 1
+                                    }
+                                }
+                                continue
+                            }
                             // (b) 请求判定：方法 token + "/"-开头路径。畸形行（如 "OK 200 OK"：
                             //     第 2 token 是数字）判为非请求 → 静默丢弃，不回不记
                             val tokens = firstLine.split(" ")
@@ -3666,6 +3753,17 @@ class AirPlayClient(
                                 continue
                             }
                             var audioTransfer: AirPlayResourceState.CarAudioTransfer? = null
+                            // 命令类型清单：每种只落一行。按键/触摸都藏在 hidSendReport 的
+                            // 报文体里，但换一台车可能换 type——先保证「它到底说了哪些 type」
+                            // 在日志里是可回答的问题。
+                            val commandType = command["type"]?.toString()
+                            if (commandType != null && eventCommandTypes.size < 24 && eventCommandTypes.add(commandType)) {
+                                val params = command["params"] as? Map<*, *>
+                                val keys =
+                                    params?.keys?.joinToString(",")
+                                        ?: command.keys.filter { it != "type" }.joinToString(",")
+                                log("EVENT: 车机命令 type=$commandType（本轮首次出现，params 键=$keys）")
+                            }
                             // changeModes 在事件应答里直接回仲裁后的归属（不另发一轮阻塞的 modesChanged）
                             val reply =
                                 if (command["type"] == "changeModes") {

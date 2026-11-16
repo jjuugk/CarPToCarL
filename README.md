@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk)**
-> —— 主线固定直链（当前 1.2.52，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk)**
+> —— 主线固定直链（当前 1.2.53，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.52，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.52.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.53，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.53.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.52`（正式版；**CarLife 引擎发过一次「暂停」之后就永久静音——起播序列里的 PAUSE 把放行闸门锁死，而引擎此后只推 PCM、从不补 RESUME**，单测 851 例 0 失败）。① 现象一：用户反馈「切换挡位之后直接没声音」。手机侧一切正常——`CARLIFE: 音频直通 216 包 / 864KB / 1411kbps · 电平 98%`，混音泵每 30 秒稳定送 1291~1293 包，30 个锚点全部送达；可 `AUDIO: 混音体检 —— 媒体 0% / 播报 0%`，同时每 30 秒刷一条 `CARLIFE: 暂停期间丢弃 1293 包 PCM`（正好是 30 秒的全部音频），从 08:43:16 一直丢到日志结束，4 分多钟一声不响。② 真凶：引擎在 08:43:16.403 发的是 `媒体 暂停（0x30003）` → `音频格式宣告（INIT）` → `媒体 停止（0x30002）` → `INIT`，之后一直推裸 PCM，**从不补 0x30004 RESUME**。旧代码遇到 PAUSE 在「已持有焦点」时把 `eligible` 置 false，而 `INITIALIZED` 分支又没复位它，于是 `canForwardPcm` 永久为 false；更糟的是 `routeAudio` 里 `forwardingAllowed = canForwardPcm` 是一道**没有超时**的硬门禁，绕过了 sink 内部「暂停 15 秒后自动放行」的兜底——状态机一卡住就是永久静音。③ 改法：新增 `pausedByCar`，区分「车机侧暂停」（接管主音频 / 静音借用 / 切到 FM，必须等车机还回来）与「引擎侧暂停」（PAUSE / MediaSession 暂停，允许自愈）；`INITIALIZED` 在 `focused && !pausedByCar` 时复位，引擎的 INIT+PCM 自己就能恢复；用户点播放时直接恢复授权，不必再等一次焦点事件；`setPlaybackPaused(paused, indefinite)` 让车机侧永久拦、引擎侧仍按 15 秒窗口放行（宁可重复播放几秒，也不要永久没声）。硬门禁只保留「播报通道不受媒体暂停影响」，媒体通道交给窗口裁决。④ 顺带修好方向盘切歌：宝马 G38 NBT Evo 的按键走 AirPlay 事件通道的 `hidSendReport`，设备的 HID 描述符是**位图**（`0xB5` 下一首 / `0xB6` 上一首 / `0xB0` 播放各占 1 bit），旧代码却把整个字节当 Usage ID → 按下一首报 `0x01`、上一首 `0x02`、播放 `0x04`，三个值全被判成「未知键」丢掉（两份日志里 7 次 / 19 次按键一次都没生效）。现在按描述符的位映射展开，日志里能直接看到「车机媒体键 下一首」。⑤ 现象二（同一批日志的另一份）：播放器被暂停时推的是真静音（电平 0%），属于正常行为、不是丢音——这份的每次静音都能对上「车机接管主音频」或屏幕上点过暂停，点播放立刻恢复。⑥ 诊断关键词：`15 秒后自动恢复放行`（引擎侧暂停）、`车机侧暂停，等它归还音频后才恢复`、`暂停已超过 15 秒——恢复放行 PCM`（兜底生效）。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.53`（正式版；**宝马 MGU-81 方向盘媒体键：这台车在 `/info` 里根本没有媒体键 HID 设备，两条承载通路（AirPlay `hidSendReport` 与 iAP2 `0x6800`+`0x6802`）整场都是空的——先把证据补齐，并修掉一个把 MGU-81 误判成通用系 Cinemo 栈的真 bug**，单测 866 例 0 失败）。① 现场：075846 那份日志（MGU-81，4 轮会话）里 `EVENT:` 共 411 条，HID 报告全部来自 `uuid=1`（触摸），`uuid=0`（`HardKeyInputDescriptor`）**一条都没有**；解码 `/info` 描述符才看清真相——62B 是 Digitizer 触摸，78B 是 iDrive 控制器（Button 1 + Consumer `0x0224` 返回键 + X/Y + Wheel），**没有 0xB0/0xB5/0xB6 这类媒体键 Usage**。对照宝马 G38：`/info` 给了 4 个设备，其中 31B 的 `ButtonInput` 正是 Consumer 位图（`0xB5` 下一首 / `0xB6` 上一首 / `0xB0` 播放），1.2.52 的位图解析修的就是它。② iAP2 侧同样空：车机在 `0x1D01` 里声明「会发 `0x6800` StartHID / `0x6802` AccessoryHIDReport」（传输组件 `CinemoHIDComponent`），隧道链路的识别与 MFi 全部走通，但整场只发过 `0xae00 StartPowerUpdates`，**StartHID 一次没发**——唯一可能承载方向盘按键的通道没有开。③ 因此本版不「修」MGU-81 的按键解析（没有报文可解），而是把结论做成日志：新增 `AIRPLAY: hidDevices[i] … → 触摸/媒体键/旋钮`、`AIRPLAY: ⚠ HID 无媒体键设备`、`EVENT: HID 报告首次来自 uuid=X`、`EVENT: HID 体检 —— 声明 N 个设备（uuid=1:340条 uuid=0:0条）`、`EVENT: 车机命令 type=…（本轮首次出现）`、`EVENT: ⚠ 车机拒绝命令 [RTSP/1.0 4xx]` 六类证据行。④ 真 bug 修掉：`isCinemoStack` 原判据是「`0x1D01` 整段报文体含 `Cinemo` 就算通用系」，而 MGU-81 的传输组件是 `BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——BMW 只是把 HID 中间件换成了 Cinemo 组件，却因此吃到通用系的 0x4300 双标识报文体、90 秒宽限与「不重认证」策略。改为「**全部**传输组件名都含 Cinemo 且至少两个」，厂商含 `General Motors` 仍然直接命中。⑤ 1.2.52 的内容一并在此版：CarLife 引擎发过 PAUSE 后永久静音（`pausedByCar` + `INITIALIZED` 自愈 + 硬门禁只保留播报通道）、方向盘 G38 位图解析。⑥ 诊断关键词：`HID 无媒体键设备`、`HID 体检`、`从没发过报告=`、`内未收到 0x6800 StartHID`。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,71 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.53 —— 2026-11-16（宝马 MGU-81 方向盘媒体键：这台车没有媒体键 HID 设备，先把证据补齐）
+
+**起因**：G38 的位图 bug 修完之后，用户在同一批日志里指出「上两份日志也一样，方向盘切歌没反应」，
+其中 075846 那份是宝马 **MGU-81**（iD8 系，无线 CarPlay）。
+
+**一、日志先把「没有报文」这件事说死**
+
+`EVENT:` 共 411 条，其中 HID 报告**全部**来自 `uuid=1`（触摸，单指绝对坐标）；`uuid=0`
+（`HardKeyInputDescriptor`）在整个日志里 **0 条**——没有 `EVENT: 其他 HID 报告`、没有
+`EVENT: HID 报告 … 映射不到 usage`、没有 `EVENT: 车机媒体键`。也就是说不是「收到了解不出来」，
+而是**一条都没收到**。
+
+**二、解码 `/info` 描述符，才知道这台车压根没有媒体键设备**
+
+```
+hidDescriptor[0] 62B  05 0d 09 04 …  → Digitizer 触摸（TipSwitch + X/Y）
+hidDescriptor[1] 78B  05 01 09 08 …  → iDrive 控制器：
+                         Button 1 + Consumer 0x0224(返回) + X/Y + Wheel(0x38)
+```
+
+78 字节里**没有一个** `0xB0/0xB1/0xB5/0xB6/0xCF` 这类媒体键 Usage。对照同一天的 G38 日志，
+它给了 4 个设备，其中 31B 的 `ButtonInput` 是 `09 b5 09 b6 09 b0 … 81 02` 的 Consumer 位图
+——1.2.52 修的就是那一个。
+
+**三、iAP2 那条路也没开**
+
+车机在 `0x1D01` 里声明「会发 `0x6800` StartHID / `0x6802` AccessoryHIDReport / `0x6803` StopHID」，
+传输组件里还专门有一个 `CinemoHIDComponent`。隧道链路的 `0x1D00 → 0x1D01 → 0x1D02 → 0xAA00..0xAA05`
+与问候全部走通，但车机整场只主动发过 `0xae00 StartPowerUpdates`（我们还当「未处理的 CSM」丢了），
+**StartHID 一次没发** → 没有 HID 描述符、没有 `0x6802` 报告。
+
+结论：MGU-81 上「方向盘切歌没反应」不是解析问题，是**车载侧不给报文**。两条已知通路都空的时候，
+再改我们的位图/下标语义都是空转。
+
+**四、本版做的事：把证据做成一行行日志**
+
+| 新增日志 | 回答什么问题 |
+| ---- | ---- |
+| `AIRPLAY: hidDevices[i] uuid=… name=… → 触摸/媒体键(0xb5 下一首…)/旋钮/电话键` | 这台车声明了哪些 HID 设备、各自能承载什么 |
+| `AIRPLAY: ⚠ HID 无媒体键设备 —— 方向盘切歌只能靠 iAP2 0x6800/0x6802` | 一眼看出「这台车没有 AirPlay 媒体键通路」 |
+| `EVENT: HID 报告首次来自 uuid=X → <画像>` | 哪个设备真的在说话（每种一次，不刷屏） |
+| `EVENT: HID 体检 —— 声明 N 个设备（uuid=1:340条 uuid=0:0条）；从没发过报告=0` | 首帧后 12 秒一次性给出「谁说话、谁沉默」 |
+| `EVENT: 车机命令 type=…（本轮首次出现，params 键=…）` | 车机到底下发过哪些命令类型（未知 type 不再静默） |
+| `EVENT: ⚠ 车机拒绝命令 [RTSP/1.0 4xx]` | `hidSetInputMode` 是发后不管，被拒时以前完全看不出来 |
+
+描述符画像由新增的 `input/HidDescriptorSummary` 提供（页 + Usage + Array/Variable 位），
+不按车机型号或 uuid 写死。
+
+**五、顺手修掉一个真 bug：MGU-81 被误判成通用系 Cinemo 栈**
+
+`isCinemoStack` 原判据是「`0x1D01` 整段报文体里含 `Cinemo` 就算通用系」。MGU-81 的传输组件是
+`BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——BMW 只是把媒体/HID 中间件换成了
+Cinemo 的组件，栈本身是 BMW 自己的。误判的代价很具体：它会拿到通用系那套 0x4300 双标识报文体、
+90 秒可用性宽限，以及「拆链前不重跑识别+MFi」——而实测 MGU-81 的 0x4300 是正常 ACK、走标准
+无线 CarPlay 流程。
+
+改成「**全部**传输组件名都含 `Cinemo`（且至少两个组件）」，厂商名含 `General Motors` 仍然直接命中
+（别克 E2LB / 凯迪拉克 CT5 照旧）。
+
+**六、单测**
+
+866 例 0 失败（+13：`HidDescriptorSummaryTest` 8 例，用 MGU-81/G38/奥迪三套真实描述符逐字节锁定
+「触摸 / 旋钮 / 位图媒体键 / 数组媒体键」；`CinemoStackDetectionTest` 5 例，锁住「混着 Cinemo 组件的
+宝马不算通用系」）。
 
 ### 1.2.52 —— 2026-11-16（CarLife 引擎发过 PAUSE 之后永久静音：放行闸门被锁死且没有超时，正式版）
 

@@ -267,6 +267,60 @@ class Iap2SenderSession(
 
     internal companion object {
         /**
+         * 0x1D01 里「传输组件」所在的参数号（0x11/0x12/0x18）。
+         *
+         * 实测 Cinemo 栈一族（别克 E2LB、凯迪拉克 CT5，两组字节逐字节相同）：
+         *  - 0x11 子参 0=2 → `CinemoBTComponent`（子参 3 还带一个 `4C:92` 标识）
+         *  - 0x18 子参 0=3 → `CinemoWIFIComponent`
+         *  - 0x12 子参 0=1 → `CinemoHIDRemote`
+         *
+         * 宝马 MGU-81 同一条消息里是 `BMW 42056` / `CinemoHIDComponent` / `BMW 42056 Wifi`
+         * ——**混着 BMW 与 Cinemo 的组件名**，所以栈判定不能只看「有没有出现过 Cinemo」。
+         */
+        internal val COMPONENT_GROUPS = intArrayOf(0x11, 0x12, 0x18)
+
+        /**
+         * 是否通用系 Cinemo 栈（别克 E2LB / 凯迪拉克 7731 等）。
+         *
+         * 两条判据任取其一：身份里 manufacturer 含 `General Motors`；或 0x1D01 的**全部**
+         * 传输组件名都带 `Cinemo`（`CinemoBTComponent` / `CinemoWIFIComponent` /
+         * `CinemoHIDRemote`）。雪佛兰/别克/凯迪拉克都是 SAIC-GM 出品，组件名一致，
+         * 所以按栈判而不是按品牌名判。
+         *
+         * **必须是「全部」而不是「含有一个」**（2026-11-16 修正）：宝马 MGU-81 的传输组件是
+         * `BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——BMW 只是把媒体/HID
+         * 中间件换成了 Cinemo 的组件，栈本身不是通用系。按「含有一个」判会把 MGU-81 误认成
+         * 通用系，于是它吃到通用系那套 0x4300 双标识报文体、90 秒宽限和不重认证策略
+         * （见 [AvailabilityRetryBudget]），与实测行为（0x4300 正常 ACK、走标准无线 CarPlay）
+         * 完全不符。
+         */
+        internal fun isCinemoStack(
+            identificationBody: ByteArray,
+            identityText: String,
+        ): Boolean {
+            if (identityText.contains("general motors")) return true
+            val names = transportComponentNames(identificationBody)
+            return names.size >= 2 && names.all { it.contains("cinemo", ignoreCase = true) }
+        }
+
+        /**
+         * 车机自报的传输组件**名字**（[COMPONENT_GROUPS] 指向的参数，取子参 1）。
+         *
+         * 只给栈判定用：拿名字而不是整段报文体做匹配，否则「某个组件叫
+         * CinemoHIDComponent」的宝马会被当成通用系（见 [isCinemoStack]）。
+         */
+        internal fun transportComponentNames(identificationBody: ByteArray): List<String> {
+            val params = Iap2Csm.parseParams(identificationBody).associateBy { it.id }
+            val names = ArrayList<String>(COMPONENT_GROUPS.size)
+            for (groupId in COMPONENT_GROUPS) {
+                val value = params[groupId]?.value ?: continue
+                val sub = Iap2Csm.parseParams(value).associateBy { it.id }
+                names += sub[1]?.value?.asStringOrEmpty() ?: "?"
+            }
+            return names
+        }
+
+        /**
          * 0x4E09 自报的设备名（iAP2 身份，**不是**蓝牙名）。
          *
          * 依据：MIB3 真机 Frida 抓包的逐字节常量、catplay/xcertplay 发送端、
@@ -479,18 +533,18 @@ class Iap2SenderSession(
     /**
      * 是否通用系 Cinemo 栈（别克 E2LB / 凯迪拉克 7731 等）。
      *
-     * 两条判据任取其一：身份里 manufacturer 含 `General Motors`；或 0x1D01 的传输组件里
-     * 带 `Cinemo`（`CinemoBTComponent` / `CinemoWIFIComponent` / `CinemoHIDRemote`）。
-     * 雪佛兰/别克/凯迪拉克都是 SAIC-GM 出品，组件名一致，所以按栈判而不是按品牌名判。
+     * 两条判据任取其一：身份里 manufacturer 含 `General Motors`；或 0x1D01 的**全部**
+     * 传输组件名都带 `Cinemo`（`CinemoBTComponent` / `CinemoWIFIComponent` /
+     * `CinemoHIDRemote`）。雪佛兰/别克/凯迪拉克都是 SAIC-GM 出品，组件名一致，
+     * 所以按栈判而不是按品牌名判。
+     *
+     * **必须是「全部」而不是「含有一个」**（2026-11-16 修正）：宝马 MGU-81 的传输组件是
+     * `BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——BMW 只是把媒体/HID
+     * 中间件换成了 Cinemo 的组件，栈本身不是通用系。按「含有一个」判会把 MGU-81 误认成
+     * 通用系，于是它吃到通用系那套 0x4300 双标识报文体、90 秒宽限和不重认证策略
+     * （见 [AvailabilityRetryBudget]），与实测行为（0x4300 正常 ACK、走标准无线 CarPlay）
+     * 完全不符。
      */
-    private fun isCinemoStack(
-        identification: Iap2Csm.Frame,
-        identityText: String,
-    ): Boolean {
-        if (identityText.contains("general motors")) return true
-        return identification.body.decodeToString().contains("Cinemo", ignoreCase = true)
-    }
-
     fun run(timeoutMillis: Long = 60_000L): CarPlayEndpoint {
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         if (!channel.awaitReady(remainingMillis(deadline))) {
@@ -511,7 +565,7 @@ class Iap2SenderSession(
         // 别克 E2LB 收到新版嵌套体后控制会话直接停摆）。无 Context（单测）时固定新版。
         receiverIdentity = identityText
         // 通用系（General Motors / Cinemo 组件栈）：0x4300 优先试「双标识体」。
-        cinemoStack = isCinemoStack(identification, identityText)
+        cinemoStack = isCinemoStack(identification.body, identityText)
         preferDualAvailability = cinemoStack
         // 车机自己声明能收 0x4300 时，历史静默记忆不许把它堵死（见 nextVariant 注释）。
         acceptsAvailability = accessoryDeclaresReceive(Iap2MessageIds.CARPLAY_AVAILABILITY) == true
@@ -2293,9 +2347,8 @@ class Iap2SenderSession(
      * WiFi 应为 `3` —— 现在按参考实现发 1，先记下来当下一轮实验项。
      */
     private fun logTransportComponents(params: Map<Int, Iap2Csm.Param>) {
-        val groups = intArrayOf(0x11, 0x12, 0x18)
-        val parts = ArrayList<String>(groups.size)
-        for (groupId in groups) {
+        val parts = ArrayList<String>(COMPONENT_GROUPS.size)
+        for (groupId in COMPONENT_GROUPS) {
             val value = params[groupId]?.value ?: continue
             val sub = Iap2Csm.parseParams(value).associateBy { it.id }
             val kindBytes = sub[0]?.value
@@ -2313,6 +2366,12 @@ class Iap2SenderSession(
         if (parts.isNotEmpty()) log("iap2 0x1d01 传输组件：" + parts.joinToString(" / "))
     }
 
+    /**
+     * 车机自报的传输组件**名字**（`0x1D01` 参数 0x11 / 0x12 / 0x18 的子参 1）。
+     *
+     * 只给栈判定用（[isCinemoStack]）：拿名字而不是整段报文体做 `contains("Cinemo")`，
+     * 否则「某个组件叫 CinemoHIDComponent」的宝马会被当成通用系（见该函数注释）。
+     */
     private fun remainingMillis(deadlineNanos: Long): Long {
         val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L
         return remaining.coerceIn(0, 60_000L)

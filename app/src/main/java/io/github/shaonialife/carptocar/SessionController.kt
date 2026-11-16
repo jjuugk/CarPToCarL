@@ -45,6 +45,7 @@ import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
+import io.github.shaonialife.carptocar.input.HidDescriptorSummary
 import io.github.shaonialife.carptocar.input.KnobReports
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchReports
@@ -5094,6 +5095,7 @@ object SessionController {
                     "STAGE: 车机接管屏幕有回落信号（首帧后 ${HANDOVER_QUIET_MS / 1000}s 内 ${events} 条事件命令：" +
                         carEventTypes.joinToString("、") + "；$receiveLine）",
                 )
+                hidDiagnosticLine()?.let { appendLog("EVENT: $it") }
                 return@run
             }
             // 零事件时再用收帧率把两种完全不同的故障切开：
@@ -5118,6 +5120,7 @@ object SessionController {
                     "`<SCREEN> State changed` / `Video state=active|inactive` / " +
                     "`Failed to overtake the screen: \"<reason>\"`",
             )
+            hidDiagnosticLine()?.let { appendLog("EVENT: $it") }
         }
     }
 
@@ -5747,6 +5750,22 @@ object SessionController {
                                     "hidSendReport" -> {
                                         val uuid = command["uuid"]?.toString()
                                         val report = command["hidReport"] as? ByteArray
+                                        // 哪台设备真的在说话：uuid 计数 + 每台首次一行画像。
+                                        // 方向盘媒体键与触摸可能是两个不同 uuid，车机只在
+                                        // 「它声明的那个设备」上发报——这台车没有媒体键设备
+                                        // 时，这里永远不会出现第二个 uuid（MGU-81 就是 0 条）。
+                                        val uuidKey = uuid ?: "?"
+                                        hidReportCounts.merge(uuidKey, 1, Int::plus)
+                                        if (hidReportFirstLogged.add(uuidKey)) {
+                                            val profile =
+                                                setup.hidDescriptors[uuidKey]?.let {
+                                                    HidDescriptorSummary.describe(it).text()
+                                                } ?: "车机没给描述符"
+                                            appendLog(
+                                                "EVENT: HID 报告首次来自 uuid=$uuidKey → $profile" +
+                                                    "（报告 ${report?.size ?: 0}B）",
+                                            )
+                                        }
                                         // 车机媒体键（Consumer Control）走 hidSendReport 通路，
                                         // 判定**以设备描述符为准**（不按 uuid、不按车机型号写死）：
                                         // 描述符声明了 Consumer 页(0x0C)的设备才当媒体键，报告字节是
@@ -6026,6 +6045,11 @@ object SessionController {
                             setup.hidDeviceUuids.forEach { uuid ->
                                 client.sendHidSetInputMode(uuid, mode = 0)
                             }
+                            // 新一轮 /info：HID 计数与「首次来自 uuid」标记都属于上一轮，清零
+                            hidReportCounts.clear()
+                            hidReportFirstLogged.clear()
+                            hidDeclaredUuids = setup.hidDeviceUuids
+                            hidHasMediaKeyDevice = setup.hasMediaKeyHid
                             val screen = if (screenAcquired) client.runScreenStream(sessionKey, setup.displayUuid) else null
                             requireAttempt(attempt)
                             if (screen != null || !screenAcquired) {
@@ -6719,6 +6743,46 @@ object SessionController {
 
     /** 车机发过的事件命令 `type` 集合（去重，仅日志诊断用）。 */
     private val carEventTypes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * 每个 HID 设备（`/info hidDevices[].uuid`）本轮收到过多少条 `hidSendReport`。
+     *
+     * 方向盘切歌排查的分水岭：**哪个 uuid 真的在说话**。宝马 MGU-81（2026-11-16）整场
+     * 4 个会话里 uuid=1（触摸）有几百条、uuid=0（iDrive 旋钮）**0 条**——把这件事写成
+     * 一行数字，比翻 400 条 `EVENT:` 才能确认要快得多。
+     */
+    private val hidReportCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** 已打过「首次来自 uuid=X」log 的设备（每种一行，不刷屏）。 */
+    private val hidReportFirstLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 本轮 `/info` 声明的 HID 设备 uuid（空 = 车机没声明，触摸/按键都走不了 HID 通路）。 */
+    @Volatile
+    private var hidDeclaredUuids: List<String> = emptyList()
+
+    /** 本轮 `/info` 里有没有能承载方向盘媒体键的设备（画像见 [HidDescriptorSummary]）。 */
+    @Volatile
+    private var hidHasMediaKeyDevice = false
+
+    /**
+     * 一行 HID 体检结论：哪个 uuid 在说话、哪个一句没说、媒体键有没有承载通路。
+     *
+     * 只在「首帧后 12 秒」这个既有观察点打一次（见 [startScreenHandoverGate]）——
+     * 再密的日志也没人看，而这三个事实足以判定「按键不来」是车机没发还是我们没解。
+     */
+    private fun hidDiagnosticLine(): String? {
+        val declared = hidDeclaredUuids
+        if (declared.isEmpty()) return null
+        val counts = declared.joinToString(" ") { uuid -> "uuid=$uuid:${hidReportCounts[uuid] ?: 0}条" }
+        val silent = declared.filter { (hidReportCounts[it] ?: 0) == 0 }
+        return "HID 体检 —— 声明 ${declared.size} 个设备（$counts）" +
+            if (silent.isEmpty()) {
+                "；都有报告"
+            } else {
+                "；从没发过报告=${silent.joinToString("/")}" +
+                    (if (hidHasMediaKeyDevice) "" else "，且本轮无媒体键设备（方向盘切歌只能靠 iAP2 0x6800/0x6802）")
+            }
+    }
 
     /** 最近一次收到车机事件命令的 `uptimeMillis`（0 = 从没收到）。 */
     @Volatile
