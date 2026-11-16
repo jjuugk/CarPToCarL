@@ -52,9 +52,17 @@ internal class CarLifeAudioSink(
     private var bytes = 0L
     private var lastReportAt = 0L
 
-    /** 因「音乐会话暂停」被丢弃的包数（诊断用：导航播报被误判暂停时能一眼看出来）。 */
+    /** 因门禁被丢弃的包数（诊断用：导航播报被误判暂停时能一眼看出来）。 */
     private var droppedWhenPaused = 0L
     private var lastDropReportAt = 0L
+
+    /**
+     * 最近一次丢弃来自哪道门禁。
+     *
+     * 以前两条丢弃路径（调用方 `forwardingAllowed=false` / 本类暂停窗口）共用同一句日志，
+     * 2026-11-16 排查时因此把「路由层恒丢」误读成「状态机误判暂停」，多花了一轮。
+     */
+    private var lastDropReason = ""
 
     /**
      * 电平统计（跟着 5 秒那条「音频直通」日志一起报）。
@@ -181,13 +189,15 @@ internal class CarLifeAudioSink(
         bytes += size
         reportIfDue()
         if (!forwardingAllowed) {
-            countDroppedWhenPaused()
+            countDroppedWhenPaused("调用方禁止转发（forwardingAllowed=false）")
             return
         }
         // 音乐会话暂停后的一小段窗口内：丢弃引擎仍在推的残留 PCM（避免重复播放）
         val now = android.os.SystemClock.uptimeMillis()
         if (dropWhenPaused && shouldDropPaused(now)) {
-            countDroppedWhenPaused()
+            countDroppedWhenPaused(
+                if (pauseIndefinite) "车机侧暂停（无限期，等它归还音频）" else "引擎侧暂停（15 秒窗口内）",
+            )
             return
         }
         if (srcRate <= 0) {
@@ -246,9 +256,14 @@ internal class CarLifeAudioSink(
         lastReportAt = 0
         droppedWhenPaused = 0
         lastDropReportAt = 0
+        lastDropReason = ""
         pauseWindowExpiredLogged = false
         pauseIndefinite = false
         pausedSince = 0L
+        // 必须一起复位：只清 pausedSince 而留着 playbackPaused = true，会让
+        // shouldDropPaused() 命中「since == 0 → 丢弃」那条早返回——永久丢包，
+        // 而且既不打印「15 秒后放行」也不打印「会话暂停」，日志上完全看不出来。
+        playbackPaused = false
         peakSinceReport = 0
         nonZeroSinceReport = 0
         sampledSinceReport = 0
@@ -262,15 +277,19 @@ internal class CarLifeAudioSink(
      * 表现为「刚连上开导航没声音，开始放音乐才有声」。这里每 5 秒记一条，
      * 下次导出日志就能直接确认是不是这条路径吃掉了声音。
      */
-    private fun countDroppedWhenPaused() {
+    private fun countDroppedWhenPaused(reason: String) {
         droppedWhenPaused++
+        lastDropReason = reason
         val now = android.os.SystemClock.uptimeMillis()
         if (lastDropReportAt == 0L) {
             lastDropReportAt = now
             return
         }
         if (now - lastDropReportAt < DROP_REPORT_INTERVAL_MS) return
-        log("CARLIFE: 暂停期间丢弃 ${droppedWhenPaused} 包 PCM（若此时本应有导航/媒体声音，说明会话状态被误判）")
+        log(
+            "CARLIFE: 丢弃 ${droppedWhenPaused} 包 PCM（原因：$lastDropReason）" +
+                "——若此时本应有声音，说明这道门禁误判",
+        )
         droppedWhenPaused = 0
         lastDropReportAt = now
     }

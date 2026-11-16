@@ -1417,7 +1417,14 @@ object CarLifeHijack {
                 // 2026-11-16 实测：以前这里 `forwardingAllowed = canForwardPcm` 是一道
                 // **没有超时**的硬门禁，状态机一旦卡在暂停态就永久静音——08:43:16 之后
                 // 连续 4 分多钟每 30 秒稳定丢 1292 包，而引擎电平和 RTP 发包全都正常。
-                forwardingAllowed = sink !== audioSink,
+                //
+                // 2026-11-16 二次修（1.2.54）：上一版写成 `sink !== audioSink` —— 媒体通道的
+                // sink **恒等于** audioSink，这个表达式对媒体路恒为 false（对播报路恒为 true），
+                // 等于把媒体 PCM 100% 丢弃。于是 1.2.52/1.2.53 依旧全程没声音，且现象与上一版
+                // 一字不差：电平 98%、每 30 秒稳定丢 1292 包、混音体检「媒体 0%」。
+                // 暂停语义一律交给 sink 内部（车机侧暂停无限期、引擎侧暂停 15 秒窗口），
+                // 这里不再放任何门禁；播报路本来就不参与暂停（dropWhenPaused = false）。
+                forwardingAllowed = true,
             )
             val sender = io.github.shaonialife.carptocar.SessionController.audioSender
             if (sender?.isRunning == true) return
