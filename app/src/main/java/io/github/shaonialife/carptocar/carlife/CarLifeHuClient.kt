@@ -376,6 +376,22 @@ class CarLifeHuClient(
     @Volatile
     private var featureConfigAcked = false
 
+    /**
+     * 本会话是否已经为 98386 等满 [ORDERED_ACK_WAIT_MS] 仍没收到确认——「超时逃生」。
+     *
+     * 为什么必须有：1.2.51 的 PR#25 给首轮 98311 加了「featureConfigAcked 才准发」的门禁，
+     * 但有的车机（实测宝马 MGU-81）的 CarLife 引擎**从不回 MD_FEATURE_CONFIG_DONE**，
+     * featureConfigAcked 永远 false → 98311 被永久拦住 → 引擎永不出首帧 → 车机黑屏判「连不上」。
+     * 1.2.50 没有这个门禁所以能出画面。
+     *
+     * 语义是会话级「这台引擎已证明不回 ACK」：一旦置位，本会话内所有 98311 都不再等确认，
+     * 包括无帧看门狗的 resendEncInit、视频口重连的 restartEncoding（它们会 pushFeatureConfig
+     * 把 featureConfigAcked 重新置 false，所以逃生标志不能跟着重置）。正常车 2s 内回确认，
+     * 这个标志保持 false，防抢跑语义完全不变。连接断开时清零。
+     */
+    @Volatile
+    private var encoderInitAckTimedOut = false
+
     /** 二次初始化是否已经排过（每条会话只做一次）。 */
     private val settleReinitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -504,6 +520,7 @@ class CarLifeHuClient(
         // 首轮有序初始化的闸门：每条新会话都要从「98386 还没确认、首条 98311 还没发」开始。
         firstInitSent = false
         featureConfigAcked = false
+        encoderInitAckTimedOut = false
         settleReinitStarted.set(false)
         encryptSetupLogged.set(false)
         // CONNECT_TYPE 探测：只在开启时复位成「待探测」，否则保持已完成态（不会被触发）。
@@ -835,9 +852,12 @@ class CarLifeHuClient(
                         }
                         if (!running.get()) return@Thread
                         if (!featureConfigAcked) {
+                            // 等满窗口仍无 ACK：认定这台引擎不回 98386，逃生放行首轮 98311。
+                            // 否则门禁会永久拦住 98311，引擎永不出帧（1.2.51~1.2.53 的黑屏根因）。
+                            encoderInitAckTimedOut = true
                             log(
                                 "CARLIFE: 98386 在 ${ORDERED_ACK_WAIT_MS}ms 内未确认——" +
-                                    "首轮初始化继续等确认（不抢先定档）",
+                                    "超时逃生，按 1.2.50 照常发首轮 98311（等不到确认，不能永远不发）",
                             )
                         } else {
                             log("CARLIFE: 98386 已确认 ${ackWaited}ms —— 现在发首轮 98311（分辨率为直通档）")
@@ -1483,7 +1503,8 @@ class CarLifeHuClient(
                     waited += 50
                 }
                 if (!running.get()) return@Thread
-                log("CARLIFE: 二次初始化下发 98311 ${requestedWidth}x$requestedHeight@$videoFps（等引擎回 65544）")
+                if (!featureConfigAcked) encoderInitAckTimedOut = true
+                log("CARLIFE: 二次初始化下发 98311 ${requestedWidth}x$requestedHeight@$videoFps${if (!featureConfigAcked) "（98386 未确认，超时逃生）" else "（等引擎回 65544）"}")
                 sendEncoderInit(force = true)
             } catch (_: InterruptedException) {
             }
@@ -1510,7 +1531,7 @@ class CarLifeHuClient(
 
     @Synchronized
     private fun flushPendingEncoderInit() {
-        if (!encoderInitPending || !versionMatched || !featureConfigAcked || !running.get()) return
+        if (!encoderInitPending || !versionMatched || !(featureConfigAcked || encoderInitAckTimedOut) || !running.get()) return
         val force = pendingEncoderForce
         encoderInitPending = false
         pendingEncoderForce = false
@@ -1533,9 +1554,10 @@ class CarLifeHuClient(
     private fun sendEncoderInit(force: Boolean = false) {
         // 冷启动期视频口可能早于 98386 协商完成触发重连，所有 98311 入口都必须遵守同一前置条件，
         // 避免未确认前抢跑定档并白白消耗 firstInitSent 与去重时间窗。
-        if (!canSendOrderedEncoderInit(orderedInit, versionMatched, featureConfigAcked)) {
+        // 逃生口：本会话已为 ACK 等满窗口仍无回音时放行，避免不回 98386 的引擎被永久拦住。
+        if (!canSendOrderedEncoderInit(orderedInit, versionMatched, featureConfigAcked, encoderInitAckTimedOut)) {
             if (!encoderInitPending) {
-                log("CARLIFE: 延后下发 98311（versionMatched=$versionMatched featureAcked=$featureConfigAcked）")
+                log("CARLIFE: 延后下发 98311（versionMatched=$versionMatched featureAcked=$featureConfigAcked timedOut=$encoderInitAckTimedOut）")
             }
             encoderInitPending = true
             pendingEncoderForce = pendingEncoderForce || force
@@ -2164,12 +2186,19 @@ class CarLifeHuClient(
             firstInitSent: Boolean,
         ): Boolean = orderedInit && !firstInitSent
 
-        /** 有序初始化下首轮与重连 98311 统一遵守「版本匹配 + 98386 已确认」门禁。 */
+        /**
+         * 有序初始化下首轮与重连 98311 统一遵守「版本匹配 + 98386 已确认」门禁。
+         *
+         * [ackTimedOut] 是超时逃生：为 98386 等满 [ORDERED_ACK_WAIT_MS] 仍无回音时置位，
+         * 放行 98311。否则像宝马 MGU-81 这种从不回 MD_FEATURE_CONFIG_DONE 的引擎会被
+         * 永久拦在门外（1.2.51~1.2.53 黑屏根因）。默认 false，不改变既有调用语义。
+         */
         internal fun canSendOrderedEncoderInit(
             orderedInit: Boolean,
             versionMatched: Boolean,
             featureConfigAcked: Boolean,
-        ): Boolean = !orderedInit || (versionMatched && featureConfigAcked)
+            ackTimedOut: Boolean = false,
+        ): Boolean = !orderedInit || (versionMatched && (featureConfigAcked || ackTimedOut))
 
         /**
          * 连续重发时的最大间隔（毫秒）。

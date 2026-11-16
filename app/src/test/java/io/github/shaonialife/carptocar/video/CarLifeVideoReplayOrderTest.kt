@@ -57,6 +57,38 @@ class CarLifeVideoReplayOrderTest {
     }
 
     @Test
+    fun `ack timeout escapes the gate so engines that never confirm 98386 still get 98311`() {
+        // 宝马 MGU-81 的引擎从不回 MD_FEATURE_CONFIG_DONE：featureConfigAcked 永远 false。
+        // 1.2.51~1.2.53 因门禁永久拦住 98311 而黑屏。等满窗口后 ackTimedOut 置位必须放行。
+        assertTrue(
+            CarLifeHuClient.canSendOrderedEncoderInit(
+                orderedInit = true,
+                versionMatched = true,
+                featureConfigAcked = false,
+                ackTimedOut = true,
+            ),
+        )
+        // 版本都没匹配时即使超时也不放行（逃生只解决 ACK，不解决版本协商）。
+        assertFalse(
+            CarLifeHuClient.canSendOrderedEncoderInit(
+                orderedInit = true,
+                versionMatched = false,
+                featureConfigAcked = false,
+                ackTimedOut = true,
+            ),
+        )
+        // 未开启有序初始化时，逃生与否都无所谓，恒放行。
+        assertTrue(
+            CarLifeHuClient.canSendOrderedEncoderInit(
+                orderedInit = false,
+                versionMatched = true,
+                featureConfigAcked = false,
+                ackTimedOut = true,
+            ),
+        )
+    }
+
+    @Test
     fun `passthrough emits cropped sps VideoConfig before first encrypted IDR and local stop suppresses onEnded`() {
         val endedCalled = AtomicBoolean(false)
         val key = ByteArray(32) { (it + 3).toByte() }
