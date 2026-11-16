@@ -145,6 +145,76 @@ class CarLifeMediaPlaybackTest {
     }
 
     @Test
+    fun `engine pause followed by init and pcm resumes without any resume packet`() {
+        val playback = CarLifeMediaPlayback()
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+        assertTrue(playback.playing)
+
+        // 2026-11-16 08:43:16 实测序列：引擎起播先发 0x30003 PAUSE + 0x30002 STOP，
+        // 再重新宣告格式（INIT），之后一直推裸 PCM，**从不补 0x30004 RESUME**。
+        // 以前 PAUSE 在 focused=true 时把 eligible 锁成 false，这串 INIT+PCM 一次都授权
+        // 不了 → canForwardPcm 永久 false → 引擎的 PCM 被全部丢弃，车机上就是永久静音。
+        playback.onActivity(CarLifeMediaActivity.PAUSE)
+        assertFalse(playback.playing)
+        assertFalse(playback.canForwardPcm)
+
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.STOP)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+        assertTrue("引擎重建后必须能自己恢复，不能等一个永远不来的 RESUME", playback.canForwardPcm)
+        assertTrue(playback.playing)
+        // 引擎侧暂停不能被当成「车机侧」，否则 sink 会一直拦到车机还音频（永远不会发生）。
+        assertFalse(playback.pauseHeldByCar)
+    }
+
+    @Test
+    fun `pause source tells car takeover apart from engine pause`() {
+        val playback = CarLifeMediaPlayback()
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+
+        // 车机接管/静音借用主音频 → 只能等它还回来（sink 不套 15 秒窗口）。
+        playback.onCarPause()
+        assertTrue(playback.pauseHeldByCar)
+        playback.onCarResume()
+        assertFalse(playback.pauseHeldByCar)
+
+        // 音乐焦点被车机切走（切到 FM 收音机）→ 同样只能等焦点回来。
+        playback.onActivity(CarLifeMediaActivity.FOCUS_RELEASED)
+        assertTrue(playback.pauseHeldByCar)
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        assertFalse(playback.pauseHeldByCar)
+
+        // 引擎自己发的 PAUSE → 不是车机侧，允许按 15 秒窗口自动放行。
+        playback.onActivity(CarLifeMediaActivity.PAUSE)
+        assertFalse(playback.pauseHeldByCar)
+    }
+
+    @Test
+    fun `user hits play during engine pause clears the veto even without focus events`() {
+        val playback = CarLifeMediaPlayback()
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+
+        playback.onActivity(CarLifeMediaActivity.PAUSE)
+        assertFalse(playback.canForwardPcm)
+
+        // 用户点播放（MediaSession 由暂停转播放）是最强的起播意图：
+        // 直接恢复授权，不必再等一次 FOCUS_GAINED（引擎起播路径根本不发焦点事件）。
+        playback.onSessionPlayback(false)
+        assertFalse(playback.canForwardPcm)
+        playback.onSessionPlayback(true)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+        assertTrue(playback.canForwardPcm)
+        assertTrue(playback.playing)
+    }
+
+    @Test
     fun `unmute after 42s mute does not trigger false 9240 silence reconnect`() {
         val clock = AtomicLong(1_000L)
         val expected = AtomicBoolean(false)

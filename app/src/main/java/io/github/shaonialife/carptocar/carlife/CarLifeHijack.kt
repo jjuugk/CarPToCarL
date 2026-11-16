@@ -290,7 +290,10 @@ object CarLifeHijack {
             if (!running.get()) return@synchronized
             val playing = knownMediaPlaying()
             mediaPlayback.onSessionPlayback(playing)
-            audioSink?.setPlaybackPaused(!mediaPlayback.canForwardPcm)
+            audioSink?.setPlaybackPaused(
+                !mediaPlayback.canForwardPcm,
+                indefinite = mediaPlayback.pauseHeldByCar,
+            )
             updateAudioPlayback(media = mediaPlayback.playing)
         }
     }
@@ -306,7 +309,10 @@ object CarLifeHijack {
             mediaPlayback.reset()
             val playing = knownMediaPlaying()
             mediaPlayback.onSessionPlayback(playing)
-            sink.setPlaybackPaused(!mediaPlayback.canForwardPcm)
+            sink.setPlaybackPaused(
+                !mediaPlayback.canForwardPcm,
+                indefinite = mediaPlayback.pauseHeldByCar,
+            )
             updateAudioPlayback(media = mediaPlayback.playing, navigation = false)
             true
         }
@@ -563,7 +569,7 @@ object CarLifeHijack {
         synchronized(audioPlaybackLock) {
             wasPlaying = (knownMediaPlaying() ?: mediaPlayback.playing) || mediaAudioActive
             mediaPlayback.onCarPause()
-            audioSink?.setPlaybackPaused(true)
+            audioSink?.setPlaybackPaused(true, indefinite = true)
             audioSink?.clearPendingPcm()
             updateAudioPlayback(media = false)
         }
@@ -1078,7 +1084,10 @@ object CarLifeHijack {
             val sessionPlaying = knownMediaPlaying()
             mediaPlayback.onSessionPlayback(sessionPlaying)
             mediaPlayback.onActivity(activity)
-            sink.setPlaybackPaused(!mediaPlayback.canForwardPcm)
+            sink.setPlaybackPaused(
+                !mediaPlayback.canForwardPcm,
+                indefinite = mediaPlayback.pauseHeldByCar,
+            )
             val playing = mediaPlayback.playing
             updateAudioPlayback(
                 media = playing,
@@ -1401,7 +1410,14 @@ object CarLifeHijack {
                 channels = 0,
                 pcm = pcm,
                 size = size,
-                forwardingAllowed = sink !== audioSink || mediaPlayback.canForwardPcm,
+                // 只保留一个硬约束：**播报通道（9241）永不受媒体暂停影响**——导航播报
+                // 恰恰多在没放音乐/音乐被暂停时来。媒体通道不再用 canForwardPcm 硬拦，
+                // 交给 sink 内部的窗口裁决（车机侧暂停永久拦，引擎侧暂停 15 秒后放行）。
+                //
+                // 2026-11-16 实测：以前这里 `forwardingAllowed = canForwardPcm` 是一道
+                // **没有超时**的硬门禁，状态机一旦卡在暂停态就永久静音——08:43:16 之后
+                // 连续 4 分多钟每 30 秒稳定丢 1292 包，而引擎电平和 RTP 发包全都正常。
+                forwardingAllowed = sink !== audioSink,
             )
             val sender = io.github.shaonialife.carptocar.SessionController.audioSender
             if (sender?.isRunning == true) return

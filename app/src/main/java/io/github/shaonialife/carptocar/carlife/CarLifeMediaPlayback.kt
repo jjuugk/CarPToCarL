@@ -33,18 +33,44 @@ internal class CarLifeMediaPlayback {
     private var lastKnownSessionPlaying: Boolean? = null
     private var sourcePaused = false
 
+    /**
+     * 「暂停」是不是**车机侧**造成的（接管/静音借用主音频、音乐焦点被释放）。
+     *
+     * 必须和引擎侧暂停分开：车机把音源切走（例如切到 FM 收音机）后，CarLife 引擎仍在
+     * 后台推 PCM，此时**不能**因为看到 INIT+PCM 就把音源抢回来；而引擎自己起播/重建编码器
+     * 只发 `INIT + PCM`、从不补 `0x30004 RESUME`（2026-11-16 实测），这种必须能自动恢复。
+     * 两者的区分信号就是这里：焦点释放 / 车机接管 → true，其余 → false。
+     */
+    private var pausedByCar = false
+
     val playing: Boolean get() = sessionPlaying ?: wirePlaying
     val canForwardPcm: Boolean get() = sessionPlaying != false && !sourcePaused
 
+    /**
+     * 当前这次拦截是否「只能等车机还回来」（车机侧暂停）。
+     *
+     * 供 [CarLifeAudioSink] 决定要不要套用「15 秒后自动放行」的窗口：车机切走音源时
+     * 必须一直拦住，不能到点自己把声音推回去。
+     */
+    val pauseHeldByCar: Boolean get() = pausedByCar && sourcePaused
+
     fun onSessionPlayback(playing: Boolean?) {
         // 只有从已知暂停态切换到播放态才代表用户恢复播放；重复上报的 PLAYING 快照不覆盖刚发生的 PAUSE。
-        if (playing == true && lastKnownSessionPlaying == false) sourcePaused = false
+        val resumed = playing == true && lastKnownSessionPlaying == false
+        if (resumed) {
+            sourcePaused = false
+            pausedByCar = false
+        }
         if (playing != null) lastKnownSessionPlaying = playing
         sessionPlaying = playing
         if (playing != null) {
-            eligible = false
+            // 用户明确点播放（暂停→播放）是最强的起播意图，直接恢复本轮授权；
+            // 引擎随后推的 PCM 不必再等一次 FOCUS_GAINED（2026-11-16：引擎起播时
+            // 先发 PAUSE/STOP 再 INIT，焦点事件一次都没有）。
+            eligible = resumed
             if (!playing) {
                 sourcePaused = true
+                pausedByCar = false
                 wirePlaying = false
             }
         }
@@ -55,6 +81,17 @@ internal class CarLifeMediaPlayback {
             CarLifeMediaActivity.INITIALIZED -> {
                 initialized = true
                 pcmAfterInit = false
+                // 引擎起播/重建编码器的标准序列是 PAUSE(0x30003) → STOP → INIT → PCM，
+                // **从不补 0x30004 RESUME**（2026-11-16 08:43:16 实测）。以前 PAUSE 在
+                // focused=true 时把 eligible 锁成 false，后面这串 INIT+PCM 一次都授权不了，
+                // 于是 mediaPlayback.canForwardPcm 永久为 false、引擎的 PCM 被全部丢弃
+                // ——车机侧表现就是「放着放着突然没声音，之后再也不响」。
+                // 车机侧接管/焦点释放走的是 onCarPause / FOCUS_RELEASED（pausedByCar=true），
+                // 那种仍要等车机还回来，不受这里影响。
+                if (focused == true && !pausedByCar) {
+                    sourcePaused = false
+                    eligible = true
+                }
             }
 
             CarLifeMediaActivity.PCM ->
@@ -70,6 +107,7 @@ internal class CarLifeMediaPlayback {
 
             CarLifeMediaActivity.PAUSE -> {
                 sourcePaused = true
+                pausedByCar = false
                 wirePlaying = false
                 if (focused == true) eligible = false
                 pcmAfterInit = false
@@ -77,6 +115,7 @@ internal class CarLifeMediaPlayback {
 
             CarLifeMediaActivity.RESUME -> {
                 if (sessionPlaying != false) sourcePaused = false
+                pausedByCar = false
                 eligible = false
                 wirePlaying = sessionPlaying != false
             }
@@ -88,10 +127,12 @@ internal class CarLifeMediaPlayback {
                     if (sessionPlaying != false) sourcePaused = false
                 }
                 focused = true
+                pausedByCar = false
             }
 
             CarLifeMediaActivity.FOCUS_RELEASED -> {
                 sourcePaused = true
+                pausedByCar = true
                 if (focused != false) {
                     eligible = true
                     pcmAfterInit = false
@@ -111,6 +152,7 @@ internal class CarLifeMediaPlayback {
     /** 车机侧抢占/静音触发暂停：立即阻断残留媒体 PCM 并退出播放态。 */
     fun onCarPause() {
         sourcePaused = true
+        pausedByCar = true
         wirePlaying = false
         eligible = false
         pcmAfterInit = false
@@ -120,6 +162,7 @@ internal class CarLifeMediaPlayback {
     fun onCarResume() {
         if (sessionPlaying == false) return
         sourcePaused = false
+        pausedByCar = false
         eligible = false
         wirePlaying = true
     }
@@ -136,6 +179,7 @@ internal class CarLifeMediaPlayback {
         sessionPlaying = null
         lastKnownSessionPlaying = null
         sourcePaused = false
+        pausedByCar = false
         wirePlaying = false
         transportChanged()
     }

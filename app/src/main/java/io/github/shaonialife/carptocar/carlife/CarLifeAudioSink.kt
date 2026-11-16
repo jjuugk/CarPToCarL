@@ -89,16 +89,34 @@ internal class CarLifeAudioSink(
     @Volatile
     private var pausedSince = 0L
 
+    /**
+     * 这次暂停是不是**车机侧**造成的（它接管/静音借用了主音频，或把音乐焦点切走）。
+     *
+     * 车机侧暂停不吃 [PAUSE_DROP_WINDOW_MS] 的「到点自动放行」——它必须一直拦到车机
+     * 明确把音频还回来，否则引擎的残留 PCM 会把车机的原生音源（FM/蓝牙）抢回去。
+     * 引擎自己发的 `0x30003 PAUSE` 不算，那条仍按 15 秒窗口恢复（2026-11-16：
+     * 引擎起播时先发 PAUSE+STOP 再 INIT，从不补 RESUME，按车机侧处理就是永久静音）。
+     */
+    @Volatile
+    private var pauseIndefinite = false
+
     /** 「超时放行」只记一次，避免每秒刷屏。 */
     private var pauseWindowExpiredLogged = false
 
     /**
      * 外部联动开关：音乐会话暂停时置 true（丢弃残留 PCM），恢复播放时置 false。
+     *
+     * @param indefinite true = 车机侧暂停，一直拦到它主动还回来；false = 引擎/应用侧暂停，
+     *   只拦 [PAUSE_DROP_WINDOW_MS]，之后自动放行（宁可重复播放几秒，也不要永久没声音）。
      */
-    fun setPlaybackPaused(paused: Boolean) {
+    fun setPlaybackPaused(
+        paused: Boolean,
+        indefinite: Boolean = false,
+    ) {
         val changed = playbackPaused != paused
         if (changed && paused && dropWhenPaused) clearPendingPcm()
         playbackPaused = paused
+        pauseIndefinite = paused && indefinite
         if (!paused) {
             pausedSince = 0L
             pauseWindowExpiredLogged = false
@@ -108,16 +126,20 @@ internal class CarLifeAudioSink(
         if (changed || pausedSince == 0L) {
             pausedSince = android.os.SystemClock.uptimeMillis()
             pauseWindowExpiredLogged = false
-            log(
-                "CARLIFE: 音乐会话暂停——丢弃引擎残留 PCM（避免重复播放，" +
-                    "${PAUSE_DROP_WINDOW_MS / 1000} 秒后自动恢复放行）",
-            )
+            val suffix =
+                if (pauseIndefinite) {
+                    "车机侧暂停，等它归还音频后才恢复"
+                } else {
+                    "${PAUSE_DROP_WINDOW_MS / 1000} 秒后自动恢复放行"
+                }
+            log("CARLIFE: 音乐会话暂停——丢弃引擎残留 PCM（避免重复播放，$suffix）")
         }
     }
 
-    /** 当前这包 PCM 是否该按「暂停残留」丢掉（只在暂停后的一小段窗口内）。 */
+    /** 当前这包 PCM 是否该按「暂停残留」丢掉（车机侧暂停永久拦，其余只在窗口内）。 */
     private fun shouldDropPaused(now: Long): Boolean {
         if (!playbackPaused) return false
+        if (pauseIndefinite) return true
         val since = pausedSince
         if (since == 0L) return true
         if (now - since < PAUSE_DROP_WINDOW_MS) return true
@@ -225,6 +247,7 @@ internal class CarLifeAudioSink(
         droppedWhenPaused = 0
         lastDropReportAt = 0
         pauseWindowExpiredLogged = false
+        pauseIndefinite = false
         pausedSince = 0L
         peakSinceReport = 0
         nonZeroSinceReport = 0
