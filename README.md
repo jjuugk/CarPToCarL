@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk)**
-> —— 主线固定直链（当前 1.2.53，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk)**
+> —— 主线固定直链（当前 1.2.54，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.53，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.53.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.54，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.54.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.53`（正式版；**宝马 MGU-81 方向盘媒体键：这台车在 `/info` 里根本没有媒体键 HID 设备，两条承载通路（AirPlay `hidSendReport` 与 iAP2 `0x6800`+`0x6802`）整场都是空的——先把证据补齐，并修掉一个把 MGU-81 误判成通用系 Cinemo 栈的真 bug**，单测 866 例 0 失败）。① 现场：075846 那份日志（MGU-81，4 轮会话）里 `EVENT:` 共 411 条，HID 报告全部来自 `uuid=1`（触摸），`uuid=0`（`HardKeyInputDescriptor`）**一条都没有**；解码 `/info` 描述符才看清真相——62B 是 Digitizer 触摸，78B 是 iDrive 控制器（Button 1 + Consumer `0x0224` 返回键 + X/Y + Wheel），**没有 0xB0/0xB5/0xB6 这类媒体键 Usage**。对照宝马 G38：`/info` 给了 4 个设备，其中 31B 的 `ButtonInput` 正是 Consumer 位图（`0xB5` 下一首 / `0xB6` 上一首 / `0xB0` 播放），1.2.52 的位图解析修的就是它。② iAP2 侧同样空：车机在 `0x1D01` 里声明「会发 `0x6800` StartHID / `0x6802` AccessoryHIDReport」（传输组件 `CinemoHIDComponent`），隧道链路的识别与 MFi 全部走通，但整场只发过 `0xae00 StartPowerUpdates`，**StartHID 一次没发**——唯一可能承载方向盘按键的通道没有开。③ 因此本版不「修」MGU-81 的按键解析（没有报文可解），而是把结论做成日志：新增 `AIRPLAY: hidDevices[i] … → 触摸/媒体键/旋钮`、`AIRPLAY: ⚠ HID 无媒体键设备`、`EVENT: HID 报告首次来自 uuid=X`、`EVENT: HID 体检 —— 声明 N 个设备（uuid=1:340条 uuid=0:0条）`、`EVENT: 车机命令 type=…（本轮首次出现）`、`EVENT: ⚠ 车机拒绝命令 [RTSP/1.0 4xx]` 六类证据行。④ 真 bug 修掉：`isCinemoStack` 原判据是「`0x1D01` 整段报文体含 `Cinemo` 就算通用系」，而 MGU-81 的传输组件是 `BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——BMW 只是把 HID 中间件换成了 Cinemo 组件，却因此吃到通用系的 0x4300 双标识报文体、90 秒宽限与「不重认证」策略。改为「**全部**传输组件名都含 Cinemo 且至少两个」，厂商含 `General Motors` 仍然直接命中。⑤ 1.2.52 的内容一并在此版：CarLife 引擎发过 PAUSE 后永久静音（`pausedByCar` + `INITIALIZED` 自愈 + 硬门禁只保留播报通道）、方向盘 G38 位图解析。⑥ 诊断关键词：`HID 无媒体键设备`、`HID 体检`、`从没发过报告=`、`内未收到 0x6800 StartHID`。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.53.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.53/CarPToCarL-1.2.53.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.54`（正式版；**连上了没声音——1.2.52 把 `forwardingAllowed = sink !== audioSink` 当作「拆掉硬门禁」，可媒体通道的 sink 恒等于 audioSink，这个表达式对媒体路恒为 false（对播报路反而不受影响），等于装了一道永远关着的门：媒体 PCM 100% 被丢，播放状态机再正确也发不出声**，单测 866 例 0 失败）。① 现场：175121 那份日志（宝马 G38，17:36:48 建流后连续 15 分钟）手机侧四个环节全部正常——`音频直通 216 包 / 864KB / 1411kbps · 电平 98%（非零 99%）` 每 5 秒一条不断、`链路体检 近 30.0s 送 1291 包、44057 样本/秒（差 -0.10%）`、`锚点 30 个全部送达`、`/feedback` 的 `sampleTime` 按 44.1k 实时推进。② 决定性证据只有一行：`混音体检 —— 本窗口 1292 帧；媒体 0% / 播报 0%`，泵每 30 秒产出 1292 帧（≈43 帧/秒，一帧不少），却没有一帧拿到媒体 PCM——`mixNextFrame` 缺样本按 0 计，于是整条流是「满速静音」：帧数、字节数、时间戳全对，车机照常解码播放，放的是静音。③ 根因：1.2.52 把 `forwardingAllowed = sink !== audioSink || mediaPlayback.canForwardPcm` 改成了 `forwardingAllowed = sink !== audioSink`，`write()` 第一道门 `if (!forwardingAllowed) { 丢弃; return }` 因此对媒体路恒丢，且它计的就是那句每 30 秒一条的 `暂停期间丢弃 1292 包 PCM`（数字恰好是整窗口，看着像状态机误判）。④ 三个假证据：`音频直通` 的电平/包数统计在门禁**之前**；AAC-LC 192kbps 是 CBR，静音帧同样 557B/帧，所以「共发 5242 包 / 3037KB」也正常；`sampleTime` 只证明流在跑。⑤ 修改：`forwardingAllowed = true`（暂停语义全部交给 sink 内部：车机侧无限期、引擎侧 15 秒窗口）、两条丢弃路径分开标注原因、`stop()` 补复位 `playbackPaused`（只清 `pausedSince` 会命中 `since == 0 → 丢弃` 的早返回，永久丢包且一条日志都不打）。⑥ 验收口径：`混音体检` 的 `媒体` 应从 0% 变接近 100%、`丢弃 N 包 PCM` 应消失。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,79 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.54 —— 2026-11-16（连上了没声音：路由层一道恒 false 的门禁把媒体 PCM 全丢了）
+
+**起因**：1.2.52 / 1.2.53 两版都反馈「还是没声音」。175121 这份日志（宝马 G38，
+`CarLife` 劫持画面 + PCM 直通，17:36:48 建音频流后连续 15 分钟）里，手机侧一切正常，
+车机喇叭全程静音。
+
+**一、手机侧四个环节全部正常**
+
+```
+CARLIFE: 音频直通 216 包 / 864KB / 1411kbps · 电平 98%（非零 99%）   ← 每 5 秒，15 分钟不断
+AUDIO: 链路体检 t102/AAC_LC —— 近 30.0s 送 1291 包、44057 样本/秒（声明 44100，差 -0.10%）
+AUDIO: 链路体检 —— 锚点 30 个全部送达                                ← controlPort 6011 在监听
+AIRPLAY: feedback.stream[0] type=102 sr=44297 sampleTime=1021952     ← 44.1k 实时推进
+```
+
+**二、真正说明问题的是「混音体检」那一行**
+
+```
+AUDIO: 混音体检 —— 本窗口 1292 帧 / 44091 样本每秒；媒体 0% / 播报 0%
+```
+
+泵每 30 秒产出 1292 帧（≈43 帧/秒，一帧不少），但**没有任何一帧拿到媒体 PCM**。
+`AudioMixer.mixNextFrame` 缺样本时按 0 计（等价补静音），于是整条流是「满速静音」：
+帧数、字节数、RTP 时间戳、锚点全都正常，车机也照常解码播放——放的是静音。
+
+**三、根因：`sink !== audioSink` 对媒体路恒为 false**
+
+1.2.52 为了拆掉「无超时的硬门禁」，把 `CarLifeHijack.routeAudio()` 里的
+
+```kotlin
+forwardingAllowed = sink !== audioSink || mediaPlayback.canForwardPcm
+```
+
+改成了
+
+```kotlin
+forwardingAllowed = sink !== audioSink
+```
+
+本意是「媒体通道不再被状态机硬拦」，但媒体通道的 sink **就是** `audioSink`，这个表达式
+对媒体路恒为 `false`；播报通道（9241）的 sink 不是 `audioSink`，反而恒为 `true`。
+于是 `CarLifeAudioSink.write()` 的第一道门
+
+```kotlin
+if (!forwardingAllowed) { countDroppedWhenPaused(); return }
+```
+
+把媒体 PCM 100% 丢弃——状态机再正确也发不出声。而且这一路计的就是那句每 30 秒一条的
+`暂停期间丢弃 1292 包 PCM`：数字恰好等于一个整窗口的到达量，看着像「会话状态被误判成
+暂停」，实际是路由层全丢。
+
+**四、三个把人带偏的假证据**
+
+- `音频直通 … 电平 98%（非零 99%）`：`sampleLevel()` 与 `packets++` 都在门禁**之前**，
+  有电平、有包数，不等于有声音送出去
+- `已停止（共发 5242 包 / 3037KB）`：AAC-LC 是 192kbps **CBR**，静音帧同样 557B/帧
+  （本场首帧日志正好 `557B`），所以字节数完全说明不了有没有内容
+- `/feedback` 的 `sampleTime`：只证明流在跑、车机在消费时间轴，不证明内容不是静音
+
+**五、修改**
+
+- `forwardingAllowed = true`：暂停语义全部交给 sink 内部（车机侧暂停无限期、引擎侧暂停
+  15 秒窗口），路由层不再放任何门禁；播报路本来就不参与暂停（`dropWhenPaused = false`）
+- 两条丢弃路径分开打原因：`丢弃 N 包 PCM（原因：调用方禁止转发…／车机侧暂停…）`，
+  下次一眼能定位是哪道门，不再共用「说明会话状态被误判」这一句
+- `stop()` 一并复位 `playbackPaused`：只清 `pausedSince` 而留着 `playbackPaused = true`，
+  会让 `shouldDropPaused()` 命中 `since == 0 → 丢弃` 的早返回——永久丢包且**一条日志都不打**
+
+**六、验收口径**
+
+装上后看两行就够：`混音体检` 的 `媒体` 应从 `0%` 变成接近 `100%`；`丢弃 N 包 PCM`
+应消失。若 `媒体` 上来了却仍然没声，问题就不在这条链路（车机侧解码/音量），这两行足以区分。
 
 ### 1.2.53 —— 2026-11-16（宝马 MGU-81 方向盘媒体键：这台车没有媒体键 HID 设备，先把证据补齐）
 
