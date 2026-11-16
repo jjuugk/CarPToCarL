@@ -13,7 +13,7 @@ import io.github.shaonialife.carptocar.audio.AudioSource
  * 现在改为**直通**：直接把引擎的裸 PCM 喂给 [AudioSender.feedPcm]，由其内部完成
  * 采样率/声道对齐 + RTP/ChaCha20 封包发送。不依赖录屏授权、少一次中转。
  *
- * 唯一的例外是 [io.github.shaonialife.carptocar.audio.NavAudioRoute] 选了 alert /
+ * 唯一的例外是 [io.github.shaonialife.carptocar.audio.NavAudioRoute] 选了
  * speechRecognition 的实验分支：那时 9241 改投**第二条独立音频流**（见 [write] 末尾），
  * 不再进主混音器。默认仍是混音——AirPlay 的 audioType 枚举里没有 navigation，
  * 手机侧混音才是 CarPlay 的标准做法。

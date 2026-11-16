@@ -1855,9 +1855,10 @@ class MainActivity : AppCompatActivity() {
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
         }
 
-        // 导航播报通道（实验）：混音 / alert 独立流 / speechRecognition 独立流。
+        // 导航播报通道（实验）：混音 / speechRecognition 独立流。
         // 只能下次连接起效——audioType 只在 SETUP 里出现一次，一条流建成后改不了语义，
         // 中途换等于拆掉重建（还会顺带触发 RECORD，正是宝马车机的死点）。
+        // alert 档已在 1.2.58 移除：那台 AUDI 4260 对它的 SETUP 回 400 并直接断整条会话。
         val navRow = findViewById<android.view.View>(R.id.rowNavAudio)
         val navValue = findViewById<TextView>(R.id.navAudioValue)
         val navNote = findViewById<TextView>(R.id.navAudioNote)
@@ -1867,7 +1868,6 @@ class MainActivity : AppCompatActivity() {
             navValue.text =
                 when (route) {
                     NavAudioRoute.MIX -> "混音"
-                    NavAudioRoute.ALERT -> "alert"
                     NavAudioRoute.SPEECH -> "语音识别"
                 }
             navNote.text = route.detail

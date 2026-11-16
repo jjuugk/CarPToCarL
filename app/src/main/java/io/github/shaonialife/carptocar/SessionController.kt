@@ -1139,7 +1139,7 @@ object SessionController {
     /**
      * 导航播报的**独立音频流**（实验，见 [io.github.shaonialife.carptocar.audio.NavAudioRoute]）。
      *
-     * null = 导航与媒体混在 [audioSender] 里（默认行为）。非空 = 设置里选了 alert /
+     * null = 导航与媒体混在 [audioSender] 里（默认行为）。非空 = 设置里选了
      * speechRecognition 且车机确实声明了该档、第二条流也建成了——此时 9241 的 PCM 由
      * [io.github.shaonialife.carptocar.carlife.CarLifeAudioSink] 直接投给它，不再进主混音器。
      *
@@ -1251,7 +1251,7 @@ object SessionController {
         // 导航借用归还时若正在通话，通话流不拆
         if (audioInCallMode && client.phoneOwnsAudio) return audioSender?.isRunning == true
         val type = activeCallProfile?.streamType ?: activeAudioProfile?.streamType
-        // 导航独立流的类型可能和主音频不同（alert 若落在 102 上就是 102/100 各一条），
+        // 导航独立流的类型可能和主音频不同（例如语音档落在 101 上就是 101/100 各一条），
         // 拆链要按各自类型分别 TEARDOWN，漏掉的那条只能等车机自己超时回收。
         val navType = activeNavAudioProfile?.streamType
         audioSender?.stop()
@@ -4048,9 +4048,15 @@ object SessionController {
     /**
      * 给导航播报单独建一条音频流（**实验功能**，设置项 [NavAudioRoute]）。
      *
-     * 只在三件事同时成立时建流：设置里选了 alert / speechRecognition、车机 `/info` 声明了
+     * 只在三件事同时成立时建流：设置里选了 speechRecognition、车机 `/info` 声明了
      * 该档、SETUP 回 200 且发送端起得来。任何一步不成立都只打一行日志并**保持混音**——
      * 导航声音永远有路可走，不会因为实验失败变成没声音。
+     *
+     * **`alert` 档已在 1.2.58 移除**：它不满足上面这条「失败无害」的前提。2026-11-16 的
+     * AUDI 4260 日志里，选了 alert 的会话每一次都在第二条流 SETUP 被回 400 之后
+     * **整条断掉**（车机把它当会话级致命错误），而那台车机上除 media / alert 之外
+     * 没有任何一档的位图含 PCM——所以 alert 是「唯一可能、但一碰就掉线」的选项，
+     * 不值得留在界面上让人点。
      *
      * 两个刻意为之的约束：
      *  1. `micPort = 0`：输入端口只属于 media 档。挂到语音/提示音档上，宝马车机会关掉

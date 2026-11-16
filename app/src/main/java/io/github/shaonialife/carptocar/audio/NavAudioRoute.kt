@@ -12,21 +12,29 @@ import android.content.Context
  * （见 `docs/CARPLAY-WIRELESS-HEADUNIT-SPEC.md`）。也就是说「让车机单独给导航一条
  * 音量曲线」在协议层没有正规入口，Apple 自己的做法也是手机侧混音 + ducking。
  *
- * 但「协议没说」不等于「车机没实现」。部分固件对 `alert` / `speechRecognition`
- * 档有自己的增益与路由，值不值得赌只能用单变量实验回答。这个枚举就是那个实验的
- * 三个取值，改完重启连接即生效：
+ * 但「协议没说」不等于「车机没实现」。部分固件对 `speechRecognition` 档有自己的
+ * 增益与路由，值不值得赌只能用单变量实验回答。这个枚举就是那个实验的两个取值，
+ * 改完重启连接即生效：
  *
  *  - [MIX]：与媒体混成一条流（**默认**）。当前行为，AirPlay/CarPlay 的标准做法。
- *  - [ALERT]：独立流，`audioType=alert`。车机的提示音/铃声档。
  *  - [SPEECH]：独立流，`audioType=speechRecognition`。车机的 Siri 档。
  *
- * 后两个都是实验性质，失败一律**自动回退** [MIX]（见
- * `SessionController.startNavAudioChannel`）：车机没声明该档、SETUP 被拒、发送端
- * 起不来，都只打一行日志，导航声音照旧从混音流出去——不会变成「导航没声音」。
+ * ## alert 档已被移除（1.2.58，实车证伪）
+ *
+ * 2026-11-16 的 AUDI 4260（DELPHI）日志里，选了 `alert` 的车机会话**每一轮都在
+ * 建流后整条断掉**：主音频 SETUP 200 之后发 `t100/alert/0x8000 PCM` 的 SETUP →
+ * **400**（补 `ct/sr` 重试仍是 400）→ 77ms 后车机 reset 事件通道 → 视频端口
+ * ECONNREFUSED → 控制通道关闭 → RECORD 失败 → 蓝牙 iAP2 断开。
+ * 没选 alert 的两轮（speechRecognition / 混音）都稳定运行到手动断开。
+ * 结论：这台车机把「不合法的 alert SETUP」当成**会话级致命错误**，不是只忽略那条流；
+ * 代价是掉线，所以这个选项不能留着让人误点。
+ *
+ * [SPEECH] 保留是因为它的失败模式是无害的：车机没声明该档、或该档位图不含我们
+ * 要的 PCM 格式，就不会建流，只打一行日志，导航声音照旧从混音流出去
+ * （见 `SessionController.startNavAudioChannel` 与 `AudioProfilePicker`）。
  */
 enum class NavAudioRoute {
     MIX,
-    ALERT,
     SPEECH,
     ;
 
@@ -39,7 +47,6 @@ enum class NavAudioRoute {
         get() =
             when (this) {
                 MIX -> null
-                ALERT -> "alert"
                 SPEECH -> "speechRecognition"
             }
 
@@ -48,7 +55,6 @@ enum class NavAudioRoute {
         get() =
             when (this) {
                 MIX -> "混音"
-                ALERT -> "alert 独立流"
                 SPEECH -> "speechRecognition 独立流"
             }
 
@@ -57,12 +63,9 @@ enum class NavAudioRoute {
         get() =
             when (this) {
                 MIX -> "导航与音乐混成一条流，播报时自动压低音乐，车机只有一个音量（标准做法）"
-                ALERT ->
-                    "导航走车机的提示音档，可能单独调音量；音乐不再自动压低，" +
-                        "没声明该档的车机自动回退混音"
                 SPEECH ->
                     "导航走车机的语音助手档，可能被当成 Siri（抢麦、弹语音界面）；" +
-                        "没声明该档自动回退混音"
+                        "车机没声明该档、或该档不收 PCM 时自动回退混音"
             }
 
     /** 循环到下一个取值（界面点一下切一档）。 */
@@ -98,7 +101,12 @@ enum class NavAudioRoute {
             }
         }
 
-        /** 持久化值 → 枚举：大小写不敏感，认不出就回 [MIX]（绝不因为脏数据建错流）。 */
+        /**
+         * 持久化值 → 枚举：大小写不敏感，认不出就回 [MIX]（绝不因为脏数据建错流）。
+         *
+         * 老版本存下的 `"ALERT"` 会走到这里并被回落成 [MIX]——正是要的效果：
+         * 那个档位会让整条会话断掉，升级后不该还有任何路径能建它。
+         */
         fun parse(raw: String?): NavAudioRoute {
             val key = raw?.trim()?.lowercase().orEmpty()
             return entries.firstOrNull { it.name.lowercase() == key } ?: MIX

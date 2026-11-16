@@ -5,8 +5,8 @@ package io.github.shaonialife.carptocar.airplay
  *
  * ## 为什么抽成纯函数
  *
- * 这里判断错一步的后果不是「报错」，而是「静默建错流」：车机没声明 `alert` 档却照样
- * 发 SETUP，有的固件会回 200、给出 dataPort、然后一个样本都不消费（Honda 100/media
+ * 这里判断错一步的后果不是「报错」，而是「静默建错流」：车机没声明 `speechRecognition`
+ * 档却照样发 SETUP，有的固件会回 200、给出 dataPort、然后一个样本都不消费（Honda 100/media
  * 的老症状），排查时看到的只是「导航没声音」。把规则固定成可单测的纯函数，比指望
  * 实车日志逐台验证便宜得多。
  *
