@@ -51,6 +51,23 @@ class AudioMixer(
     private val duckHoldMillis: Long = 250L,
     /** duck 时的音乐增益（Q10，258 ≈ −12dB）。 */
     private val duckGainQ: Int = 258,
+    /**
+     * 媒体路的**目标水位**（毫秒）：环形缓冲里长期该保留多少音频，超了就丢最旧的压回去。
+     *
+     * 为什么必须有这个数（1.2.59）：容量 500ms 只是「最多能存多少」，它本身**不构成
+     * 延迟上限**。CarLife 引擎在会话开局常常一次性推一大段（它自己的解码缓冲），水位
+     * 直接顶到 500ms 并长期停在那儿——推多少读多少，水位不变，于是「积压」变成
+     * **恒定 500ms 的音频延迟**：导航说「前方右转」永远比路口晚半秒，音画也差半拍，
+     * 而且任何一次泵抖动都会在满水位上直接丢掉一段最旧的音乐。
+     *
+     * 压到 150ms 的取舍：7 个 21ms 块的余量，足够吸收引擎的写入突发；又比 500ms
+     * 少 350ms 的固定延迟。裁的永远是**最旧的**媒体——已经过时的音频，丢了不影响
+     * 可懂度，只是音乐可能轻微跳一下（引擎推得比实时快时这本来就不可避免，区别只是
+     * 现在「小步常丢」而不是「顶满后一次丢一大段」）。
+     *
+     * **只作用于媒体路**：播报（TTS）是有语义的整段，裁头就是缺字，绝不能这么干。
+     */
+    private val mediaTargetMillis: Int = 150,
 ) {
     companion object {
         /** 增益定点基数（Q10）：1024 = 0dB。 */
@@ -120,6 +137,10 @@ class AudioMixer(
         (RESYNC_AFTER_MILLIS * sampleRate / 1000 / frameSamples).toInt()
 
     private val bytesPerSample = channels * 2
+
+    /** 媒体路目标水位换算成字节（按 [bytesPerSample] 对齐，见 [Ring.trimTo]）。 */
+    private val mediaTargetBytes =
+        (sampleRate.toLong() * mediaTargetMillis / 1000).toInt() * bytesPerSample
 
     private val media = Ring((sampleRate.toLong() * capacityMillis / 1000).toInt() * bytesPerSample)
     private val nav = Ring((sampleRate.toLong() * capacityMillis / 1000).toInt() * bytesPerSample)
@@ -217,6 +238,26 @@ class AudioMixer(
     var windowResyncs = 0L
         private set
 
+    /**
+     * 本窗口内媒体路的**峰值水位**（毫秒）——就是「音频延迟」的直接读数。
+     *
+     * 正常应该稳定在 [mediaTargetMillis] 附近；接近 [capacityMillis] 说明水位控制没
+     * 起作用（或 target 被调得太大），此时用户听到的是「声音比画面慢半拍」。
+     */
+    @Volatile
+    var windowMediaWaterMaxMillis = 0L
+        private set
+
+    /** 本窗口内播报路的峰值水位（毫秒）。顶到容量说明 TTS 在积压，播报会越说越晚。 */
+    @Volatile
+    var windowNavWaterMaxMillis = 0L
+        private set
+
+    /** 本窗口内**为了压延迟主动裁掉**的媒体字节数（不是溢出丢弃，是水位控制）。 */
+    @Volatile
+    var windowMediaTrimBytes = 0L
+        private set
+
     /** 累计重排次数（跨窗口）。>0 说明真的丢掉过一段时间轴。 */
     @Volatile
     var resyncCount = 0L
@@ -292,6 +333,14 @@ class AudioMixer(
         return (nextFrameAt - nowNanos).coerceIn(1_000_000L, 20_000_000L)
     }
 
+    /** 环形缓冲里的字节数换算成「多少毫秒的音频」（诊断用）。 */
+    private fun waterMillisOf(bytes: Int): Long =
+        if (bytes <= 0) {
+            0L
+        } else {
+            bytes.toLong() * 1000L / (bytesPerSample.toLong() * sampleRate)
+        }
+
     /**
      * 产出一帧到 [out]（长度必须 ≥ [frameBytes]）。两路相加，超出 −0.9dBFS 的部分软限幅。
      *
@@ -311,6 +360,15 @@ class AudioMixer(
         // 锁粒度是「一整帧」（352 样本 ≈ 7.33ms，实际执行是几十微秒），争用可以忽略。
         synchronized(media) {
             synchronized(nav) {
+                // 水位控制（1.2.59）：读样本**之前**把媒体积压裁到目标水位。
+                // 放在这里而不是喂入侧，是因为「该不该丢」取决于消费端此刻的真实进度；
+                // 放在读之前而不是之后，是因为这一帧马上要读的就是最旧的那批样本。
+                val trimmed = media.trimTo(mediaTargetBytes, bytesPerSample)
+                if (trimmed > 0) windowMediaTrimBytes += trimmed.toLong()
+                val mediaWaterMs = waterMillisOf(media.size)
+                if (mediaWaterMs > windowMediaWaterMaxMillis) windowMediaWaterMaxMillis = mediaWaterMs
+                val navWaterMs = waterMillisOf(nav.size)
+                if (navWaterMs > windowNavWaterMaxMillis) windowNavWaterMaxMillis = navWaterMs
                 hasMedia = media.size >= bytesPerSample
                 hasNav = nav.size >= bytesPerSample
                 navActive =
@@ -365,6 +423,9 @@ class AudioMixer(
         windowMaxGapNanos = 0
         windowMaxDueFrames = 0
         windowResyncs = 0
+        windowMediaWaterMaxMillis = 0
+        windowNavWaterMaxMillis = 0
+        windowMediaTrimBytes = 0
         windowPeak = 0
         windowLimitedSamples = 0
         // 不重置 lastFrameAtNanos：跨窗口的那一刻不该被算成「停拍」
@@ -461,6 +522,30 @@ class AudioMixer(
             head = 0
             tail = 0
             size = 0
+        }
+
+        /**
+         * 把水位压到 [keep] 字节以内，丢掉**最旧的**部分；返回实际丢掉的字节数。
+         *
+         * [align] 是「一个完整样本帧」的字节数（16bit 立体声 = 4）。必须按它对齐：
+         * 从半个样本或半个声道开始读，会让左右声道互换、把波形错位成噪声。
+         *
+         * 与 [write] 的溢出丢弃分开计数（[dropped] vs 调用方的 trim 统计）：
+         * 溢出是「写得太快兜不住」，裁剪是「我们主动压延迟」，两者的处理方向不一样。
+         */
+        @Synchronized
+        fun trimTo(
+            keep: Int,
+            align: Int,
+        ): Int {
+            if (keep <= 0) return 0
+            val excess = size - keep
+            if (excess <= 0) return 0
+            val drop = if (align > 1) (excess / align) * align else excess
+            if (drop <= 0) return 0
+            tail = (tail + drop) % capacity
+            size -= drop
+            return drop
         }
     }
 }

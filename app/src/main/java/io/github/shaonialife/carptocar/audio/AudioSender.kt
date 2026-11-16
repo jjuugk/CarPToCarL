@@ -1059,10 +1059,22 @@ class AudioSender(
             val limitText =
                 if (limitedPct > 0) "折回 $limitedPct% 的样本" else "未触发"
             val peakText = "峰值 $peakPct% / 软限幅 $limitText"
+            // 水位：直接回答「声音为什么慢半拍」。
+            // 媒体路正常应贴着目标水位（150ms）——那是「音频延迟」的实测值；
+            // 接近容量 500ms 说明积压没被压下去，播报路顶到容量说明 TTS 在排队，
+            // 表现就是「一句话越说越晚」。
+            val waterText =
+                "；水位 媒体 ${mixer.windowMediaWaterMaxMillis}ms / 播报 " +
+                    "${mixer.windowNavWaterMaxMillis}ms" +
+                    if (mixer.windowMediaTrimBytes > 0) {
+                        "（为压延迟裁掉 ${mixer.windowMediaTrimBytes / 1024}KB 最旧的媒体）"
+                    } else {
+                        "（未触发裁剪）"
+                    }
             log(
                 "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / $perSecond 样本每秒；" +
                     "媒体 $mediaPct% / 播报 $navPct%；duck 已触发 ${mixer.duckedFrames} 帧；" +
-                    "$peakText；" + dropText + gapText + lagText,
+                    "$peakText；" + dropText + waterText + gapText + lagText,
             )
             mixer.resetWindow()
         }

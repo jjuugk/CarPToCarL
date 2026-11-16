@@ -322,4 +322,52 @@ class AudioMixerTest {
         mixer.mixNextFrame(buffer, System.nanoTime())
         assertEquals(0, sampleAt(buffer, 0))
     }
+
+    /**
+     * 水位控制（1.2.59）：引擎开局一次性推 400ms，不该变成永久 400ms 延迟。
+     *
+     * 旧行为是「容量 500ms 上限，满了才丢」——于是这段突发会一直躺在缓冲里，
+     * 表现为恒定延迟 + 后续每次抖动都在满水位上丢一大段。
+     */
+    @Test
+    fun `媒体积压超过目标水位时裁到目标`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val frames = rate * 400 / 1000
+        val big = pcm(frames, 1000)
+        mixer.feed(AudioSource.MEDIA, big, 0, big.size)
+        mixer.mixNextFrame(buffer, System.nanoTime())
+        assertTrue(
+            "水位应压到目标(150ms)附近，实际 ${mixer.windowMediaWaterMaxMillis}ms",
+            mixer.windowMediaWaterMaxMillis <= 180,
+        )
+        assertTrue("应该发生了水位裁剪", mixer.windowMediaTrimBytes > 0)
+    }
+
+    /** 正常量级（低于目标水位）一个字节都不能动——裁掉的都是实时音频。 */
+    @Test
+    fun `水位在目标以内不裁剪`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val frames = rate * 100 / 1000
+        val small = pcm(frames, 1000)
+        mixer.feed(AudioSource.MEDIA, small, 0, small.size)
+        mixer.mixNextFrame(buffer, System.nanoTime())
+        assertEquals(0L, mixer.windowMediaTrimBytes)
+        assertEquals(1000, sampleAt(buffer, 0))
+    }
+
+    /** 播报路绝不裁剪：TTS 是整段语义，裁头就是缺字（宁可晚，也不能少一句）。 */
+    @Test
+    fun `播报路不做水位裁剪`() {
+        val mixer = mixer()
+        val buffer = ByteArray(frameBytes)
+        val frames = rate * 400 / 1000
+        val big = pcm(frames, 700)
+        mixer.feed(AudioSource.NAV, big, 0, big.size)
+        mixer.mixNextFrame(buffer, System.nanoTime())
+        assertEquals(700, sampleAt(buffer, 0))
+        assertEquals(0L, mixer.windowMediaTrimBytes)
+        assertTrue("播报水位应照实记录", mixer.windowNavWaterMaxMillis >= 390)
+    }
 }
