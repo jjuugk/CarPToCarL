@@ -161,4 +161,48 @@ class ConsumerKeysTest {
         assertEquals(listOf(0xB6), map.usagesFor(byteArrayOf(0x06)))
         assertEquals(emptyList<Int>(), map.usagesFor(byteArrayOf(0x00)))
     }
+
+    // ---- 宝马 G38 NBT Evo（/info ButtonInput，uuid=618ec76a…）：位图报告 ----
+
+    /**
+     * 车机 `/info` 里 hidDevices 的 ButtonInput 描述符（31B，2026-11-16 实机日志）：
+     * `05 0c 09 01 a1 01` 之后声明 `09 b5 09 b6 09 b0` 三个 usage，
+     * `75 01 95 03 81 02` = 3 bit 位图 → bit0=下一首(0xB5)、bit1=上一首(0xB6)、bit2=播放(0xB0)。
+     */
+    private val bmwG38ButtonDescriptor =
+        hex(
+            "05 0c 09 01 a1 01 05 0c 09 b5 09 b6 09 b0 15 00 25 01 75 01 95 03 81 02 75 05 95 01 81 01 c0",
+        )
+
+    @Test
+    fun bmwG38ButtonInputIsBitmapWithThreeUsages() {
+        val map = ConsumerKeys.parseDescriptor(bmwG38ButtonDescriptor)!!
+        assertFalse("`81 02` 是位图报告，不是 Array", map.isArray)
+        assertEquals(listOf(0xB5, 0xB6, 0xB0), map.usages)
+    }
+
+    @Test
+    fun bmwG38SteeringWheelKeysDecodeToMediaKeys() {
+        val map = ConsumerKeys.parseDescriptor(bmwG38ButtonDescriptor)!!
+        // 2026-11-16 08:26~08:31 实测：方向盘按键送来的就是一个字节的位图，
+        // 按下「下一首」=0x01、「上一首」=0x02、「播放」=0x04，松开=0x00。
+        // 旧实现把整个字节当 Usage ID → 0x01/0x02/0x04 全是「未知」，三个键全丢。
+        assertEquals(listOf(0xB5), map.usagesFor(byteArrayOf(0x01)))
+        assertEquals(listOf(0xB6), map.usagesFor(byteArrayOf(0x02)))
+        assertEquals(listOf(0xB0), map.usagesFor(byteArrayOf(0x04)))
+        assertEquals(emptyList<Int>(), map.usagesFor(byteArrayOf(0x00)))
+        assertEquals(0, ConsumerKeys.keyCodeFor(0x01))
+        assertEquals(
+            KeyEvent.KEYCODE_MEDIA_NEXT,
+            ConsumerKeys.keyCodeFor(map.usagesFor(byteArrayOf(0x01))[0]),
+        )
+        assertEquals(
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+            ConsumerKeys.keyCodeFor(map.usagesFor(byteArrayOf(0x02))[0]),
+        )
+        assertEquals(
+            KeyEvent.KEYCODE_MEDIA_PLAY,
+            ConsumerKeys.keyCodeFor(map.usagesFor(byteArrayOf(0x04))[0]),
+        )
+    }
 }

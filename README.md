@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.51.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.51/CarPToCarL-1.2.51.apk)**
-> —— 主线固定直链（当前 1.2.51，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk)**
+> —— 主线固定直链（当前 1.2.52，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.51.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.51/CarPToCarL-1.2.51.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.51，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.51.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.52，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.52.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.51`（正式版；**「明明连上了，App 还写着正在加入车机热点」——文案按事实更新、入网不再拆掉已经能用的网络；同时合并了社区 PR #25 的 CarLife 视频保活**，单测 848 例 0 失败）。① 现象：用户反馈 1.2.46 / 1.2.48 / 1.2.50 都会出现「手机其实已经挂在车机热点上，界面却一直写正在加入」。核对后 `net/` 与 `session/` 自 1.2.45 起零改动——**不是版本回归**，是一直存在的时序问题。② 第一个真凶：入网前先 `release()` 再建。系统里那条热点其实好好的，被我们自己拆掉：21:34:35 拆掉 `172.16.222.106`，636ms 后 `onLost`，6 秒后才以 `.105` 连回来——用户看到的就是「连上了、还提示加入中、热点还掉了一下」。本版手上还有可用网络就先留着，新网络到位再换；请求失败/超时/取消时把原来那条原样还回去（连断线监听一起）。③ 第二个真凶：文案只在入网流程**返回之后**才改写，而系统 `onAvailable` 往往早好几秒（21:34:41 网络已通、21:34:47 流程才结束；`WifiJoinGate` 的等待分支最长还要再等 40 秒）。本版新增「网络一就绪」回调，地址到手就把文案换成「已连上车机热点（IP），正在等车机应答…」；另外 `phaseHint` 在读的时候也做一次事实校正，任何还写着「正在加入」的分支都被兜住（英雄卡与通知栏两条路径一起生效）。④ 顺带合并社区 PR #25（作者 jackjinke）：CarLife 源重启 / 倒车借屏归还后保持保活、收到带 SPS 的新 IDR 时重置时间戳基线、98311 统一受「版本匹配 + 98386 已确认」门禁——**视频侧改动仍需实车验证**。⑤ 诊断关键词：`网络已就绪 "…"（IP=…）`、`已有一条可用网络…不提前拆`、`把原来那条可用网络还回去`、`沿用 id=`。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.51.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.51/CarPToCarL-1.2.51.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.52`（正式版；**CarLife 引擎发过一次「暂停」之后就永久静音——起播序列里的 PAUSE 把放行闸门锁死，而引擎此后只推 PCM、从不补 RESUME**，单测 851 例 0 失败）。① 现象一：用户反馈「切换挡位之后直接没声音」。手机侧一切正常——`CARLIFE: 音频直通 216 包 / 864KB / 1411kbps · 电平 98%`，混音泵每 30 秒稳定送 1291~1293 包，30 个锚点全部送达；可 `AUDIO: 混音体检 —— 媒体 0% / 播报 0%`，同时每 30 秒刷一条 `CARLIFE: 暂停期间丢弃 1293 包 PCM`（正好是 30 秒的全部音频），从 08:43:16 一直丢到日志结束，4 分多钟一声不响。② 真凶：引擎在 08:43:16.403 发的是 `媒体 暂停（0x30003）` → `音频格式宣告（INIT）` → `媒体 停止（0x30002）` → `INIT`，之后一直推裸 PCM，**从不补 0x30004 RESUME**。旧代码遇到 PAUSE 在「已持有焦点」时把 `eligible` 置 false，而 `INITIALIZED` 分支又没复位它，于是 `canForwardPcm` 永久为 false；更糟的是 `routeAudio` 里 `forwardingAllowed = canForwardPcm` 是一道**没有超时**的硬门禁，绕过了 sink 内部「暂停 15 秒后自动放行」的兜底——状态机一卡住就是永久静音。③ 改法：新增 `pausedByCar`，区分「车机侧暂停」（接管主音频 / 静音借用 / 切到 FM，必须等车机还回来）与「引擎侧暂停」（PAUSE / MediaSession 暂停，允许自愈）；`INITIALIZED` 在 `focused && !pausedByCar` 时复位，引擎的 INIT+PCM 自己就能恢复；用户点播放时直接恢复授权，不必再等一次焦点事件；`setPlaybackPaused(paused, indefinite)` 让车机侧永久拦、引擎侧仍按 15 秒窗口放行（宁可重复播放几秒，也不要永久没声）。硬门禁只保留「播报通道不受媒体暂停影响」，媒体通道交给窗口裁决。④ 顺带修好方向盘切歌：宝马 G38 NBT Evo 的按键走 AirPlay 事件通道的 `hidSendReport`，设备的 HID 描述符是**位图**（`0xB5` 下一首 / `0xB6` 上一首 / `0xB0` 播放各占 1 bit），旧代码却把整个字节当 Usage ID → 按下一首报 `0x01`、上一首 `0x02`、播放 `0x04`，三个值全被判成「未知键」丢掉（两份日志里 7 次 / 19 次按键一次都没生效）。现在按描述符的位映射展开，日志里能直接看到「车机媒体键 下一首」。⑤ 现象二（同一批日志的另一份）：播放器被暂停时推的是真静音（电平 0%），属于正常行为、不是丢音——这份的每次静音都能对上「车机接管主音频」或屏幕上点过暂停，点播放立刻恢复。⑥ 诊断关键词：`15 秒后自动恢复放行`（引擎侧暂停）、`车机侧暂停，等它归还音频后才恢复`、`暂停已超过 15 秒——恢复放行 PCM`（兜底生效）。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.52.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.52/CarPToCarL-1.2.52.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,91 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.52 —— 2026-11-16（CarLife 引擎发过 PAUSE 之后永久静音：放行闸门被锁死且没有超时，正式版）
+
+**起因**：用户反馈两份日志都没声音——「第一份 10 分钟后没声音」「第二份切换挡位之后直接没声音」。
+
+**一、手机侧没有停发，声音是自己被丢掉的**
+
+第二份（084753）里，CarLife 引擎的电平与混音泵的发送量背道而驰：
+
+```
+CARLIFE: 音频直通 216 包 / 864KB / 1411kbps · 电平 98%（非零 98%）
+AUDIO: 混音体检 —— 本窗口 1291 帧；媒体 0% / 播报 0%
+CARLIFE: 暂停期间丢弃 1293 包 PCM
+```
+
+从 `08:43:53` 到 `08:47:31`，每 30 秒恰好丢 1292~1293 包（正好是 30 秒的全部音频），
+4 分多钟一声不响。锚点 30 个全部送达、RTP 时间戳按实时推进——链路和发包都没问题。
+
+**二、真凶：引擎的起播序列里带 PAUSE，却不补 RESUME**
+
+```
+[08:43:16.403] 媒体 暂停（0x30003）
+[08:43:16.404] 媒体 音频格式宣告（INIT）
+[08:43:16.404] 媒体 停止（0x30002）
+[08:43:16.404] 媒体 音频格式宣告（INIT）
+之后           一直推裸 PCM，从不补 0x30004 RESUME
+```
+
+`CarLifeMediaPlayback` 遇到 `PAUSE` 在「已持有焦点」时把 `eligible` 置 false，而
+`INITIALIZED` 分支又没复位它 → `canForwardPcm = sessionPlaying != false && !sourcePaused`
+永久为 false。更糟的是 `routeAudio` 里 `forwardingAllowed = canForwardPcm` 是**没有超时**的
+硬门禁，绕过了 sink 内部 `PAUSE_DROP_WINDOW_MS`（15 秒）的「到点自动放行」——状态机一卡住
+就是永久静音，连兜底都没有。1.2.46 那次只修了 sink 内部的软窗口，管不到这道硬门禁。
+
+**三、改法**
+
+- 新增 `pausedByCar`，把两种暂停分开：**车机侧**（`onCarPause` / `FOCUS_RELEASED`：接管主音频、
+  静音借用、切到 FM）必须等车机还回来；**引擎/应用侧**（`PAUSE` / MediaSession 暂停）允许自愈。
+- `INITIALIZED` 在 `focused == true && !pausedByCar` 时复位 `sourcePaused` / `eligible`，
+  让引擎的 `INIT + PCM` 自己恢复，不必等那个永远不来的 `RESUME`。
+- MediaSession 由暂停转播放（用户点播放）时直接恢复授权，不必再等一次 `FOCUS_GAINED`
+  ——引擎起播路径根本不发焦点事件。
+- `CarLifeAudioSink.setPlaybackPaused(paused, indefinite)`：车机侧暂停永久拦，引擎侧暂停
+  仍按 15 秒窗口放行（宁可重复播放几秒，也不要永久没声音）。
+- `routeAudio` 的硬门禁只保留「播报通道永不受媒体暂停影响」，媒体通道交给 sink 的窗口裁决。
+
+「车机切 FM 后不被引擎残留 PCM 抢回音源」的语义靠 `pausedByCar` 保住，原有测试
+`car pause does not reclaim native radio` 保持通过。
+
+**四、另一份日志（083652）不是 bug**
+
+那份的「10 分钟后没声音」是播放器真的处于暂停态：三段静音每次都能对上
+`RESOURCE: 车机接管/静音借用主音频（TAKEN_PERMANENTLY）`（按设计发硬键 `0x20` 暂停）
+或屏幕上点过暂停，且每次点播放立刻恢复；静音期间引擎推的就是 `电平 0%（非零 0%）`
+——真静音，不是被我们丢掉的。
+
+**五、顺带修好方向盘切歌**
+
+用户同时反馈「方向盘切歌没反应」。三份日志里，宝马 G38 NBT Evo（`BMW 94841` / `G38-NBTEvo-0716`）
+的 `/info` 给了四个 HID 设备，其中 `ButtonInput` 的描述符是**位图**语义：
+
+```
+05 0c 09 01 a1 01  05 0c  09 b5  09 b6  09 b0
+75 01 95 03 81 02              ← 3 bit 位图：bit0=下一首 0xB5、bit1=上一首 0xB6、bit2=播放 0xB0
+```
+
+而事件通道的解析用的是 `usageFor()`，它只对 **Array** 语义成立（字节值是 usages 下标）；
+位图语义下直接把整个字节当 Usage ID，于是：
+
+```
+[08:26:13.592] EVENT: 车机媒体键 未知(0x01)（uuid=618ec76a… usage=0x01）无对应 Android 键，忽略
+[08:27:48.301] EVENT: 车机媒体键 未知(0x04)（uuid=618ec76a… usage=0x04）无对应 Android 键，忽略
+```
+
+`0x01`/`0x02`/`0x04` 正是那三个 bit，7 次 / 19 次按键一次都没生效。改用同一文件里本来就有的
+`usagesFor()`（按描述符位映射展开）后，`0x01 → 下一首`、`0x02 → 上一首`、`0x04 → 播放`。
+iAP2 `0x6801` 那条通路一直用的是 `usagesFor`，所以只有 AirPlay 事件通道这一条受影响。
+
+**另一台（MGU-81 / iD8.5）不是同一个原因**：它的 HID 设备只有 `TouchInputDescriptor` 与
+`HardKeyInputDescriptor`，后者只声明了 `Button 1` + `AC Back` + `Wheel`，**没有媒体键 usage**；
+整份日志里连一条 `EVENT: 其他 HID 报告` 都没有，说明车机压根没把方向盘按键发上来
+（iAP2 侧也只有 `0x1D01/0xAA0x/0xAE00`，从未出现 `0x6800 StartHID` 或 `0x5000` 订阅）。
+这一项本版**未修**，需要在该车上按方向盘时再抓一份日志定位。
+
+单测 **853 例 0 失败**（新增 2 例：G38 ButtonInput 位图三个键）。
 
 ### 1.2.51 —— 2026-11-15（「连上了还说正在加入热点」+ 入网不再拆掉能用的网络；合并 PR #25 视频保活，正式版）
 

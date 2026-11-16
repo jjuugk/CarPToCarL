@@ -5768,8 +5768,16 @@ object SessionController {
                                                 ?.let { it[0].toInt() and 0xFF }
                                         val consumerUsage =
                                             when {
-                                                // 有描述符：只有 Consumer 设备才解析（非 Consumer → null）
-                                                descriptor != null -> keyMap?.let { rawValue?.let(it::usageFor) }
+                                                // 有描述符：只有 Consumer 设备才解析（非 Consumer → null）。
+                                                // **必须用 usagesFor 而不是 usageFor**：报告语义有两套，
+                                                //  - Array（`81 00`）：字节值是 usages 下标，usageFor 才对；
+                                                //  - Variable/位图（`81 02`）：每个 usage 占 1 bit，整个字节是
+                                                //    位图，直接当 usage ID 会得到 1/2/4 这种「未知键」。
+                                                // 宝马 G38 NBT Evo 的 ButtonInput 正是位图：
+                                                // `09 b5 09 b6 09 b0 … 81 02` → 按下一首报 0x01、
+                                                // 上一首报 0x02、播放报 0x04。1.2.52 之前这三个值全被
+                                                // 判成「未知(0x01)」丢掉，表现就是方向盘切歌完全没反应。
+                                                descriptor != null -> keyMap?.usagesFor(report ?: ByteArray(0))?.firstOrNull()
                                                 // 描述符缺失（未知车机）：保守回退——仅 1 字节报告，
                                                 // 值当 Usage ID 直读
                                                 report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
