@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk)**
-> —— 主线固定直链（当前 1.2.54，14.0 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk)**
+> —— 主线固定直链（当前 1.2.59，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.54，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.54.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.59，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.59.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.54`（正式版；**连上了没声音——1.2.52 把 `forwardingAllowed = sink !== audioSink` 当作「拆掉硬门禁」，可媒体通道的 sink 恒等于 audioSink，这个表达式对媒体路恒为 false（对播报路反而不受影响），等于装了一道永远关着的门：媒体 PCM 100% 被丢，播放状态机再正确也发不出声**，单测 866 例 0 失败）。① 现场：175121 那份日志（宝马 G38，17:36:48 建流后连续 15 分钟）手机侧四个环节全部正常——`音频直通 216 包 / 864KB / 1411kbps · 电平 98%（非零 99%）` 每 5 秒一条不断、`链路体检 近 30.0s 送 1291 包、44057 样本/秒（差 -0.10%）`、`锚点 30 个全部送达`、`/feedback` 的 `sampleTime` 按 44.1k 实时推进。② 决定性证据只有一行：`混音体检 —— 本窗口 1292 帧；媒体 0% / 播报 0%`，泵每 30 秒产出 1292 帧（≈43 帧/秒，一帧不少），却没有一帧拿到媒体 PCM——`mixNextFrame` 缺样本按 0 计，于是整条流是「满速静音」：帧数、字节数、时间戳全对，车机照常解码播放，放的是静音。③ 根因：1.2.52 把 `forwardingAllowed = sink !== audioSink || mediaPlayback.canForwardPcm` 改成了 `forwardingAllowed = sink !== audioSink`，`write()` 第一道门 `if (!forwardingAllowed) { 丢弃; return }` 因此对媒体路恒丢，且它计的就是那句每 30 秒一条的 `暂停期间丢弃 1292 包 PCM`（数字恰好是整窗口，看着像状态机误判）。④ 三个假证据：`音频直通` 的电平/包数统计在门禁**之前**；AAC-LC 192kbps 是 CBR，静音帧同样 557B/帧，所以「共发 5242 包 / 3037KB」也正常；`sampleTime` 只证明流在跑。⑤ 修改：`forwardingAllowed = true`（暂停语义全部交给 sink 内部：车机侧无限期、引擎侧 15 秒窗口）、两条丢弃路径分开标注原因、`stop()` 补复位 `playbackPaused`（只清 `pausedSince` 会命中 `since == 0 → 丢弃` 的早返回，永久丢包且一条日志都不打）。⑥ 验收口径：`混音体检` 的 `媒体` 应从 0% 变接近 100%、`丢弃 N 包 PCM` 应消失。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.54.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.54/CarPToCarL-1.2.54.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.59`（正式版；**本次把 1.2.54 之后的四个提交一起发出，核心是「方控切歌恢复 + 拆掉会掉线的 alert 导航流 + 混音不再积压成固定延迟」**。① **1.2.57 方控切歌恢复**：1.2.42 往 `SessionController.dispatchMediaKey` 里插了一行`if (CarLifeHijack.sendMediaKey(keyCode)) return`，而 `sendMediaKey` 的返回值只是「socket 写成功」，车机与引擎是否执行它并不知道；这台车机上「直投 transportControls」一直失败（荣耀 MagicOS 只认设置页手动关→开通知使用权，`requestRebind` 无效，日志每轮都有`通知使用权已授权但系统始终没绑定监听器`），于是旧版唯一能用的兜底 `AudioManager.dispatchMediaKeyEvent`（系统内部广播，不需要通知使用权）永远轮不到——三条路全灭。实车证据：9 次 `CARLIFE: 车机硬键 0x10/0x0F` 之后没有任何 `0x10035`、没有新的音频格式宣告、PCM 电平不变。改法：`input/MediaKeyRoute` 白名单只让**播放/暂停类**走硬键（保留「未授通知使用权时车机按暂停也要真停住」的初衷），切歌一律回落系统焦点路由，并新增 `MEDIA: 直投未生效 → 系统焦点路由 下一曲` 作为「按键最终落到哪」的凭据。② **1.2.58 移除 alert 导航独立流**：2026-11-16 AUDI 4260（DELPHI）四轮会话两两对照——选 alert 的两轮全部在第二条流 SETUP 回 **400 ×3**（含补 `ct/sr` 重试）后 **77ms** 被车机reset 事件通道 → 视频端口 ECONNREFUSED → 控制通道关闭 → RECORD 失败 → 蓝牙 iAP2 断开；选 speechRecognition 的一轮因位图 `0x20000040` 无 PCM 不建流，稳定 51s；混音一轮稳定 36s+。也就是说这个选项的代价不是「不生效」而是**掉线**。`NavAudioRoute` 删掉 `ALERT`，老版本存的`"ALERT"` 经 `parse()` 自动回落成 `MIX`，升级即修好。顺带查清本车机 9 条 `audioFormats` 里只有 `media(100)` / `alert(100)` / `compatibility(100)` 三条位图含 PCM 48k——「导航单独成流」在这台车上已无可用档。③ **1.2.59 混音加目标水位**：`AudioMixer` 两路各有500ms 环形缓冲，但只有「满了才丢最旧」一条策略，**容量被当成延迟上限**——引擎开局突发推一段就把水位顶到 500ms，之后推多少读多少、长期停在那里，变成**恒定 500ms 音频延迟**（导航永远晚半秒），且任何抖动都在满水位上直接丢掉一整段最旧的音乐。改法：每帧混音**读样本之前**把媒体路裁到 150ms（按 4 字节 16bit 立体声对齐，绝不从半个样本开始读），播报路一字节不碰（TTS 是整段语义，裁头就是缺字）；`混音体检` 新增`水位 媒体 Nms / 播报 Nms（为压延迟裁掉 NKB 最旧的媒体）`。④ **1.2.55 音质三项**：AAC 256kbps、混音软限幅 −0.9dBFS、三次插值重采样。876 例单测 0 失败；①②③ 均**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,93 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.59 —— 2026-11-16（方控切歌恢复 + 拆掉会掉线的 alert 导航流 + 混音不再积压成固定延迟，正式版）
+
+本次发布把 1.2.54 之后的**四个**提交一起发出（其中 `1.2.55` / `1.2.57` / `1.2.58` 只做过
+本地提交与测试包，没有单独发版；`1.2.56` 是投屏邀请方案，实机证伪后整块还原，**该号作废不复用**）。
+
+**一、1.2.57 —— 方控切歌恢复（1.2.42 引入的退化）**
+
+`SessionController.dispatchMediaKey()` 在 `956307c`（1.2.42）被插了一层：
+
+```kotlin
+if (CarLifeHijack.sendMediaKey(keyCode)) return
+```
+
+`sendMediaKey` 对 NEXT/PREVIOUS 调 `client.sendHardKeyCode()`，返回值只表示 **socket 写成功**，
+却被当成「已接管」直接 `return`，于是第三层兜底 `AudioManager.dispatchMediaKeyEvent`（系统内部
+广播，交给持有媒体焦点的音乐 App，**不需要通知使用权**）永远轮不到。
+
+而这台手机上「直投 `transportControls`」从来就没成功过：荣耀 MagicOS 只认设置页手动关→开
+通知使用权，`requestRebind()` 无效，每轮日志都有 `MEDIA: ⚠ 通知使用权已授权但系统始终没绑定
+监听器`。三条路全灭，方控按了像没按。旧版（≤1.2.41）能用的唯一原因就是最后那条兜底。
+
+实车证据（2026-11-16 日志）：9 次 `CARLIFE: 车机硬键 0x10/0x0F` 之后，**没有任何 `0x10035`
+媒体信息、没有新的音频格式宣告、PCM 电平也不变** → 引擎收到硬键但不执行。
+
+改法：新增 `input/MediaKeyRoute.carLifeHardKeyTakes()` 白名单，**只有播放/暂停类**（PLAY /
+PAUSE / PLAY_PAUSE / STOP）允许走 CarLife 硬键（保留 1.2.42 的原意「未授通知使用权时车机按
+暂停也要真停住」），切歌一律回到系统焦点路由；并新增
+`MEDIA: 直投未生效 → 系统焦点路由 下一曲` 作为「按键最终落到哪」的唯一凭据——
+以前只能靠「是否出现 `CARLIFE: 车机硬键`」反推。`CarLifeHijack.sendMediaKey` 的注释也写明
+返回值语义：**报文写出成功 ≠ 引擎执行**，调用方不得拿它做前置门禁。
+
+**二、1.2.58 —— 移除 alert 导航独立流（它的代价是掉线）**
+
+1.2.47 的「导航播报可选独立流」一直标着「未实车验证」。2026-11-16 AUDI 4260（DELPHI）四轮
+会话两两对照，结论很干脆：
+
+| 导航播报通道 | 第二条流 | 结果 |
+|---|---|---|
+| alert | SETUP 返回 **400 ×3**（含补 `ct/sr` 重试）| 77ms 后车机 reset 事件通道 → 视频 `ECONNREFUSED` → 控制通道关闭 → RECORD 失败 → 蓝牙 iAP2 断开 |
+| speechRecognition | 位图 `(100,0x20000040)` 无 PCM/AAC → 不建流 | 稳定 51s，手动断开 |
+| 混音 | 静默返回，不建流 | 稳定 36s 以上 |
+
+主音频 `t102/media AAC 48k` SETUP **200**、`dataPort=6000` 之后 71ms 发出
+`t100/alert/0x8000 PCM` 的 SETUP 被回 400，车机把这次非法 SETUP 当作**会话级致命错误**，
+并不只是忽略那一条流。所以这个选项的代价不是「不生效」而是**掉线**，不能留在界面上让人误点。
+
+改法：`NavAudioRoute` 删掉 `ALERT`，只剩 `MIX` / `SPEECH`，循环变两档；
+**老版本存下的 `"ALERT"` 会经 `parse()` 回落成 `MIX`**——升级即自动修好，代码里再无任何
+路径能建出那条流（`removedAlertValueFallsBackToMix` / `alertIsGone` 两例守住）。
+
+附带查清：本车机 `/info` 的 9 条 `audioFormats` 里，位图含 PCM 48k（bit15）的只有
+`media(100)` `0x8800`、`alert(100)` `0x40008800`、`compatibility(100)` `0x8854` 三条；
+`default` / `telephony` / `speechRecognition` / `media(102, AAC)` 全部不含 PCM。
+协议里没有 `navigation` 档，**「导航单独成流」在这台车上已无可用档**。`compatibility(100)`
+是唯一没试过的候选，但要试必须先加「本车机不收第二条流」的失败记忆，否则每重连一次断一次。
+
+**三、1.2.59 —— 混音环形缓冲加目标水位**
+
+`AudioMixer` 两路各有 500ms 环形缓冲，但只有「容量到了才丢最旧」这一条策略：
+**500ms 只是容量上限，不构成延迟上限**。引擎在会话开局常一次性推一大段（它自己的解码缓冲），
+水位直接顶到 500ms，之后「推多少读多少」，水位**长期停在 500ms** 不变——积压就变成了
+**恒定 500ms 的音频延迟**（导航说「前方右转」永远比路口晚半秒），而且任何一次泵抖动都会在
+满水位上直接丢掉一整段最旧的音乐，诊断里只看到 `droppedBytes` 在涨，看不到「积压多少毫秒」。
+
+改法：`mediaTargetMillis`（默认 150ms）+ `Ring.trimTo()`，每帧混音**读样本之前**把媒体路
+裁到目标水位；丢弃按 `bytesPerSample`（4 字节，16bit 立体声）对齐，绝不从半个样本 / 半个
+声道开始读，否则左右声道互换、波形错位成噪声。**只裁媒体路，播报路一字节不动**——TTS 是
+有语义的整段，裁头就是缺字，宁可晚也不能少一句，播报侧只加观测。
+
+`AUDIO: 混音体检` 因此多一段：`水位 媒体 Nms / 播报 Nms（为压延迟裁掉 NKB 最旧的媒体）`。
+判读口径：媒体水位稳定在 ~150ms = 控制生效（延迟从 500 降到 150）；仍停在 480~500ms =
+控制没走到这条路上；播报水位顶到 ~500ms = TTS 在排队，那是另一件事。
+
+**四、1.2.55 —— 音质三项**
+
+AAC 256kbps、混音软限幅（−0.9dBFS）、三次插值重采样。这一版只做过本地提交，随本次一起发出。
+
+**五、验证与待办**
+
+876 例单元测试 0 失败（新增 `MediaKeyRouteTest` 4 例、`AudioMixerTest` 3 例、
+`NavAudioRouteTest` 2 例）。**以上三处改动均未实车验证**，上车后看这几行：
+
+- 方控切歌：应出现 `MEDIA: 直投未生效 → 系统焦点路由 下一曲`，且 `CARLIFE: 车机硬键 0x10/0x0F`
+  **不再出现**；若那行出现后仍不切歌，问题才转到「谁持有媒体焦点」。
+- 导航播报：设置里只剩「混音 / 语音识别」两档，旧值自动变混音。
+- 音频延迟：`混音体检` 的 `水位 媒体` 应从 ~500ms 降到 ~150ms。
 
 ### 1.2.54 —— 2026-11-16（连上了没声音：路由层一道恒 false 的门禁把媒体 PCM 全丢了）
 
