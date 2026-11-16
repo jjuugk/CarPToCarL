@@ -91,20 +91,50 @@ class AudioMixerTest {
     }
 
     @Test
-    fun `相加溢出时饱和限幅`() {
+    fun `相加溢出时软限幅而不是硬削波`() {
+        val expected = AudioMixer.softLimit(60_000)
+        assertTrue("两路满幅相加应被压到满幅附近但严格不触顶：$expected", expected in 31_500..32_766)
+
         val mixer = mixer()
         val buffer = ByteArray(frameBytes)
         mixer.feed(AudioSource.MEDIA, pcm(frameSamples, 30_000), 0, frameSamples * 4)
         mixer.feed(AudioSource.NAV, pcm(frameSamples, 30_000), 0, frameSamples * 4)
         mixer.mixNextFrame(buffer, System.nanoTime())
-        assertEquals(Short.MAX_VALUE.toInt(), sampleAt(buffer, 0))
+        assertEquals(expected, sampleAt(buffer, 0))
 
         val mixer2 = mixer()
         val buffer2 = ByteArray(frameBytes)
         mixer2.feed(AudioSource.MEDIA, pcm(frameSamples, -30_000), 0, frameSamples * 4)
         mixer2.feed(AudioSource.NAV, pcm(frameSamples, -30_000), 0, frameSamples * 4)
         mixer2.mixNextFrame(buffer2, System.nanoTime())
-        assertEquals(Short.MIN_VALUE.toInt(), sampleAt(buffer2, 0))
+        // 软限幅对正负严格对称
+        assertEquals(-expected, sampleAt(buffer2, 0))
+    }
+
+    @Test
+    fun `软限幅只碰接近满幅的样本`() {
+        // 拐点以下逐位原样：正常电平的音乐不会因为这次改动改变任何一位
+        assertEquals(0, AudioMixer.softLimit(0))
+        assertEquals(10_000, AudioMixer.softLimit(10_000))
+        assertEquals(-20_000, AudioMixer.softLimit(-20_000))
+        assertEquals(AudioMixer.SOFT_LIMIT_KNEE, AudioMixer.softLimit(AudioMixer.SOFT_LIMIT_KNEE))
+        // 满幅附近：被压到约 −0.21 dB，但**严格不触顶**（tanh 渐近，不会出现平顶）
+        val atFull = AudioMixer.softLimit(Short.MAX_VALUE.toInt())
+        assertTrue("满幅输入应被压到 31500..32766，实际 $atFull", atFull in 31_500..32_766)
+        assertEquals(-atFull, AudioMixer.softLimit(-Short.MAX_VALUE.toInt()))
+        // 越界部分被压缩（不再是硬平顶），但仍然单调、不越界
+        var previous = AudioMixer.softLimit(AudioMixer.SOFT_LIMIT_KNEE)
+        var value = AudioMixer.SOFT_LIMIT_KNEE
+        while (value < 65_535) {
+            value += 137
+            val out = AudioMixer.softLimit(value)
+            assertTrue("软限幅必须单调：in=$value out=$out prev=$previous", out >= previous)
+            assertTrue("软限幅不得越界：in=$value out=$out", out in -32768..32767)
+            previous = out
+        }
+        // 两路满幅相加（±65535 量级）也收在满幅以内，且不比 FS 输入更高
+        assertTrue(AudioMixer.softLimit(65_534) <= Short.MAX_VALUE.toInt())
+        assertTrue(AudioMixer.softLimit(65_534) > atFull)
     }
 
     @Test

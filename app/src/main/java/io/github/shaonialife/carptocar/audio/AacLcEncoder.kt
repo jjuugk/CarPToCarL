@@ -22,7 +22,7 @@ import android.media.MediaFormat
 class AacLcEncoder(
     private val sampleRate: Int,
     private val channels: Int,
-    private val bitRate: Int = 192_000,
+    private val bitRate: Int = defaultBitRate(sampleRate, channels),
     /** 是否给每帧补 7 字节 ADTS 头（见 [AudioTuning.ADTS]）。 */
     private val wrapAdts: Boolean = false,
     private val log: (String) -> Unit,
@@ -30,6 +30,42 @@ class AacLcEncoder(
     companion object {
         /** AAC-LC 一帧固定 1024 个采样（每声道）。 */
         const val FRAME_SAMPLES = 1024
+
+        /**
+         * 默认编码码率（bps）。
+         *
+         * 2026-11-16 从 192k 提到 256k：
+         *  - 44.1k/立体声下 192k ≈ 4.4 bit/样本，属「够用但有损可闻」；256k ≈ 5.8 bit/样本，
+         *    是 Apple Music 高质量档位的同一量级，高频空气感与瞬态（鼓点、弦乐擦弦）明显干净。
+         *  - 代价只有带宽：44.1k 一帧 1024 采样 ≈ 23.2ms，平均 743B/帧（192k 时 557B），
+         *    即 32KB/s。视频流本来就是几百 KB/s 量级，这点增量可忽略。
+         *  - 车机侧只是 AAC-LC 解码，码率变化不影响 `/info` 里声明的格式位（0x400000），
+         *    不需要重新协商。
+         *
+         * 万一某台车机的 AAC 解码链吃不下 256k（表现为「有包无声」而本机自解码正常），
+         * 把这里调回 [BIT_RATE_SAFE_BPS] 即可，链路其余部分不用动。
+         */
+        const val BIT_RATE_BPS = 256_000
+
+        /** 保守档（旧值）：车机解码异常时的一键回退。 */
+        const val BIT_RATE_SAFE_BPS = 192_000
+
+        /**
+         * 按采样率/声道数取默认码率。
+         *
+         * 立体声 44.1k/48k 都取 [BIT_RATE_BPS]；单声道（车机极少用，但通话上行档存在）
+         * 折半——单声道 128k 已远高于其透明门限，多给的比特只是浪费。
+         */
+        fun defaultBitRate(
+            sampleRate: Int,
+            channels: Int,
+        ): Int {
+            val stereo = if (channels >= 2) BIT_RATE_BPS else BIT_RATE_BPS / 2
+            // 低采样率（8k/16k 的 TTS 通路）按比例降到 ~5.8 bit/样本，避免编码器把比特浪费在
+            // 本来就窄的带宽上；下限 64k 保证语音清晰度。
+            val scaled = (sampleRate.toLong() * stereo / 44_100L).toInt()
+            return scaled.coerceIn(64_000, stereo)
+        }
 
         /** 一帧 PCM 的字节数（16bit）。 */
         fun pcmBytes(channels: Int): Int = FRAME_SAMPLES * channels * 2
@@ -218,7 +254,8 @@ class AacLcEncoder(
                 started = true
                 log(
                     "AUDIO: AAC-LC 编码器就绪（${sampleRate}Hz ${channels}ch " +
-                        "${bitRate / 1000}kbps，帧=${FRAME_SAMPLES}采样/${inputFrameBytes}B）",
+                        "${bitRate / 1000}kbps，帧=${FRAME_SAMPLES}采样/${inputFrameBytes}B，" +
+                        "codec=${created.name}）",
                 )
                 true
             } catch (error: Exception) {

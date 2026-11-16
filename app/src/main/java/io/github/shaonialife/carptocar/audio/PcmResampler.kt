@@ -15,7 +15,12 @@ package io.github.shaonialife.carptocar.audio
  *  - 每块起点还把相位重置成 0，块边界处多一次子样本跳变，听感是「发毛发刺」。
  *
  * 现在把「相位」和「上一块最后一帧」带过块边界：位置连续、长期比值精确，
- * 边界处也能拿到下一帧做线性插值（不再是最近邻复制，消除 44.1→48 的镜像失真）。
+ * 边界处也能拿到下一帧做插值（不再是最近邻复制）。
+ *
+ * 插值核：**四点三次（Catmull-Rom）**，块首/块尾两帧退化线性。
+ * 2026-11-16 从纯线性插值升级：线性的频响是 sinc²，大幅上采样（16k 的导航播报 →
+ * 44.1k，比值 2.76）时 8k 以上的镜像只压到 −10dB 左右，听感是播报「发毛、发沙」；
+ * 三次核在同样位置多压 ~15dB，且样本点上的值与原信号严格一致（不会改变音量/相位）。
  *
  * 线程模型：**非线程安全**，由调用方（[AudioSender.feedPcm]，本身 @Synchronized）串行使用。
  */
@@ -93,16 +98,37 @@ internal class PcmResampler {
             val i1 = if (i0 + 1 <= lastIndex) i0 + 1 else i0
             val b0 = i0 * ch
             val b1 = i1 * ch
+            // 四点（Catmull-Rom）还是两点（线性）
+            val smooth = i0 >= 1 && i0 + 2 <= lastIndex
+            val bm1 = if (smooth) (i0 - 1) * ch else 0
+            val b2 = if (smooth) (i0 + 2) * ch else 0
             var c = 0
             while (c < ch) {
-                val s0 = work[b0 + c].toInt()
-                val s1 = work[b1 + c].toInt()
-                val value = s0 + ((s1 - s0) * frac).toInt()
+                val value =
+                    if (smooth) {
+                        // 三次插值：过 (i0, i1) 两点，用 i0-1 / i0+2 定两端斜率。
+                        // 相比线性插值，16k→44.1k 这类**大幅上采样**的镜像（8k 以上的
+                        // 「嘶」声）压制约 15dB，44.1k↔48k 的小比值也更平滑。
+                        // 代价是陡峭瞬态可能轻微过冲，下面统一 clamp。
+                        val p0 = work[bm1 + c].toDouble()
+                        val p1 = work[b0 + c].toDouble()
+                        val p2 = work[b1 + c].toDouble()
+                        val p3 = work[b2 + c].toDouble()
+                        val a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3
+                        val b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3
+                        val cc = -0.5 * p0 + 0.5 * p2
+                        ((a * frac + b) * frac + cc) * frac + p1
+                    } else {
+                        // 块首/块尾两帧没有完整四点，退化线性（每块最多 2 个点，不可闻）
+                        val s0 = work[b0 + c].toInt()
+                        val s1 = work[b1 + c].toInt()
+                        s0 + (s1 - s0) * frac
+                    }
                 out[produced * ch + c] =
                     when {
-                        value > 32767 -> Short.MAX_VALUE
-                        value < -32768 -> Short.MIN_VALUE
-                        else -> value.toShort()
+                        value > 32767.0 -> Short.MAX_VALUE
+                        value < -32768.0 -> Short.MIN_VALUE
+                        else -> value.toInt().toShort()
                     }
                 c++
             }

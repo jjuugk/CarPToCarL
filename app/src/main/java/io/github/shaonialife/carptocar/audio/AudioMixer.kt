@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.audio
 
+import kotlin.math.tanh
+
 /**
  * 混音源：CarLife 的两条音频通路。
  *
@@ -75,6 +77,39 @@ class AudioMixer(
          * 这种量级才会超过它——那时硬推两千多帧也没有意义。
          */
         const val RESYNC_AFTER_MILLIS = 2_000L
+
+        /**
+         * 软限幅的拐点：−0.9 dBFS（32767 × 10^(−0.9/20) ≈ 29491）。
+         *
+         * 低于它的样本**逐位原样通过**（不做任何增益、不引入量化误差），保证绝大多数
+         * 正常电平的音乐听感与改动前完全一致。
+         */
+        const val SOFT_LIMIT_KNEE = 29_491
+
+        /** 拐点到满幅的余量（3276）。 */
+        private const val SOFT_LIMIT_ROOM = Short.MAX_VALUE - SOFT_LIMIT_KNEE
+
+        /**
+         * 软限幅：把超出 [SOFT_LIMIT_KNEE] 的部分沿 `tanh` 曲线压向满幅（**渐近，永不触顶**）。
+         *
+         * `f(d) = ROOM · tanh(d / ROOM)`，其中 `d = |x| − KNEE`。它满足：
+         *  - `f(0) = 0`、`f'(0) = 1` → 拐点处斜率连续，没有折点；
+         *  - `f(∞) → ROOM` 但**严格小于** ROOM → 输出永远 ≤ 32766，不会出现任何平顶。
+         *
+         * 为什么必须渐近而不能截断：第一版用的是「三次曲线 + 到 ROOM 为止」，结果输入
+         * 一旦超过满幅（音乐 + 播报两路满幅相加很常见）就全部被压到 32767，反而造出一段
+         * 15 个样本的平顶——和原来的硬 clamp 在听感上没区别。tanh 让越界的部分继续单调
+         * 变化，波形被压扁但不被切平，谐波只来自「压缩」而不是「方波边沿」。
+         *
+         * 代价：满幅输入实际输出 31986（−0.21 dB），这点峰值损失不可闻，换掉的是削波破音。
+         */
+        fun softLimit(value: Int): Int {
+            val magnitude = if (value < 0) -value else value
+            if (magnitude <= SOFT_LIMIT_KNEE) return value
+            val d = (magnitude - SOFT_LIMIT_KNEE).toDouble() / SOFT_LIMIT_ROOM
+            val shaped = SOFT_LIMIT_KNEE + (SOFT_LIMIT_ROOM * tanh(d)).toInt()
+            return if (value < 0) -shaped else shaped
+        }
     }
 
     /** 一帧的 PCM 字节数（16bit 交织）。 */
@@ -144,6 +179,27 @@ class AudioMixer(
 
     /** 上一次产出帧的时刻（泵线程私有，用于算 [windowMaxGapNanos]）。 */
     private var lastFrameAtNanos = 0L
+
+    /**
+     * 本次窗口内输出样本的**峰值**（绝对值，0..32767）。
+     *
+     * 用途：判断「音质」问题的方向。峰值长期顶在 32767 说明送进来的音乐本身就是
+     * 满幅（流行乐常见的响度战争母带），此时任何混音/编码链都在削波边缘工作，
+     * 该做的是让用户把手机媒体音量降 2~3 格，而不是在链路上找补。
+     */
+    @Volatile
+    var windowPeak = 0
+        private set
+
+    /**
+     * 本次窗口内**被软限幅折回**的样本数（占总样本数的百分比见体检行）。
+     *
+     * 完全不触发 = 软限幅没有白白压电平；持续 5% 以上 = 两路相加确实在顶满幅，
+     * 这时才需要用户降音量（或我们把 duck 做得更深）。
+     */
+    @Volatile
+    var windowLimitedSamples = 0L
+        private set
 
     /**
      * 本次窗口内 [dueFrames] 算出的**最大落后帧数**。
@@ -237,7 +293,7 @@ class AudioMixer(
     }
 
     /**
-     * 产出一帧到 [out]（长度必须 ≥ [frameBytes]）。两路相加，饱和限幅。
+     * 产出一帧到 [out]（长度必须 ≥ [frameBytes]）。两路相加，超出 −0.9dBFS 的部分软限幅。
      *
      * 缺样本时按 0 计——等价于补静音，保证 RTP 时间戳连续（车机的 jitter buffer 不会排空）。
      */
@@ -248,6 +304,9 @@ class AudioMixer(
         var hasMedia = false
         var hasNav = false
         var navActive = false
+        // 窗口统计用局部变量累加，帧末写一次（避免逐样本 volatile 写）
+        var peak = windowPeak
+        var limited = 0L
         // 锁两个环形缓冲（顺序固定：media → nav，写侧只锁自己那一个，不会成环）。
         // 锁粒度是「一整帧」（352 样本 ≈ 7.33ms，实际执行是几十微秒），争用可以忽略。
         synchronized(media) {
@@ -267,12 +326,15 @@ class AudioMixer(
                         val music = media.readShort()
                         val voice = nav.readShort()
                         val mixed = ((music * gain) shr 10) + voice
-                        val clamped =
-                            when {
-                                mixed > Short.MAX_VALUE -> Short.MAX_VALUE.toInt()
-                                mixed < Short.MIN_VALUE -> Short.MIN_VALUE.toInt()
-                                else -> mixed
-                            }
+                        // 软限幅而不是硬 clamp（2026-11-16）：
+                        // 音乐 0dBFS 的流行乐叠上导航播报，和值经常越过满幅。原来的
+                        // `coerceIn(-32768, 32767)` 直接把波形切成平顶——平顶的垂直边沿
+                        // 等价于往信号里注入大量奇次谐波，听感就是「播报一响，音乐破一下」。
+                        // 现在 −0.9dBFS 以下逐位原样通过，超出部分沿三次曲线平滑折回满幅。
+                        val clamped = softLimit(mixed)
+                        if (clamped != mixed) limited++
+                        val magnitude = if (clamped < 0) -clamped else clamped
+                        if (magnitude > peak) peak = magnitude
                         out[offset++] = (clamped and 0xFF).toByte()
                         out[offset++] = ((clamped shr 8) and 0xFF).toByte()
                     }
@@ -283,6 +345,8 @@ class AudioMixer(
         emittedFrames++
         framesEmitted++
         windowFrames++
+        windowPeak = peak
+        windowLimitedSamples += limited
         if (lastFrameAtNanos != 0L) {
             val gap = nowNanos - lastFrameAtNanos
             if (gap > windowMaxGapNanos) windowMaxGapNanos = gap
@@ -301,6 +365,8 @@ class AudioMixer(
         windowMaxGapNanos = 0
         windowMaxDueFrames = 0
         windowResyncs = 0
+        windowPeak = 0
+        windowLimitedSamples = 0
         // 不重置 lastFrameAtNanos：跨窗口的那一刻不该被算成「停拍」
     }
 

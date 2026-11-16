@@ -696,7 +696,8 @@ class AudioSender(
     /**
      * 把一段 PCM 重采样到 [sampleRate] 立体声，返回新数组；无需处理时返回原输入。
      *
-     * 44.1k↔48k 这类小比值交给 [PcmResampler]（线性插值 + 相位跨块延续），不引第三方库：
+     * 44.1k↔48k 这类小比值、以及 16k 播报 → 44.1k 的大比值，都交给 [PcmResampler]
+     * （四点三次插值 + 相位跨块延续），不引第三方库：
      * CarLife 引擎实际只会输出 44.1k 或 48k。任意其它比值同一套逻辑也成立，不会中断推流。
      */
     private fun alignPcm(
@@ -1048,10 +1049,20 @@ class AudioSender(
                 } else {
                     "；定拍准（无落后）"
                 }
+            // 峰值 / 软限幅占比：直接回答「音质是不是被顶到满幅了」。
+            // 峰值长期 100% 且软限幅占比高 = 送进来的音乐本身就是满幅，该降手机音量；
+            // 峰值 100% 但软限幅 0% = 只是偶尔擦到拐点，软限幅没有白白压电平。
+            val peakPct = mixer.windowPeak * 100 / 32768
+            val totalSamples = mixFrames * samplesPerPacket * CHANNELS
+            val limitedPct =
+                if (totalSamples > 0) (mixer.windowLimitedSamples * 100 / totalSamples).toInt() else 0
+            val limitText =
+                if (limitedPct > 0) "折回 $limitedPct% 的样本" else "未触发"
+            val peakText = "峰值 $peakPct% / 软限幅 $limitText"
             log(
                 "AUDIO: 混音体检 —— 本窗口 $mixFrames 帧 / $perSecond 样本每秒；" +
                     "媒体 $mediaPct% / 播报 $navPct%；duck 已触发 ${mixer.duckedFrames} 帧；" +
-                    dropText + gapText + lagText,
+                    "$peakText；" + dropText + gapText + lagText,
             )
             mixer.resetWindow()
         }
