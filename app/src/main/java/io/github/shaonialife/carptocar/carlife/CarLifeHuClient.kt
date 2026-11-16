@@ -79,6 +79,8 @@ class CarLifeHuClient(
     private val audioExpected: () -> Boolean = { false },
     /** 收到手机推送的媒体信息（歌名/歌手/封面，0x10035）。 */
     private val onMediaInfo: (info: CarLifeMediaInfo) -> Unit = {},
+    /** 收到媒体播放进度（0x10036，ms，约每秒一条）。 */
+    private val onMediaProgress: (progressMs: Int) -> Unit = {},
     /**
      * 引擎是否处于**语音会话**（`语音(4)` 模块从 0 变非 0，以及反向）。
      *
@@ -992,18 +994,21 @@ class CarLifeHuClient(
             }
 
             CarLifeProtocol.MD_MEDIA_PROGRESS -> {
-                // 媒体进度条（u32 progressBar，单位 ms）。只做低频诊断：限流 10 秒，
-                // 否则冻结解冻一次就能把几百行灌进日志（见 progressLog 注释）。
-                val progress = if (payload.size >= 4) {
-                    ((payload[0].toInt() and 0xFF) shl 24) or
-                        ((payload[1].toInt() and 0xFF) shl 16) or
-                        ((payload[2].toInt() and 0xFF) shl 8) or
-                        (payload[3].toInt() and 0xFF)
+                // 媒体进度（protobuf field1 varint 或裸 u32，两种形态 + 合理性校验）。
+                // 旧实现按裸 u32 直读，把 protobuf tag 0x08 当最高位 → 实车日志读到
+                // 1.4～1.5 亿 ms（≈40 小时）；按 varint 解回来是逐拍 +10 秒的正常进度。
+                // 限流 10 秒只管日志；进度本身每条都要交给上层（每秒补推 0x5001）。
+                val progress = CarLifeProtocol.parseMediaProgress(payload)
+                if (progress == null) {
+                    if (progressLog.allow("media-progress")) {
+                        val head = payload.take(8).joinToString(" ") { "%02x".format(it) }
+                        log("CARLIFE: 媒体进度解析失败 head=$head（同类提示 10 秒最多一行）")
+                    }
                 } else {
-                    0
-                }
-                if (progressLog.allow("media-progress")) {
-                    log("CARLIFE: 媒体进度 ${progress}ms（同类提示 10 秒最多一行）")
+                    onMediaProgress(progress)
+                    if (progressLog.allow("media-progress")) {
+                        log("CARLIFE: 媒体进度 ${progress}ms（同类提示 10 秒最多一行）")
+                    }
                 }
             }
 

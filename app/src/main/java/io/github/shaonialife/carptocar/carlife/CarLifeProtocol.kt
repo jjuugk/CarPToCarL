@@ -604,11 +604,22 @@ internal object CarLifeProtocol {
      *   field 2 (mediaInfo)→ tag 0x12 (length-delimited，内嵌完整 CarlifeMediaInfo 子消息)
      */
     fun parseMediaInfoList(payload: ByteArray): List<CarLifeMediaInfo> {
-        val result = ArrayList<CarLifeMediaInfo>()
-        var index = 0
         // 同 parseModuleStatus：截断包不能让异常逃到 workerLoop（否则整条 CarLife
         // 连接被 finally 的 stop() 拆掉）。
         try {
+            // 两种载荷形态：
+            //  A. 8.8.5 实测（2026-11-02 hex 实证）：payload **直接**就是一个
+            //     CarlifeMediaInfo，首字节 0x0a = field1(source, string)。
+            //  B. 旧形态：0x08 cnt + 0x12 mediaInfo 子消息包装，首字节 0x08 = cnt(varint)。
+            // 按顶层标签的 wireType 区分，而不是无条件先试 A——对 B 形态直接解析会把
+            // 整个子消息字节串当成歌名（非空），返回一条假信息。
+            val first = payload.firstOrNull()?.toInt()?.and(0xFF) ?: return emptyList()
+            if ((first ushr 3) == 1 && (first and 0x07) == 2) {
+                parseMediaInfo(payload, 0, payload.size)?.let { return listOf(it) }
+            }
+
+            val result = ArrayList<CarLifeMediaInfo>()
+            var index = 0
             while (index < payload.size) {
                 val tag = payload[index].toInt() and 0xFF
                 index++
@@ -633,11 +644,69 @@ internal object CarLifeProtocol {
                     }
                 }
             }
+            return result
         } catch (_: RuntimeException) {
-            // 返回已解析部分
+            return emptyList()
         }
-        return result
     }
+
+    /**
+     * 8.8.5 的 `CarlifeMediaInfo.duration` 单位是**秒**（日志里 dur=193 对应 3:13 那首歌），
+     * 而 iAP2 `0x5001` 的 duration 要毫秒。1..3600 视为秒，超出则当已经换算过。
+     */
+    private fun normalizeDuration(value: Int): Int = if (value in 1..3_600) value * 1_000 else value
+
+    /**
+     * 解析媒体进度（`MD_MEDIA_PROGRESS` / 0x10036）载荷，单位 ms。
+     *
+     * 两条路径：
+     *  1. protobuf field 1 的 varint（`0x08 <varint>`）——8.8.5 实际形态；
+     *  2. 裸 u32 大端（旧引擎可能直接给 4 字节），作为兼容保留。
+     *
+     * 两条路径都做 ≤24 小时的合理性校验。2026-11-16 实车日志里旧实现按裸 u32 读出了
+     * 1.4～1.5 亿 ms（≈40 小时）且乱跳——真实载荷是 `08 <varint>`，把 tag 字节 0x08
+     * 当成大端最高位就成了那个天文数字；按 varint 解回来是 21.1s，且逐拍 +10 秒。
+     * 校验作为兜底：解析失败返回 null，调用方只打诊断，不把垃圾值送进车机进度条。
+     */
+    fun parseMediaProgress(payload: ByteArray): Int? {
+        var index = 0
+        var found: Int? = null
+        while (index < payload.size) {
+            val tag = payload[index].toInt() and 0xFF
+            index++
+            val field = tag ushr 3
+            val wireType = tag and 0x07
+            when {
+                wireType == 0 -> {
+                    val value = readVarint(payload, index)
+                    index += varintLen(payload, index)
+                    if (field == 1) found = value
+                }
+
+                wireType == 2 -> {
+                    val length = readVarint(payload, index)
+                    index += varintLen(payload, index) + length
+                }
+
+                wireType == 5 -> index += 4
+                wireType == 1 -> index += 8
+                else -> break
+            }
+        }
+        found?.takeIf { it in 0..MAX_SANE_PROGRESS_MS }?.let { return it }
+        if (payload.size == 4) {
+            val raw =
+                ((payload[0].toInt() and 0xFF) shl 24) or
+                    ((payload[1].toInt() and 0xFF) shl 16) or
+                    ((payload[2].toInt() and 0xFF) shl 8) or
+                    (payload[3].toInt() and 0xFF)
+            if (raw in 0..MAX_SANE_PROGRESS_MS) return raw
+        }
+        return null
+    }
+
+    /** 合理的播放进度上限：24 小时。 */
+    private const val MAX_SANE_PROGRESS_MS = 24 * 60 * 60 * 1_000
 
     /** 解析单个 CarlifeMediaInfo 子消息；解析不出歌名时返回 null。 */
     private fun parseMediaInfo(
@@ -686,13 +755,19 @@ internal object CarLifeProtocol {
                     val value = readVarint(payload, index)
                     index += varintLen(payload, index)
                     when (field) {
-                        6 -> duration = value
+                        6 -> duration = normalizeDuration(value)
                         7 -> playlistNum = value
                         9 -> mode = value
                     }
                 }
 
-                // wireType=5 (fixed32) 或未知：跳过固定长度/放弃
+                // fixed32/fixed64：不认识也要能跳过。实测 24KB 的媒体信息里封面
+                // （field 5）之后还跟着几十字节别的字段；旧实现遇到非 0/2 的
+                // wireType 直接 return null，整条信息（含歌名）就废了。
+                wireType == 5 -> index += 4
+                wireType == 1 -> index += 8
+
+                // wireType 3/4 是已废弃的 group 编码，无法安全跳过
                 else -> return null
             }
         }

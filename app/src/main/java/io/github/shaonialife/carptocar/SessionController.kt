@@ -575,6 +575,42 @@ object SessionController {
             )
             pushNowPlayingAll()
         }
+        // 数据源 C：播放位置（引擎每秒一条 0x10036）。必须逐秒补推 0x5001，
+        // 否则车机只在换歌那刻收到一次位置，进度条永远停在 0:00。真 iPhone 也按秒推。
+        CarLifeHijack.addMediaProgressListener { pushNowPlayingPosition() }
+    }
+
+    /** 上次进度补推日志时刻（只影响日志，不影响发包）。 */
+    @Volatile
+    private var lastPositionLogAtMs = 0L
+
+    /**
+     * 只推「播放位置」的 0x5001（约每秒一次）。
+     *
+     * 与 [pushNowPlayingAll] 的区别：不改内容去重键、不刷每行日志、只走 WiFi 隧道
+     * （真车路径）。蓝牙链路只在测试台用，逐秒补推没有意义还添噪音。
+     */
+    private fun pushNowPlayingPosition() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastPositionLogAtMs >= 10_000L) {
+            lastPositionLogAtMs = now
+            appendLog("CARLIFE: 进度 ${currentElapsedMs()}ms → 静默补推 0x5001（每秒）")
+        }
+        currentClient?.pushNowPlaying(quiet = true)
+    }
+
+    /**
+     * 当前播放位置（ms）。
+     *
+     * 引擎每秒推一条 0x10036，两次之间按墙钟外推（上限 3 秒），进度条连续走、
+     * 不会一秒一跳；引擎停推后最多多走 3 秒，不会无限增长。
+     */
+    private fun currentElapsedMs(): Int {
+        val base = CarLifeHijack.latestMediaProgressMs
+        val at = CarLifeHijack.latestMediaProgressAtMs
+        if (base <= 0 || at <= 0L) return 0
+        val drift = (android.os.SystemClock.elapsedRealtime() - at).coerceIn(0L, 3_000L)
+        return (base + drift).toInt()
     }
 
     /**
@@ -832,7 +868,8 @@ object SessionController {
             album = album.takeIf { it.isNotBlank() },
             durationMs = duration,
             status = Iap2NowPlaying.STATUS_PLAYING, // CarLife 推歌名即视为播放中
-            elapsedMs = 0,
+            // 必须是真实位置：填 0 时车机「已播放」永远停在 0:00、进度条一动不动。
+            elapsedMs = currentElapsedMs(),
             appName = info.source.takeIf { it.isNotBlank() },
             artworkId =
                 if (includeArtwork && !Iap2ArtworkSupport.unsupported) {

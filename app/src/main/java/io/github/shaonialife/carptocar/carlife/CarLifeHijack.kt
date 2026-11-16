@@ -268,6 +268,37 @@ object CarLifeHijack {
     var latestMediaInfoAtMillis: Long = 0L
         private set
 
+    /**
+     * 最近一次播放进度（ms）与采样时刻（`SystemClock.elapsedRealtime()`）。
+     *
+     * 引擎每秒推一条 0x10036；两次之间由上层按墙钟外推，车机进度条才连续走。
+     * 0 = 本轮还没收到过可用进度（解析失败或引擎停推）。
+     */
+    @Volatile
+    var latestMediaProgressMs: Int = 0
+        private set
+
+    @Volatile
+    var latestMediaProgressAtMs: Long = 0L
+        private set
+
+    /** 播放进度监听（每收到一条合法 0x10036 触发一次，约每秒）。 */
+    private val mediaProgressListeners = java.util.concurrent.CopyOnWriteArrayList<(Int) -> Unit>()
+
+    fun addMediaProgressListener(listener: (Int) -> Unit) {
+        mediaProgressListeners.add(listener)
+    }
+
+    fun removeMediaProgressListener(listener: (Int) -> Unit) {
+        mediaProgressListeners.remove(listener)
+    }
+
+    private fun onMediaProgress(progressMs: Int) {
+        latestMediaProgressMs = progressMs
+        latestMediaProgressAtMs = android.os.SystemClock.elapsedRealtime()
+        mediaProgressListeners.forEach { runCatching { it(progressMs) } }
+    }
+
     /** 媒体信息变化监听（歌名/歌手变化时触发）。 */
     private val mediaInfoListeners = java.util.concurrent.CopyOnWriteArrayList<(CarLifeMediaInfo) -> Unit>()
 
@@ -995,6 +1026,7 @@ object CarLifeHijack {
                         synchronized(audioPlaybackLock) { audioSink === sink && mediaPlayback.playing }
                     },
                     onMediaInfo = { info -> onMediaInfo(info) },
+                    onMediaProgress = { ms -> onMediaProgress(ms) },
                     requestedFps = requestedFps,
                     initialConnectType = connectType,
                     probeIds = probeIds,

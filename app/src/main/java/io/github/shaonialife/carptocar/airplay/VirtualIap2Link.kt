@@ -302,16 +302,19 @@ class VirtualIap2Link(
      * CarLife 0x10035 到达的——若订阅先于歌名，就会停在空态。所以歌名就绪后必须
      * 由外部主动补推一次。链路尚未建立（MIB3 未识别）时静默忽略。
      */
-    fun pushNowPlaying() {
+    /** @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。 */
+    fun pushNowPlaying(quiet: Boolean = false) {
         synchronized(lock) {
             if (!mib3Identified && !tunnelIdentified) return
             val nowPlaying = nowPlayingProvider?.invoke() ?: return
             lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
             sendNowPlayingLocked(nowPlaying)
-            log(
-                "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
-                    " 歌手=${nowPlaying.artist ?: "?"}）",
-            )
+            if (!quiet) {
+                log(
+                    "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
+                        " 歌手=${nowPlaying.artist ?: "?"}）",
+                )
+            }
         }
     }
 

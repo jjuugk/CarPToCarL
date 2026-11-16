@@ -2285,9 +2285,12 @@ class AirPlayClient(
         return controlSessionReady
     }
 
-    /** 歌名变化时主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。 */
-    fun pushNowPlaying() {
-        obtainIapLink().pushNowPlaying()
+    /**
+     * 主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。
+     * quiet = 播放位置逐秒补推：照常发包，但不刷日志。
+     */
+    fun pushNowPlaying(quiet: Boolean = false) {
+        obtainIapLink().pushNowPlaying(quiet)
     }
 
     /**
