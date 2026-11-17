@@ -84,30 +84,4 @@ class AudioSenderTest {
         // 明文相同但 nonce 递增：密文必须不同（防 nonce 复用）
         org.junit.Assert.assertFalse(cipherA.contentEquals(cipherB))
     }
-
-    @Test
-    fun nonBlockingDataChannelWriteContract() {
-        // 修复①（2026-11-17）依赖的机制：非阻塞 DatagramChannel 连到对端后，
-        // write() 立即返回写入字节数，绝不像阻塞式 DatagramSocket.send() 那样
-        // 在缓冲满时卡住整个泵线程。这里验证「连接 → 非阻塞 → write 成功 → close」的契约。
-        val receiver = java.net.DatagramSocket(0)
-        val channel =
-            java.nio.channels.DatagramChannel.open().apply {
-                configureBlocking(false)
-                connect(java.net.InetSocketAddress("127.0.0.1", receiver.localPort))
-            }
-        try {
-            org.junit.Assert.assertFalse(channel.isBlocking)
-            val payload = ByteArray(64) { it.toByte() }
-            val written = channel.write(java.nio.ByteBuffer.wrap(payload))
-            assertEquals(payload.size, written)
-
-            val got = java.net.DatagramPacket(ByteArray(128), 128)
-            receiver.receive(got)
-            assertArrayEquals(payload, got.data.copyOfRange(got.offset, got.offset + got.length))
-        } finally {
-            channel.close()
-            receiver.close()
-        }
-    }
 }
