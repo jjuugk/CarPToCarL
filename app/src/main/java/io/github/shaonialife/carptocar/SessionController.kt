@@ -2398,6 +2398,13 @@ object SessionController {
         bluetoothClient?.requestImmediateRetry(reason) ?: false
 
     /**
+     * 音频流此刻在不在推。只读、无副作用——[io.github.shaonialife.carptocar.service.CarPlayService]
+     * 的保活循环每 3 秒取一次，只为了把 MediaSession 置成 PLAYING/PAUSED。
+     */
+    val audioStreamingNow: Boolean
+        get() = audioSender?.isRunning == true
+
+    /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
      *
      * 后台自动连接时用户面前没有界面，通知栏是唯一可见的界面——那里若只写
