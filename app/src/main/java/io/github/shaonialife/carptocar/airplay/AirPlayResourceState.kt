@@ -162,20 +162,6 @@ class AirPlayResourceState {
     val phoneBorrowsAudio: Boolean get() = synchronized(lock) { resources.getValue(RESOURCE_AUDIO).phoneBorrowing }
 
     /**
-     * 车机是否**只是借用/静音**着主音频（`transferType=3`，如方向盘语音键、原车静音、
-     * 原车通话），而不是永久接管。
-     *
-     * 这个区分是 2026-11-17 加的，用来止住一个很贵的动作：从前只要「主音频不在手机手里」
-     * 就把音频流 TEARDOWN，车机一还回来再 SETUP——实车日志里按一次语音键，音乐断 2.2 秒
-     * （`TEARDOWN 18:33:47.469 → 直通 18:33:49.630`），连按三次断了三次。借用是**秒级**的，
-     * 拆流重建也是**秒级**的，等于每次按语音键都白送一段静音。
-     * 借用期间保持流（继续发静音帧）才是对的：车机归还后下一帧立刻有声，RTP 时间轴不断，
-     * 也不会触发它那边重新缓冲。
-     */
-    val carBorrowsAudio: Boolean
-        get() = synchronized(lock) { resources.getValue(RESOURCE_AUDIO).borrowers.isNotEmpty() }
-
-    /**
      * 每条控制连接独立初始化：先把状态复位成「手机持有」，再采纳 `/info` 的初始归属。
      *
      * 复位是必须的——上一轮会话里车机借走的屏如果不复位，重连后会一直认为「屏在车机手里」，

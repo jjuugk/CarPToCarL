@@ -1292,10 +1292,6 @@ object SessionController {
     @Volatile
     private var activeAudioStartedAt: Long = 0L
 
-    /** 「借用期间保持音频流」这条提示每次借用只打一行（见 [applyAudioOwnership]）。 */
-    @Volatile
-    private var loggedKeepOnBorrow: Boolean = false
-
     private val audioIntent = CarPlayAudioIntent()
 
     /**
@@ -1323,30 +1319,6 @@ object SessionController {
         }
         // 导航借用归还时若正在通话，通话流不拆
         if (audioInCallMode && client.phoneOwnsAudio) return audioSender?.isRunning == true
-        // 车机**只是借用/静音**主音频（语音键、原车静音键：transferType=3）时，音频流一律不拆。
-        //
-        // 2026-11-17 实车（宝马 G38，1.2.63）：按一次方向盘语音键 →
-        //   `RESOURCE: 车机接管/静音借用主音频（BORROWED_CONSTRAINED）` →
-        //   `AUDIO: 已停止（共发 5588 包）` → `流 TEARDOWN` →
-        //   1.99 秒后重新 `SETUP` → 又 0.13 秒才出声。
-        // 也就是说**每按一次语音键，车上就白静 2.2 秒**；那一轮按键三次，断了三次。
-        // 而车机借用只有 1.5~9 秒，拆流重建和借用同量级，怎么算都是亏的。
-        //
-        // 保持流的代价是零：媒体 PCM 已由 handleCarAudioTransfer 清空，泵线程继续按
-        // 实时速率发静音帧，RTP 时间轴与锚点都不用重建；车机归还后下一帧立刻有声，
-        // 也不会触发它重新缓冲。真正的「所有权被拿走」（原车广播/持久接管）仍然拆流。
-        if (client.carBorrowsAudio && !audioInCallMode && audioSender?.isRunning == true) {
-            audioSender?.clearPcm(io.github.shaonialife.carptocar.audio.AudioSource.MEDIA)
-            if (!loggedKeepOnBorrow) {
-                loggedKeepOnBorrow = true
-                appendLog(
-                    "RESOURCE: 车机借用主音频中——音频流保持不拆（只补静音帧），" +
-                        "归还后立刻有声；避免语音键/静音键每次断 2 秒",
-                )
-            }
-            return true
-        }
-        loggedKeepOnBorrow = false
         val type = activeCallProfile?.streamType ?: activeAudioProfile?.streamType
         // 导航独立流的类型可能和主音频不同（例如语音档落在 101 上就是 101/100 各一条），
         // 拆链要按各自类型分别 TEARDOWN，漏掉的那条只能等车机自己超时回收。
@@ -2424,16 +2396,6 @@ object SessionController {
      */
     fun requestImmediateRetry(reason: String): Boolean =
         bluetoothClient?.requestImmediateRetry(reason) ?: false
-
-    /**
-     * 音频流此刻是否在推（前台服务的保活 MediaSession 据此置 PLAYING/PAUSED）。
-     *
-     * 为什么单独开一个只读口：`CarPlayService` 是另一个类，不该为了看一眼播放态去
-     * 摸 [audioSender] 这类内部字段；而且这个判断必须**便宜且无副作用**——它每 3 秒
-     * 被通知栏的刷新循环调一次。
-     */
-    val audioStreamingNow: Boolean
-        get() = audioSender?.isRunning == true
 
     /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
