@@ -15,7 +15,6 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
-import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -111,52 +110,6 @@ class AudioSender(
 
         /** 每次会话最多报这么多条「停拍归因」。 */
         private const val STALL_REPORT_LIMIT = 40
-
-        /**
-         * 待发包队列的硬上限（帧）。8 帧 @48k ≈ 171ms。
-         *
-         * 超过就往回收（停止喂料，见 [feedFramesFor]）：队列再深就等于把延迟白送出去，
-         * 而延迟一旦超过车机侧抖动缓冲，反而会被它判成「这条流跟不上」。
-         */
-        const val MAX_QUEUE_DEPTH = 8
-
-        /**
-         * 自适应目标深度的上限（帧）。4 帧 @48k ≈ 85ms。
-         *
-         * 这是「用延迟换平滑」能付出的最贵价钱：再往上垫，音乐口型对不上、切歌反馈变慢，
-         * 用户会感知到。实车日志里编码器的抖动是 64~107ms（3~5 帧），4 帧刚好覆盖。
-         */
-        const val MAX_QUEUE_TARGET = 4
-
-        /**
-         * 单拍最多喂几帧 PCM 给编码器。
-         *
-         * 不设上限时，落后 32 帧的追赶会把 32 帧 PCM（≈682ms）在 0ms 内灌进去，
-         * 环形缓冲被瞬间抽干、编码器输入队列直接顶满——从「慢」变成「丢」。
-         */
-        const val MAX_FEED_PER_TICK = 4
-
-        /**
-         * 这一拍该喂几帧 PCM（纯函数，单测直接验）。
-         *
-         * 唯一目标是让发送队列维持在 [target]：
-         * - 浅了 → 多喂，编码器手里有存货，泵才能「一拍一包」地匀速发；
-         * - 正好 → 只喂 1 帧维持流水线（喂等于发，深度不变）；
-         * - 超了 / 顶到上限 → **停喂**，让队列先消化。
-         *
-         * 反例（踩过）：按 `AudioMixer.dueFrames` 的欠账当喂料量。欠账是「应发未发」，
-         * 队列消化期间它恒大于 0，按它喂会让队列越喂越深——延迟堆到车机侧抖动缓冲之上，
-         * 它会直接判这条流跟不上。喂料看深度，发送看节拍，两者不要互相干扰。
-         */
-        fun feedFramesFor(
-            depth: Int,
-            target: Int,
-        ): Int =
-            when {
-                depth >= MAX_QUEUE_DEPTH -> 0
-                depth > target -> 0
-                else -> (target - depth + 1).coerceIn(1, MAX_FEED_PER_TICK)
-            }
 
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
@@ -289,54 +242,6 @@ class AudioSender(
      * 与「链路上丢」——两者对策完全相反。
      */
     @Volatile private var packetsDroppedFull = 0L
-
-    /**
-     * 待发包队列 —— 把「编码」和「发送」解耦的发送端 jitter buffer。
-     *
-     * 为什么必须有（2026-11-17 WinPlay 日志）：`AacLcEncoder.encode()` 里用的是
-     * `dequeueOutputBuffer(info, 0)` 零等待，而 MediaCodec 的工作线程不受我们调度控制。
-     * 它被系统延迟 60~100ms 时，输入积压 3~5 帧，随后**一口气全吐出来**——旧实现就直接
-     * 把这 3~5 个包在 0 毫秒内全打出去，然后 `timestamp` 跳 3~5 帧、泵按账本空等 3~5 拍。
-     *
-     * 实测到的就是这个指纹：每 30 秒窗口产 1407 帧、发 1407 包（总量完全正确），
-     * 但「最长停拍」15 个窗口里稳定落在 62/64/82/84/85/100/101/102/104/107ms ——
-     * 全是 21.33ms 的整数倍，且**一条** `停拍 Nms —— park/混音/发包` 归因日志都没有
-     * （泵不是被挂起，是自己在等）。接收端看到的就是「3~5 包挤在 0ms，然后一个
-     * 64~107ms 的空洞」，听感即「一顿一顿」。
-     *
-     * 现在：encode 吐出来的帧全部入队，泵线程**每拍只发一包**。编码器的抖动被队列吸收，
-     * 线上到达节奏恒定 21.33ms/包。RTP 序号与时间戳仍在真正发送时推进，语义不变。
-     *
-     * 用 [LinkedBlockingDeque] 而不是 `ArrayDeque`：`restartPipeline` 会在
-     * `audio-restart` 线程里 `clear()`，泵线程同时在 poll——`ArrayDeque` 那两个操作
-     * 交错会抛 `ConcurrentModificationException` 或吐出半个链表。它自带容量上限，
-     * 队列满了 `offerLast` 直接返回 false，比「先塞再 while 判超」更省事也更准。
-     */
-    private val payloadQueue: LinkedBlockingDeque<ByteArray> = LinkedBlockingDeque(MAX_QUEUE_DEPTH)
-
-    /**
-     * 队列目标深度（帧）。1 = 只留编码器固有的一帧，零额外延迟。
-     *
-     * 自适应规则：出现一次「队列空、这一拍没包可发」就 +1（最高 [MAX_QUEUE_TARGET]），
-     * 连续两个体检窗口（60 秒）没再空拍就 -1（最低 1）。平时不付延迟，链路抖了才垫。
-     */
-    private var queueTargetDepth = 1
-
-    /** 队列空导致「这一拍没包可发」的累计次数 / 本窗口次数。 */
-    private var emptyTicks = 0L
-    private var windowEmptyTicks = 0L
-
-    /** 本窗口见过的最大队列深度（诊断：编码器到底有多抖）。 */
-    private var windowMaxQueueDepth = 0
-
-    /** 连续多少个体检窗口没出现空拍（用来回落目标深度）。 */
-    private var calmWindows = 0
-
-    /** 队列封顶时被丢弃的最旧包数（正常应为 0，非 0 说明喂料背压没来得及收）。 */
-    private var packetsDroppedBacklog = 0L
-
-    /** 本会话累计喂给编码器的 PCM 帧数（起播阶段判据：前几拍的空拍是编码器固有延迟）。 */
-    private var fedFrames = 0L
     private var lastDropFullLogAt = 0L
     private var lastLogAt = 0L
     private var readFailures = 0
@@ -742,50 +647,15 @@ class AudioSender(
                         var produced = 0
                         var mixNanos = 0L
                         var sendNanos = 0L
-                        // 喂料：按**队列深度**决定这一拍灌几帧给编码器（见 computeFeedFrames）。
-                        // 不能按 due 灌——due 是「应发未发」的帧数，队列正在消化时它恒大于 0，
-                        // 按它灌只会把队列越灌越深，延迟一路堆到车机侧抖动缓冲之上。
-                        val feed = computeFeedFrames()
-                        while (produced < feed && running.get()) {
+                        while (produced < due && running.get()) {
                             val mixStart = System.nanoTime()
                             mixer.mixNextFrame(mixFrameBuffer, mixStart)
-                            val dispatchStart = System.nanoTime()
-                            dispatchPcm(mixFrameBuffer)
-                            mixNanos += dispatchStart - mixStart
-                            sendNanos += System.nanoTime() - dispatchStart
-                            produced++
-                            fedFrames++
-                        }
-                        // 发送：**一拍一包**。这是全段改动的落点——编码器一次吐 3~5 帧时，
-                        // 多出来的帧留在队列里，由后面几拍匀速发出去，线上到达节奏恒定 21.33ms。
-                        val wire = payloadQueue.pollFirst()
-                        if (wire != null) {
                             val sendStart = System.nanoTime()
-                            val ok = sendPayload(wire)
-                            sendNanos += System.nanoTime() - sendStart
-                            if (!ok) {
-                                log("AUDIO: 数据口发送失败——链路已断，停止泵线程")
-                                stop()
-                                break
-                            }
-                        } else {
-                            // 队列空：这一拍没有包可发，接收端会看到一个单帧空洞。
-                            emptyTicks++
-                            windowEmptyTicks++
-                            // 起播前几帧编码器还没吐第一包（AAC 固有 1~2 帧延迟），
-                            // 那不是抖动，别拿来抬高目标深度。
-                            if (fedFrames > 3 && queueTargetDepth < MAX_QUEUE_TARGET) {
-                                queueTargetDepth++
-                                log(
-                                    "AUDIO: 编码器没能及时吐帧（队列空，已空 $emptyTicks 拍）" +
-                                        "——目标队列深度提到 $queueTargetDepth 帧" +
-                                        "（≈${queueTargetDepth * samplesPerPacket * 1000 / sampleRate}ms，" +
-                                        "用一点延迟换匀速发送）",
-                                )
-                            }
-                        }
-                        if (payloadQueue.size > windowMaxQueueDepth) {
-                            windowMaxQueueDepth = payloadQueue.size
+                            dispatchPcm(mixFrameBuffer)
+                            val sendEnd = System.nanoTime()
+                            mixNanos += sendStart - mixStart
+                            sendNanos += sendEnd - sendStart
+                            produced++
                         }
                         val loopEnd = System.nanoTime()
                         reportStall(
@@ -884,11 +754,8 @@ class AudioSender(
         lastRealFeedAt = 0L
         resamplers.forEach { it.reset() }
         mixer.reset()
-        // 队列里压着的是**上一段**音频（可能是几十毫秒前的音乐）。重启的语义是
-        // 「从现在起重新出声」，继续把它们发出去等于先把旧声音播一遍再恢复。
-        payloadQueue.clear()
         log(
-            "AUDIO: 已重置混音泵（清空两路缓冲与待发队列、定拍原点重排；RTP 时间轴保持连续）——$reason",
+            "AUDIO: 已重置混音泵（清空两路缓冲、定拍原点重排；RTP 时间轴保持连续）——$reason",
         )
     }
 
@@ -951,11 +818,6 @@ class AudioSender(
         return resampler.convert(rateAligned, rateAligned.size, inRate, sampleRate, rateChannels)
     }
 
-    /**
-     * 这一拍该喂几帧 PCM 给编码器（决策逻辑见 [feedFramesFor]）。
-     */
-    private fun computeFeedFrames(): Int = feedFramesFor(payloadQueue.size, queueTargetDepth)
-
     /** 走与采集循环一致的封包/编码/发送路径（[feedPcm] 与采集循环共用）。 */
     private fun dispatchPcm(pcm: ByteArray) {
         try {
@@ -964,10 +826,7 @@ class AudioSender(
                     val encoder = aacEncoder ?: return
                     encoder.encode(pcm, pcm.size)
                 } else {
-                    // 必须拷一份：PCM 通路没有编码器，`pcm` 就是泵线程复用的 mixFrameBuffer，
-                    // 直接入队的话下一拍 mixNextFrame 会把它改写，队列里积压的几个「包」
-                    // 会一起变成最新那一帧——听感是重复/断续，且极难从日志看出来。
-                    listOf(pcm.copyOf(pcm.size))
+                    listOf(pcm)
                 }
             if (payloads.isEmpty()) return
             // 一次性自检只对**真实音频**做：定拍泵在没人放音乐时也会出静音帧，
@@ -976,19 +835,14 @@ class AudioSender(
                 selfChecked = true
                 verifyEncodedFrame(payloads.first())
             }
-            // 关键：**只入队，不在这里发**。编码器一次吐 3~5 帧时，若就地全发出去，
-            // 接收端会看到「0ms 内 5 个包 → 107ms 一个包都没有」（见 [payloadQueue] 注释）。
-            // 真正的发送节奏由泵线程一拍一包地控制。
-            payloads.forEach { payload ->
-                // 队列封顶（[MAX_QUEUE_DEPTH]）：丢**最旧**的。实时流宁可跳过一小段，
-                // 也不能让延迟无限蓄积——蓄到超过车机侧抖动缓冲，它会判这条流跟不上。
-                // 正常情况下走不到这里（[feedFramesFor] 会在队列涨满前停止喂料）。
-                if (!payloadQueue.offerLast(payload)) {
-                    payloadQueue.pollFirst()
-                    payloadQueue.offerLast(payload)
-                    packetsDroppedBacklog++
+            var sendFailed = false
+            for (payload in payloads) {
+                if (!sendPayload(payload)) {
+                    sendFailed = true
+                    break
                 }
             }
+            if (sendFailed) stop()
         } catch (error: Throwable) {
             log("AUDIO: 直通注入异常 - ${error.message}")
             stop()
@@ -1031,9 +885,6 @@ class AudioSender(
         pumpThread = null
         thread = null
         mixer.reset()
-        // 队列里压着的是这条流最后几十毫秒的音频。收尾时不清掉，下一轮会话若复用
-        // 这个实例，开头会先播上一轮的尾巴（跨会话的「重复一小段」，极难归因）。
-        payloadQueue.clear()
         restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
             // 「已就地补发」只说明我们这一侧没丢包，不代表车机收到了：ICMP 端口不可达
@@ -1275,10 +1126,7 @@ class AudioSender(
             val lagNowMs = mixer.lagMillis(now, timestamp / samplesPerPacket)
             val lagText =
                 if (mixer.windowMaxDueFrames > 1 || lagNowMs > 0) {
-                    // 注意用 samplesPerPacket 而不是 SAMPLES_PER_PACKET（352）：AAC 通路
-                    // 一帧是 1024 样本，套用 352 会把「落后 3 帧」算成 22ms，实际是 64ms
-                    // —— 差 3 倍，直接把「一次 100ms 的顿」误读成「22ms 的小抖动」。
-                    val lagMs = mixer.windowMaxDueFrames * samplesPerPacket * 1000 / sampleRate
+                    val lagMs = mixer.windowMaxDueFrames * SAMPLES_PER_PACKET * 1000 / sampleRate
                     "；最大落后 ${mixer.windowMaxDueFrames} 帧（≈${lagMs}ms）、" +
                         "此刻时间轴差 ${lagNowMs}ms、" +
                         "本会话累计追回 ${mixer.catchUpFrames} 帧、重排 ${mixer.resyncCount} 次"
@@ -1314,39 +1162,6 @@ class AudioSender(
             )
             mixer.resetWindow()
         }
-        // 发包队列体检 —— 这一行是「声音一顿一顿」的直接读数。
-        // 队列深 = 编码器在积压（我们正拿延迟换平滑）；空拍 > 0 = 编码器那一拍没吐帧，
-        // 接收端就是一个 21.33ms 的空洞。只要「空拍 0、峰值深度恒定」，到达节奏就是匀的。
-        val emptyDelta = windowEmptyTicks
-        val tickMs = samplesPerPacket * 1000 / sampleRate
-        val queueText =
-            buildString {
-                append("AUDIO: 发包队列 —— 目标 $queueTargetDepth 帧 / 当前 ${payloadQueue.size} 帧；")
-                append("本窗口峰值 $windowMaxQueueDepth 帧（≈${windowMaxQueueDepth * tickMs}ms）")
-                if (emptyDelta > 0) {
-                    append("；⚠ 空拍 $emptyDelta 次（每拍 = 接收端一个 ${tickMs}ms 空洞，累计 $emptyTicks）")
-                } else {
-                    append("；空拍 0 次（每拍都发出了包）")
-                }
-                if (packetsDroppedBacklog > 0) {
-                    append("；队列封顶丢 $packetsDroppedBacklog 包（背压没来得及收）")
-                }
-            }
-        log(queueText)
-        // 目标深度回落：连续两个窗口（60 秒）没再空拍，就把垫的深度还回去——延迟只该在
-        // 链路真的抖的时候付，稳下来就该退回 1 帧（零额外延迟）。
-        if (emptyDelta == 0L) {
-            calmWindows++
-            if (calmWindows >= 2 && queueTargetDepth > 1) {
-                queueTargetDepth--
-                calmWindows = 0
-                log("AUDIO: 连续 60 秒没有空拍——目标队列深度回落到 $queueTargetDepth 帧")
-            }
-        } else {
-            calmWindows = 0
-        }
-        windowEmptyTicks = 0
-        windowMaxQueueDepth = payloadQueue.size
         healthAtNanos = now
         healthSyncSent = syncSent
         healthIcmpSent = syncIcmpDeferrals
