@@ -12,6 +12,9 @@ import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -102,6 +105,9 @@ class AudioSender(
         /** 两次「停拍归因」之间的最小间隔（避免连续停摆时把日志刷爆）。 */
         private const val STALL_REPORT_GAP_NANOS = 300_000_000L
 
+        /** 两次「缓冲满丢包」日志之间的最小间隔（5 秒；拥塞时别刷屏）。 */
+        private const val DROP_FULL_LOG_GAP_NANOS = 5_000_000_000L
+
         /** 每次会话最多报这么多条「停拍归因」。 */
         private const val STALL_REPORT_LIMIT = 40
 
@@ -148,7 +154,22 @@ class AudioSender(
 
     /** stop() 幂等闸门（多条收尾路径都会调 stop）。 */
     private val stopped = AtomicBoolean(false)
-    private var socket: DatagramSocket? = null
+    /**
+     * 数据口 6000 的发送通道。
+     *
+     * 2026-11-17 从阻塞式 `DatagramSocket.send()` 换成**非阻塞** `DatagramChannel`：
+     * 车机暂停/掉网时内核发送缓冲填满，`DatagramSocket.send()` 会一直阻塞在 sendto
+     * （11:00:12 日志「发包 1138ms / 本线程 CPU +10ms」——墙钟走了 1.1 秒但线程几乎没耗 CPU，
+     * 只可能是阻塞在内核，不是编码）。一个 send 卡住就把整个定拍泵线程拖住，后面所有帧
+     * 挤在一起补，表现为「声音卡顿/choppy」。
+     *
+     * 非阻塞模式下 send 返回 0（缓冲满）时**丢掉这一包**即可：音频是实时流，晚到的一包
+     * 毫无意义，丢掉反而保住后续帧的节拍。车机恢复消费后自然续发，无需重建会话。
+     *
+     * 同步口 6011 仍用 `DatagramSocket`（每秒仅 1 包，从不会填满缓冲，且它依赖
+     * connect + ICMP 端口不可达判断 controlPort 是否监听，见 [openSyncSocket]）。
+     */
+    private var socket: DatagramChannel? = null
     private var syncSocket: DatagramSocket? = null
     private var record: AudioRecord? = null
     private var thread: Thread? = null
@@ -176,6 +197,7 @@ class AudioSender(
     private var healthIcmpSent = 0L
     private var healthPackets = 0L
     private var healthSamples = 0L
+    private var healthDroppedFull = 0L
 
     /** AAC-LC 编码器（仅 [AudioCodec.AAC_LC] 时创建）。 */
     private var aacEncoder: AacLcEncoder? = null
@@ -212,6 +234,15 @@ class AudioSender(
     /** 采集+推流统计（日志限流用）。 */
     private var packetsSent = 0L
     private var bytesSent = 0L
+
+    /**
+     * 非阻塞发送时因内核缓冲满而丢掉的包数（2026-11-17）。
+     * 丢包是**预期行为**：车机暂停/拥塞时不消费，晚到的包毫无意义；丢掉保住节拍，
+     * 车机恢复后自然续发。这里只计数 + 节流日志，供链路体检区分「我方缓冲满主动丢」
+     * 与「链路上丢」——两者对策完全相反。
+     */
+    @Volatile private var packetsDroppedFull = 0L
+    private var lastDropFullLogAt = 0L
     private var lastLogAt = 0L
     private var readFailures = 0
 
@@ -835,7 +866,8 @@ class AudioSender(
                     "controlPort $controlPort 的 ICMP 拒绝（我们这侧已就地补发；$verdict）",
             )
         }
-        log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB）")
+        log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB" +
+            if (packetsDroppedFull > 0) "；缓冲满主动丢 $packetsDroppedFull 包）" else "）")
     }
 
     /** 捕获配置：媒体/游戏/导航等常见播放用途（逐项添加，个别用途被系统拒绝时跳过）。 */
@@ -868,27 +900,31 @@ class AudioSender(
      * 而我们这侧 0 丢（`环形缓冲丢 0KB`、样本率 47988/秒），丢包只能发生在链路上。
      * 这里能做的就是把「我们发得出去」这件事做到最稳。
      */
-    private fun openDataSocket(): DatagramSocket {
-        val socket = DatagramSocket()
-        socket.connect(InetAddress.getByName(host), dataPort)
+    private fun openDataSocket(): DatagramChannel {
+        // minSdk 31 上 java.nio.channels 必然可用；connect/socket 选项失败沿用
+        // start()/startPassthrough() 外层 try-catch 的既有失败路径（关通道、返回 false）。
+        val channel = DatagramChannel.open()
+        channel.configureBlocking(false)
+        channel.connect(InetSocketAddress(InetAddress.getByName(host), dataPort))
+        val underlying = channel.socket()
         val wantBuffer = 256 * 1024
         val bufferOk =
             runCatching {
-                socket.sendBufferSize = wantBuffer
-                socket.sendBufferSize
+                underlying.sendBufferSize = wantBuffer
+                underlying.sendBufferSize
             }.getOrDefault(0)
         val dscpOk =
             runCatching {
-                socket.trafficClass = 0xB8
+                underlying.trafficClass = 0xB8
                 true
             }.getOrDefault(false)
         val bufferNote = if (bufferOk >= 32 * 1024) "" else "（⚠ 系统限制，按默认走）"
         val dscpNote = if (dscpOk) "" else "（⚠ 不支持，按默认 QoS）"
         log(
-            "AUDIO: 数据口 → $host:$dataPort；发送缓冲 ${bufferOk / 1024}KB$bufferNote" +
-                "；DSCP=EF$dscpNote",
+            "AUDIO: 数据口 → $host:$dataPort（非阻塞，缓冲满即丢这一包不卡泵）；" +
+                "发送缓冲 ${bufferOk / 1024}KB$bufferNote；DSCP=EF$dscpNote",
         )
-        return socket
+        return channel
     }
 
     /**
@@ -993,6 +1029,7 @@ class AudioSender(
         val sentDelta = syncSent - healthSyncSent
         val icmpDelta = syncIcmpDeferrals - healthIcmpSent
         val packetDelta = packetsSent - healthPackets
+        val dropFullDelta = packetsDroppedFull - healthDroppedFull
         val sampleDelta = timestamp - healthSamples
         val seconds = windowMs / 1000.0
         val measured = if (seconds > 0.5) sampleDelta / seconds else 0.0
@@ -1014,7 +1051,13 @@ class AudioSender(
             } else {
                 "累计 $packetDelta 包、${measured.toInt()} 样本/秒（声明 $sampleRate）"
             }
-        log("AUDIO: 链路体检 t$streamType/${codec.name} —— 累计 $packetsSent 包；$rateText；$anchor")
+        val dropFullText =
+            if (dropFullDelta > 0) {
+                "；缓冲满主动丢 $dropFullDelta 包（累计 $packetsDroppedFull）"
+            } else {
+                ""
+            }
+        log("AUDIO: 链路体检 t$streamType/${codec.name} —— 累计 $packetsSent 包；$rateText；$anchor$dropFullText")
         // 混音体检：一行回答「两路各自占多少、有没有被 duck、环形缓冲有没有丢」。
         // 导航+音乐同时播时看这行就能判定是不是混音侧的问题（产出必须 ≈ 每秒帧数）。
         val mixFrames = mixer.windowFrames
@@ -1083,6 +1126,7 @@ class AudioSender(
         healthIcmpSent = syncIcmpDeferrals
         healthPackets = packetsSent
         healthSamples = timestamp
+        healthDroppedFull = packetsDroppedFull
     }
 
     /**
@@ -1269,10 +1313,25 @@ class AudioSender(
         nonceCounter++
         val client = socket ?: return false
         return try {
-            client.send(DatagramPacket(wire, wire.size))
-            packetsSent++
-            bytesSent += wire.size
-            true
+            // 非阻塞：缓冲满时 send 返回 0，绝不卡住泵线程。丢这一包（晚到无意义），
+            // RTP 序号/时间戳上面已经推进过——保持时间轴单调，车机按 seq gap 识别丢包。
+            val written = client.write(ByteBuffer.wrap(wire))
+            if (written <= 0) {
+                packetsDroppedFull++
+                val now = System.nanoTime()
+                if (lastDropFullLogAt == 0L || now - lastDropFullLogAt >= DROP_FULL_LOG_GAP_NANOS) {
+                    lastDropFullLogAt = now
+                    log(
+                        "AUDIO: 数据口缓冲满——已主动丢 $packetsDroppedFull 包" +
+                            "（车机暂停/拥塞时不消费；非阻塞不卡泵，恢复后自动续发）",
+                    )
+                }
+                true // 不是链路断，别 stop——丢包是预期行为
+            } else {
+                packetsSent++
+                bytesSent += wire.size
+                true
+            }
         } catch (error: IOException) {
             log("AUDIO: UDP 发送失败 - ${error.message}")
             false

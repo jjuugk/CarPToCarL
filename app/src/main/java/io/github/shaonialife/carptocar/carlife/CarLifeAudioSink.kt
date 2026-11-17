@@ -138,7 +138,7 @@ internal class CarLifeAudioSink(
                 if (pauseIndefinite) {
                     "车机侧暂停，等它归还音频后才恢复"
                 } else {
-                    "${PAUSE_DROP_WINDOW_MS / 1000} 秒后自动恢复放行"
+                    "${PAUSE_DROP_WINDOW_MS / 1000} 秒窗口，之后到达的 PCM 即放行"
                 }
             log("CARLIFE: 音乐会话暂停——丢弃引擎残留 PCM（避免重复播放，$suffix）")
         }
