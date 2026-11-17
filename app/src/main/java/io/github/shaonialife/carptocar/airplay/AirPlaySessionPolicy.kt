@@ -30,6 +30,30 @@ internal object AirPlaySessionPolicy {
         pairingInProgress: Boolean,
         pendingRequests: Int,
     ): Boolean = pairingInProgress || pendingRequests > 0
+
+    /**
+     * 声明 CARPLAY_CONTROL(bit37) 的车机等不到本轮 ctrl 邀请时，能不能按已发现的 mDNS
+     * 端点放行直连（而不是 4 秒就整轮放弃）。
+     *
+     * 背景（2026-11-17 BMW 28041 / G38-NBTevo，1.2.64 连不上、1.2.32 能连）：
+     * `c12d30e` 给 `[awaitCtrlInvite]` 加了门控——bit37 车机只认本轮新邀请，连 mDNS
+     * 发现端点都不放行，怕「抢在车机打开 AirPlay 窗口前连接」。这台车恰好声明 bit37，
+     * 却从不下发 0x4301、也不发 ctrl 邀请，mDNS 端点却是确定的 `172.16.224.1:7000`，
+     * 于是 11 轮全部卡死在等邀请。
+     *
+     * 判据不看「车机的声明」（会撒谎）也不看「有没有 mDNS 记录」（可能过期），只看
+     * **端点端口此刻实测可不可连**：连得上 = 车机 AirPlay 窗口确实开着，放行直连不会
+     * 抢跑，正是门控想放行却又怕误判的那种情形；连不上 = 窗口没开，继续等邀请，
+     * 保住 `c12d30e` 要防的行为。
+     *
+     * @param receiverControlled 车机是否声明 bit37；false 的车机本就不走这道门控，
+     *   返回 true 表示「按既有行为放行」，不改变它。
+     * @param endpointReachable mDNS 端点的 AirPlay 端口（默认 7000）TCP 实测可连。
+     */
+    fun allowReceiverControlledFallback(
+        receiverControlled: Boolean,
+        endpointReachable: Boolean,
+    ): Boolean = !receiverControlled || endpointReachable
 }
 
 /** pair-setup 拿到错误码之后的下一步。 */

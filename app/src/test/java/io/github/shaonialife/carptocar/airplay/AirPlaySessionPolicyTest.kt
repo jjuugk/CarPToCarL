@@ -86,4 +86,45 @@ class AirPlaySessionPolicyTest {
             }
         }
     }
+
+    // ---- ③ bit37 门控降级：声明「车机发起」却从不邀请的车机 ----
+
+    @Test
+    fun `未声明 bit37 的车机维持既有放行行为`() {
+        // 不看端口探测结果——老车机本来就按 mDNS 端点放行，门控不作用于它
+        assertTrue(
+            AirPlaySessionPolicy.allowReceiverControlledFallback(
+                receiverControlled = false,
+                endpointReachable = false,
+            ),
+        )
+        assertTrue(
+            AirPlaySessionPolicy.allowReceiverControlledFallback(
+                receiverControlled = false,
+                endpointReachable = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `bit37 车机端口实测可连才放行直连`() {
+        // 2026-11-17 BMW 28041：从不下发 0x4301/邀请，但 mDNS 端点 172.16.224.1:7000 可连
+        assertTrue(
+            AirPlaySessionPolicy.allowReceiverControlledFallback(
+                receiverControlled = true,
+                endpointReachable = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `bit37 车机端口连不上时继续等邀请不抢跑`() {
+        // c12d30e 要防的：车机窗口没开就直连会 ECONNREFUSED 并把重试搅乱
+        assertFalse(
+            AirPlaySessionPolicy.allowReceiverControlledFallback(
+                receiverControlled = true,
+                endpointReachable = false,
+            ),
+        )
+    }
 }

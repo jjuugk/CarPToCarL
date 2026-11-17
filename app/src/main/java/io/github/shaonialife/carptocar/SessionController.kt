@@ -19,6 +19,7 @@ import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
 import io.github.shaonialife.carptocar.audio.NavAudioRoute
+import io.github.shaonialife.carptocar.airplay.AirPlaySessionPolicy
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
@@ -190,6 +191,13 @@ object SessionController {
      * 车机不发邀请时（旧机型）由「已发现 _airplay._tcp」提前放行，最坏也只等这么久。
      */
     private const val CTRL_INVITE_WAIT_MS = 4_000L
+
+    /**
+     * 声明 bit37 的车机等邀请到多久后做一次端点端口探测（2026-11-17 门控降级）。
+     * 1.2s 给真会邀请的车机先发邀请的机会；太早探会把「马上就邀请」的车机误判成不发。
+     * 探测本身 TCP connect 最长 PROBE_TIMEOUT_MILLIS，所以只做一次、不循环。
+     */
+    private const val CTRL_FALLBACK_PROBE_FIRST_MS = 1_200L
 
     /** 端点不完整时等 mDNS 缓存命中：绑网时已开始发现，通常几百毫秒内命中。 */
     private const val ENDPOINT_RESOLVE_WAIT_MS = 3_000L
@@ -3820,12 +3828,16 @@ object SessionController {
         ssid: String,
         timeoutMillis: Long,
         receiverControlled: Boolean,
+        endpointToProbe: Iap2SenderSession.CarPlayEndpoint,
     ): Boolean {
         val advertiser = ctrlAdvertiser
         val deadline = android.os.SystemClock.uptimeMillis() + timeoutMillis
         val startedAt = android.os.SystemClock.uptimeMillis()
         var lastLogAt = startedAt
         var reannounced = false
+        // bit37 车机端口探测：只在声明了「车机发起」却迟迟不邀请时做，且只探一次——
+        // 每次 TCP connect 最长 PROBE_TIMEOUT_MILLIS(800ms)，不能每 50ms 一次。
+        var probedOnce = false
         while (android.os.SystemClock.uptimeMillis() < deadline) {
             if (connectCancelled) return false
             val invites = advertiser?.inviteCount ?: 0
@@ -3838,6 +3850,40 @@ object SessionController {
             }
             // 邀请更早到过、只是当时端点未就绪（catplay cache_miss 自愈）：直接接续。
             if (consumePendingInvite("等邀请窗口")) return true
+            val nowForProbe = android.os.SystemClock.uptimeMillis()
+            // 门控降级（2026-11-17 BMW 28041）：声明 bit37 但从不下发 0x4301/邀请的车机，
+            // 只要 mDNS 端点此刻 TCP 可连就放行——端口可连即「车机 AirPlay 窗口已开」，
+            // 不会抢跑；连不上则继续等邀请，保留 c12d30e 防「窗口没开就连」的语义。
+            // 探测放在 1.2s 后（给真会邀请的车机先发邀请的机会），且只探一次——
+            // 此刻连不上多半是窗口还没开，多探也是同样结果；后续邀请到了会被正常处理。
+            if (
+                receiverControlled &&
+                invites == 0 &&
+                !probedOnce &&
+                nowForProbe - startedAt >= CTRL_FALLBACK_PROBE_FIRST_MS
+            ) {
+                probedOnce = true
+                val reachable = probeEndpoint(endpointToProbe)
+                if (
+                    AirPlaySessionPolicy.allowReceiverControlledFallback(
+                        receiverControlled = receiverControlled,
+                        endpointReachable = reachable,
+                    )
+                ) {
+                    appendLog(
+                        "CTRL: ✓ 车机声明 bit37 但 ${nowForProbe - startedAt}ms 仍无邀请——mDNS 端点 " +
+                            "${endpointToProbe.ipAddresses.firstOrNull()}:${endpointToProbe.airPlayPort} " +
+                            "TCP 可连（车机窗口已开），按旧版行为放行直连；" +
+                            "端口不可连则继续等邀请，不抢跑",
+                    )
+                    return true
+                }
+                appendLog(
+                    "CTRL: 车机声明 bit37、无邀请，mDNS 端点 " +
+                        "${endpointToProbe.ipAddresses.firstOrNull()}:${endpointToProbe.airPlayPort} " +
+                        "TCP 暂不可连——继续等本轮邀请（窗口未开不抢跑）",
+                )
+            }
             val browserInfo = endpointBrowser?.awaitEndpoint(0)
             if (browserInfo != null && !receiverControlled) {
                 // bit37 CARPLAY_CONTROL = 车机声明「由它主动发起连接」。catplay 的
@@ -5538,7 +5584,14 @@ object SessionController {
                         // 等 ctrl 邀请（catplay CarPlayCtrlServer：邀请=车机已发现手机且
                         // AirPlay 窗口已开，收到即刻连接）。此前是「固定睡 1.6s 赌它已到」，
                         // 快的时候白等、慢的时候不够；改为事件驱动。
-                        if (!awaitCtrlInvite(endpoint.ssid, CTRL_INVITE_WAIT_MS, receiverControlled) && receiverControlled) {
+                        if (
+                            !awaitCtrlInvite(
+                                endpoint.ssid,
+                                CTRL_INVITE_WAIT_MS,
+                                receiverControlled,
+                                effectiveEndpoint,
+                            ) && receiverControlled
+                        ) {
                             // 没等到本轮新邀请就不连：保留发现与蓝牙监听，等车机邀请或回连再起一轮
                             phaseHint = "等待车机发出新的连接邀请"
                             connectBudget.end(cause = "CARPLAY_CONTROL 车机尚未发出本轮新邀请", keywords = "ctrl-int / 新邀请")
