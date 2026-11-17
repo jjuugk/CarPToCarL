@@ -1265,6 +1265,14 @@ object SessionController {
     private var activeAudioProfile: AudioProfile? = null
 
     /**
+     * 当前发给车机的音频档采样率（Hz）；0 = 本次没有音频流。
+     *
+     * 与 [CarLifeHijack.mediaSourceSampleRate]（引擎输出率）并列显示，可判断有无重采样。
+     */
+    val activeAudioSampleRate: Int
+        get() = activeAudioProfile?.sampleRate ?: 0
+
+    /**
      * 当前音频流是否处在**通话场景**（`audioType=telephony` 档）。
      *
      * 通话与媒体在接收端是两条**不同的输出设备**：车机收到 telephony 档的流才会打开
@@ -4056,7 +4064,15 @@ object SessionController {
                 appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
             }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
-            val ordered = AudioProfileMemory.order(candidates, entry)
+            var ordered = AudioProfileMemory.order(candidates, entry)
+            // 采样率偏好：把用户指定率的档提到最前（与 CarLife 引擎宣告的 MEDIA_SAMPLE_RATE
+            // 两端对齐，避免 44.1↔48 重采样）。只重排不删除，另一率的档仍留作兜底。
+            val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
+            if (ratePref.targetSampleRate != null) {
+                val before = ordered.map { it.sampleRate }.distinct()
+                ordered = ratePref.reorderCandidates(ordered)
+                appendLog("AUDIO: 采样率偏好=${ratePref.label}——优先 ${ratePref.targetSampleRate}Hz 档（重排前候选率=$before）")
+            }
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
                 return false

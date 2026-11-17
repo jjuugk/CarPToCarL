@@ -1164,6 +1164,58 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
+                <!-- 媒体采样率策略：点击循环 自动 → 48kHz → 44.1kHz -->
+                <LinearLayout
+                    android:id="@+id/rowAudioRate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="媒体采样率"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/audioRateNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="不改引擎采样率，也不改音频档顺序（原有行为）"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/audioRateValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_icon_tile"
+                        android:gravity="center"
+                        android:minWidth="56dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:text="自动"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <!-- 方向盘语音键三连击 → 重启音频（默认开） -->
                 <View
                     android:layout_width="match_parent"

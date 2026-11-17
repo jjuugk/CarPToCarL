@@ -383,6 +383,15 @@ internal object CarLifeProtocol {
         useVehicleResolution: Boolean = true,
         mediaLyricSupport: Boolean = true,
         contentEncryption: Boolean = false,
+        /**
+         * 引擎媒体 PCM 采样率宣告（`MEDIA_SAMPLE_RATE`）。
+         *
+         * 反编译 carlife.apk 证实：`AudioUtil.isSampleRate48K()` = `mSampleRateSupported == 1`，
+         * 而 `mSampleRateSupported` 由 featureConfig 里 `key=="MEDIA_SAMPLE_RATE"` 的 value 设置。
+         * `1` → 引擎输出 48k，其它值 → 44.1k；**只在引擎 `is48k` 偏好尚未写过时生效**（默认值）。
+         * null = 不下发这一项（保持旧行为，让引擎/车机自行决定）。
+         */
+        mediaSampleRate: Int? = null,
     ): ByteArray {
         val items = ArrayList<ByteArray>()
         items += pbString(1, "I_FRAME_INTERVAL") + pbVarint(2, iFrameInterval)
@@ -390,6 +399,9 @@ internal object CarLifeProtocol {
         items += pbString(1, "DISABLE_RESOLUTION_OPTION") + pbVarint(2, if (useVehicleResolution) 1 else 0)
         items += pbString(1, "CONTENT_ENCRYPTION") + pbVarint(2, if (contentEncryption) 1 else 0)
         items += pbString(1, "MEDIA_LYRIC_SUPPORT") + pbVarint(2, if (mediaLyricSupport) 1 else 0)
+        if (mediaSampleRate != null) {
+            items += pbString(1, "MEDIA_SAMPLE_RATE") + pbVarint(2, mediaSampleRate)
+        }
         var list = ByteArray(0)
         for (item in items) list += pbBytes(2, item)
         val cnt = items.size

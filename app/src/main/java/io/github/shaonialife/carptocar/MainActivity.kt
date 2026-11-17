@@ -32,6 +32,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
@@ -1888,6 +1889,25 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        // 媒体采样率策略：自动 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
+        val audioRateRow = findViewById<android.view.View>(R.id.rowAudioRate)
+        val audioRateValue = findViewById<TextView>(R.id.audioRateValue)
+        val audioRateNote = findViewById<TextView>(R.id.audioRateNote)
+
+        fun refreshAudioRate() {
+            val pref = AudioRatePreference.load(ctx)
+            audioRateValue.text = pref.label
+            audioRateNote.text = pref.detail
+        }
+
+        refreshAudioRate()
+        audioRateRow.setOnClickListener {
+            val next = AudioRatePreference.load(ctx).next()
+            AudioRatePreference.save(ctx, next)
+            refreshAudioRate()
+            snack("媒体采样率：${next.label}（下次连接起效；引擎已手动设过 48k 偏好时以引擎为准）")
+        }
+
         // 方向盘语音键三连击 → 重启音频（默认开）。
         // 只说「短按三次」，不提 VR_START/VR_STOP：用户要的是「怎么用」和「什么时候用」。
         val tripleRestartSwitch = findViewById<SwitchCompat>(R.id.switchVoiceTripleRestart)
@@ -2044,8 +2064,22 @@ class MainActivity : AppCompatActivity() {
             )!!
         DrawableCompat.setTint(icon.mutate(), getColor(if (on) R.color.m3_ok else R.color.m3_outline))
         audioTag.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
-        audioTag.text = if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭"
+        // 采样率显示：车机协商档（发过去的）+ 引擎源率（CarLife 实际输出）。
+        // 两者不等说明正在重采样——实车 44.1k↔48k 重采样会数分钟后累计卡顿，值得一眼看出。
+        val carRate = SessionController.activeAudioSampleRate
+        val engineRate = CarLifeHijack.mediaSourceSampleRate
+        val rateText =
+            when {
+                carRate <= 0 -> ""
+                engineRate <= 0 || engineRate == carRate -> " · ${carRate / 1000}kHz"
+                else -> " · 引擎${fmtRate(engineRate)}→车机${fmtRate(carRate)}（重采样）"
+            }
+        audioTag.text = (if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭") + rateText
     }
+
+    /** 采样率显示成 "44.1k" / "48k" / "16k" 这样的短标签。 */
+    private fun fmtRate(hz: Int): String =
+        if (hz % 1000 == 0) "${hz / 1000}k" else "%.1fk".format(hz / 1000.0)
 
     /**
      * 连接准备计数：热点 SSID / 蓝牙配对 / 投屏权限。

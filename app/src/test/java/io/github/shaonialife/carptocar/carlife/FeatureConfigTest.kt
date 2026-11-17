@@ -52,4 +52,26 @@ class FeatureConfigTest {
         val valueIndex = at + "CONTENT_ENCRYPTION".length + 1 // +1 跳过 field2 的 tag(0x10)
         assertEquals("默认必须发 0（不加密）", 0, payload[valueIndex].toInt())
     }
+
+    @Test
+    fun mediaSampleRateAbsentByDefault() {
+        // 自动档：不下发 MEDIA_SAMPLE_RATE（保持旧行为，条数仍 5）。
+        val payload = CarLifeProtocol.featureConfig()
+        assertEquals("默认条数 5", 5, payload[1].toInt())
+        assertTrue("默认不能出现 MEDIA_SAMPLE_RATE", !asText(payload).contains("MEDIA_SAMPLE_RATE"))
+    }
+
+    @Test
+    fun mediaSampleRateCarriedWhenSet() {
+        // 指定率：新增一项，条数变 6；值 1=48k、0=44.1k（引擎的判定是 ==1）。
+        for ((value, label) in listOf(1 to "48k", 0 to "44.1k")) {
+            val payload = CarLifeProtocol.featureConfig(mediaSampleRate = value)
+            val text = asText(payload)
+            assertEquals("带 MEDIA_SAMPLE_RATE 时条数 6（$label）", 6, payload[1].toInt())
+            val at = text.indexOf("MEDIA_SAMPLE_RATE")
+            assertTrue("必须带 MEDIA_SAMPLE_RATE（$label）：$text", at >= 0)
+            val valueIndex = at + "MEDIA_SAMPLE_RATE".length + 1 // +1 跳过 field2 tag(0x10)
+            assertEquals("$label 的值应写进 field2", value, payload[valueIndex].toInt())
+        }
+    }
 }

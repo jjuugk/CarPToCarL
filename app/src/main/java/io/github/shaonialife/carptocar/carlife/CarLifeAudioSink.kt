@@ -44,6 +44,9 @@ internal class CarLifeAudioSink(
     @Volatile
     private var srcRate = 0
 
+    /** 引擎宣告的源采样率（只读，供 UI 显示是否发生 44.1↔48 重采样）；0 = 尚未宣告。 */
+    val sourceSampleRate: Int get() = srcRate
+
     /** CarLife 引擎宣告的源声道数（1 或 2）。 */
     @Volatile
     private var srcChannels = 2

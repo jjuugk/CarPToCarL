@@ -112,6 +112,14 @@ class CarLifeHuClient(
      */
     initialConnectType: Int = 5,
     /**
+     * 98386 featureConfig 里的 `MEDIA_SAMPLE_RATE`（引擎媒体 PCM 采样率宣告）。
+     *
+     * `1` → 引擎输出 48k，其它值 → 44.1k；null = 不下发这一项（保持旧行为）。
+     * 该字段只是引擎的**默认值**，引擎持久化偏好 `is48k` 一旦写过就会覆盖它。
+     * 由 [io.github.shaonialife.carptocar.audio.AudioRatePreference] 设置映射而来。
+     */
+    private val mediaSampleRate: Int? = null,
+    /**
      * 帧率变更命令的探测 id 列表。
      *
      * 手机端 `VideoMsgHandler.handleMessage` 里确实有 `VIDEO_ENCODER_FRAME_RATE_CHANGE`
@@ -879,9 +887,10 @@ class CarLifeHuClient(
                     log(
                         "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                             "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
-                            "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
+                            "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词" +
+                                (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") + "）",
                     )
-                    send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+                    send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
                     Thread.sleep(1200)
                     log("CARLIFE: 主动推送 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
                     sendEncoderInit()
@@ -1135,7 +1144,7 @@ class CarLifeHuClient(
         if (reason != "命中" && connectType != PROBE_DEFAULT_TYPE) {
             connectType = PROBE_DEFAULT_TYPE
             runCatching {
-                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
             }
             log("CARLIFE: [探测] 已复位 CONNECT_TYPE=$connectType")
         }
@@ -1480,10 +1489,11 @@ class CarLifeHuClient(
             log(
                 "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                     "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
-                    "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词）",
+                    "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词" +
+                        (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") + "）",
             )
         }
-        send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType))
+        send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
     }
 
     /**

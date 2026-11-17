@@ -1,6 +1,7 @@
 package io.github.shaonialife.carptocar.carlife
 
 import android.content.Context
+import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSource
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
@@ -499,6 +500,14 @@ object CarLifeHijack {
 
     /** 已劫持并收到流（车机连接前就该为 true）。 */
     val isStreaming: Boolean get() = running.get() && client?.isRunning == true && hasVideo
+
+    /**
+     * CarLife 引擎当前宣告的媒体 PCM 采样率（Hz）；0 = 尚未宣告。
+     *
+     * 供 UI 与车机协商档采样率并列显示，一眼看出是否发生 44.1↔48 重采样。
+     */
+    val mediaSourceSampleRate: Int
+        get() = synchronized(audioPlaybackLock) { audioSink?.sourceSampleRate ?: 0 }
 
     /**
      * 最近 10s 内源侧**真的出过视频帧**。判定一律以真实视频流为准（用户明确要求）：
@@ -1029,6 +1038,7 @@ object CarLifeHijack {
                     onMediaProgress = { ms -> onMediaProgress(ms) },
                     requestedFps = requestedFps,
                     initialConnectType = connectType,
+                    mediaSampleRate = AudioRatePreference.load(appContext).mediaSampleRateFeatureValue,
                     probeIds = probeIds,
                     connectTypeProbe = connectTypeProbe,
                     orderedInit = orderedInit,
