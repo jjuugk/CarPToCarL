@@ -59,6 +59,15 @@ object PermissionRepair {
         BATTERY("电池优化已忽略", "系统会问「是否允许应用始终在后台运行」，点「允许」"),
 
         /**
+         * 后台存活（2026-11-17）：`isBackgroundRestricted` / standby bucket 被判定受限时。
+         *
+         * 这一项**没有系统弹窗**——厂商的「应用冻结 / 应用启动管理」是自家页面，
+         * AOSP 没有对应 Action。只能打开应用详情页，让用户在那儿往里点
+         * （各 ROM 路径不同：ColorOS「耗电管理 → 允许后台运行」、MagicOS「应用启动管理」）。
+         */
+        BACKGROUND("后台存活未被限制", "在打开的页面里找到「电池 / 耗电管理」，改成「不限制」或允许后台运行"),
+
+        /**
          * 兜底步，**不进 [stepsFor] 的计划**：Android 12/12L 没有
          * `POST_NOTIFICATIONS` 这个运行时权限，通知被关只能在系统页面里开。
          * 只有 `PERMISSIONS` 那一步发现「没有运行时权限可申请、但通知仍旧关着」时才用它。
@@ -89,6 +98,7 @@ object PermissionRepair {
             if (Requirement.LOCATION_SERVICE in missing) add(Step.LOCATION)
             if (Requirement.NOTIFICATION_ACCESS in missing) add(Step.NOTIFICATION_ACCESS)
             if (Requirement.BATTERY_OPTIMIZATION in missing) add(Step.BATTERY)
+            if (Requirement.BACKGROUND_SURVIVAL in missing) add(Step.BACKGROUND)
         }
 
     /** 现查一遍体检，给出「还要补哪几步」（已满足的不会出现）。 */
@@ -181,6 +191,14 @@ object PermissionRepair {
                         putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                     },
                     appDetails(context),
+                )
+
+            // 后台限制没有通用 Action：各 ROM 的自启/耗电管理页都在**应用详情**里
+            // （ColorOS 在「耗电管理」，MagicOS 在「应用启动管理」），所以先跳详情页。
+            Step.BACKGROUND ->
+                listOf(
+                    appDetails(context),
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
                 )
         }
 

@@ -44,9 +44,67 @@ class CarPlayService : Service() {
         object : Runnable {
             override fun run() {
                 refreshNotification()
+                syncKeepAliveSession()
                 uiHandler.postDelayed(this, STATE_TICK_MS)
             }
         }
+
+    /**
+     * 让 MediaSession 反映「音频流在不在推」。没有流就置 PAUSED，但**不释放会话**
+     * （会话本身保持 active，重建要重新走系统侧登记，反而多一次抖动）。
+     */
+    private fun syncKeepAliveSession() {
+        val playing = SessionController.audioStreamingNow
+        if (keepAlivePlaying == playing && keepAliveSession != null) return
+        runCatching {
+            val session =
+                keepAliveSession
+                    ?: android.media.session.MediaSession(this, "CarPToCarL").also {
+                        // **不设 FLAG_HANDLES_MEDIA_BUTTONS**：我们要的只是「媒体类身份」，
+                        // 不抢按键。设了它，系统会把方向盘/耳机的媒体键优先投给我们这条
+                        // 空会话，而真正的播放器（网易云等）收不到——1.2.59 好不容易理顺的
+                        // 方控切歌会从这里断掉。
+                        it.setFlags(0)
+                        it.setMetadata(
+                            android.media.MediaMetadata
+                                .Builder()
+                                .putString(
+                                    android.media.MediaMetadata.METADATA_KEY_TITLE,
+                                    "车机音频直通",
+                                ).putString(
+                                    android.media.MediaMetadata.METADATA_KEY_ARTIST,
+                                    "CarPToCarL",
+                                ).build(),
+                        )
+                        it.isActive = true
+                        keepAliveSession = it
+                        fileLog("SVC: 保活 MediaSession 已登记（降低被系统冻结的概率）")
+                    }
+            session.setPlaybackState(
+                android.media.session.PlaybackState
+                    .Builder()
+                    .setState(
+                        if (playing) {
+                            android.media.session.PlaybackState.STATE_PLAYING
+                        } else {
+                            android.media.session.PlaybackState.STATE_PAUSED
+                        },
+                        android.media.session.PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                        if (playing) 1f else 0f,
+                    ).build(),
+            )
+            keepAlivePlaying = playing
+        }.onFailure { fileLog("SVC: MediaSession 同步失败 - ${it.message}") }
+    }
+
+    private fun releaseKeepAliveSession() {
+        keepAlivePlaying = null
+        runCatching {
+            keepAliveSession?.isActive = false
+            keepAliveSession?.release()
+        }
+        keepAliveSession = null
+    }
 
     /**
      * 冻结监视：每秒一次心跳，靠 `elapsedRealtime()` 的跳变判定进程是否被系统冻结过。
@@ -55,6 +113,25 @@ class CarPlayService : Service() {
      * 解冻后第一次 tick 就会看到「本该 1 秒前跑的心跳，现在才到」，差值就是冻结时长。
      */
     private val freezeWatch = FreezeWatch()
+
+    /**
+     * 保活用 MediaSession（2026-11-17）。
+     *
+     * 目的不是「放歌」，是让系统把我们当成**正在播放音频的媒体应用**：
+     * 前台服务 + 唤醒锁都拿齐了，国产 ROM 的冻结策略仍然会挂起进程（两份实车日志：
+     * 荣耀 7s/19s/25s、一加 10s，每次冻结都让车机按 keepAlive 超时把会话撤掉）。
+     * 而「媒体类前台服务 + 活跃 MediaSession」是各家省电策略里唯一被普遍豁免的组合。
+     *
+     * 只在**音频流真的在推**时置为 PLAYING，其余时候置为 PAUSED——不假装在播，
+     * 免得手机媒体控制中心出现一张空的播放卡。
+     *
+     * **必须被通知监听器忽略**：`MediaListenerService` 会遍历活跃会话找「正在播放」的那条，
+     * 我们自己的会话混进去会让车机歌名变成 CarPToCarL 自己。那边已按包名过滤。
+     */
+    private var keepAliveSession: android.media.session.MediaSession? = null
+
+    /** 上一次同步给 MediaSession 的播放态（避免每 3 秒重复写状态、重复唤醒系统）。 */
+    private var keepAlivePlaying: Boolean? = null
 
     private val freezeTick =
         object : Runnable {
@@ -125,7 +202,13 @@ class CarPlayService : Service() {
             this,
             NOTIFICATION_ID,
             buildNotification(),
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            // mediaPlayback 与 connectedDevice 一起声明（2026-11-17）：
+            // 车机在的时候我们是「连着设备」，同时在把音频往车上送——这两个身份都成立。
+            // 只报 connectedDevice 时，国产 ROM 的冻结策略仍会挂起进程（1.2.62/1.2.63
+            // 两份实车日志里各有 7s / 10s / 19s / 25s 的冻结，全部导致车机按 keepAlive
+            // 超时撤会话）。带上媒体类身份 + 活跃 MediaSession 才稳。
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
         )
         acquireLocks()
         // 通知栏文案跟着会话阶段走：服务一活就开始刷新，销毁时停。
@@ -200,7 +283,8 @@ class CarPlayService : Service() {
                 NOTIFICATION_ID,
                 buildNotification(),
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         } catch (error: Exception) {
             fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
@@ -211,6 +295,7 @@ class CarPlayService : Service() {
         uiHandler.removeCallbacks(stateTick)
         uiHandler.removeCallbacks(freezeTick)
         freezeWatch.reset()
+        releaseKeepAliveSession()
         releaseLocks()
         // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
         // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
@@ -315,6 +400,9 @@ class CarPlayService : Service() {
             )
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
+            // IMMEDIATE（API 31+）：不加这条时系统允许把新前台服务的通知延后 10 秒展示，
+            // 期间服务处于「未完成启动」状态——部分 ROM 会顺势判它可被冻结。
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("CarPToCarL · 车机连接")
             .setContentText(text)

@@ -26,6 +26,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- 前台服务额外声明 mediaPlayback 类型（2026-11-17）：
+         只报 connectedDevice 时，国产 ROM 的「应用冻结」照样会在息屏/后台把进程挂起
+         （实车日志：`PROC: 进程被系统冻结 10 秒` → 心跳断 11s → 车机按 keepAlive 超时撤会话）。
+         带 mediaPlayback 类型 + 活跃 MediaSession 的进程，系统才按「媒体应用」对待。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- 音频通道：AudioPlaybackCapture（捕获本机媒体/导航声音上车）必需 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 音频通道激活时静音手机媒体音量（声音只从车机出），断开恢复 -->
@@ -92,7 +97,7 @@
         <service
             android:name=".service.CarPlayService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|mediaProjection" />
+            android:foregroundServiceType="connectedDevice|mediaProjection|mediaPlayback" />
 
         <!-- 通知栏「断开」：后台自动连接时界面上没有窗口，断开的入口必须独立于
              界面存活，所以走广播。exported=false 即可——PendingIntent 由本应用创建，

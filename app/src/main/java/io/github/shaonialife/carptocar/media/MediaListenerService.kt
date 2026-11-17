@@ -38,7 +38,7 @@ class MediaListenerService : NotificationListenerService() {
                 componentName(this),
             )
             MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
-            update(manager.getActiveSessions(componentName(this)))
+            update(activeSessions())
             // 重绑（disallow/allow 自愈、系统重连）会再走一遍 onListenerConnected：
             // 先摘掉上一条轮询，否则 1Hz 刷新会按重连次数叠加，永不退出。
             mainHandler.removeCallbacks(periodicRefresh)
@@ -84,6 +84,17 @@ class MediaListenerService : NotificationListenerService() {
     private val manager by lazy {
         getSystemService(android.content.Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
     }
+
+    /**
+     * 活跃媒体会话（**已剔除本应用自己**）。
+     *
+     * 2026-11-17 起前台服务会维持一条保活 MediaSession（防系统冻结，见
+     * `CarPlayService.syncKeepAliveSession`）。它同样出现在活跃会话列表里，而
+     * [refresh] 取的是「第一条 STATE_PLAYING」——不过滤的话车机上的歌名会被
+     * 我们自己的「车机音频直通」顶掉。保活是保活，不能污染播放信息。
+     */
+    private fun activeSessions(): List<android.media.session.MediaController> =
+        manager.getActiveSessions(componentName(this)).filterNot { it.packageName == packageName }
 
     private val sessionListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
@@ -165,7 +176,7 @@ class MediaListenerService : NotificationListenerService() {
         if (!NotificationAccess.isConnected || !NotificationAccess.isGranted(this)) return
         val controllers =
             try {
-                manager.getActiveSessions(componentName(this))
+                activeSessions()
             } catch (_: SecurityException) {
                 NotificationAccess.markDisconnected()
                 MediaSessionsState.accessGranted = false

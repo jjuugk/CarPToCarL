@@ -32,8 +32,9 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
  * [Severity.BLOCKING] / [Severity.WARNING] / [Severity.INFO] 三档——**只读体检绝不
  * 阻断连接**，缺项写清后果，由既有流程去引导，避免又多出几个自家弹窗。
  *
- * 11 项：蓝牙权限 / 蓝牙开关 / WLAN 权限 / WLAN 开关 / 本机地址 / 位置服务 /
- * 目标车机已配对 / 本机蓝牙名 / 通知权限 / 通知使用权（媒体会话）/ 电池优化。UI 与日志
+ * 12 项：蓝牙权限 / 蓝牙开关 / WLAN 权限 / WLAN 开关 / 本机地址 / 位置服务 /
+ * 目标车机已配对 / 本机蓝牙名 / 通知权限 / 通知使用权（媒体会话）/ 电池优化 /
+ * 后台存活未被限制。UI 与日志
  * 取的是同一份 [Report]（[Report.headline] 给界面一行摘要，[Report.describe] 给日志与
  * 详情弹窗），因此界面上看到的那句话，导出的日志里一定有完全相同的一份。
  *
@@ -74,6 +75,21 @@ object ConnectionPreflight {
         NOTIFICATIONS("通知权限", Severity.INFO),
         NOTIFICATION_ACCESS("通知使用权（媒体会话）", Severity.INFO),
         BATTERY_OPTIMIZATION("电池优化已忽略", Severity.INFO),
+
+        /**
+         * 厂商/系统的后台限制（2026-11-17 加）。
+         *
+         * 为什么要单独一项：`isIgnoringBatteryOptimizations` 只管 Doze 白名单，
+         * **管不到厂商自己的应用冻结**。两份实车日志里它都是「✓ 已忽略」，进程照样被冻：
+         * 荣耀 PTP-AN10 冻了 7s / 19s / 25s，一加 PJA110 冻了 10s。
+         * 冻结期间不发帧、不回 keepAlive，车机按超时撤会话——用户看到的就是
+         * 「刚出声不到一分钟，画面和声音一起没了」。
+         *
+         * 判据只看**系统自己承认的两个事实**（都不需要额外权限）：
+         * `isBackgroundRestricted`（应用被限制后台）与 standby bucket 是否落进
+         * RARE/RESTRICTED。真被限制时，光靠前台服务 + 唤醒锁是救不回来的。
+         */
+        BACKGROUND_SURVIVAL("后台存活未被限制", Severity.INFO),
     }
 
     /**
@@ -359,6 +375,7 @@ object ConnectionPreflight {
                         "未忽略会限制后台存活：车机回连时本机可能已被系统冻结",
                     ),
                 )
+                add(backgroundSurvivalCheck(app))
             }
         return Report(checks)
     }
@@ -367,4 +384,53 @@ object ConnectionPreflight {
         context: Context,
         permission: String,
     ): Boolean = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * 「后台存活未被限制」：`isBackgroundRestricted` + app standby bucket 两条系统事实。
+     *
+     * 都不需要额外权限（只查自己）：`ActivityManager.isBackgroundRestricted()` 与
+     * `UsageStatsManager.appStandbyBucket`（Android 9+）。两条都为 false/正常才算就绪。
+     *
+     * 之所以不判厂商私有开关（ColorOS「应用冻结」、MagicOS「应用启动管理」）——
+     * 那些没有公开 API，读不到就只能靠日志里的冻结事件兜底
+     * （`PROC: 进程被系统冻结 N 秒`，见 CarPlayService.freezeTick）。
+     */
+    private fun backgroundSurvivalCheck(app: Context): Check {
+        val restricted =
+            runCatching {
+                app.getSystemService(android.app.ActivityManager::class.java)
+                    ?.isBackgroundRestricted == true
+            }.getOrDefault(false)
+        val bucket =
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    app.getSystemService(android.app.usage.UsageStatsManager::class.java)
+                        ?.appStandbyBucket ?: -1
+                } else {
+                    -1
+                }
+            }.getOrDefault(-1)
+        val rareOrRestricted =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                (
+                    bucket == android.app.usage.UsageStatsManager.STANDBY_BUCKET_RARE ||
+                        bucket == android.app.usage.UsageStatsManager.STANDBY_BUCKET_RESTRICTED
+                )
+        val ready = !restricted && !rareOrRestricted
+        val detail =
+            when {
+                ready -> "未被系统限制后台（standby=$bucket）"
+                restricted && rareOrRestricted ->
+                    "系统已限制本应用后台（standby=$bucket）——车机连着时可能被冻结，" +
+                        "表现为「刚出声几十秒就整轮掉线」。请到「设置 → 应用 → 本应用 → 电池/耗电管理」" +
+                        "改成「不限制」或允许后台运行"
+                restricted ->
+                    "系统已限制本应用后台运行——车机连着时可能被冻结导致整轮掉线。" +
+                        "请到「设置 → 应用 → 本应用 → 电池/耗电管理」改成「不限制」"
+                else ->
+                    "本应用被系统归入 standby=$bucket（低活跃度会限流/冻结）。" +
+                        "请把「电池/耗电管理」改成「不限制」并允许自启动"
+            }
+        return Check(Requirement.BACKGROUND_SURVIVAL, ready, detail)
+    }
 }
