@@ -31,9 +31,6 @@ class AacLcEncoder(
         /** AAC-LC 一帧固定 1024 个采样（每声道）。 */
         const val FRAME_SAMPLES = 1024
 
-        /** MPEG-4 audioObjectType：2 = AAC-LC（AudioSpecificConfig 的前 5 bit）。 */
-        private const val AAC_LC_OBJECT_TYPE = 2
-
         /**
          * 默认编码码率（bps）。
          *
@@ -153,15 +150,6 @@ class AacLcEncoder(
             var created: MediaCodec? = null
             try {
                 val format = MediaFormat.createAudioFormat(MIME, sampleRate, channels)
-                // **必须给 csd-0（AudioSpecificConfig）**，否则解码器不知道码流的
-                // profile / 采样率索引 / 声道配置，`dequeueOutputBuffer` 会一直
-                // INFO_TRY_AGAIN_LATER 到超时 → 自检恒返回 null。
-                //
-                // 2026-11-17 之前的自检一直是这么失败的：日志里那句
-                // 「自检 = 本机解码器没解出样本（首帧 683B）——无法证伪」在 1.2.62 / 1.2.63
-                // 的日志里一模一样地重复了五六次。它让人以为「码流可能有问题但查不出来」，
-                // 实际上只是自检自己没配对解码器。修好后这一行才有诊断价值。
-                format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(audioSpecificConfig(sampleRate, channels)))
                 val codec = MediaCodec.createDecoderByType(MIME)
                 created = codec
                 codec.configure(format, null, null, 0)
@@ -206,36 +194,6 @@ class AacLcEncoder(
                 runCatching { created?.stop() }
                 runCatching { created?.release() }
             }
-        }
-
-        /**
-         * 组 2 字节 AudioSpecificConfig（MPEG-4 Audio，ISO/IEC 14496-3）：
-         *
-         * ```
-         * 5 bits  audioObjectType           2 = AAC-LC
-         * 4 bits  samplingFrequencyIndex   3 = 48000 / 4 = 44100 / 6 = 24000 …
-         * 4 bits  channelConfiguration     2 = 立体声
-         * 3 bits  其余补 0
-         * ```
-         *
-         * 48k 立体声 → `(2<<11)|(3<<7)|(2<<3)` = 0x1190 → `11 90`；
-         * 44.1k 立体声 → 0x1210 → `12 10`。
-         *
-         * 解码器**必须**拿到它：`MediaFormat.createAudioFormat` 只说了容器参数，
-         * 没给 profile/channelConfig，硬解码器会一直 INFO_TRY_AGAIN_LATER。
-         */
-        internal fun audioSpecificConfig(
-            sampleRate: Int,
-            channels: Int,
-        ): ByteArray {
-            // 采样率索引表与 ADTS 头共用一份（[frequencyIndex]），不另写一套——
-            // 两处取值必须逐位一致，否则「头里说 44.1k、配置里说 48k」会让解码器
-            // 按错的时钟播，听感正是「一顿一顿」。
-            val value =
-                (AAC_LC_OBJECT_TYPE shl 11) or
-                    (frequencyIndex(sampleRate) shl 7) or
-                    (channels.coerceIn(1, 7) shl 3)
-            return byteArrayOf(((value shr 8) and 0xFF).toByte(), (value and 0xFF).toByte())
         }
     }
 

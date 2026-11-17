@@ -32,7 +32,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
-import io.github.shaonialife.carptocar.audio.AudioRouteOption
 import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
@@ -1913,33 +1912,6 @@ class MainActivity : AppCompatActivity() {
                     "已开启：方向盘语音键短按三次重启音频"
                 } else {
                     "已关闭：语音键恢复原来的单次识别行为"
-                },
-            )
-        }
-        // 音频编码通路（PCM 直通 / AAC）——二分「一顿一顿」用的，不是性能选项。
-        val pcmSwitch = findViewById<SwitchCompat>(R.id.switchAudioPcm)
-        val pcmNote = findViewById<TextView>(R.id.audioPcmNote)
-        pcmSwitch.isChecked = AudioRouteOption.preferPcm
-
-        fun refreshPcmNote() {
-            pcmNote.text =
-                if (pcmSwitch.isChecked) {
-                    "已开启：下次建音频流直接发 PCM（跳过 AAC 编码与接收端 AAC 解码）。" +
-                        "若声音变干净，说明问题在 AAC 链路；若照旧一顿一顿，则与编码无关。"
-                } else {
-                    "关（默认）走 AAC 压缩；开则直接发 PCM、去掉编码环节。" +
-                        "改完需重连或语音键三连击重启音频才生效。"
-                }
-        }
-        refreshPcmNote()
-        pcmSwitch.setOnCheckedChangeListener { _, checked ->
-            AudioRouteOption.save(ctx, checked)
-            refreshPcmNote()
-            snack(
-                if (checked) {
-                    "已切到 PCM 直通——请重连或语音键三连击重启音频，新档位才生效"
-                } else {
-                    "已切回 AAC 压缩——请重连或语音键三连击重启音频，新档位才生效"
                 },
             )
         }

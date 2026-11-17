@@ -15,7 +15,6 @@ import io.github.shaonialife.carptocar.airplay.StreamOrderMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
-import io.github.shaonialife.carptocar.audio.AudioRouteOption
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
@@ -4087,14 +4086,7 @@ object SessionController {
                 AudioProfileMemory.clearAll(context.applicationContext)
                 appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
             }
-            val candidates =
-                client.audioCandidates(
-                    preferCompat = audioPreferCompat,
-                    preferPcm = AudioRouteOption.preferPcm,
-                )
-            if (AudioRouteOption.preferPcm) {
-                appendLog("AUDIO: 「音频走 PCM 直通」已开启——PCM 档排前面（AAC 仍兜底）")
-            }
+            val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
             val ordered = AudioProfileMemory.order(candidates, entry)
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
@@ -4847,20 +4839,8 @@ object SessionController {
     private fun audioCandidateKeys(identity: String): Set<String> =
         runCatching {
             val client = currentClient ?: return@runCatching emptySet()
-            val preferred =
-                client
-                    .audioCandidates(
-                        preferCompat = audioPreferCompat,
-                        preferPcm = AudioRouteOption.preferPcm,
-                    ).map { it.key }
-            // 两种顺序都要算进来：开/关「PCM 直通」会换首档，判断「是不是全部试穿」时
-            // 不能因为当前开关而漏掉另一组键。
-            val alternate =
-                client
-                    .audioCandidates(
-                        preferCompat = !audioPreferCompat,
-                        preferPcm = !AudioRouteOption.preferPcm,
-                    ).map { it.key }
+            val preferred = client.audioCandidates(preferCompat = audioPreferCompat).map { it.key }
+            val alternate = client.audioCandidates(preferCompat = !audioPreferCompat).map { it.key }
             (preferred + alternate).toSet()
         }.getOrDefault(emptySet())
 

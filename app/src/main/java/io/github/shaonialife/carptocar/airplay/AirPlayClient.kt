@@ -2790,32 +2790,13 @@ class AirPlayClient(
         val startedAt = SystemClock.uptimeMillis()
         var statusLine: String
         var responseBody: ByteArray
-        // 首次请求带不带 ct/sr：
-        //
-        // **AAC 档（t102）必须带**。`ct`=4 告诉接收端「这路是 AAC-LC」，`sr` 给采样率；
-        // 缺了它，宽松的接收端（WinPlay 这类）会照收包、照按 spf=1024 推进 sampleTime，
-        // 却不拿它去初始化 AAC 解码器——数据全收到了、时钟全对、听感却是「一顿一顿」。
-        // 2026-11-17 的 1.2.65 日志正是这个形态：发送 47991 样本/秒、接收端消费
-        // 47999.9 样本/秒（精确 48000）、端到端延迟 290ms 稳定，唯独声音不对。
-        // 真 iPhone 的音频 SETUP 一定带这两个字段，本类早就写了这段重试逻辑，
-        // 只是因为「已通过车机首次就 200」而永远走不到。
-        //
-        // PCM 档保持**不带**：奥迪/别克/宝马那条 t100 通路一直是不带就 200，
-        // 改了等于拿能用的场景去赌。
-        val firstWithCodec = profile.codec == AudioCodec.AAC_LC
-        var usedCodecFields = firstWithCodec
+        var usedCodecFields = false
         try {
-            if (firstWithCodec) {
-                log(
-                    "AIRPLAY: 音频 SETUP 首次即带 ct=${compressionTypeOf(negotiation.codec)} " +
-                        "sr=${negotiation.sampleRate}（AAC 档，接收端靠它初始化解码器）",
-                )
-            }
             val first =
                 request(
                     "SETUP",
                     "rtsp://$host:${endpoint.airPlayPort}/",
-                    buildAudioBody(firstWithCodec),
+                    buildAudioBody(false),
                     // 8s：奥迪音频 SETUP 实测可能耗时 ~2.7s（车机侧资源仲裁）；异步读线程
                     // 保证等待期间 feedback 心跳照常发送，长等待不再触发车机看门狗
                     timeoutMillis = setupTimeoutMillis,
@@ -2824,40 +2805,27 @@ class AirPlayClient(
             statusLine = first.first
             responseBody = first.second
             if (!statusLine.contains("200")) {
-                // 400 = 请求体被拒（不是"格式不匹配"）。**反向**重试一次：
-                // AAC 档已带 ct/sr 还失败 → 说明这台接收端不吃这两个字段，退回不带；
-                // PCM 档原本不带 → 按真 iPhone 的写法补齐 ct/sr 再试。
-                // 两个方向都试过还不行才算这一档不可用，接着换下一档。
-                val retryWithCodec = !firstWithCodec
+                // 400 = 请求体被拒（不是"格式不匹配"）。先按真 iPhone 的字段补齐再发一次：
+                // ct（压缩类型）/ sr（采样率）是标准字段，缺了可能被严格实现直接否掉。
                 log(
-                    "AIRPLAY: 音频 SETUP 被拒 [$statusLine]——改发" +
-                        (if (retryWithCodec) "带" else "不带") +
-                        " ct/sr 的版本重试一次" +
-                        (if (retryWithCodec) {
-                            "（ct=${compressionTypeOf(negotiation.codec)} sr=${negotiation.sampleRate}）"
-                        } else {
-                            "（这台接收端可能不认 ct/sr）"
-                        }),
+                    "AIRPLAY: 音频 SETUP 被拒 [$statusLine]——按真 iPhone 的写法补齐 " +
+                        "ct=${compressionTypeOf(negotiation.codec)} sr=${negotiation.sampleRate} 后重试一次",
                 )
                 val retryStartedAt = SystemClock.uptimeMillis()
                 val retry =
                     request(
                         "SETUP",
                         "rtsp://$host:${endpoint.airPlayPort}/",
-                        buildAudioBody(retryWithCodec),
+                        buildAudioBody(true),
                         timeoutMillis = setupTimeoutMillis,
                         contentType = "application/x-apple-binary-plist",
                     )
                 statusLine = retry.first
                 responseBody = retry.second
-                usedCodecFields = retryWithCodec
+                usedCodecFields = true
                 log(
                     "AIRPLAY: 音频 SETUP 重试往返 ${SystemClock.uptimeMillis() - retryStartedAt}ms [$statusLine]" +
-                        if (statusLine.contains("200")) {
-                            "（" + (if (retryWithCodec) "补齐" else "去掉") + " ct/sr 后通过）"
-                        } else {
-                            "（两种写法都失败，换下一档）"
-                        },
+                        (if (statusLine.contains("200")) "（补齐 ct/sr 后通过）" else "（补齐 ct/sr 仍被拒）"),
                 )
             }
         } catch (error: IOException) {
@@ -3039,10 +3007,7 @@ class AirPlayClient(
      *     取不到用 [AUDIO_LATENCY_FALLBACK_MS]。
      * 拿不到 /info 时回退协议基线（media + PCM48k + 250ms），与改动前一致。
      */
-    fun audioCandidates(
-        preferCompat: Boolean = false,
-        preferPcm: Boolean = false,
-    ): List<AudioProfile> {
+    fun audioCandidates(preferCompat: Boolean = false): List<AudioProfile> {
         val baseline =
             listOf(
                 AudioProfile(AUDIO_TYPE_MEDIA, AUDIO_FORMAT_PCM_48K_STEREO, 48_000, AUDIO_LATENCY_FALLBACK_MS),
@@ -3139,26 +3104,9 @@ class AirPlayClient(
         }
         // 「兼容档」= 强制走 PCM 旧通路（跳过 AAC）：AAC-LC 在某些车机上会被 SETUP 直接
         // 拒掉，留一个人工入口，免得自动候选每次都先撞一次墙。
-        //
-        // 「PCM 优先」（[preferPcm]，界面上的「音频走 PCM 直通」开关）= PCM 排前面但
-        // **保留 AAC 兜底**。两个开关的区别是「要不要还试 AAC」：preferCompat 是
-        // 「这台车 AAC 一定不行，别浪费一轮」，preferPcm 是「怀疑 AAC 链路有问题，
-        // 先用 PCM 试，真不行再退回去」。
-        //
-        // 为什么需要后者（2026-11-17）：1.2.65 的日志里 AAC 通路的每一项硬指标都正常
-        // ——发送 47991 样本/秒、接收端 feedback 消费 47999.9 样本/秒（精确 48000）、
-        // 端到端延迟 290ms 且稳定、6011 锚点 30/30 送达、无冻结无丢包。唯独听感是
-        // 「一顿一顿」。这种「数据全对、声音不对」只可能是码流或接收端解码的问题，
-        // 而手机上唯一能绕过它的办法就是不走 AAC。留这个开关，一次安装就能二分：
-        // PCM 不顿 = AAC 环节；PCM 还顿 = 与编码无关。
-        val pcmOrdered = pcm.sortedBy { priority(it.audioType) }
-        val aacOrdered = aac.distinctBy { it.key }
         val ordered =
-            when {
-                preferCompat -> pcmOrdered
-                preferPcm -> pcmOrdered + aacOrdered
-                else -> aacOrdered + pcmOrdered
-            }
+            (if (preferCompat) emptyList() else aac.distinctBy { it.key }) +
+                pcm.sortedBy { priority(it.audioType) }
         if (ordered.isEmpty()) {
             log(
                 "AIRPLAY: 车机未声明可用的 AAC-LC / PCM 立体声格式" +

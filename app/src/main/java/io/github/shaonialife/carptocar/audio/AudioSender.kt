@@ -101,7 +101,7 @@ class AudioSender(
          * 正常一拍 = 一帧 352 样本 ≈ 7.33ms，park 会被钳到 20ms。100ms 是十倍余量，
          * 不会把正常的调度抖动也记下来；而实车那次停摆是 1400ms，远超阈值。
          */
-        private const val STALL_REPORT_NANOS = 25_000_000L
+        private const val STALL_REPORT_NANOS = 100_000_000L
 
         /** 两次「停拍归因」之间的最小间隔（避免连续停摆时把日志刷爆）。 */
         private const val STALL_REPORT_GAP_NANOS = 300_000_000L
