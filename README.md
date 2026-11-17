@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk)**
-> —— 主线固定直链（当前 1.2.59，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**
+> —— 主线固定直链（当前 1.2.62，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.59，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.59.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.62，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.62.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.59`（正式版；**本次把 1.2.54 之后的四个提交一起发出，核心是「方控切歌恢复 + 拆掉会掉线的 alert 导航流 + 混音不再积压成固定延迟」**。① **1.2.57 方控切歌恢复**：1.2.42 往 `SessionController.dispatchMediaKey` 里插了一行`if (CarLifeHijack.sendMediaKey(keyCode)) return`，而 `sendMediaKey` 的返回值只是「socket 写成功」，车机与引擎是否执行它并不知道；这台车机上「直投 transportControls」一直失败（荣耀 MagicOS 只认设置页手动关→开通知使用权，`requestRebind` 无效，日志每轮都有`通知使用权已授权但系统始终没绑定监听器`），于是旧版唯一能用的兜底 `AudioManager.dispatchMediaKeyEvent`（系统内部广播，不需要通知使用权）永远轮不到——三条路全灭。实车证据：9 次 `CARLIFE: 车机硬键 0x10/0x0F` 之后没有任何 `0x10035`、没有新的音频格式宣告、PCM 电平不变。改法：`input/MediaKeyRoute` 白名单只让**播放/暂停类**走硬键（保留「未授通知使用权时车机按暂停也要真停住」的初衷），切歌一律回落系统焦点路由，并新增 `MEDIA: 直投未生效 → 系统焦点路由 下一曲` 作为「按键最终落到哪」的凭据。② **1.2.58 移除 alert 导航独立流**：2026-11-16 AUDI 4260（DELPHI）四轮会话两两对照——选 alert 的两轮全部在第二条流 SETUP 回 **400 ×3**（含补 `ct/sr` 重试）后 **77ms** 被车机reset 事件通道 → 视频端口 ECONNREFUSED → 控制通道关闭 → RECORD 失败 → 蓝牙 iAP2 断开；选 speechRecognition 的一轮因位图 `0x20000040` 无 PCM 不建流，稳定 51s；混音一轮稳定 36s+。也就是说这个选项的代价不是「不生效」而是**掉线**。`NavAudioRoute` 删掉 `ALERT`，老版本存的`"ALERT"` 经 `parse()` 自动回落成 `MIX`，升级即修好。顺带查清本车机 9 条 `audioFormats` 里只有 `media(100)` / `alert(100)` / `compatibility(100)` 三条位图含 PCM 48k——「导航单独成流」在这台车上已无可用档。③ **1.2.59 混音加目标水位**：`AudioMixer` 两路各有500ms 环形缓冲，但只有「满了才丢最旧」一条策略，**容量被当成延迟上限**——引擎开局突发推一段就把水位顶到 500ms，之后推多少读多少、长期停在那里，变成**恒定 500ms 音频延迟**（导航永远晚半秒），且任何抖动都在满水位上直接丢掉一整段最旧的音乐。改法：每帧混音**读样本之前**把媒体路裁到 150ms（按 4 字节 16bit 立体声对齐，绝不从半个样本开始读），播报路一字节不碰（TTS 是整段语义，裁头就是缺字）；`混音体检` 新增`水位 媒体 Nms / 播报 Nms（为压延迟裁掉 NKB 最旧的媒体）`。④ **1.2.55 音质三项**：AAC 256kbps、混音软限幅 −0.9dBFS、三次插值重采样。876 例单测 0 失败；①②③ 均**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.59.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.59/CarPToCarL-1.2.59.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.62`（正式版；**本次核心是「找回 1.2.50 能稳定连上的三档连接容错」**。1.2.53 把 `isCinemoStack` 判据收紧成「全部传输组件名含 Cinemo」，本意是纠正宝马 MGU-81 的栈归类，但没意识到这个开关的全部读取点都是**连接容错**（0x4300 双标识 / 90s ACK 宽限 / 不重认证），于是这台车被拿掉三档容错——同机同车日志：1.2.50 双标识时段入网成功 5 次、RECORD 9 次，1.2.53 单标识时段入网成功 1 次却 RECORD 14 次（连上后被反复掐断），1.2.60 的 11 次 0x4300 全是单标识、8 轮里 6 轮卡在热点入网。1.2.62 把判据回退到「报文体出现 Cinemo 即命中」，凡带 Cinemo 组件的车都给足容错。同时带出 1.2.60 的 98311 门禁 ACK 超时逃生、1.2.61 的 0x10035 媒体解析恢复。884 例单测 0 失败，**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,62 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.62 —— 2026-11-17（找回 1.2.50 的三档连接容错，正式版）
+
+本次发布把 `1.2.60` / `1.2.61` 两个只做过本地提交与测试包的版本一起发出，核心是查清并修掉
+「1.2.50 能稳定连、之后就越发连不上」的版本退化。
+
+**一、根因：`isCinemoStack` 判据收紧误伤了连接容错**
+
+1.2.53（`4e42a0d`）为了纠正「宝马 MGU-81 只是把 HID 中间件换成 `CinemoHIDComponent`、
+协议栈本身不是通用系」这个归类，把判据从「0x1D01 报文体出现 Cinemo」收紧成
+「**全部**传输组件名都含 Cinemo 且 ≥2」。归类本身没错，但漏算了一件事：
+`cinemoStack` 这个开关的**全部读取点都是连接容错**——
+
+- `preferDualAvailability`（`Iap2SenderSession:569`）：`0x4300` 优先发双标识体还是单标识体；
+- `AvailabilityRetryBudget.fastRetryNanos`（`:840/:894`）：ACK 宽限 90 秒还是 45 秒；
+- `inlineReauthentication = !cinemoStack`（`:815`）：拆链前当场重认证还是把时间全留给等待。
+
+没有任何 HID 消费者读它（HID 画像走独立的 `HidDescriptorSummary`）。所以判据一收紧，
+MGU-81 的三档容错被一次性拿掉。
+
+**二、证据：同机同车的跨版本日志**
+
+`CarPToCarL-log-20261116-172207-all.txt`（vivo V2337A + BMW MGU-81，日志跨多个版本）：
+
+| 时段 | 版本 | 0x4300 形态 | 入网成功 | RECORD 成功 |
+| ---- | ---- | ----------- | -------- | ----------- |
+| 21 时 | 1.2.50 | 双标识 31 次 | 5 次 | 9 次 |
+| 17 时 | 1.2.53 | 单标识 7 次 | 1 次 | 14 次 |
+
+17 时段只入网 1 次却 RECORD 14 次，紧跟着全是 `control EOF` / `SocketException` /
+`视频通道终止`——症状是**连上后被反复掐断**，而不是单纯连不上。
+`CarPToCarL-log-20261117-075705-all.txt`（1.2.60）里 11 次 `0x4300` **全部**是单标识体，
+8 个 GATE 会话中 6 个卡在热点入网（`15s + 20s` 宽限 > 车机 22–26s 耐心）。
+
+顺带排除三个假设：PR25 只改拿码流之后的视频层，与建链无关；1.2.51 的「入网不再拆网络」
+在日志里新增的 `已有一条可用网络` 一次都没出现（每轮仍走旧 `release()`）；15s+20s 宽限
+`git blame` 显示 11-08 就有，不是 1.2.50 之后的回归。
+
+**三、改动**
+
+`Iap2SenderSession.isCinemoStack` 判据回退到「manufacturer 含 General Motors，或 0x1D01
+整段报文体出现 Cinemo（不区分大小写）」。凡带 Cinemo 组件的车都给足三档容错。
+`CinemoStackDetectionTest` 两个 BMW 用例的期望同步改为命中。
+`transportComponentNames()` 保留作日志诊断工具，不再参与栈判定。
+
+**四、随版带出（此前只做过本地测试包）**
+
+- **1.2.60**：98311 门禁加 ACK 超时逃生——不回 98386 的引擎不再永久黑屏。
+- **1.2.61**：恢复 `0x10035` 媒体解析、接通 `0x10036` 进度。
+
+全量 **884 例单测 0 失败**；APK 14,060,677 B（14.1 MB），sha256
+`abb9ff710b3761aaaca492ed1bcc1cb80c8700d62fa34bc996e3ab6c7bd1f743`。
+
+**五、验收口径**：下次上车重点看 `iap2 0x4300 报文体形态` 是否回到
+`新版双标识体…通用系 Cinemo：双标识优先`，以及入网成功率和会话稳定时长。
+本次改动**未实车验证**。
 
 ### 1.2.59 —— 2026-11-16（方控切歌恢复 + 拆掉会掉线的 alert 导航流 + 混音不再积压成固定延迟，正式版）
 

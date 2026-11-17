@@ -1,18 +1,15 @@
 package io.github.shaonialife.carptocar.iap2
 
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 「通用系 Cinemo 栈」判定。
+ * 「按通用系 Cinemo 那套连接容错对待」的判定。
  *
  * 这条判据手上挂着 0x4300 报文体（`preferDualAvailability`）、宽限 90s 和不重认证三件事，
- * 误判的代价不是日志好看不好看，而是**给非通用系车机发错报文体**。
- *
- * 2026-11-16 的现场：宝马 MGU-81 的 0x1D01 传输组件是
- * `BMW 42056` / `BMW 42056 Wifi` / **`CinemoHIDComponent`**——旧判据「整段报文体里出现
- * Cinemo 就算通用系」直接把 MGU-81 认成通用系。
+ * 判错的代价是**连接容错被拿掉**：11-16 曾收紧成「全部组件名都含 Cinemo」，
+ * 把带 `CinemoHIDComponent` 的宝马 MGU-81 排除在外，实测入网成功率和 RECORD 都掉下来
+ * （详见日志 2026-11-17），11-17 回退到「报文体出现 Cinemo 即命中」。
  */
 class CinemoStackDetectionTest {
     private fun component(
@@ -44,9 +41,9 @@ class CinemoStackDetectionTest {
             component(0x18, 3, "CinemoWIFIComponent")
 
     @Test
-    fun bmwWithCinemoHidComponentIsNotCinemoStack() {
-        assertFalse(
-            "BMW 只是把 HID 中间件换成 Cinemo 组件，栈不是通用系",
+    fun bmwWithCinemoHidComponentIsTreatedAsCinemoStack() {
+        assertTrue(
+            "带 Cinemo 组件就给足三档连接容错——MGU-81 实测需要双标识 + 90s + 不重认证",
             Iap2SenderSession.isCinemoStack(bmwMguBody(), "bmw 42056 mgu-81 bmw group"),
         )
     }
@@ -69,12 +66,12 @@ class CinemoStackDetectionTest {
     }
 
     @Test
-    fun singleCinemoComponentIsNotEnough() {
+    fun singleCinemoComponentIsEnough() {
         val body =
             Iap2Csm.string(2, "BMW Group") +
                 component(0x11, 1, "CinemoHIDComponent")
-        assertFalse(
-            "只有一个组件时无法证明整条栈是 Cinemo——按通用系处理会发错 0x4300 报文体",
+        assertTrue(
+            "哪怕只有一个 Cinemo 组件也按通用系给足容错——宁可多给宽限，不要连不上",
             Iap2SenderSession.isCinemoStack(body, "bmw group"),
         )
     }
