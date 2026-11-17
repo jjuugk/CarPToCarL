@@ -72,4 +72,43 @@ class AacLcEncoderTest {
         assertEquals(1024, AudioTuning.RAW_SPF.spf)
         assertTrue(!AudioTuning.RAW_SPF.highAccuracyTimestamps)
     }
+
+    /**
+     * AudioSpecificConfig 的位布局（ISO/IEC 14496-3，2 字节版）。
+     *
+     * 它只在自检里用（给解码器补 csd-0），但取值错了会让「自检」永远失败或解出错的东西——
+     * 2026-11-17 之前正是因为没有这个字段，自检在五六份日志里一直报「没解出样本」，
+     * 把「码流可能有问题」这个假象维持了整整一周。
+     */
+    @Test
+    fun audioSpecificConfigForAacLc48kStereo() {
+        // 2 = AAC-LC, 3 = 48000Hz, 2 = 立体声 → (2<<11)|(3<<7)|(2<<3) = 0x1190
+        val asc = AacLcEncoder.audioSpecificConfig(48_000, 2)
+        assertEquals(2, asc.size)
+        assertEquals(0x11, asc[0].toInt() and 0xFF)
+        assertEquals(0x90, asc[1].toInt() and 0xFF)
+    }
+
+    @Test
+    fun audioSpecificConfigForAacLc44100Stereo() {
+        // 4 = 44100Hz → (2<<11)|(4<<7)|(2<<3) = 0x1210
+        val asc = AacLcEncoder.audioSpecificConfig(44_100, 2)
+        assertEquals(0x12, asc[0].toInt() and 0xFF)
+        assertEquals(0x10, asc[1].toInt() and 0xFF)
+    }
+
+    @Test
+    fun audioSpecificConfigMatchesAdtsFrequencyIndex() {
+        // 两处索引必须同源：否则「ADTS 头说 44.1k、asc 说 48k」这种组合会让解码时钟错位
+        //
+        // ASC 的 4 bit 采样率索引跨字节边界：
+        //   byte0 = [objectType 5 bit][freqIndex 高 3 bit]
+        //   byte1 = [freqIndex 低 1 bit][channelConfig 4 bit][0 3 bit]
+        listOf(48_000, 44_100, 32_000, 24_000).forEach { rate ->
+            val asc = AacLcEncoder.audioSpecificConfig(rate, 2)
+            val hi = (asc[0].toInt() and 0xFF) and 0x07
+            val lo = ((asc[1].toInt() and 0xFF) and 0x80) shr 7
+            assertEquals("采样率 $rate 的索引对不上", AacLcEncoder.frequencyIndex(rate), (hi shl 1) or lo)
+        }
+    }
 }

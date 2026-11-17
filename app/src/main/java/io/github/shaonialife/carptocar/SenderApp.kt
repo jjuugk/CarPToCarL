@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import io.github.shaonialife.carptocar.audio.AudioRouteOption
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -35,6 +36,8 @@ class SenderApp : Application() {
         CarGpsOption.load(this)
         // 方向盘语音键手势（默认开）：短按三次重启音频。按键线程每按一次都会读
         VoiceKeyGesture.load(this)
+        // 「音频走 PCM 直通」（默认关）：只改档位排序，建音频流时读一次
+        AudioRouteOption.load(this)
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，
         // 原因见 SessionTrace 注释（报文量大会挤掉过程日志）。必须在业务起来之前 attach。
         SessionTrace.attach(this)

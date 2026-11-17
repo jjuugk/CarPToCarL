@@ -1230,6 +1230,50 @@
                     android:textSize="12sp"
                     android:textStyle="bold" />
 
+                <!-- 音频编码通路：PCM 直通 / AAC。这不是「更好的默认值」，是二分用的开关：
+                     打开后不顿 → 问题在 AAC 编码/解码；照样顿 → 与编码无关。 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:baselineAligned="false"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="音频走 PCM 直通（跳过 AAC）"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/audioPcmNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="关（默认）走 AAC 压缩；开则直接发 PCM、去掉编码环节。改完需重连或语音键三连击重启音频才生效。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchAudioPcm"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
+
                 <!-- 流分辨率缩放 -->
                 <TextView
                     android:layout_width="wrap_content"
