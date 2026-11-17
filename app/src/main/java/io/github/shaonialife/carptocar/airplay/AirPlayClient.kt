@@ -1166,6 +1166,9 @@ class AirPlayClient(
     val phoneOwnsScreen: Boolean get() = resourceState.phoneOwnsScreen
     val phoneOwnsAudio: Boolean get() = resourceState.phoneOwnsAudio
     val phoneBorrowsAudio: Boolean get() = resourceState.phoneBorrowsAudio
+
+    /** 车机只是借用/静音着主音频（语音键、原车静音）——此时不拆音频流，见 [AirPlayResourceState.carBorrowsAudio]。 */
+    val carBorrowsAudio: Boolean get() = resourceState.carBorrowsAudio
     val resourceDescription: String get() = resourceState.describe()
 
     /** 车机在 `changeModes` 中完成主音频永久接管、受限借用（如静音）或归还时回调。 */
