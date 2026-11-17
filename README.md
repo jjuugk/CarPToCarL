@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**
-> —— 主线固定直链（当前 1.2.62，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.63.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.63/CarPToCarL-1.2.63.apk)**
+> —— 主线固定直链（当前 1.2.63，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.63.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.63/CarPToCarL-1.2.63.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.62，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.62.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.63，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.63.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.62`（正式版；**本次核心是「找回 1.2.50 能稳定连上的三档连接容错」**。1.2.53 把 `isCinemoStack` 判据收紧成「全部传输组件名含 Cinemo」，本意是纠正宝马 MGU-81 的栈归类，但没意识到这个开关的全部读取点都是**连接容错**（0x4300 双标识 / 90s ACK 宽限 / 不重认证），于是这台车被拿掉三档容错——同机同车日志：1.2.50 双标识时段入网成功 5 次、RECORD 9 次，1.2.53 单标识时段入网成功 1 次却 RECORD 14 次（连上后被反复掐断），1.2.60 的 11 次 0x4300 全是单标识、8 轮里 6 轮卡在热点入网。1.2.62 把判据回退到「报文体出现 Cinemo 即命中」，凡带 Cinemo 组件的车都给足容错。同时带出 1.2.60 的 98311 门禁 ACK 超时逃生、1.2.61 的 0x10035 媒体解析恢复。884 例单测 0 失败，**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.63`（正式版；**本次核心是「音频数据口改非阻塞发送，杜绝 UDP 缓冲满拖垮定拍泵线程」**。11-17 实车日志：暂停期间车机不消费、256KB 发送缓冲填满，阻塞式 `DatagramSocket.send()` 卡在内核 310~1183ms（发包占大头但本线程 CPU 几乎不涨，是 sendto 阻塞而非编码慢），一个 send 卡住就把整个音频定拍泵线程拖住，后续帧挤在一起补 → 声音卡顿/choppy。1.2.63 把数据口换成非阻塞 `DatagramChannel`：缓冲满时 `write()` 返回 0 即丢这一包（实时流晚到无意义）、RTP 序号仍推进、立即继续泵，车机恢复消费后自然续发。同步口保持阻塞式（每秒 1 包不会满，且依赖 ICMP 判断端口监听）。新增「缓冲满主动丢 N 包」体检日志区分「我方主动丢」与「链路上丢」。885 例单测 0 失败，**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.63.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.63/CarPToCarL-1.2.63.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,29 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.63 —— 2026-11-17（音频数据口改非阻塞发送，正式版）
+
+**一、现象**：11-17 实车反馈「音频响一分钟之后断、声音卡顿」。日志里 10:59:56–11:00:37
+密集 40+ 次停拍，判据是 `停拍 311ms —— 发包 310 / 本线程 CPU +13ms`（另一处
+`发包 1138ms / CPU +10ms`）——墙钟走了 1.1 秒，线程却几乎没耗 CPU，只可能是
+`DatagramSocket.send()` 阻塞在内核。车机暂停/拥塞时不消费这个 UDP 端口，256KB 发送缓冲
+填满后，一次 send 卡住就把整个音频定拍泵线程拖住，后续帧全挤在一起补 → 声音 choppy。
+（对照：真正的 AAC 编码慢是 `发包 215ms / CPU +5173ms`，CPU 会跟着涨；这次不是。）
+
+**二、改动**：数据口（6000）从阻塞式 `DatagramSocket` 换成非阻塞 `DatagramChannel`
+（`configureBlocking(false)` + `connect` + `write(ByteBuffer)`）。缓冲满时 `write()` 返回 0，
+就**丢掉这一包**——实时音频晚到毫无意义，丢掉反而保住后续帧的节拍；车机恢复消费后自然续发，
+不必重建会话。RTP 序号/时间戳在丢包时照常推进，车机按 seq gap 识别丢包。同步口（6011）
+保持 `DatagramSocket`（每秒仅 1 包不会填满缓冲，且它依赖 connect + ICMP 端口不可达来判断
+controlPort 是否监听）。
+
+**三、可观测性**：链路体检与会话汇总新增「缓冲满主动丢 N 包」，用来区分「我方缓冲满主动丢」
+和「链路上丢」——两者对策完全相反。附非阻塞 write 契约单测。885 例单测 0 失败。
+
+**四、关于「暂停后静音」**：核查后确认**不是**暂停门禁的锅——88 秒静音期间引擎基本没推 PCM
+（90 秒仅 160 包，正常 50 包/秒），没有帧经过门禁被误丢。真正原因是两个音乐 App 交替成为
+活跃会话、引擎随之停推；不在本次改动范围。仅把误导性的暂停日志文案改正。**未实车验证。**
 
 ### 1.2.62 —— 2026-11-17（找回 1.2.50 的三档连接容错，正式版）
 
