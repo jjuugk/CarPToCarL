@@ -32,6 +32,7 @@ import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
 import io.github.shaonialife.carptocar.carlife.LyricLines
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
+import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.ArtworkDedupe
@@ -989,7 +990,30 @@ object SessionController {
                 }
             },
             log = ::appendLog,
+            // 短按三次 = 重启音频（见 VoiceKeyGesture 注释）。回调里只做一次线程切换：
+            // 重启要跑 RTSP SETUP/RECORD，绝不能占 iAP2 事件线程，也不该挤 CarLife 命令队列。
+            gestureEnabled = { VoiceKeyGesture.tripleTapRestartEnabled },
+            onTripleTap = {
+                appendLog("AUDIO: 语音键三连击 → 安排一次音频重启")
+                audioRestartWorker.execute { restartAudioNow("方向盘语音键三连击") }
+            },
         )
+
+    /**
+     * 重启音频专用线程。
+     *
+     * 不复用 [carLifeCommandSender]：那条队列只有 2 个槽位且丢弃最旧，一次 SETUP+RECORD
+     * 可能占几百毫秒，会把用户按下的语音键/切歌命令挤掉。也不占 iAP2 事件线程——那里
+     * 卡住会连带 keepAlive 迟到、车机直接撤会话。
+     */
+    private val audioRestartWorker =
+        java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "audio-restart").apply { isDaemon = true }
+        }
+
+    /** 车机持有/借用主音频时收到的重启请求：等它归还后再补做重建。 */
+    @Volatile
+    private var pendingAudioRebuild: String? = null
 
     /**
      * 车机定位 → CarLife（0x18010 `CarlifeCarGps`）。
@@ -1351,6 +1375,13 @@ object SessionController {
             CarPlayAudioIntent.MediaCommand.RESUME -> {
                 appendLog("RESOURCE: 车机归还主音频（解除静音/结束借用）——恢复此前被暂停的媒体播放")
                 if (!CarLifeHijack.resumeMediaFromCar("车机解除静音归还主音频")) dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
+                // 三连击时车机正借用主音频、我们挂起了一次重建：现在接力做掉。
+                val pending = pendingAudioRebuild
+                if (pending != null) {
+                    pendingAudioRebuild = null
+                    appendLog("AUDIO: 车机已归还主音频 → 补做挂起的音频流重建（$pending）")
+                    audioRestartWorker.execute { restartAudioNow("车机归还后补做（$pending）") }
+                }
             }
 
             CarPlayAudioIntent.MediaCommand.NONE -> {
@@ -1500,6 +1531,8 @@ object SessionController {
             // 旋钮的锚点是「上一笔真触摸的位置」，跨会话残留会让新会话的第一次转动
             // 落在上轮的用户停手处；顺手把积压动作丢掉（此时已经没有触摸通道可走）。
             KnobRouter.reset()
+            // 挂起的「等车机归还后重启音频」属于上一轮会话，不能带进下一轮。
+            pendingAudioRebuild = null
             retireSessionResources()
             attemptGate.end(reason)
             SessionTrace.sessionEnd(reason)
@@ -4213,6 +4246,86 @@ object SessionController {
         } else {
             "AUDIO[导航流]: $line"
         }
+
+    /**
+     * 用户手动「重启音频」——方向盘语音键短按三次触发（[io.github.shaonialife.carptocar.carlife.VoiceKeyGesture]）。
+     *
+     * ## 为什么需要它
+     *
+     * 2026-11-17 两份实车日志里，「画面还在、音乐没了」至少有三种成因：CarLife 引擎退出后
+     * 只恢复了视频、车机侧音频输出设备被释放（`sampleTime` 照涨、喇叭全静）、泵线程被 park
+     * 到时间轴错位。过去唯一的解法是停车熄火重连，代价是整个 CarPlay 会话重建（十几秒、
+     * 可能再触发一轮握手失败）。三连击把它压到 1~2 秒，且**不用看屏幕**。
+     *
+     * ## 做三件事，按「代价从小到大」
+     *
+     * 1. **重置泵**（[io.github.shaonialife.carptocar.audio.AudioSender.restartPipeline]）：
+     *    清缓冲、重排定拍原点。RTP 时间轴不动，所以哪怕后面两步都没做，这一步也不会更糟。
+     * 2. **恢复播放**：语音键会让车机借走主音频并暂停本机媒体，只重建流不会让播放器重新开始。
+     * 3. **重建音频流**（[rebuildAudioChannel]）：新建一条流逼车机重开输出通路。
+     *    **先建新的、成功了才停旧的**——SETUP 被拒时旧流仍在推，绝不把「有声音」变「没声音」。
+     *
+     * 车机此刻持有/借用主音频（`phoneOwnsAudio=false`）时不抢：抢会把车机的借用栈重置掉，
+     * 它归还时反而找不到自己的借用。挂起到它归还后再建（见 [handleCarAudioTransfer]）。
+     *
+     * 入口有两个，共用同一套动作：方向盘语音键短按三次（[VoiceKeyGesture]）与界面上的
+     * 「立即重启一次」按钮。两者都是**异步、立即返回**——SETUP/RECORD 会阻塞几百毫秒，
+     * 不能在主线程或 iAP2 事件线程上做。
+     */
+    fun requestAudioRestart(reason: String) {
+        audioRestartWorker.execute { restartAudioNow(reason) }
+    }
+
+    private fun restartAudioNow(reason: String) {
+        val client = currentClient
+        if (client == null || client.cancelled || !client.controlSessionAlive) {
+            appendLog("AUDIO: 重启音频（$reason）被忽略——当前没有在线的 CarPlay 会话")
+            uiHintSink?.invoke("没有在线会话，无法重启音频")
+            return
+        }
+        audioSender?.restartPipeline(reason)
+        navAudioSender?.restartPipeline(reason)
+        if (MediaSessionsState.nowPlaying?.playing != true) {
+            // 三连击的语义就是「我要声音回来」，所以这里无条件恢复一次播放；
+            // 用户若本来就想暂停，自己再按一次暂停即可（比「重建完依然静音」可接受）。
+            CarLifeHijack.resumeMediaFromCar("重启音频后恢复播放（$reason）")
+        }
+        if (!client.phoneOwnsAudio) {
+            pendingAudioRebuild = reason
+            appendLog("AUDIO: 车机当前持有/借用主音频——先不抢，等它归还后再重建音频流（$reason）")
+            uiHintSink?.invoke("音频已重置，等车机归还主音频后自动重建")
+            return
+        }
+        pendingAudioRebuild = null
+        val sender = audioSender
+        if (sender != null && sender.isRunning) {
+            val rebuilt = rebuildAudioChannel(reason)
+            appendLog(
+                if (rebuilt) {
+                    "AUDIO: ✓ 重启音频完成（新流已建、旧流已停）"
+                } else {
+                    "AUDIO: 重启音频只完成了一半——泵已重置，音频流重建失败（旧流仍在推）"
+                },
+            )
+            uiHintSink?.invoke(if (rebuilt) "音频已重启" else "音频已重置（流重建失败，旧流仍在推）")
+            return
+        }
+        // 流根本没在推（引擎退出后没恢复、上一轮拆流没建回来）：这不是「重建」而是「补建」，
+        // 走与「资源取得」完全相同的路径，顺带把 RECORD 补上。
+        val context = appContext?.applicationContext
+        val secret = currentSharedSecret
+        val started =
+            context != null && secret != null &&
+                applyAudioOwnership(context, client, secret, true)
+        appendLog(
+            if (started) {
+                "AUDIO: ✓ 重启音频完成（原本没有在推的流，已重新建立并激活）"
+            } else {
+                "AUDIO: 重启音频失败——音频流没能建立（车机未声明可用音频档或 SETUP 被拒）"
+            },
+        )
+        uiHintSink?.invoke(if (started) "音频已重启" else "音频重启失败，详见日志")
+    }
 
     /**
      * 会话 RECORD 成功后激活**所有**音频发送端。

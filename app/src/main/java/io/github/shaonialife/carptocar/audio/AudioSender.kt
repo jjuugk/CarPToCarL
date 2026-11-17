@@ -732,6 +732,34 @@ class AudioSender(
     fun clearPcm(source: AudioSource) = mixer.clear(source)
 
     /**
+     * 用户手动「重启音频」（方向盘语音键三连击，见 [io.github.shaonialife.carptocar.carlife.VoiceKeyGesture]）。
+     *
+     * 只重置**泵侧**的状态，不动 socket、不动 RTP 时间轴：
+     *
+     * - 两路环形缓冲清空——积压了几百毫秒的旧样本本来就是「重启」要丢掉的东西；
+     * - 定拍原点归零、账本基线在下一拍按当时的 RTP 时间戳重设——时间轴错位（停拍追不回来、
+     *   重采样相位卡住）就是这么救的；
+     * - `seq` / `timestamp` **保持连续**：车机按时间戳排播，凭空跳一段会让它判成丢包或重复，
+     *   反而更久不出声。
+     *
+     * 这条路径**不重建 RTSP 流**（那是 [io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams.restartAudio]
+     * 干的事）。两者一起用：先重置泵，流真的坏了再拆建。
+     */
+    @Synchronized
+    fun restartPipeline(reason: String) {
+        if (!running.get()) {
+            log("AUDIO: 重启音频被忽略——音频发送没在运行（$reason）")
+            return
+        }
+        lastRealFeedAt = 0L
+        resamplers.forEach { it.reset() }
+        mixer.reset()
+        log(
+            "AUDIO: 已重置混音泵（清空两路缓冲、定拍原点重排；RTP 时间轴保持连续）——$reason",
+        )
+    }
+
+    /**
      * 把一段 PCM 重采样到 [sampleRate] 立体声，返回新数组；无需处理时返回原输入。
      *
      * 44.1k↔48k 这类小比值、以及 16k 播报 → 44.1k 的大比值，都交给 [PcmResampler]

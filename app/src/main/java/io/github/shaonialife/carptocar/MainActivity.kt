@@ -41,6 +41,7 @@ import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
@@ -1885,6 +1886,43 @@ class MainActivity : AppCompatActivity() {
                     "导航播报：${next.label}（下次连接起效；车机没声明该档会自动回退混音）"
                 },
             )
+        }
+
+        // 方向盘语音键三连击 → 重启音频（默认开）。
+        // 只说「短按三次」，不提 VR_START/VR_STOP：用户要的是「怎么用」和「什么时候用」。
+        val tripleRestartSwitch = findViewById<SwitchCompat>(R.id.switchVoiceTripleRestart)
+        val tripleRestartNote = findViewById<TextView>(R.id.voiceTripleRestartNote)
+        tripleRestartSwitch.isChecked = VoiceKeyGesture.tripleTapRestartEnabled
+
+        fun refreshTripleRestartNote() {
+            tripleRestartNote.text =
+                if (tripleRestartSwitch.isChecked) {
+                    "方向盘语音键短按三次：清空音频缓冲并重建音频流，专治「画面在、音乐没了」；" +
+                        "后两次不再当作语音识别。"
+                } else {
+                    "已关闭：语音键按几次就起几次语音识别（原样）。"
+                }
+        }
+        refreshTripleRestartNote()
+        tripleRestartSwitch.setOnCheckedChangeListener { _, checked ->
+            VoiceKeyGesture.saveTripleTapRestart(ctx, checked)
+            refreshTripleRestartNote()
+            snack(
+                if (checked) {
+                    "已开启：方向盘语音键短按三次重启音频"
+                } else {
+                    "已关闭：语音键恢复原来的单次识别行为"
+                },
+            )
+        }
+        // 「立即重启一次」：不用下车按键也能验证这套动作通不通（同一段代码）。
+        findViewById<TextView>(R.id.btnRestartAudio).setOnClickListener {
+            if (!SessionController.isStreaming()) {
+                snack("当前没有在推流的会话，无法重启音频")
+                return@setOnClickListener
+            }
+            SessionController.requestAudioRestart("界面按钮「立即重启一次」")
+            snack("正在重启音频…（结果见日志 AUDIO: 行）")
         }
 
         // 流分辨率缩放（30%–160%，步进 5；下次连接起效）

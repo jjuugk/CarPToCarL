@@ -155,4 +155,73 @@ class VoiceKeyRouterTest {
         // 三次长按补 VR_STOP，最后那次 0.89s 短按不补
         assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
     }
+
+    // ---- 三连击重启音频（VoiceKeyGesture） ----
+
+    /** 手势开启的实例：默认实例不传 gestureEnabled，等于关，现有用例不受影响。 */
+    private var tripleTaps = 0
+    private val gestureRouter =
+        VoiceKeyRouter(
+            nowMillis = { now },
+            send = { sent.add(it) },
+            log = { logs.add(it) },
+            gestureEnabled = { true },
+            onTripleTap = { tripleTaps++ },
+        )
+
+    /** 短按一次（按住 [holdMs]，之后空闲 [gapMs]）。 */
+    private fun tap(
+        router: VoiceKeyRouter,
+        holdMs: Long = 300L,
+        gapMs: Long = 200L,
+    ) {
+        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
+        advance(holdMs)
+        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
+        advance(gapMs)
+    }
+
+    @Test
+    fun threeQuickTapsRestartAudio() {
+        repeat(3) { tap(gestureRouter) }
+        assertEquals("三连击只触发一次", 1, tripleTaps)
+        // 手势成立时要撤掉刚发出的识别：3 次 VR_START + 1 次 VR_STOP
+        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_START })
+        assertEquals(1, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
+        assertTrue(logs.any { it.contains("三连击") })
+    }
+
+    @Test
+    fun fourthTapDoesNotRetrigger() {
+        repeat(4) { tap(gestureRouter) }
+        assertEquals("第四次点击要重新从 1 数起", 1, tripleTaps)
+    }
+
+    @Test
+    fun slowTapsDoNotTrigger() {
+        // 每次间隔 900ms：第一次按下到第三次松开 2.7s，超出窗口
+        repeat(3) { tap(gestureRouter, holdMs = 300L, gapMs = 900L) }
+        assertEquals(0, tripleTaps)
+    }
+
+    @Test
+    fun longPressDoesNotCountAsTap() {
+        // 按住说话 2s（PTT）+ 两次短按：不能凑成三连击
+        gestureRouter.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
+        advance(2_000L)
+        gestureRouter.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
+        advance(200L)
+        tap(gestureRouter)
+        tap(gestureRouter)
+        assertEquals(0, tripleTaps)
+    }
+
+    @Test
+    fun gestureDisabledKeepsOriginalBehaviour() {
+        // 默认实例 = 手势关闭
+        repeat(3) { tap(router) }
+        assertEquals(0, tripleTaps)
+        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_START })
+        assertEquals("关闭时一次 VR_STOP 都不该补", 0, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
+    }
 }
