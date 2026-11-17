@@ -74,23 +74,18 @@ class AudioMixer(
         const val GAIN_UNITY_Q = 1024
 
         /**
-         * 单拍最多追几帧（一帧 = `frameSamples` 样本：AAC 1024 → 23.2ms @44.1k）。
+         * 单拍最多追几帧（一帧 = `frameSamples` 样本：352 → 7.33ms @48k）。
          *
          * 原先是 3（≈22ms），隐含假设「停拍只有几十毫秒」。2026-11-14 实车日志推翻了
          * 这个假设：泵线程单次停摆 1400ms，代码却只补 22ms、把剩下 1378ms **整段扔掉**，
          * 顺带把时间原点挪到眼前。听感就是每次停摆「断一下 + 音乐跳一截」，而且
          * 音频相对视频持续超前、越积越多（样本率 -0.09% → -4.8% → -14%）。
          *
-         * 8 → **32**（2026-11-17）：8 帧在 1024 样本/帧下只有 186ms，而实车停拍是
-         * 100~309ms 量级（`AUDIO: 停拍 309ms —— park 309`），超过上限的那部分当场
-         * 永久丢掉。1.2.63 那份日志里表现得很干净：混音器每 30 秒产 1292 帧，车机只收到
-         * 1273~1284 包，交付率 -0.16% → -1.49% 一路走低，累计到一分钟就是百分之几的
-         * 欠账——车机缓冲只出不进，迟早哑掉。
-         *
-         * 32 帧 = 743ms/拍：一次 300ms 停摆一拍就追平。单拍突发 32 个 RTP 包（约 24KB）
-         * 在车机热点直连的链路上是毫秒级的事，比「丢一段音频」划算得多。
+         * 现在取 8（≈59ms/拍）：不追求一拍追平，而是每拍净追 7 帧，1400ms 的积压
+         * 约 27 拍消化完。单拍突发只有 8 个 RTP 包，接收端 jitter buffer 接得住；
+         * 追赶期间输出速率短暂高于实时，这是刻意的——宁可对齐，也不要空档。
          */
-        const val MAX_CATCHUP_FRAMES = 32
+        const val MAX_CATCHUP_FRAMES = 8
 
         /**
          * 落后超过这么久才真的放弃追赶、重排时间原点。
@@ -155,16 +150,6 @@ class AudioMixer(
     /** 泵的时间原点与已产帧数（定拍基准）。 */
     private var originNanos = 0L
     private var emittedFrames = 0L
-
-    /**
-     * 「外部已交付帧数」的基准（见 [dueFrames] 的 `sentFrames` 参数）。
-     *
-     * 只有收了外部计数才有意义：外部计数是**RTP 时间轴**（真正进了包的样本数），
-     * 它和 [emittedFrames]（混出来多少帧）会分叉——编码器偶发不吐帧、或者一帧吐出
-     * 两包，都会让两者差几帧。以 RTP 时间轴为准才不会把差额累积成「越放越少」。
-     * 重排原点时同步刷新基准，免得重排后又追一笔已经放弃的旧账。
-     */
-    private var sentBaseline = 0L
 
     /** 当前音乐增益（Q10），逐帧线性趋近目标值。 */
     private var gainQ = GAIN_UNITY_Q
@@ -308,22 +293,11 @@ class AudioMixer(
      * **落后时不丢时间轴**：只有超过 [RESYNC_AFTER_MILLIS] 才重排原点，其余情况一律
      * 用「多发几帧」把积压追回来（缺样本自动补零 = 静音）。改这个行为的原因见
      * [MAX_CATCHUP_FRAMES] 的注释。
-     *
-     * @param sentFrames 调用方**真正发出去的帧数**（RTP 时间戳 ÷ 每包样本数）。
-     *   传了它就以它为准——这是 2026-11-17 的核心修正：混音器「混出来 1292 帧」不等于
-     *   「发出去 1292 帧」，编码器偶尔不吐帧（`payloads.isEmpty()`）时那些样本根本没进
-     *   RTP 时间轴，而内部计数器却已经往前走。两边差几帧看着无害，30 秒一窗口差 19 帧
-     *   就是 -1.5%，一分钟车机缓冲就被掏空。缺口必须**由我们自己补回来**。
-     *   传 -1（默认）= 退化成内部计数（单测与 PCM 采集通路用）。
      */
-    fun dueFrames(
-        nowNanos: Long,
-        sentFrames: Long = -1L,
-    ): Int {
+    fun dueFrames(nowNanos: Long): Int {
         if (originNanos == 0L) {
             originNanos = nowNanos
             emittedFrames = 0L
-            sentBaseline = if (sentFrames >= 0) sentFrames else 0L
             return 1
         }
         val elapsedNanos = nowNanos - originNanos
@@ -331,8 +305,7 @@ class AudioMixer(
         // 注意除以 frameSamples：这是「帧数」不是「样本数」，漏除会把 21ms 当成 1 秒，
         // 每拍都判定「落后太多」→ 重新对齐 → 实际只产出 1 帧/拍（速率崩掉）。
         val elapsedFrames = elapsedNanos * sampleRate / 1_000_000_000L / frameSamples
-        val accounted = if (sentFrames >= 0) sentFrames - sentBaseline else emittedFrames
-        val due = elapsedFrames - accounted
+        val due = elapsedFrames - emittedFrames
         if (due <= 0) return 0
         if (due > windowMaxDueFrames) windowMaxDueFrames = due
         if (due > resyncThresholdFrames) {
@@ -340,7 +313,6 @@ class AudioMixer(
             // 一段时间轴的分支，RTP 时间戳从眼前继续走。
             originNanos = nowNanos
             emittedFrames = 0L
-            if (sentFrames >= 0) sentBaseline = sentFrames
             resyncCount++
             windowResyncs++
             return 1
@@ -353,32 +325,11 @@ class AudioMixer(
         return take
     }
 
-    /**
-     * 当前「时间轴落后」多少毫秒（正数 = 我们送得比墙钟慢，车机那边正在被掏空）。
-     *
-     * 体检行用它给出**瞬时**欠账；[windowMaxDueFrames] 给的是窗口内的峰值。
-     */
-    fun lagMillis(
-        nowNanos: Long,
-        sentFrames: Long = -1L,
-    ): Long {
-        if (originNanos == 0L) return 0L
-        val elapsedNanos = nowNanos - originNanos
-        if (elapsedNanos <= 0) return 0L
-        val elapsedFrames = elapsedNanos * sampleRate / 1_000_000_000L / frameSamples
-        val accounted = if (sentFrames >= 0) sentFrames - sentBaseline else emittedFrames
-        return (elapsedFrames - accounted) * frameSamples * 1000L / sampleRate
-    }
-
     /** 距离下一帧还有多久（纳秒，已钳到 [1ms, 20ms]，供泵线程 park）。 */
-    fun nanosToNextFrame(
-        nowNanos: Long,
-        sentFrames: Long = -1L,
-    ): Long {
+    fun nanosToNextFrame(nowNanos: Long): Long {
         if (originNanos == 0L) return 0L
-        val accounted = if (sentFrames >= 0) sentFrames - sentBaseline else emittedFrames
         val nextFrameAt =
-            originNanos + (accounted + 1) * frameSamples * 1_000_000_000L / sampleRate
+            originNanos + (emittedFrames + 1) * frameSamples * 1_000_000_000L / sampleRate
         return (nextFrameAt - nowNanos).coerceIn(1_000_000L, 20_000_000L)
     }
 
@@ -497,7 +448,6 @@ class AudioMixer(
         nav.clear()
         originNanos = 0L
         emittedFrames = 0L
-        sentBaseline = 0L
         gainQ = GAIN_UNITY_Q
         lastNavFeedNanos = 0L
         framesEmitted = 0L

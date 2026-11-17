@@ -292,59 +292,6 @@ class AudioMixerTest {
         assertEquals(1L, mixer.windowResyncs)
     }
 
-    /**
-     * 2026-11-17 实车（宝马 G38，1.2.63）的核心教训：
-     *
-     * 「混音器混出多少帧」不等于「RTP 时间轴走了多少帧」。编码器偶尔不吐帧
-     * （`AacLcEncoder.encode` 返回空表）时，那一帧样本根本没进包，但内部计数器
-     * 已经往前走了——于是 30 秒窗口里产出 1292 帧、只发出 1273 包，交付率 -1.49%。
-     * 车机按 44100 渲染，我们每秒少喂 0.6%，一分钟后它的缓冲被掏空 → 哑音。
-     *
-     * 现在 `dueFrames(now, sentFrames)` 以**真正发出的帧数**为账本：漏掉的会被后续
-     * 拍次自动补上来（多混几帧），时间轴始终贴着墙钟。
-     */
-    @Test
-    fun `以发出帧数为账本时_漏掉的帧会被补回来`() {
-        val mixer = mixer()
-        val buffer = ByteArray(frameBytes)
-        var now = 20_000_000_000L
-        var sent = 0L // 真正进了 RTP 的帧数
-        var produced = 0
-        var lost = 0
-        // 第一拍初始化
-        mixer.dueFrames(now, sent)
-        mixer.mixNextFrame(buffer, now)
-        produced++
-        sent++
-        // 跑 2 秒，每 5ms 醒一次；每 10 帧模拟一次「编码器没吐帧」（样本丢掉、时间轴没动）
-        repeat(400) {
-            now += 5_000_000L
-            val due = mixer.dueFrames(now, sent)
-            repeat(due) {
-                mixer.mixNextFrame(buffer, now)
-                produced++
-                if (produced % 10 == 0) lost++ else sent++
-            }
-        }
-        val expected = 2 * rate / frameSamples // ≈ 93 帧/2 秒
-        assertTrue("漏了 $lost 帧，但产出 $produced 帧必须多于时间轴帧数", produced > expected)
-        assertTrue("时间轴必须贴着墙钟（±3 帧），实际 sent=$sent / expect=$expected", kotlin.math.abs(sent - expected) <= 3)
-        assertTrue("漏掉的帧必须真的多混回来（produced=$produced > sent=$sent）", produced > sent)
-        assertTrue("这一刻的欠账应接近 0，实际 ${mixer.lagMillis(now, sent)}ms", kotlin.math.abs(mixer.lagMillis(now, sent)) <= 60)
-    }
-
-    @Test
-    fun `时间轴欠账能被量出来`() {
-        val mixer = mixer()
-        val buffer = ByteArray(frameBytes)
-        val t0 = 30_000_000_000L
-        mixer.dueFrames(t0, 0)
-        mixer.mixNextFrame(buffer, t0)
-        // 走 200ms 却一包没发：欠账 ≈ 200ms
-        val lag = mixer.lagMillis(t0 + 200_000_000L, 0)
-        assertTrue("欠账应在 150~250ms 之间，实际 $lag", lag in 150..250)
-    }
-
     @Test
     fun `最长停拍只记真实间隔`() {
         val mixer = mixer()

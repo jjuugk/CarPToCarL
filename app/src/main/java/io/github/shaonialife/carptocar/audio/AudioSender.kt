@@ -619,18 +619,11 @@ class AudioSender(
 
                     while (running.get()) {
                         val loopStart = System.nanoTime()
-                        // 以 **RTP 时间轴**为准算欠账：`timestamp` 只在包真的发出去时才前进，
-                        // 因此「编码器没吐帧」「一帧吐两包」都会体现在这里。用混音器自己的
-                        // 产出计数会把这些差额当成本事已办完——30 秒一窗口少 19 帧，
-                        // 就是车机侧每秒少 0.65% 的音频（2026-11-17 实车日志）。
-                        val sentFrames = timestamp / samplesPerPacket
                         val outerNanos = if (lastLoopEnd == 0L) 0L else loopStart - lastLoopEnd
-                        val due = mixer.dueFrames(loopStart, sentFrames)
+                        val due = mixer.dueFrames(loopStart)
                         if (due <= 0) {
                             val parkStart = System.nanoTime()
-                            java.util.concurrent.locks.LockSupport.parkNanos(
-                                mixer.nanosToNextFrame(loopStart, sentFrames),
-                            )
+                            java.util.concurrent.locks.LockSupport.parkNanos(mixer.nanosToNextFrame(loopStart))
                             val parkEnd = System.nanoTime()
                             val parked = parkEnd - parkStart
                             reportStall(
@@ -1119,16 +1112,10 @@ class AudioSender(
             // 落后/追回/重排：回答「停摆有没有变成空洞」。
             // 旧实现落后 22ms 以上就丢弃并重排原点，所以那时候这三个数根本不存在；
             // 现在的设计是追回来，`重排` 一旦 >0 就说明真的丢过一段时间轴（2 秒以上）。
-            //
-            // 「此刻时间轴差」= 墙钟走到哪儿 vs RTP 时间戳走到哪儿（正数 = 我们送少了）。
-            // 这个数持续 >100ms 就是「车机缓冲在被掏空」，下一步必然是哑音；
-            // 它和「最大落后」的区别：那个是窗口峰值，这个是**当前**欠账，恢复没恢复一眼可见。
-            val lagNowMs = mixer.lagMillis(now, timestamp / samplesPerPacket)
             val lagText =
-                if (mixer.windowMaxDueFrames > 1 || lagNowMs > 0) {
+                if (mixer.windowMaxDueFrames > 1) {
                     val lagMs = mixer.windowMaxDueFrames * SAMPLES_PER_PACKET * 1000 / sampleRate
                     "；最大落后 ${mixer.windowMaxDueFrames} 帧（≈${lagMs}ms）、" +
-                        "此刻时间轴差 ${lagNowMs}ms、" +
                         "本会话累计追回 ${mixer.catchUpFrames} 帧、重排 ${mixer.resyncCount} 次"
                 } else {
                     "；定拍准（无落后）"
