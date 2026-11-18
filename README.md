@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**
-> —— 主线固定直链（当前 1.2.62，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk)**
+> —— 主线固定直链（当前 1.2.70，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.62，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.62.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.70，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.70.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.62`（正式版；**本次核心是「找回 1.2.50 能稳定连上的三档连接容错」**。1.2.53 把 `isCinemoStack` 判据收紧成「全部传输组件名含 Cinemo」，本意是纠正宝马 MGU-81 的栈归类，但没意识到这个开关的全部读取点都是**连接容错**（0x4300 双标识 / 90s ACK 宽限 / 不重认证），于是这台车被拿掉三档容错——同机同车日志：1.2.50 双标识时段入网成功 5 次、RECORD 9 次，1.2.53 单标识时段入网成功 1 次却 RECORD 14 次（连上后被反复掐断），1.2.60 的 11 次 0x4300 全是单标识、8 轮里 6 轮卡在热点入网。1.2.62 把判据回退到「报文体出现 Cinemo 即命中」，凡带 Cinemo 组件的车都给足容错。同时带出 1.2.60 的 98311 门禁 ACK 超时逃生、1.2.61 的 0x10035 媒体解析恢复。884 例单测 0 失败，**未实车验证**。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.62.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.62/CarPToCarL-1.2.62.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.70`（正式版；**本次核心是「音频顿挫的两处修复 + 媒体采样率两端对齐」**。①数据口从阻塞式 `DatagramSocket` 改回**非阻塞 `DatagramChannel`**——实车日志证明 `sendto()` 在车机暂停/拥塞时阻塞 700~791ms（CPU 仅 +17ms、发包占 95%），把整个定拍泵线程拖死，改后缓冲满即丢包保节拍；②新增**媒体采样率三档选项**（自动/48k/44.1k）：解包 CarLife 引擎证实其采样率由车机下发的 `MEDIA_SAMPLE_RATE` 决定、并非恒定 48k，App 通过 98386 直接宣告并优先协商同率档，避免 44.1↔48 重采样；界面实时显示引擎源率与车机协商率。合并了 1.2.62 的三档连接容错与 1.2.63~65 被回滚后重新验证的改动。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -834,6 +834,38 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.70 —— 2026-11-18（音频顿挫两处修复 + 媒体采样率两端对齐，正式版）
+
+本次发布聚焦「连接播放一段时间后概率一顿一顿」的排查与修复，核心结论是**手机侧音频本身
+完全连续**（2 分钟录音逐 20ms 分析零空洞），顿挫由两处独立的发送端问题造成，均已修复。
+
+**一、非阻塞发包：消除 700ms 级发送阻塞**
+
+真机日志的停拍归因给出铁证：`停拍 791ms —— park 0 / 混音 5 / 发包 785ms；GC +0、CPU +17ms`
+——墙钟走了 791ms 但线程几乎没耗 CPU，只可能是阻塞在内核 `DatagramSocket.send()`：车机暂停或
+网络拥塞时内核发送缓冲填满，`sendto()` 一直阻塞，把整个音频定拍泵线程拖住，后续帧全部挤在一起
+补，听感即顿挫。数据口 6000 改回**非阻塞 `DatagramChannel`**（`configureBlocking(false)`），缓冲满
+时 `write()` 返回 0 就丢这一包（实时音频晚到无意义），立即继续泵，车机恢复后自然续发；
+RTP 序号/时间戳仍推进。同步口 6011 保持阻塞式（每秒 1 包不会满，且依赖 ICMP 判断端口监听）。
+体检行新增「缓冲满主动丢 N 包」，与链路上丢包区分。此修复曾在 1.2.63 引入、当晚回滚，本次经
+日志证据重新确认为真凶后郑重应用（commit `6724df7`）。
+
+**二、媒体采样率三档选项（自动 / 48kHz / 44.1kHz）**
+
+解包 `carlife.apk` 反编译证实：CarLife 引擎的媒体 PCM 采样率**不是恒定的 48k**，而是运行时由
+车机下发的 `MEDIA_SAMPLE_RATE` featureConfig 与持久化 `is48k` 偏好决定（48k 与 44.1k 都会出现；
+实车日志 26 条全 44100Hz）。此前写死的「48K 优先」建立在一条已不存在的 48000Hz 日志上，在
+44.1k 源上反而引入重采样。本次新增设置项，通过 98386 featureConfig 直接向引擎宣告目标采样率，
+并让 `audioCandidates` 优先协商同率档，两端对齐零重采样。默认「自动」完全保持旧行为。
+界面 `audioTag` 实时显示引擎源率与车机协商率，不等时标注「重采样」，便于实车核对。
+
+**三、诊断结论（诚实边界）**
+
+录音与体检一致证明手机发出音频连续、发包均匀、车机按实时消费，**卡顿不在手机端**。此前怀疑的
+Wi-Fi 扫描丢包被 WinPlay diagnostics 的零丢包数据推翻；WinPlay 接收端每 10 秒一次的 682ms
+`ptsGapMs` 重锚是接收端行为，本次未改接收端。未实车验证本版是否彻底消除听感顿挫。
+900 例单测 0 失败。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`。
 
 ### 1.2.62 —— 2026-11-17（找回 1.2.50 的三档连接容错，正式版）
 
