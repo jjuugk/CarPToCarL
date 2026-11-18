@@ -44,6 +44,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.input.CarInputClient
+import io.github.shaonialife.carptocar.input.KnobFocus
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -1932,6 +1933,32 @@ class MainActivity : AppCompatActivity() {
                     "已开启：方向盘语音键短按三次重启音频"
                 } else {
                     "已关闭：语音键恢复原来的单次识别行为"
+                },
+            )
+        }
+
+        // 旋钮焦点模式（实验，默认关）：声明 FOCUS_UI、旋钮改发 CarLife 焦点键。下次连接起效。
+        val knobFocusSwitch = findViewById<SwitchCompat>(R.id.switchKnobFocus)
+        val knobFocusNote = findViewById<TextView>(R.id.knobFocusNote)
+        knobFocusSwitch.isChecked = KnobFocus.enabled
+
+        fun refreshKnobFocusNote() {
+            knobFocusNote.text =
+                if (knobFocusSwitch.isChecked) {
+                    "旋钮转动移动选中项、按下确认、返回键返回（CarLife 焦点模式）。下次连接起效。"
+                } else {
+                    "已关闭：旋钮转动 = 上下滑动、按下 = 点击（原有行为）。"
+                }
+        }
+        refreshKnobFocusNote()
+        knobFocusSwitch.setOnCheckedChangeListener { _, checked ->
+            KnobFocus.save(ctx, checked)
+            refreshKnobFocusNote()
+            snack(
+                if (checked) {
+                    "已开启旋钮焦点模式：断开后重新连接起效"
+                } else {
+                    "已关闭旋钮焦点模式：断开后重新连接起效"
                 },
             )
         }

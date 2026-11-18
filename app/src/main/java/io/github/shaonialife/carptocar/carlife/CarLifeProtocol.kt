@@ -226,6 +226,22 @@ internal object CarLifeProtocol {
 
         /** 停语音识别。 */
         const val VR_STOP = 0x22
+
+        // 旋钮焦点键：百度开源车机端 `CommonParams`（apollo-DuerOS CarLife-Android-Vehicle）
+        // 的 `KEYCODE_SELECTOR_NEXT/PREVIOUS`、`KEYCODE_BACK`、`KEYCODE_OK`。
+        // 仅在 98386 声明 `FOCUS_UI = 1` 的会话里使用（见 [io.github.shaonialife.carptocar.input.KnobFocus]）。
+
+        /** 旋钮顺时针：焦点移到下一项。 */
+        const val SELECTOR_NEXT = 0x06
+
+        /** 旋钮逆时针：焦点移到上一项。 */
+        const val SELECTOR_PREVIOUS = 0x07
+
+        /** 返回。 */
+        const val BACK = 0x0E
+
+        /** 确认（旋钮按下）。 */
+        const val OK = 0x14
     }
 
     const val HEARTBEAT = 131074
@@ -392,6 +408,14 @@ internal object CarLifeProtocol {
          * null = 不下发这一项（保持旧行为，让引擎/车机自行决定）。
          */
         mediaSampleRate: Int? = null,
+        /**
+         * 车机是否要求焦点 UI（`FOCUS_UI`，旋钮车）。
+         *
+         * 键名与取值来自百度开源车机端：`CarlifeConfUtil.KEY_BOOL_FOCUS_UI = "FOCUS_UI"`，
+         * `FeatureConfigManager.customFeature()` 按布尔写 1/0。
+         * false = 不下发这一项（保持旧行为）。
+         */
+        focusUi: Boolean = false,
     ): ByteArray {
         val items = ArrayList<ByteArray>()
         items += pbString(1, "I_FRAME_INTERVAL") + pbVarint(2, iFrameInterval)
@@ -401,6 +425,9 @@ internal object CarLifeProtocol {
         items += pbString(1, "MEDIA_LYRIC_SUPPORT") + pbVarint(2, if (mediaLyricSupport) 1 else 0)
         if (mediaSampleRate != null) {
             items += pbString(1, "MEDIA_SAMPLE_RATE") + pbVarint(2, mediaSampleRate)
+        }
+        if (focusUi) {
+            items += pbString(1, "FOCUS_UI") + pbVarint(2, 1)
         }
         var list = ByteArray(0)
         for (item in items) list += pbBytes(2, item)

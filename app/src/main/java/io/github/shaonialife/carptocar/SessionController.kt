@@ -48,6 +48,7 @@ import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.HidDescriptorSummary
+import io.github.shaonialife.carptocar.input.ButtonEdges
 import io.github.shaonialife.carptocar.input.KnobReports
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.MediaKeyRoute
@@ -6058,18 +6059,20 @@ object SessionController {
                                                 null
                                             }
                                         if (knobLayout != null && report != null) {
-                                            // 旋钮：转动 → 竖向滑动，按下 → 点一下。
-                                            // CarLife+ 没有焦点引擎，只能把旋钮翻译成触摸
-                                            // （为什么不是硬键，见 KnobRouter 的 KDoc）。
+                                            // 旋钮：默认转动 → 竖向滑动，按下 → 点一下；开启「旋钮焦点模式」
+                                            // 后改发 CarLife 焦点键（见 KnobRouter / KnobFocus 的 KDoc）。
+                                            // 按下/返回只取按下沿：按住时车机仍持续发报告，按电平会连点。
                                             val knob = KnobReports.parse(report, knobLayout)
-                                            if (knob.steps != 0 || knob.pressed == true) {
+                                            val (pressEdge, backEdge) =
+                                                knobButtonEdges.update(uuidKey, knob.pressed, knob.backPressed)
+                                            if (knob.steps != 0 || pressEdge || backEdge) {
                                                 appendLog(
                                                     "EVENT: 旋钮 uuid=$uuid steps=${knob.steps}" +
-                                                        " 按下=${knob.pressed} 返回=${knob.backPressed}",
+                                                        " 按下=${knob.pressed} 返回=${knob.backPressed}" +
+                                                        if (CarLifeHijack.knobFocusSession) " → 焦点键" else "",
                                                 )
                                             }
-                                            if (knob.steps != 0) KnobRouter.onSteps(knob.steps)
-                                            if (knob.pressed == true) KnobRouter.onPress()
+                                            KnobRouter.onKnob(knob.steps, pressEdge, backEdge)
                                         } else if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                             lastConsumerUsage = consumerUsage
@@ -6293,6 +6296,7 @@ object SessionController {
                             // 新一轮 /info：HID 计数与「首次来自 uuid」标记都属于上一轮，清零
                             hidReportCounts.clear()
                             hidReportFirstLogged.clear()
+                            knobButtonEdges.clear()
                             hidDeclaredUuids = setup.hidDeviceUuids
                             hidHasMediaKeyDevice = setup.hasMediaKeyHid
                             val screen = if (screenAcquired) client.runScreenStream(sessionKey, setup.displayUuid) else null
@@ -7000,6 +7004,9 @@ object SessionController {
 
     /** 已打过「首次来自 uuid=X」log 的设备（每种一行，不刷屏）。 */
     private val hidReportFirstLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 旋钮按下/返回的按下沿检测（每个 uuid 一份），随新一轮 /info 清空。 */
+    private val knobButtonEdges = ButtonEdges()
 
     /** 本轮 `/info` 声明的 HID 设备 uuid（空 = 车机没声明，触摸/按键都走不了 HID 通路）。 */
     @Volatile

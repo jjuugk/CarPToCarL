@@ -120,6 +120,11 @@ class CarLifeHuClient(
      */
     private val mediaSampleRate: Int? = null,
     /**
+     * 98386 featureConfig 里是否声明 `FOCUS_UI = 1`（旋钮焦点模式）。
+     * 由 [io.github.shaonialife.carptocar.input.KnobFocus] 设置映射而来；false 时不下发该项。
+     */
+    private val focusUi: Boolean = false,
+    /**
      * 帧率变更命令的探测 id 列表。
      *
      * 手机端 `VideoMsgHandler.handleMessage` 里确实有 `VIDEO_ENCODER_FRAME_RATE_CHANGE`
@@ -888,9 +893,10 @@ class CarLifeHuClient(
                         "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                             "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
                             "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词" +
-                                (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") + "）",
+                                (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") +
+                                (if (focusUi) "，FOCUS_UI=1 旋钮焦点" else "") + "）",
                     )
-                    send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
+                    send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate, focusUi = focusUi))
                     Thread.sleep(1200)
                     log("CARLIFE: 主动推送 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
                     sendEncoderInit()
@@ -1144,7 +1150,7 @@ class CarLifeHuClient(
         if (reason != "命中" && connectType != PROBE_DEFAULT_TYPE) {
             connectType = PROBE_DEFAULT_TYPE
             runCatching {
-                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
+                send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate, focusUi = focusUi))
             }
             log("CARLIFE: [探测] 已复位 CONNECT_TYPE=$connectType")
         }
@@ -1447,6 +1453,10 @@ class CarLifeHuClient(
                     CarLifeProtocol.HardKey.VR_START ->
                         "（语音识别开始）→ CarLife+ 应起小度；等它的「引擎模块状态 …语音=1」确认"
                     CarLifeProtocol.HardKey.VR_STOP -> "（语音识别结束）"
+                    CarLifeProtocol.HardKey.SELECTOR_NEXT -> "（旋钮下一项）"
+                    CarLifeProtocol.HardKey.SELECTOR_PREVIOUS -> "（旋钮上一项）"
+                    CarLifeProtocol.HardKey.OK -> "（旋钮确认）"
+                    CarLifeProtocol.HardKey.BACK -> "（返回）"
                     else -> ""
                 },
             ) + if (ok) "" else " —— 命令通道不可用，未送达",
@@ -1490,10 +1500,11 @@ class CarLifeHuClient(
                 "CARLIFE: 主动推送 98386 特征配置（CONNECT_TYPE=$connectType，" +
                     "I 帧间隔=${CarLifeProtocol.I_FRAME_INTERVAL_DEFAULT} 帧，" +
                     "DISABLE_RESOLUTION_OPTION=1 分辨率直通，CONTENT_ENCRYPTION=0 不加密，MEDIA_LYRIC_SUPPORT=1 歌词" +
-                        (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") + "）",
+                        (mediaSampleRate?.let { "，MEDIA_SAMPLE_RATE=$it（${if (it == 1) "48k" else "44.1k"}）" } ?: "") +
+                        (if (focusUi) "，FOCUS_UI=1 旋钮焦点" else "") + "）",
             )
         }
-        send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate))
+        send(CarLifeProtocol.HU_FEATURE_CONFIG, CarLifeProtocol.featureConfig(connectType, mediaSampleRate = mediaSampleRate, focusUi = focusUi))
     }
 
     /**

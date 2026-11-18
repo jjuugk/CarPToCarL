@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.carlife
 import android.content.Context
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSource
+import io.github.shaonialife.carptocar.input.KnobFocus
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSender
@@ -550,6 +551,17 @@ object CarLifeHijack {
     val isActive: Boolean get() = running.get() && client?.isRunning == true
 
     /**
+     * 本轮 CarLife 连接是否在 98386 里声明了 `FOCUS_UI = 1`（建链时 [KnobFocus.enabled] 的快照）。
+     * 旋钮路由以它为准：开关中途改了，本轮仍按建链时的声明走，下次连接才换。
+     */
+    @Volatile
+    var knobFocusSession: Boolean = false
+        private set
+
+    /** 旋钮焦点键（[CarLifeProtocol.HardKey.SELECTOR_NEXT] 等）→ 0x68008；未接管时返回 false。 */
+    fun sendKnobKey(keycode: Int): Boolean = client?.sendHardKeyCode(keycode) ?: false
+
+    /**
      * 把一条车机定位转给 CarLife+（0x18010）。
      *
      * 由 [SessionController] 在 iAP2 0xFFFB（LocationInformation）到达时调用；
@@ -989,6 +1001,8 @@ object CarLifeHijack {
                     source = AudioSource.NAV,
                 )
             if (!publishAudioSource(sink, naviSink)) return
+            val focusUi = KnobFocus.enabled
+            knobFocusSession = focusUi
             val hu =
                 CarLifeHuClient(
                     host = "127.0.0.1",
@@ -1039,6 +1053,7 @@ object CarLifeHijack {
                     requestedFps = requestedFps,
                     initialConnectType = connectType,
                     mediaSampleRate = AudioRatePreference.load(appContext).mediaSampleRateFeatureValue,
+                    focusUi = focusUi,
                     probeIds = probeIds,
                     connectTypeProbe = connectTypeProbe,
                     orderedInit = orderedInit,

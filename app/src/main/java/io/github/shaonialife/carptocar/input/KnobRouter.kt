@@ -16,6 +16,9 @@ import java.util.concurrent.LinkedBlockingDeque
  * 所以旋钮**只能**翻译成触摸：转动 → 一段竖向滑动手势（列表滚动/翻页），按下 → 在锚点
  * 点一下。这条通路（`CarLifeHijack.handleTouch`）已经在实车上验证可用。
  *
+ * 例外：开启实验开关 [KnobFocus] 后，本轮连接在 98386 声明 `FOCUS_UI = 1`，旋钮改发 CarLife
+ * 协议的焦点键（SELECTOR_NEXT/PREVIOUS、OK、BACK），不再合成触摸（依据见 [KnobFocus] 的 KDoc）。
+ *
  * ## 锚点为什么要记「最后一次触摸点」
  *
  * 用户通常先用手点一下列表，再转旋钮。锚点取最后一次真实触摸的位置，滑动就发生在
@@ -78,6 +81,33 @@ object KnobRouter {
         anchorY = y
     }
 
+    /**
+     * 一份旋钮报告的统一入口。
+     *
+     * [pressEdge]/[backEdge] 必须是**按下沿**（[ButtonEdges]），不是电平。
+     * 焦点模式（本轮已声明 `FOCUS_UI`）发焦点键；否则走原有的触摸翻译，返回键在触摸模式下不处理（同旧行为）。
+     */
+    fun onKnob(
+        steps: Int,
+        pressEdge: Boolean,
+        backEdge: Boolean,
+    ) {
+        if (CarLifeHijack.knobFocusSession) {
+            val keys = KnobFocus.hardKeysFor(steps, pressEdge, backEdge)
+            if (keys.isEmpty()) return
+            if (!CarLifeHijack.isActive) {
+                logIdle()
+                return
+            }
+            for (key in keys) {
+                if (!CarLifeHijack.sendKnobKey(key)) return
+            }
+            return
+        }
+        if (steps != 0) onSteps(steps)
+        if (pressEdge) onPress()
+    }
+
     /** 旋钮转动（[steps] >0 顺时针、<0 逆时针）。 */
     fun onSteps(steps: Int) {
         if (steps == 0) return
@@ -98,16 +128,20 @@ object KnobRouter {
 
     private fun enqueue(command: Command) {
         if (!CarLifeHijack.isActive) {
-            val now = android.os.SystemClock.uptimeMillis()
-            if (now - idleLoggedAt > 5_000L) {
-                idleLoggedAt = now
-                logSink?.invoke("KNOB: 旋钮动作被丢弃——CarLife 尚未接管（无触摸通道可走）")
-            }
+            logIdle()
             return
         }
         if (queue.remainingCapacity() == 0) queue.pollFirst()
         queue.offerLast(command)
         startWorker()
+    }
+
+    private fun logIdle() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - idleLoggedAt > 5_000L) {
+            idleLoggedAt = now
+            logSink?.invoke("KNOB: 旋钮动作被丢弃——CarLife 尚未接管（无触摸通道可走）")
+        }
     }
 
     @Synchronized
