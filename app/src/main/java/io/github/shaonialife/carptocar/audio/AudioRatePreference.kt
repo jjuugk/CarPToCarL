@@ -109,27 +109,66 @@ enum class AudioRatePreference {
         private const val PREFS_NAME = "settings"
         private const val KEY = "audio_rate_preference"
 
+        /** 引擎宣告率的落盘键（Hz）。与 [KEY] 同库不同键，便于独立清除。 */
+        private const val KEY_ANNOUNCED_RATE = "announced_media_rate_hz"
+
         /**
          * 引擎最近一次宣告的媒体采样率（CarLife `MUSIC_PKG_INIT` 的 field1）。
          *
-         * 0 = 还没收到过（或宣到了 44.1k/48k 以外的值，不采信）。跨会话保留：
-         * 引擎的 `is48k` 是持久化偏好，**上一次**协商出来的值就是这一次要跟随的目标——
+         * 0 = 还没收到过（或宣到了 44.1k/48k 以外的值，不采信）。**跨会话、跨进程保留**：
+         * 引擎的 `is48k` 本身是持久化偏好，上一次协商出来的值就是这一次要跟随的目标——
          * 而建流（SETUP）发生在音乐开播之前，本次宣告还没到，只能靠这个历史值。
+         * 内存优先，冷启动时从 SharedPreferences 回填，避免「每次重启 App 第一次连接都退回 48k」。
          */
         @Volatile
         private var announcedMediaRate: Int = 0
 
-        /** 记录引擎宣告的媒体采样率；只认 44.1k / 48k，其它值忽略。 */
-        fun noteAnnouncedMediaRate(rate: Int) {
-            if (rate == RATE_44K1_HZ || rate == RATE_48K_HZ) announcedMediaRate = rate
+        /** 记录引擎宣告的媒体采样率；只认 44.1k / 48k，其它值忽略。[context] 非空时一并落盘。 */
+        fun noteAnnouncedMediaRate(
+            rate: Int,
+            context: Context? = null,
+        ) {
+            if (rate != RATE_44K1_HZ && rate != RATE_48K_HZ) return
+            announcedMediaRate = rate
+            if (context != null) {
+                runCatching {
+                    context
+                        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putInt(KEY_ANNOUNCED_RATE, rate)
+                        .apply()
+                }
+            }
         }
 
-        /** 引擎最近宣告的采样率；未知（从未收到）返回 null。 */
-        fun announcedMediaRate(): Int? = announcedMediaRate.takeIf { it > 0 }
+        /** 引擎最近宣告的采样率；未知（从未收到）返回 null。[context] 非空时允许读落盘值。 */
+        fun announcedMediaRate(context: Context? = null): Int? {
+            val cached = announcedMediaRate
+            if (cached > 0) return cached
+            if (context == null) return null
+            val stored =
+                runCatching {
+                    context
+                        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .getInt(KEY_ANNOUNCED_RATE, 0)
+                }.getOrDefault(0)
+            if (stored != RATE_44K1_HZ && stored != RATE_48K_HZ) return null
+            announcedMediaRate = stored
+            return stored
+        }
 
-        /** 清空宣告值。仅供单测隔离使用。 */
-        fun resetAnnouncedMediaRate() {
+        /** 清空宣告值（内存与落盘）。仅供单测隔离使用。 */
+        fun resetAnnouncedMediaRate(context: Context? = null) {
             announcedMediaRate = 0
+            if (context != null) {
+                runCatching {
+                    context
+                        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .remove(KEY_ANNOUNCED_RATE)
+                        .apply()
+                }
+            }
         }
 
         /** 读当前设置；未写过 / 值非法都按 [AUTO]（默认跟随车机）。 */

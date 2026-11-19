@@ -4238,7 +4238,7 @@ object SessionController {
             // 排序在生成候选时就一次做完（只重排不删除），这里只留一行日志，
             // 方便和 SETUP 实际协商出来的频率对照。
             val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
-            val announcedRate = io.github.shaonialife.carptocar.audio.AudioRatePreference.announcedMediaRate()
+            val announcedRate = io.github.shaonialife.carptocar.audio.AudioRatePreference.announcedMediaRate(appContext)
             val preferRate = ratePref.preferredRate(announcedRate)
             appendLog(
                 if (ratePref == io.github.shaonialife.carptocar.audio.AudioRatePreference.AUTO) {

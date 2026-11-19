@@ -1003,7 +1003,7 @@ object CarLifeHijack {
                         // 「跟随车机」策略的输入：这就是引擎（车机协商后）实际输出的采样率。
                         // 本次建流发生在音乐开播之前，用不上它；但下一次建流会按它排序候选，
                         // 让 AirPlay 侧的档位与引擎输出同率，省掉 44.1↔48 重采样。
-                        AudioRatePreference.noteAnnouncedMediaRate(rate)
+                        AudioRatePreference.noteAnnouncedMediaRate(rate, appContext)
                         synchronized(audioPlaybackLock) {
                             if (audioSink === sink) sink.configure(rate, channels)
                         }
