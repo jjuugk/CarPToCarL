@@ -4234,7 +4234,21 @@ object SessionController {
                 AudioProfileMemory.clearAll(context.applicationContext)
                 appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
             }
-            val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
+            // 采样率：跟随车机（引擎最近一次宣告的实际输出率）/ 显式 48k / 44.1k。
+            // 排序在生成候选时就一次做完（只重排不删除），这里只留一行日志，
+            // 方便和 SETUP 实际协商出来的频率对照。
+            val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
+            val announcedRate = io.github.shaonialife.carptocar.audio.AudioRatePreference.announcedMediaRate()
+            val preferRate = ratePref.preferredRate(announcedRate)
+            appendLog(
+                if (ratePref == io.github.shaonialife.carptocar.audio.AudioRatePreference.AUTO) {
+                    "AUDIO: 采样率=跟随车机（引擎最近宣告 ${announcedRate?.let { "${it}Hz" } ?: "未知"}）" +
+                        "——优先 ${preferRate}Hz 档"
+                } else {
+                    "AUDIO: 采样率偏好=${ratePref.label}——优先 ${preferRate}Hz 档"
+                },
+            )
+            val candidates = client.audioCandidates(preferCompat = audioPreferCompat, preferRate = preferRate)
             var ordered = AudioProfileMemory.order(candidates, entry)
             // 直通（1.2.72 起音频只有这一条路径）没有混音器可利用两路，也尽量不编码：
             // PCM 档优先，让引擎的 PCM 原样封包发走；车机只声明 AAC 时才被迫编码。
@@ -4248,14 +4262,6 @@ object SessionController {
                 appendLog("AUDIO: 直通模式——PCM 档优先，AAC 仅作兜底")
             }
             ordered = pcmFirst
-            // 采样率偏好：把用户指定率的档提到最前（与 CarLife 引擎宣告的 MEDIA_SAMPLE_RATE
-            // 两端对齐，避免 44.1↔48 重采样）。只重排不删除，另一率的档仍留作兜底。
-            val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
-            if (ratePref.targetSampleRate != null) {
-                val before = ordered.map { it.sampleRate }.distinct()
-                ordered = ratePref.reorderCandidates(ordered)
-                appendLog("AUDIO: 采样率偏好=${ratePref.label}——优先 ${ratePref.targetSampleRate}Hz 档（重排前候选率=$before）")
-            }
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
                 return false

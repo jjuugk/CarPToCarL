@@ -1000,6 +1000,10 @@ object CarLifeHijack {
                     // SPS 是码流的真相：确认后立刻告诉上层（界面显示、落盘快照都跟着它）。
                     onStreamSize = { w, h -> onActualStreamSize?.invoke(w, h) },
                     onAudioFormat = { rate, channels ->
+                        // 「跟随车机」策略的输入：这就是引擎（车机协商后）实际输出的采样率。
+                        // 本次建流发生在音乐开播之前，用不上它；但下一次建流会按它排序候选，
+                        // 让 AirPlay 侧的档位与引擎输出同率，省掉 44.1↔48 重采样。
+                        AudioRatePreference.noteAnnouncedMediaRate(rate)
                         synchronized(audioPlaybackLock) {
                             if (audioSink === sink) sink.configure(rate, channels)
                         }

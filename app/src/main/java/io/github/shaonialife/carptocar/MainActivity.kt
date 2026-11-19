@@ -1856,7 +1856,7 @@ class MainActivity : AppCompatActivity() {
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
         }
 
-        // 媒体采样率策略：自动 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
+        // 媒体采样率策略：跟随车机 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
         val audioRateRow = findViewById<android.view.View>(R.id.rowAudioRate)
         val audioRateValue = findViewById<TextView>(R.id.audioRateValue)
         val audioRateNote = findViewById<TextView>(R.id.audioRateNote)
@@ -1872,7 +1872,7 @@ class MainActivity : AppCompatActivity() {
             val next = AudioRatePreference.load(ctx).next()
             AudioRatePreference.save(ctx, next)
             refreshAudioRate()
-            snack("媒体采样率：${next.label}（下次连接起效；引擎已手动设过 48k 偏好时以引擎为准）")
+            snack("媒体采样率：${next.label}（下次连接起效）")
         }
 
         // 方向盘语音键三连击 → 重启音频（默认开）。

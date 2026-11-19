@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import io.github.shaonialife.carptocar.audio.AudioCodec
 import io.github.shaonialife.carptocar.audio.AudioProfile
+import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
@@ -3023,9 +3024,15 @@ class AirPlayClient(
      *     部分车机 media 档只声明 44.1k 且其音频通路只吃 48k，只能用兼容档；
      *  4. 延迟取该 (type, audioType) 在 audioLatencies 的 outputLatencyMicros，
      *     取不到用 [AUDIO_LATENCY_FALLBACK_MS]。
+     *  5. [preferRate] 非 null 时把该采样率的档整体提到最前（**只重排不删除**）：
+     *     「跟随车机」策略下由 [AudioRatePreference] 传入引擎宣告率，避免 44.1↔48 重采样；
+     *     null 保持旧顺序（48k → 44.1k）。
      * 拿不到 /info 时回退协议基线（media + PCM48k + 250ms），与改动前一致。
      */
-    fun audioCandidates(preferCompat: Boolean = false): List<AudioProfile> {
+    fun audioCandidates(
+        preferCompat: Boolean = false,
+        preferRate: Int? = null,
+    ): List<AudioProfile> {
         val baseline =
             listOf(
                 AudioProfile(AUDIO_TYPE_MEDIA, AUDIO_FORMAT_PCM_48K_STEREO, 48_000, AUDIO_LATENCY_FALLBACK_MS),
@@ -3132,8 +3139,11 @@ class AirPlayClient(
             )
             return baseline
         }
-        log("AIRPLAY: 音频候选（按偏好）=${ordered.map { it.label }}")
-        return ordered.distinctBy { it.key }
+        val dedup = ordered.distinctBy { it.key }
+        // 采样率优先只重排不删除：车机若实际只接受另一率，后面的档仍作兜底，避免无声。
+        val result = if (preferRate == null) dedup else AudioRatePreference.reorderCandidates(dedup, preferRate)
+        log("AIRPLAY: 音频候选（按偏好）=${result.map { it.label }}")
+        return result
     }
 
     /**
