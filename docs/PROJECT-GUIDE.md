@@ -2,7 +2,7 @@
 
 > 定位：**导航 + 现行结论摘要**。原始证据、日志时间线和逐版变更仍在 [README.md](../README.md) 与各专题文档；
 > 本文件只做收拢、标注状态、指出冲突。冲突时**以文档中最后一次更新为准**，不要照抄早期结论。
-> 核对基线：2026-11-19 · `main` @ `95f8b6b` · v1.2.70（900 例单测 0 失败，听感顿挫修复未实车验证）。
+> 核对基线：2026-11-19 · `main` @ `be02fdc` · v1.2.70（926 例单测 0 失败；协议重构已并入，四条控制面收口未逐项实车验证）。
 >
 > 两个配套入口：[`README.md`](README.md)（docs 目录地图，按角色给阅读路径）、
 > [`PROJECT-STATUS.md`](PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
@@ -108,7 +108,7 @@
 
 ## 5. 代码地图
 
-单模块 Android 应用，`main` 主源码 **169** 个 Kotlin 文件，按链路职责切包（协议主干 + 功能分层）：
+单模块 Android 应用，`main` 主源码 **180** 个 Kotlin 文件，按链路职责切包（协议主干 + 功能分层）：
 
 | 包 | 职责 | 包 | 职责 |
 |---|---|---|---|
@@ -118,21 +118,22 @@
 | `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、消费键、CarInput（AIDL） |
 | `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活 |
 | `launcher` / `render` | 隐形屏（保留非默认）/ EGL 合成 | `ui` / `legal` / `util` | 暗幕、免责声明、日志导出等 |
-| `protocol` | **重构分支**：协议聚合层（门面 + 能力路由 + 代际审计） | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
+| `protocol` | 协议聚合层（门面 + 能力路由 + 代际审计） | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
 
-入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **118** 个文件 / **900** 例，重点覆盖协议编解码与密码学。
+入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **120** 个文件 / **926** 例，重点覆盖协议编解码与密码学。
 
-> **重构分支 `refactor/protocol-modules`**（未合并）：179 个主源码文件 / 120 测试文件 / **926** 例。
-> `protocol/` 抽象（`ProtocolModule` / `ProtocolRegistry` / `Capability` / `ProtocolEvent`）与
-> `CarPlayModule` / `CarLifeModule` 两个纯委托门面已就位；**媒体键 / 语音键 / 触摸 / 播放意图四条已收口**——
-> 装配后走 Registry 的 `FIRST_MATCH`，未装配走本地原路径，二者互斥且共用同一份实现。
-> 数据面另抽了 `video.VideoSink` / `audio.AudioSink` 两个契约，`carlife` 不再依赖具体发送端。
-> **GPS 刻意不接**（`CarGpsFix` 是 CarLife 单位约定且单消费者，做成通用事件只会更差）。
-> `SessionController` 瘦身留到实车验证后单独评估。详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
+> **协议模块化重构已并入 `main`**（2026-11-19 快进，`main` = `be02fdc`；旧 main 备份在
+> `backup/main-pre-protocol-20261119`）。`protocol/` 10 文件：`ProtocolModule` / `ProtocolRegistry` /
+> `Capability` / `ProtocolEvent` 抽象，`CarPlayModule` / `CarLifeModule` 两个纯委托门面；
+> **媒体键 / 语音键 / 触摸 / 播放意图四条已收口**——装配后走 Registry 的 `FIRST_MATCH`，未装配走
+> 本地原路径，二者互斥且共用同一份实现；数据面另抽 `video.VideoSink` / `audio.AudioSink`，
+> `carlife` 不再依赖具体发送端。**GPS 刻意不接**（`CarGpsFix` 是 CarLife 单位约定且单消费者）。
+> `SessionController` 瘦身留到实车验证后单独评估。完整说明见
+> [`PROTOCOL-MODULES.md`](PROTOCOL-MODULES.md)、[`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
 
 ---
 
-## 6. 文档索引（docs/ 现行 42 篇 + 归档 5 篇）
+## 6. 文档索引（docs/ 现行 43 篇 + 归档 5 篇）
 
 > 6.1 是跨主题精选的阅读顺序；6.2–6.7 按主题完整列出，少量重复项用「见…」交叉引用。
 > 已整体失效或外部存档的 5 篇移入 [`archive/`](archive/README.md)，仍在下方标出路径以便对照旧链接。
@@ -144,6 +145,7 @@
 | 文档 | 状态 | 一句话 / 关键判据 |
 |---|---|---|
 | `carplay-connection-layers-20261109.md` | 🧩 | L1–L5 全局架构 + 症状→层判据表；0x4301 可晚 2′35″ |
+| `PROTOCOL-MODULES.md` | 🧩 | 协议模块化重构：分层图/能力矩阵/时序图、四条控制面收口、`VideoSink`/`AudioSink` 契约、接第三种协议五步、已知缺口 |
 | `PROTOCOL-NOTES.md` | ✅ | 发送端协议全集；以 §9c-1/2/3（11-10/11）最新修正为准：modes 状态机、0x4300 等确认、新协议严格模式 |
 | `carplay-black-screen-20261106.md` | ✅ | 证伪「声明=SPS=窗口即出画」；屏幕接管门 12s / rfps 探针 |
 | `bmw-fork-port-20261108.md` | ✅ | SDP 常驻、1.5s 音频守卫、首帧不补 RECORD（3b 又删控制就绪补发）；影响所有车型 |

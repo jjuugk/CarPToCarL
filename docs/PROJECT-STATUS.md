@@ -1,11 +1,12 @@
 # CarPToCarL 项目情况（详细）
 
 > **本文件回答「项目现在是什么样」**：定位、架构、版本、代码、能力、缺口、风险、分支与文档状态。
-> 与 [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) 分工——指南是**导航**（42 篇现行文档怎么读、排障先看哪篇），
+> 与 [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) 分工——指南是**导航**（43 篇现行文档怎么读、排障先看哪篇），
 > 本文件是**体检报告**（现在处于什么状态、哪些是已证实的、哪些还是推断）。
 >
-> 数据截止 **2026-11-19 18:30**。全部数字取自仓库实际状态（`git`、`docs/`、构建配置），不是估算。
-> 基线：`main` @ `95f8b6b`，正式版 **v1.2.70**；另有重构分支 `refactor/protocol-modules` @ `0268578`（7 提交，未合并）。
+> 数据截止 **2026-11-19 20:35**。全部数字取自仓库实际状态（`git`、`docs/`、构建配置），不是估算。
+> 基线：`main` @ `be02fdc`，正式版 **v1.2.70**；协议模块化重构已于 2026-11-19 **快进并入 main**
+> （旧 main 备份在 `backup/main-pre-protocol-20261119` = `95f8b6b`）。
 
 ---
 
@@ -17,7 +18,7 @@
 | 形态 | 单模块 Android 应用，Kotlin；**发送端**（手机侧），不是接收端 |
 | 包名 / 系统 | `io.github.shaonialife.carptocar` · minSdk 31 / target / compileSdk 34（Android 12+） |
 | 当前版本 | **1.2.70**（versionCode 10270，APK 14,084,053 B） |
-| 代码规模 | 主源码 **177** 个 Kotlin 文件 / **58,600** 行；测试 **120** 文件 / **916** 例 / 16,062 行（重构分支口径；`main` 为 169 / 900） |
+| 代码规模 | 主源码 **180** 个 Kotlin 文件 / **59,142** 行；测试 **120** 文件 / **926** 例 / 16,257 行 |
 | 仓库活跃度 | 272 次提交，2026-10-25 至今 25 天，README 记录 **57** 个版本条目（1.0.0 → 1.2.70） |
 | 真车验证 | 奥迪 MIB3（2026-10-11 全链路：出画 + 触摸可交互）；测试台 DiPlay / xcertplay / WinPlay |
 | 已知不通 | 宝马 300 / iD9（vivo V2547DA / Android 16）：12 次 iAP2 会话、**0 条 0x4301** |
@@ -130,16 +131,16 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 
 ## 五、代码规模与结构
 
-### 5.1 两条线对比
+### 5.1 口径说明（重构已并入，只有一条线）
 
 | 口径 | 主源码 | 测试文件 | 测试用例 | 说明 |
 |---|---|---|---|---|
-| `main`（发布线） | 169 | 118 | 900 | 对应 1.2.70 |
-| `refactor/protocol-modules` | 179 | 120 | 926 | +8 个 `protocol/` 抽象文件、+2 个门面、+2 个数据面契约、+26 例测试 |
+| `main`（发布线） | **180** | **120** | **926** | 含协议聚合层 10 文件；`95f8b6b` 之前为 169 / 118 / 900 |
+| `backup/main-pre-protocol-20261119` | 169 | 118 | 900 | 合并前的 main 快照，仅供对比与回滚 |
 
-`main` 口径 58,600 行主源码 / 16,062 行测试 ≈ **1 : 0.27**，重点覆盖协议编解码与密码学。
+`main` 口径 59,142 行主源码 / 16,257 行测试 ≈ **1 : 0.27**，重点覆盖协议编解码与密码学。
 
-### 5.2 包结构（重构分支，179 文件）
+### 5.2 包结构（main，180 文件）
 
 | 包 | 文件 | 职责 | 包 | 文件 | 职责 |
 |---|---|---|---|---|---|
@@ -149,12 +150,15 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | `carlife` | 11 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 12 | AAC 编码、播放捕获、RTP 封装、`AudioSink` |
 | `protocol` | 10 | **重构新增**：抽象层 + 注册表 + 两个协议门面 | `input` | 8 | 触摸分流、消费键、CarInput(AIDL) |
 | `video` | 8 | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` | `ui` / `session` / `service` | 5 / 5 / 5 | 界面 / 会话总管 / 前台保活 |
-| `legal` | 3 | 免责声明 | `transport` / `render` / `media` / `capture` | 2 各 | iAP2 链路通道 / 合成 / 通知歌词 / 采集 |
+| `legal` | 3 | 免责声明 | `transport` / `render` / `media` / `capture` | 2 / 2 / 3 / 2 | iAP2 链路通道 / 合成 / 通知歌词与会话轮询兜底 / 采集 |
 | 根入口 | 3 | `MainActivity` / `SenderApp` / … | | | |
 
 结构性质：**协议主干 + 功能分层**的混合结构，不是纯按协议分组。三处交叉点已知：`net/` 里有 AirPlay 服务发现类、`transport/Iap2LinkChannel` 属 iAP2 但独立成包、`protocol/` 是跨协议抽象。
 
-### 5.3 协议模块化重构（进行中，未合并）
+### 5.3 协议模块化重构（2026-11-19 已并入 `main`，`main` = `be02fdc`）
+
+> 完整说明（分层图 / 能力矩阵 / 时序图 / 接入第三种协议的五步 / 缺口清单）见
+> [`PROTOCOL-MODULES.md`](PROTOCOL-MODULES.md)。
 
 目标：CarPlay / CarLife 各一个模块，用一个聚合文件注册，便于接第三种协议。
 
@@ -167,6 +171,10 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | 5 | `9df34e0` | **语音键 + 触摸收口**：共同点是「输入状态机留在原处，只投判定完的动作」——`VoiceKeyRouter` 交出的 VR_START/VR_STOP 硬键码走 `dispatchVoiceHardKey`；`TouchRouter` 在槽位分流前走 `dispatchTouch`。+ 4 例契约测试 | ✅ |
 | 6 | `c583fea` | **数据面抽契约**：新增 `video.VideoSink` / `audio.AudioSink`，两个发送端反向实现；`CarLifeHijack.attach` 与 `CarLifeAudioSink` 改持接口。**carlife 不再 import `VideoSender`/`AudioSender`**，第三种协议接画面只需实现契约 | ✅ |
 | 7 | `0268578` | **播放意图收口**：新增 `Capability.PLAYBACK_INTENT` / `ProtocolEvent.PlaybackIntent`，`onSourceAudioPlayback` 走 `FIRST_MATCH`；`CarPlayModule` 首次真实消费事件。+ 2 例（全量 926 例） | ✅ |
+
+并入 main 时还带入一个与本重构**无关**的修复：`be02fdc` 会话轮询兜底——媒体键不再依赖
+「通知监听器被系统绑上」，改了 `media/`（新增 `MediaSessionFallback`）与 `SessionController`
+看门狗，与协议路由没有耦合，可独立回退。
 
 阶段 4 首轮曾**整体**受阻回退：`dispatchMediaKey`、`voiceKey`（`VoiceKeyRouter` 状态机）、`carNmea`（`NmeaAssembler` 合并器）、`carLifeCommandSender`（独立线程池）四者紧耦合；当时还臆造了并不存在的 `prewarmCarLife()` / `NmeaAssembler.Fix`，已全部 `checkout` 回退，**没有提交错误代码**。
 
@@ -268,9 +276,10 @@ MIB3 车控三篇（EA / VIWI / 控制交接，1.2.29 后删）· 画面停摆�
 
 | 项 | 状态 |
 |---|---|
-| `main` | `95f8b6b`，**与 `origin/main` 一致**（已推送） |
-| `refactor/protocol-modules` | `28bf7b9`，3 提交，**未推送、未合并 main** |
-| 其他本地分支 | 共 18 条：`backup/*` 8 条（含 `backup/audio-before-rollback-1.2.68`、`backup/carlife-invite-1.2.56`）、`switch-pool` / `switch-pool-auto`、`pr25`/`pr26`/`pr27`、`usb`、`carlife-plugin`、`honor-provider`、`main-backup-4580` |
+| `main` | `be02fdc`，**与 `origin/main` 一致**（已推送）；由 `95f8b6b` 快进并入重构分支，无 merge commit |
+| `refactor/protocol-modules` | `be02fdc`，与 `main` 同点，已推送（保留分支便于对照） |
+| `backup/main-pre-protocol-20261119` | `95f8b6b`，合并前的 main 快照，已推送远端 |
+| 其他本地分支 | 共 19 条：`backup/*` 9 条（含 `backup/audio-before-rollback-1.2.68`、`backup/carlife-invite-1.2.56`）、`switch-pool` / `switch-pool-auto`、`pr25`/`pr26`/`pr27`、`usb`、`carlife-plugin`、`honor-provider`、`main-backup-4580` |
 | 未跟踪文件 | `design/`（含唯一有效 UI 稿 `from-scratch.html`） |
 | 工作区 | 干净（本轮文档整理已提交） |
 
@@ -312,7 +321,7 @@ MIB3 车控三篇（EA / VIWI / 控制交接，1.2.29 后删）· 画面停摆�
 | 项 | 数量 |
 |---|---|
 | 整理前 docs 顶层 | 48 篇（47 篇专题 + 1 篇指南） |
-| 现行专题文档 | **42 篇** |
+| 现行专题文档 | **43 篇** |
 | 归档 | 5 篇 |
 | 元文档 | `README.md`（docs 入口）、`PROJECT-GUIDE.md`（导航）、`PROJECT-STATUS.md`（本文件）、`archive/README.md` |
 

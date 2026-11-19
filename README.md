@@ -632,7 +632,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ```bash
 ./gradlew :app:assembleRelease      # 发布包（1.0.0 起为正式版；需联网下载 lint-gradle，曾缺失时用 --offline 会失败）
-./gradlew testDebugUnitTest         # 单元测试（118 个测试文件 / 900 例）
+./gradlew testDebugUnitTest         # 单元测试（120 个测试文件 / 926 例）
 ./gradlew :app:lintDebug            # lint 检查
 ```
 
@@ -659,15 +659,15 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ## 七、工程结构
 
-单模块 Android 应用（`app/`）：主源码 **169** 个 Kotlin 文件，测试 **118** 个文件 / **900** 个用例。
+单模块 Android 应用（`app/`）：主源码 **180** 个 Kotlin 文件，测试 **120** 个文件 / **926** 个用例。
 
 ### 代码是不是按协议分组？——主干是，但不是全部
 
 | 分组 | 包 | 文件 | 依据 |
 |---|---|---|---|
-| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 60 | 三种协议各占一个独立包，彼此不 import；`protocol` 是聚合层（见下节） |
+| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 67 | 三种协议各占一个独立包，**互不调用**；仅 `iap2` 共享 `carlife` 两个数据类型。`protocol` 是聚合层（见下节） |
 | 承载层（按通道） | `bt` / `net` / `transport` | 30 | 蓝牙、网络、iAP2 隧道各管一条承载 |
-| 数据面（按功能） | `audio` / `video` / `input` / `media` / `capture` / `render` | 31 | 跨协议复用，不绑定某一种协议 |
+| 数据面（按功能） | `audio` / `video` / `input` / `media` / `capture` / `render` | 35 | 跨协议复用，不绑定某一种协议 |
 | 应用与基础设施（按功能） | 根入口 / `session` / `service` / `launcher` / `ui` / `util` / `legal` | 48 | 编排、保活、界面、工具 |
 
 三处交叉：`net/` 放 AirPlay 服务发现（`AirPlayFeatures` / `CarPlayCtrlAdvertiser`）；
@@ -675,15 +675,27 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 它是聚合层，只认 `Capability`，不认具体协议。测试目录镜像同一套包名。
 
 文档三入口：[docs/README.md](docs/README.md)（docs 目录地图，按角色给阅读路径）·
-[docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)（42 篇专题文档的状态标注索引 + 排障决策表）·
+[docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)（43 篇专题文档的状态标注索引 + 排障决策表）·
 [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
 
 ### 协议聚合层（`protocol/`）
 
-> 由分支 `refactor/protocol-modules` 引入，**尚未合并到 main**。合入后 `protocol/` 由 2 个文件
-> 增至 10 个、主源码 169 → 179 个文件、用例 900 → 926 例。
+> 由分支 `refactor/protocol-modules` 引入，2026-11-19 已**快进并入 main**（`main` = `be02fdc`，
+> 旧 main 备份在 `backup/main-pre-protocol-20261119`）。完整说明见
+> [docs/PROTOCOL-MODULES.md](docs/PROTOCOL-MODULES.md)（含分层图 / 能力矩阵 / 时序图 / 缺口清单）。
 
-三个协议包**互不 import**，交互一律经 `ProtocolRegistry` 按能力接线：
+三个协议包**互不调用**（唯一例外：`iap2` 共享 `carlife` 的两个数据类型），跨协议交互一律经
+`ProtocolRegistry` 按能力接线：
+
+```mermaid
+flowchart LR
+    APP["SessionController<br/>应用编排"] --> REG["ProtocolRegistry<br/>BIND / FIRST_MATCH / ALL"]
+    REG --> CPM["CarPlayModule"]
+    REG --> CLM["CarLifeModule"]
+    CPM -. "lambda 注入" .-> IAP2["iap2 / airplay"]
+    CLM -. "lambda 注入" .-> CL["carlife"]
+    CL --> SINK["video.VideoSink<br/>audio.AudioSink"]
+```
 
 | 组件 | 作用 |
 |---|---|
@@ -751,22 +763,22 @@ CarPToCarL/
 ├── MainActivity.kt               # 操作台 UI（连接 / 声音 / 暗幕 / 日志）
 ├── SessionController.kt          # 会话总管（进程级单例）：链路生命周期、配对、WiFi、取消
 ├── SenderApp.kt                  # Application（异常兜底、包变化失效缓存）
-├── carlife/       (12)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
+├── carlife/       (11)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
 ├── iap2/          (22)           # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
 ├── airplay/       (24)           # AirPlay 配对 / 控制通道 / 流协商 / 加密 / Timing
-├── protocol/       (2)           # 跨协议代际与一致性审计（分支增至 10：聚合层）
+├── protocol/      (10)           # 能力聚合层（Registry / 门面 / 事件）+ 代际与一致性审计
 ├── bt/            (15)           # RFCOMM 双向（Server 等回连 / Client 主动连）
 ├── net/           (13)           # WiFi 入网 / mDNS 发现 / ctrl 广播
 ├── transport/      (2)           # iAP2 隧道封装（Iap2LinkChannel）
-├── audio/         (11)           # AAC 编码 / 播放捕获 → RTP/ChaCha20
-├── video/          (6)           # H.264 推流 / SPS 解析 / VideoConfig 声明
+├── audio/         (12)           # AAC 编码 / 播放捕获 → RTP/ChaCha20（+ AudioSink 契约）
+├── video/          (8)           # H.264 推流 / SPS 解析 / VideoConfig（+ VideoSink 契约）
 ├── input/          (8)           # 触摸分流 / 消费键 / CarInput
-├── media/          (2)           # 通知使用权 → 媒体会话
+├── media/          (3)           # 通知使用权 → 媒体会话（+ 会话轮询兜底）
 ├── capture/        (2)           # 画面源
 ├── render/         (2)           # EGL 多屏合成 → 编码 Surface
 ├── session/        (5)           # 会话编排：预检 / 取消 / 权限修复 / 尝试门
 ├── service/        (5)           # 前台保活 / 冻结恢复 / 通知动作
-├── launcher/      (11)           # 隐形屏启动器（保留，非默认画面来源）
+├── launcher/      (15)           # 隐形屏启动器（保留，非默认画面来源）
 │   └── settings/   (4)           #   设置面板（显示缩放、应用方向兼容）
 ├── ui/             (5)           # 暗幕、波形图、壁纸、深色弹窗、面板尺寸
 ├── legal/          (3)           # 免责声明
@@ -780,10 +792,10 @@ CarPToCarL/
 | `carlife` | CarLife 劫持 | 冒充车机连本机 CarLife+，H.264/PCM 直通，98386/98311 下发 |
 | `iap2` | iAP2 协议链路 | Link 引擎、CSM、发送端会话状态机、NowPlaying |
 | `airplay` | AirPlay 主会话 | PairVerify、控制通道、流协商、FairPlay/ChaCha 加密、Timing |
-| `protocol` | 跨协议审计 / 聚合 | 协议代际切换与一致性审计码；分支上是能力路由的装配点 |
+| `protocol` | 跨协议审计 / 聚合 | 能力路由装配点（`Registry` + 两个门面）、协议代际切换与一致性审计码 |
 | `bt` / `net` / `transport` | 承载层 | RFCOMM Server/Client、WiFi 入网与 mDNS、iAP2 隧道 |
-| `audio` / `video` | 媒体面 | AAC 编码与 RTP 封装、H.264 推流与 VideoConfig 声明对齐 |
-| `input` / `media` / `capture` / `render` | 输入与画面 | 触摸分流、通知使用权、画面源、EGL 合成 |
+| `audio` / `video` | 媒体面 | AAC 编码与 RTP 封装、H.264 推流与 VideoConfig 对齐；同时提供 `AudioSink` / `VideoSink` 契约 |
+| `input` / `media` / `capture` / `render` | 输入与画面 | 触摸分流、通知使用权与会话轮询兜底、画面源、EGL 合成 |
 | `session` / `service` | 编排与保活 | 会话预检与取消、前台服务与冻结恢复 |
 | `launcher` / `ui` / `legal` / `util` | 通用 | 隐形桌面（保留）、界面组件、免责声明、日志导出 |
 
@@ -797,13 +809,14 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ### 单元测试
 
-`app/src/test/java/io/github/shaonialife/carptocar/`，共 **118** 个测试文件、**900** 个用例，
+`app/src/test/java/io/github/shaonialife/carptocar/`，共 **120** 个测试文件、**926** 个用例，
 目录与源码包一一对应，重点覆盖协议编解码与密码学：
 
-- `airplay/`（21）：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
-- `iap2/`（23）：编解码、Link 引擎、发送端会话
+- `iap2/`（23 文件 / 218 例）：编解码、Link 引擎、发送端会话
+- `airplay/`（21 / 178）：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
+- `protocol/`（4 / 40）：能力路由投递语义（`BIND`/`FIRST_MATCH`/`ALL`、事件不回流产出方、`stopAll` 幂等）
 - `carlife/`（10）、`audio/`（12）、`video/`（7）、`net/`（9）、`bt/`（7）：协议与数据面回归
-- `input/` `launcher/` `session/` `ui/` `util/` 等：各自单元逻辑
+- `input/` `launcher/` `session/` `ui/` `util/` `media/` 等：各自单元逻辑
 
 > 早期版本依赖 **Shizuku**（虚拟屏注入 / 触摸注入），2026-10-24 起已**移除**；
 > 代码中 `shizuku/` 目录与 `ShizukuGate` 均已删除，残留文字仅为历史注释。

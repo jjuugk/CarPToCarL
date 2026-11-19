@@ -1,12 +1,12 @@
 # docs/ —— 项目文档目录
 
-> 42 篇现行专题文档 + 5 篇归档 + 3 篇元文档。**先看元文档，再按角色找路径**，不要从文件名猜。
+> 43 篇现行专题文档 + 5 篇归档 + 3 篇元文档。**先看元文档，再按角色找路径**，不要从文件名猜。
 
 ## 元文档（先读这三个）
 
 | 文档 | 用途 | 什么时候读 |
 |---|---|---|
-| [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) | **导航**：47 篇文档逐篇状态标签 + 排障决策表 + 冲突红线 | 想知道「某症状先查哪篇」「这篇还能不能信」 |
+| [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) | **导航**：48 篇文档逐篇状态标签 + 排障决策表 + 冲突红线 | 想知道「某症状先查哪篇」「这篇还能不能信」 |
 | [`PROJECT-STATUS.md`](PROJECT-STATUS.md) | **体检报告**：版本/代码/能力/风险/未验证清单/分支状态 | 想知道「项目现在什么状态、哪些还是推断」 |
 | [`archive/README.md`](archive/README.md) | **归档说明**：5 篇为什么失效 | 看到旧链接或旧结论时 |
 
@@ -31,7 +31,7 @@
 
 完整决策表见 [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) §4。
 
-**改代码前**：[`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5（结构与重构边界）、§8（未验证清单）、§9（协作约定）。
+**改代码前**：[`PROTOCOL-MODULES.md`](PROTOCOL-MODULES.md)（协议聚合层：能力路由、数据面契约、接第三种协议的五步）、[`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5（结构与重构边界）、§8（未验证清单）、§9（协作约定）。
 
 **发版 / 对外**：[`LEGAL-NOTES.md`](LEGAL-NOTES.md)、[`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) §8。
 
