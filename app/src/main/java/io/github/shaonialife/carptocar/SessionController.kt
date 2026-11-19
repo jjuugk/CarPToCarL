@@ -18,7 +18,6 @@ import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
-import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.airplay.AirPlaySessionPolicy
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -316,6 +315,14 @@ object SessionController {
      * 与 1.2.31 的行为完全一致。看到下行音频出问题就先把这里改 false。
      */
     private const val MIC_UPLINK_ENABLED = true
+
+    /**
+     * 导航播报独立流的 `audioType`（1.2.72 起固定，不提供设置项）。
+     *
+     * 与 101 AltAudio 配对：真 CarPlay 的导航提示音就走 `type=101 + audioType=default`，
+     * 车机自己当提示音处理（要不要压低媒体由它决定）。混音器已删，这条流是导航唯一的出路。
+     */
+    private const val NAV_AUDIO_TYPE = "default"
 
     /**
      * 「音频流在 RECORD 之后加入会话」时，是否补发一次 RECORD 把它纳入会话。
@@ -1322,11 +1329,13 @@ object SessionController {
     var audioSender: AudioSender? = null
 
     /**
-     * 导航播报的**独立音频流**（实验，见 [io.github.shaonialife.carptocar.audio.NavAudioRoute]）。
+     * 导航播报的**独立音频流**（**101 AltAudio / `default`**）。
      *
-     * null = 导航与媒体混在 [audioSender] 里（默认行为）。非空 = 设置里选了
-     * speechRecognition 且车机确实声明了该档、第二条流也建成了——此时 9241 的 PCM 由
-     * [io.github.shaonialife.carptocar.carlife.CarLifeAudioSink] 直接投给它，不再进主混音器。
+     * 真 CarPlay 的导航提示音就走这条：它是一条独立的 alt audio 通道，车机自己把它当
+     * 「导航/提示」类音频，要不要压低媒体由车机决定。1.2.72 把手机侧混音器删掉之后，
+     * 9241 的 TTS 只能投这里；这条流建不起来时导航就没有声音（日志会说明原因）。
+     *
+     * null = 车机没声明 `default` 档（或 SETUP 失败、发送端起不来）。
      *
      * 这条流**不需要额外的 RECORD**：RECORD 激活的是整个会话（空 plist），不是某条流，
      * 所以它刻意在第一次 RECORD **之前** SETUP，一次 RECORD 覆盖两条——宝马车机收到
@@ -1335,7 +1344,7 @@ object SessionController {
     @Volatile
     var navAudioSender: AudioSender? = null
 
-    /** 本会话导航独立流实际用的档位（诊断用；null = 没建或已回退混音）。 */
+    /** 本会话导航独立流实际用的档位（诊断用；null = 没建）。 */
     @Volatile
     var activeNavAudioProfile: AudioProfile? = null
 
@@ -1471,8 +1480,8 @@ object SessionController {
         when (audioIntent.onCarAudioTransfer(transfer, MediaSessionsState.nowPlaying?.playing == true)) {
             CarPlayAudioIntent.MediaCommand.PAUSE -> {
                 appendLog("RESOURCE: 车机接管/静音借用主音频（$transfer）——暂停本机媒体播放")
-                // 混音器里排队的媒体 PCM 一并丢掉：静音后不再漏出一截音乐
-                audioSender?.clearPcm(io.github.shaonialife.carptocar.audio.AudioSource.MEDIA)
+                // 媒体流待发的 PCM 一并丢掉：静音后不再漏出一截音乐
+                audioSender?.clearPcm()
                 CarLifeHijack.pauseMediaFromCar("车机接管/静音借用主音频")
             }
 
@@ -4208,20 +4217,18 @@ object SessionController {
             }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
             var ordered = AudioProfileMemory.order(candidates, entry)
-            // 「只推音乐」档（NavAudioRoute.DIRECT）要求音频链路里没有编码器：
-            // 只用 PCM 档直通；车机真没声明 PCM 时只能退回 AAC（那时编码不可避免，日志说明）。
-            if (NavAudioRoute.load(context.applicationContext).isDirect) {
-                val pcmOnly = ordered.filter { it.codec == io.github.shaonialife.carptocar.audio.AudioCodec.PCM }
-                if (pcmOnly.isEmpty()) {
-                    appendLog(
-                        "AUDIO: 只推音乐档要 PCM 直通，但车机只声明了 AAC 档" +
-                            "（候选=${ordered.map { it.label }}）→ 仍要编码，这不是纯直通",
-                    )
-                } else {
-                    ordered = pcmOnly
-                    appendLog("AUDIO: 只推音乐档——只用 PCM 档（跳过 AAC 编码）")
-                }
+            // 直通（1.2.72 起音频只有这一条路径）没有混音器可利用两路，也尽量不编码：
+            // PCM 档优先，让引擎的 PCM 原样封包发走；车机只声明 AAC 时才被迫编码。
+            val pcmFirst = ordered.sortedBy { if (it.codec == io.github.shaonialife.carptocar.audio.AudioCodec.PCM) 0 else 1 }
+            if (pcmFirst.none { it.codec == io.github.shaonialife.carptocar.audio.AudioCodec.PCM }) {
+                appendLog(
+                    "AUDIO: 车机没有声明 PCM 档，媒体流只能走 AAC-LC 编码" +
+                        "（这不影响导航提示音；候选=${ordered.map { it.label }}）",
+                )
+            } else if (pcmFirst.first() !== ordered.first()) {
+                appendLog("AUDIO: 直通模式——PCM 档优先，AAC 仅作兜底")
             }
+            ordered = pcmFirst
             // 采样率偏好：把用户指定率的档提到最前（与 CarLife 引擎宣告的 MEDIA_SAMPLE_RATE
             // 两端对齐，避免 44.1↔48 重采样）。只重排不删除，另一率的档仍留作兜底。
             val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
@@ -4317,11 +4324,6 @@ object SessionController {
                     // 同步包目标端口：车机在 SETUP 应答里下发。缺了它就没有 RTP↔NTP 锚点，
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
-                    // 「只推音乐」档：音频发送端走直通路径（无混音泵、到齐一帧即发）。
-                    // 与 CarLifeHijack 读的是同一个设置项，两边必须一致——那边决定接不接 9241，
-                    // 这边决定 PCM 怎么出路。
-                    directPcm =
-                        NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
                 )
             audioSender = sender
             if (!sender.startPassthrough()) {
@@ -4330,7 +4332,7 @@ object SessionController {
                 activeAudioStartedAt = 0L
                 false
             } else {
-                // 导航播报独立流（实验，设置项 NavAudioRoute）：必须在第一次 RECORD **之前**
+                // 导航播报独立流（101 AltAudio/default）：必须在第一次 RECORD **之前**
                 // SETUP，一次会话级 RECORD 才能覆盖两条流。宝马车机收到第二次 RECORD 会关掉
                 // 自己的 AirPlay 服务（1.2.45 现场结论），这条红线不能碰。
                 startNavAudioChannel(client, sharedSecret, host, context)
@@ -4347,24 +4349,23 @@ object SessionController {
     }
 
     /**
-     * 给导航播报单独建一条音频流（**实验功能**，设置项 [NavAudioRoute]）。
+     * 给导航播报单独建一条音频流：**101 AltAudio / `default`**。
      *
-     * 只在三件事同时成立时建流：设置里选了 speechRecognition、车机 `/info` 声明了
-     * 该档、SETUP 回 200 且发送端起得来。任何一步不成立都只打一行日志并**保持混音**——
-     * 导航声音永远有路可走，不会因为实验失败变成没声音。
+     * 为什么是这条（1.2.72）：
+     *  - 混音器被整体删掉了（定拍泵、duck、水位裁剪、补静音一起删），导航不能再混进媒体流；
+     *  - 真 CarPlay 的导航提示音本来就落在这条 alt audio 通道上，车机按提示音处理，
+     *    要不要压低媒体由它自己决定——两路都给它，比在手机侧混音更符合协议；
+     *  - `audioType=default` 是这条通道上常见的那一档（不是 media）。
      *
-     * **`alert` 档已在 1.2.58 移除**：它不满足上面这条「失败无害」的前提。2026-11-16 的
-     * AUDI 4260 日志里，选了 alert 的会话每一次都在第二条流 SETUP 被回 400 之后
-     * **整条断掉**（车机把它当会话级致命错误），而那台车机上除 media / alert 之外
-     * 没有任何一档的位图含 PCM——所以 alert 是「唯一可能、但一碰就掉线」的选项，
-     * 不值得留在界面上让人点。
+     * 失败无害：车机没声明该档、SETUP 被拒、发送端起不来，都只打一行日志并让
+     * `navAudioSender` 保持 null。此时导航播报**没有声音**（明确的取舍：混音已经不存在），
+     * 但媒体音频照常——绝不把导航塞回媒体流，那等于把删掉的混音偷偷加回来。
      *
      * 两个刻意为之的约束：
-     *  1. `micPort = 0`：输入端口只属于 media 档。挂到语音/提示音档上，宝马车机会关掉
-     *     这条流甚至重启整机（2026-11-09 G38 `102/media input=0x0` 的现场结论）。
+     *  1. `micPort = 0`：输入端口只属于 media 档。挂到提示音档上，宝马车机会关掉这条流
+     *     甚至重启整机（2026-11-09 G38 `102/media input=0x0` 的现场结论）。
      *  2. 不在这里发 RECORD：RECORD 激活的是整个会话（空 plist），不是某一条流。本流在
-     *     第一次 RECORD 之前 SETUP，由 [onRecordedAll] 与主音频一起激活，因此不需要
-     *     「补发 RECORD」这个动作——那正是会弄死宝马车机的动作。
+     *     第一次 RECORD 之前 SETUP，由 [onRecordedAll] 与主音频一起激活。
      */
     @Synchronized
     private fun startNavAudioChannel(
@@ -4373,16 +4374,18 @@ object SessionController {
         host: String,
         context: Context,
     ) {
-        val route = NavAudioRoute.load(context.applicationContext)
-        val audioType = route.audioType ?: return
+        val audioType = NAV_AUDIO_TYPE
         val secret =
             sharedSecret ?: run {
-                appendLog("AUDIO: 导航播报通道=${route.label} —— 没有会话密钥，保持混音")
+                appendLog("AUDIO: 导航流（101/$audioType）—— 没有会话密钥，导航播报将无声")
                 return
             }
         val profile =
             client.audioProfileForType(audioType) ?: run {
-                appendLog("AUDIO: 导航播报通道=${route.label} —— 车机未声明该档，保持混音（与音乐同一条流）")
+                appendLog(
+                    "AUDIO: 导航流（101/$audioType）—— 车机 /info 未声明该档，导航播报将无声" +
+                        "（媒体音频不受影响）",
+                )
                 return
             }
         val info =
@@ -4398,11 +4401,11 @@ object SessionController {
                     setupTimeoutMillis = 3_000,
                 )
             } catch (error: Exception) {
-                appendLog("AUDIO: 导航播报通道协商异常 - ${error.message} —— 保持混音")
+                appendLog("AUDIO: 导航流协商异常 - ${error.message} —— 导航播报将无声")
                 null
             }
         if (info == null) {
-            appendLog("AUDIO: 导航播报通道=${route.label} —— SETUP 失败，回退混音")
+            appendLog("AUDIO: 导航流（101/$audioType）SETUP 失败 —— 导航播报将无声")
             return
         }
         val nav =
@@ -4419,16 +4422,15 @@ object SessionController {
                 controlPort = info.controlPort,
             )
         if (!nav.startPassthrough()) {
-            appendLog("AUDIO: 导航播报通道=${route.label} —— 发送端启动失败，回退混音")
+            appendLog("AUDIO: 导航流（101/$audioType）发送端启动失败 —— 导航播报将无声")
             return
         }
         navAudioSender = nav
         activeNavAudioProfile = profile
         appendLog(
-            "AUDIO: ✓ 导航播报已独立成流（${route.label}）—— ${profile.label} " +
+            "AUDIO: ✓ 导航播报已独立成流 t${profile.streamType}/$audioType —— ${profile.label} " +
                 "dataPort=${info.dataPort} controlPort=${info.controlPort}；" +
-                "9241 的 TTS 不再进主混音器，等会话 RECORD 一起激活。" +
-                "若车机导航没声音/音乐不再自动压低，把「导航播报通道」切回混音即可",
+                "9241 的 TTS 直投这条（车机按提示音处理，压低音乐由它决定），等会话 RECORD 一起激活",
         )
     }
 
@@ -4592,8 +4594,6 @@ object SessionController {
                 streamType = profile.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
-                // 音频流重建也跟随「只推音乐」档，否则重建一次就悄悄回到混音路径
-                directPcm = NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
@@ -4704,7 +4704,6 @@ object SessionController {
                 streamType = target.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
-                directPcm = NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {

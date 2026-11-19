@@ -2,8 +2,6 @@ package io.github.shaonialife.carptocar.carlife
 
 import android.content.Context
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
-import io.github.shaonialife.carptocar.audio.AudioSource
-import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSink
@@ -982,22 +980,17 @@ object CarLifeHijack {
             }
             announcedWait = false
             val sink = CarLifeAudioSink(logSink ?: {})
-            // 导航播报走 TTS 通道（9241）：独立 sink、不参与暂停丢弃（见字段注释）
+            // 导航播报走 TTS 通道（9241）：独立 sink、不参与暂停丢弃，投给 101 AltAudio/default
             val naviSink =
                 CarLifeAudioSink(
                     logSink ?: {},
                     dropWhenPaused = false,
-                    source = AudioSource.NAV,
+                    isNavigation = true,
                 )
             if (!publishAudioSource(sink, naviSink)) return
-            // 「只推音乐」档（NavAudioRoute.DIRECT）：播报 PCM 丢弃、不混音、不定拍。
-            // 音频发送端自己的直通路径由 SessionController 按同一设置项开（directPcm）。
-            val directAudio = NavAudioRoute.load(appContext) == NavAudioRoute.DIRECT
-            if (directAudio) {
-                logSink?.invoke(
-                    "CARLIFE: 音频=只推音乐（直通：播报 PCM 丢弃、不混音、不定拍；9241 仍连接以保全程会话完整）",
-                )
-            }
+            logSink?.invoke(
+                "CARLIFE: 音频=直通（媒体 9240 → 协商档；导航 9241 → 101/default 独立流，不混音）",
+            )
             val hu =
                 CarLifeHuClient(
                     host = "127.0.0.1",
@@ -1012,40 +1005,28 @@ object CarLifeHijack {
                         }
                     },
                     onAudioPcm = { pcm, size -> routeAudio(sink, pcm, size) },
-                    // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端。
-                    //
-                    // 「只推音乐」档（[NavAudioRoute.DIRECT]）里 **9241 照样连**，只是把收到的
-                    // 播报 PCM 全部丢掉、也不上报导航起停。为什么不断开端口：CarLife 的会话是
-                    // 多端口一起认的，端口缺席有可能让引擎/车联侧把这一轮判成「不完整」而
-                    // 迟迟不建虚拟屏（现象就是 7240 连上了、98311 也确认了、然后一直 0 帧）。
-                    // 少连一个端口的收益（省一点引擎编码）远小于「整场没画面」的风险。
-                    //
-                    // 播报起停也不能上报：那会让车机把音乐压低却听不到任何播报。
+                    // 导航播报：TTS 通道独立格式、独立 sink，投给 101 AltAudio/default 那条流。
+                    // 混音器已经删掉（1.2.72），所以这里**必须**有独立流可投——流没建起来时
+                    // CarLifeAudioSink 会丢弃（日志另有说明「导航流未建立」）。
                     onTtsFormat = { rate, channels ->
-                        if (!directAudio) {
-                            synchronized(audioPlaybackLock) {
-                                if (ttsSink === naviSink) naviSink.configure(rate, channels)
-                            }
+                        synchronized(audioPlaybackLock) {
+                            if (ttsSink === naviSink) naviSink.configure(rate, channels)
                         }
                     },
                     onTtsPcm = { pcm, size ->
-                        if (!directAudio) {
-                            synchronized(audioPlaybackLock) {
-                                if (ttsSink === naviSink) {
-                                    onSpeechAudio?.invoke()
-                                    routeAudio(naviSink, pcm, size)
-                                }
+                        synchronized(audioPlaybackLock) {
+                            if (ttsSink === naviSink) {
+                                onSpeechAudio?.invoke()
+                                routeAudio(naviSink, pcm, size)
                             }
                         }
                     },
                     onMediaActivity = { activity -> onEngineMediaActivity(sink, activity) },
                     onTtsGate = { active ->
-                        if (!directAudio) {
-                            synchronized(audioPlaybackLock) {
-                                if (ttsSink === naviSink) {
-                                    if (!active) naviSink.clearPendingPcm()
-                                    updateAudioPlayback(navigation = active)
-                                }
+                        synchronized(audioPlaybackLock) {
+                            if (ttsSink === naviSink) {
+                                if (!active) naviSink.clearPendingPcm()
+                                updateAudioPlayback(navigation = active)
                             }
                         }
                     },
@@ -1500,7 +1481,13 @@ object CarLifeHijack {
                 // 这里不再放任何门禁；播报路本来就不参与暂停（dropWhenPaused = false）。
                 forwardingAllowed = true,
             )
-            val sender = io.github.shaonialife.carptocar.SessionController.audioSender
+            val navigation = sink === ttsSink
+            val sender =
+                if (navigation) {
+                    io.github.shaonialife.carptocar.SessionController.navAudioSender
+                } else {
+                    io.github.shaonialife.carptocar.SessionController.audioSender
+                }
             if (sender?.isRunning == true) return
             audioDroppedBytes += size
             val now = android.os.SystemClock.uptimeMillis()
@@ -1512,6 +1499,8 @@ object CarLifeHijack {
                 // 都出现过用户被这句话带偏（车机上明明勾了声音）。两种情况分开写。
                 val why =
                     when {
+                        sender == null && navigation ->
+                            "导航流（101 AltAudio/default）没建起来（车机没声明该档或 SETUP 被拒）"
                         sender == null -> "本轮还没有音频流（AirPlay 音频通路没协商出来）"
                         !sender.isRunning -> "音频流已停（拆链/收尾后仍在推的残留 PCM）"
                         else -> "音频流存在但未就绪"

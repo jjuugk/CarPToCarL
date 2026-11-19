@@ -2479,6 +2479,15 @@ class AirPlayClient(
          */
         const val AUDIO_STREAM_TYPE_MAIN_HIGH = 102L
 
+        /**
+         * 备用音频流类型（`101 AltAudio`）。
+         *
+         * 真 CarPlay 的**导航提示音**就走这条：独立的 alt audio 通道，车机自己把它
+         * 当作「导航/提示」类音频，自己决定要不要压低媒体——不需要发送端混音。
+         * 1.2.72 起 CarLife 的 TTS（9241）固定投这条，`audioType=default`。
+         */
+        const val AUDIO_STREAM_TYPE_ALT = 101L
+
         /** 音频格式位：PCM 48000Hz 16bit 立体声（catplay AudioFormat 定义 1<<15）。 */
         const val AUDIO_FORMAT_PCM_48K_STEREO = 1L shl 15
 
@@ -3116,16 +3125,20 @@ class AirPlayClient(
     }
 
     /**
-     * 按**指定的 audioType** 从 `/info` 声明里挑一条下行档位（导航播报独立流用）。
+     * 按**指定的 audioType** 从 `/info` 声明里挑一条下行档位。
      *
-     * 与 [audioCandidates] 的分工：那条是「媒体音频」的候选，只认 media / compatibility /
-     * default 三档；这里**只认调用方点名的那一档**，车机没声明就返回 null——绝不退回
-     * media 顶替（退回等于又变回混音，实验结论会被污染成「无效」）。
+     * 现在的唯一调用者是「导航播报独立流」：CarLife 的 TTS（9241）投 **101 AltAudio +
+     * `default`**——真 CarPlay 的导航提示音就是这条，车机自己会把它当提示音处理
+     * （要不要压低媒体由车机决定，发送端不混音）。
      *
-     * 格式顺序与媒体侧刻意不同：**PCM 48k 优先**，AAC 兜底。导航播报对延迟敏感，
-     * 而 AAC 要多一次编码（一帧 1024 样本 ≈21ms）加编码器冷启动；真 iPhone 的 Siri
-     * 音频是 AAC-ELD，我们没有那个编码器，所以「照真 iPhone 用 AAC」在这里不成立。
-     * 只有该档位图里没有 PCM 位时才退到 AAC-LC。
+     * 与 [audioCandidates] 的分工：那条是「媒体音频」的候选，只认 100/102 上的
+     * media / compatibility / default；这里**只认调用方点名的那一档**，车机没声明就
+     * 返回 null——绝不悄悄退回 media 顶替（那会让导航声音混进音乐流里）。
+     *
+     * 格式顺序：**101 优先**（导航的标准通路），PCM 优先于 AAC——导航播报对延迟敏感，
+     * 而 AAC 多一次编码（一帧 1024 样本 ≈21ms）加编码器冷启动；真 iPhone 的 Siri 音频
+     * 是 AAC-ELD，我们没有那个编码器，所以「照 iPhone 用 AAC」在这里不成立。
+     * 位图里没有 PCM 才退到 AAC-LC。
      */
     fun audioProfileForType(audioType: String): AudioProfile? {
         val wanted = audioType.trim().lowercase()
@@ -3139,16 +3152,17 @@ class AirPlayClient(
             (info["audioFormats"] as? List<*>)
                 ?.mapNotNull { it as? Map<*, *> }
                 .orEmpty()
-        // 顺序即优先级：PCM 48k → PCM 44.1k → AAC 48k(102/100) → AAC 44.1k(102/100)。
-        // PCM 优先是因为导航播报对延迟敏感，AAC 要多一次编码（一帧 ≈21ms）加编码器冷启动；
-        // 真 iPhone 的 Siri 走 AAC-ELD，我们没有那个编码器，「照 iPhone 用 AAC」在这里不成立。
-        // PCM 只出现在 type=100 上；AAC-LC 可能落在 102（MainHighAudio）。
+        // 顺序即优先级：101 AltAudio 全组合（PCM 48k/44.1k → AAC-LC 48k/44.1k），
+        // 再退到 100 MainAudio 的同名档——车机只在 100 上声明 default 时也能出声，
+        // 但仍然是独立流，不进媒体那一条。
         val ordered =
             listOf(
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_STEREO,
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_STEREO,
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_48K_STEREO,
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_LC_44K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,
-                AUDIO_STREAM_TYPE_MAIN_HIGH to AUDIO_FORMAT_AAC_48K_STEREO,
-                AUDIO_STREAM_TYPE_MAIN_HIGH to AUDIO_FORMAT_AAC_LC_44K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_48K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_LC_44K_STEREO,
             )

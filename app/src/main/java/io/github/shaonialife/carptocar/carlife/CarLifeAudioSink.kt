@@ -1,7 +1,6 @@
 package io.github.shaonialife.carptocar.carlife
 
 import io.github.shaonialife.carptocar.audio.AudioSink
-import io.github.shaonialife.carptocar.audio.AudioSource
 
 /**
  * CarLife 音频桥接（手机 → 车机方向的**直通落地点**）。
@@ -13,13 +12,13 @@ import io.github.shaonialife.carptocar.audio.AudioSource
  * 现在改为**直通**：直接把引擎的裸 PCM 喂给 [AudioSender.feedPcm]，由其内部完成
  * 采样率/声道对齐 + RTP/ChaCha20 封包发送。不依赖录屏授权、少一次中转。
  *
- * 唯一的例外是 [io.github.shaonialife.carptocar.audio.NavAudioRoute] 选了
- * speechRecognition 的实验分支：那时 9241 改投**第二条独立音频流**（见 [write] 末尾），
- * 不再进主混音器。默认仍是混音——AirPlay 的 audioType 枚举里没有 navigation，
- * 手机侧混音才是 CarPlay 的标准做法。
+ * 两条音源各有一个实例、各绑一条 AirPlay 流：
+ *  - 媒体（9240）→ [isNavigation] = false → `SessionController.audioSender`（协商档位）；
+ *  - 导航播报（9241）→ [isNavigation] = true → `SessionController.navAudioSender`
+ *    （固定 **101 AltAudio / default**，车机自己当提示音处理，不混音）。
  *
- * 前提：AirPlay 音频通道已协商成功（[SessionController.audioSender] 正在直通模式运行），
- * 否则直接丢弃（与旧实现的「未开启声音则丢弃」语义一致，由 [CarLifeHijack.routeAudio] 判断）。
+ * 前提：对应的 AirPlay 音频流已协商成功，否则直接丢弃（与旧实现的「未开启声音则丢弃」
+ * 语义一致，由 [CarLifeHijack.routeAudio] 判断）。
  */
 internal class CarLifeAudioSink(
     private val log: (String) -> Unit,
@@ -27,18 +26,18 @@ internal class CarLifeAudioSink(
      * 是否参与「音乐会话暂停 → 丢弃残留 PCM」的联动。
      *
      * 媒体通道（9240）用 true：音乐 App 暂停后引擎仍会把排队 PCM 推完，不丢会重复播放。
-     * **TTS 通道（9241）必须用 false**：导航播报恰恰多发生在没放音乐 / 音乐被暂停的时候，
+     * **导航通道（9241）必须用 false**：导航播报恰恰多发生在没放音乐 / 音乐被暂停的时候，
      * 一旦套用这条联动，整段播报会被当成「残留」吃掉——这是「开导航没声音」的另一半原因
      * （2026-10-27 日志：10:35:04 刚触发暂停丢弃，10:35:14 的导航 TTS 就来了）。
      */
     private val dropWhenPaused: Boolean = true,
     /**
-     * 这条 sink 对应哪一路：媒体（9240）还是播报（9241）。
+     * 这条 sink 是导航播报（9241）还是媒体（9240）。
      *
-     * 发送端按它把 PCM 写进各自的环形缓冲、各自重采样，再定拍混音。**必须区分**：
-     * 两路混成一堆字节首尾相接（旧实现）就是「导航与音乐一起放时卡顿」的根因。
+     * 只用来决定投给哪条 AirPlay 流：导航走独立的 101 AltAudio/default，媒体走协商档。
+     * 发送端本身不知道这件事——混音器删掉之后，它只需要「谁给的 PCM 就发出去」。
      */
-    private val source: AudioSource = AudioSource.MEDIA,
+    private val isNavigation: Boolean = false,
 ) {
     /** CarLife 引擎宣告的源采样率（CarlifeMusicInit；<=0 表示尚未宣告，按 48k 处理）。 */
     @Volatile
@@ -209,23 +208,17 @@ internal class CarLifeAudioSink(
                 if (channels > 0) channels else 2,
             )
         }
-        // 导航播报独立流（实验，设置项 NavAudioRoute）：那条流真的在跑时，9241 的 PCM 不
-        // 再进主混音器，直接投给独立发送端。按 MEDIA 喂是刻意的——它的混音器只有这一路
-        // 在跑，NAV 路没人喂；喂 MEDIA 也顺带避开了「自己 duck 自己」。
-        val navSender: AudioSink? =
-            if (source == AudioSource.NAV) {
+        // 导航播报走独立的 101 AltAudio/default（见 CarLifeAudioSink 类注释）：
+        // 那条流真的在跑时，9241 的 PCM 直接投给它；不在跑就丢掉——绝不回落到媒体流，
+        // 否则导航声音会和音乐混在同一条 RTP 里，又变回被删掉的那套混音。
+        val target: AudioSink? =
+            if (isNavigation) {
                 io.github.shaonialife.carptocar.SessionController.navAudioSender?.takeIf { it.isRunning }
             } else {
-                null
+                io.github.shaonialife.carptocar.SessionController.audioSender?.takeIf { it.isRunning }
             }
-        if (navSender != null) {
-            navSender.feedPcm(pcm, size, srcRate, srcChannels, AudioSource.MEDIA)
-            return
-        }
-        val sender: AudioSink? = io.github.shaonialife.carptocar.SessionController.audioSender
-        if (sender == null || !sender.isRunning) return
-        // 直通：交给 AudioSender 重采样 + 写入该源的环形缓冲（混音与发送在泵线程）
-        sender.feedPcm(pcm, size, srcRate, srcChannels, source)
+        if (target == null) return
+        target.feedPcm(pcm, size, srcRate, srcChannels)
     }
 
     /** 抽样统计电平（每 16 个采样点取 1 个，开销可忽略）。 */
@@ -244,10 +237,15 @@ internal class CarLifeAudioSink(
         }
     }
 
-    /** 暂停或 STOP 时仅清空本路音源的排队样本，不影响另一路与输出时钟。 */
+    /** 暂停或 STOP 时仅清空本路尚未发出的 PCM（两条流各自独立，互不影响）。 */
     fun clearPendingPcm() {
-        io.github.shaonialife.carptocar.SessionController.audioSender
-            ?.clearPcm(source)
+        val sender =
+            if (isNavigation) {
+                io.github.shaonialife.carptocar.SessionController.navAudioSender
+            } else {
+                io.github.shaonialife.carptocar.SessionController.audioSender
+            }
+        sender?.clearPcm()
     }
 
     @Synchronized

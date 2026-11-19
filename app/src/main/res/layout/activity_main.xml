@@ -1112,58 +1112,6 @@
                     android:layout_marginStart="52dp"
                     android:background="#5A394444" />
 
-                <!-- 导航播报通道（实验）：点击循环 混音 → alert → speechRecognition -->
-                <LinearLayout
-                    android:id="@+id/rowNavAudio"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:background="?attr/selectableItemBackground"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="导航播报通道"
-                            android:textColor="@color/m3_on_surface"
-                            android:textSize="14sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/navAudioNote"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="导航与音乐混成一条流，车机只有一个音量（AirPlay 的标准做法）"
-                            android:textColor="@color/m3_on_var"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-
-                    <TextView
-                        android:id="@+id/navAudioValue"
-                        android:layout_width="wrap_content"
-                        android:layout_height="30dp"
-                        android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="混音"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
                 <!-- 媒体采样率策略：点击循环 自动 → 48kHz → 44.1kHz -->
                 <LinearLayout
                     android:id="@+id/rowAudioRate"

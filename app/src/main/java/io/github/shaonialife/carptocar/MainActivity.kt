@@ -33,7 +33,6 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
-import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -1855,41 +1854,6 @@ class MainActivity : AppCompatActivity() {
                     "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
                 }
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
-        }
-
-        // 导航播报通道（实验）：混音 / speechRecognition 独立流。
-        // 只能下次连接起效——audioType 只在 SETUP 里出现一次，一条流建成后改不了语义，
-        // 中途换等于拆掉重建（还会顺带触发 RECORD，正是宝马车机的死点）。
-        // alert 档已在 1.2.58 移除：那台 AUDI 4260 对它的 SETUP 回 400 并直接断整条会话。
-        val navRow = findViewById<android.view.View>(R.id.rowNavAudio)
-        val navValue = findViewById<TextView>(R.id.navAudioValue)
-        val navNote = findViewById<TextView>(R.id.navAudioNote)
-
-        fun refreshNavAudio() {
-            val route = NavAudioRoute.load(ctx)
-            navValue.text =
-                when (route) {
-                    NavAudioRoute.MIX -> "混音"
-                    NavAudioRoute.SPEECH -> "语音识别"
-                    NavAudioRoute.DIRECT -> "只推音乐"
-                }
-            navNote.text = route.detail
-        }
-
-        refreshNavAudio()
-        navRow.setOnClickListener {
-            val next = NavAudioRoute.load(ctx).next()
-            NavAudioRoute.save(ctx, next)
-            refreshNavAudio()
-            snack(
-                when (next) {
-                    NavAudioRoute.MIX -> "导航播报已回到混音（下次连接起效）"
-                    NavAudioRoute.SPEECH ->
-                        "导航播报：${next.label}（下次连接起效；车机没声明该档会自动回退混音）"
-                    NavAudioRoute.DIRECT ->
-                        "只推音乐（直通）：不接导航播报、不用混音器，下次连接起效"
-                },
-            )
         }
 
         // 媒体采样率策略：自动 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
