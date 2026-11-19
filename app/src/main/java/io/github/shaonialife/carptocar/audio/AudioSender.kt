@@ -786,7 +786,8 @@ class AudioSender(
         pcm: ByteArray,
         source: AudioSource,
     ) {
-        // 播报路在这个档位不该有数据（9241 根本不接）；真来了也不许污染音乐的时间轴。
+        // 播报路在这个档位不该有数据（9241 虽然连接，但 CarLifeHijack 已把它的 PCM 丢掉）；
+        // 真漏进来了也不许污染音乐的时间轴。
         if (source != AudioSource.MEDIA) return
         // RECORD 之前不发：抢跑的 RTP 会被车机拒掉，或者提前把它的 jitter buffer 填偏
         // （与混音路径「泵在 onRecorded 才启动」同一条约束）。

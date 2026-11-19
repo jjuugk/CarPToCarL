@@ -990,12 +990,12 @@ object CarLifeHijack {
                     source = AudioSource.NAV,
                 )
             if (!publishAudioSource(sink, naviSink)) return
-            // 「只推音乐」档（NavAudioRoute.DIRECT）：不接 9241、不混音、不定拍。
+            // 「只推音乐」档（NavAudioRoute.DIRECT）：播报 PCM 丢弃、不混音、不定拍。
             // 音频发送端自己的直通路径由 SessionController 按同一设置项开（directPcm）。
             val directAudio = NavAudioRoute.load(appContext) == NavAudioRoute.DIRECT
             if (directAudio) {
                 logSink?.invoke(
-                    "CARLIFE: 音频=只推音乐（直通：不接 9241、不混音、不定拍；导航播报不会出声）",
+                    "CARLIFE: 音频=只推音乐（直通：播报 PCM 丢弃、不混音、不定拍；9241 仍连接以保全程会话完整）",
                 )
             }
             val hu =
@@ -1012,28 +1012,40 @@ object CarLifeHijack {
                         }
                     },
                     onAudioPcm = { pcm, size -> routeAudio(sink, pcm, size) },
-                    // 只推音乐档（NavAudioRoute.DIRECT）：9241 连都不连，导航播报这一路彻底不存在
-                    ttsEnabled = !directAudio,
-                    // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端
+                    // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端。
+                    //
+                    // 「只推音乐」档（[NavAudioRoute.DIRECT]）里 **9241 照样连**，只是把收到的
+                    // 播报 PCM 全部丢掉、也不上报导航起停。为什么不断开端口：CarLife 的会话是
+                    // 多端口一起认的，端口缺席有可能让引擎/车联侧把这一轮判成「不完整」而
+                    // 迟迟不建虚拟屏（现象就是 7240 连上了、98311 也确认了、然后一直 0 帧）。
+                    // 少连一个端口的收益（省一点引擎编码）远小于「整场没画面」的风险。
+                    //
+                    // 播报起停也不能上报：那会让车机把音乐压低却听不到任何播报。
                     onTtsFormat = { rate, channels ->
-                        synchronized(audioPlaybackLock) {
-                            if (ttsSink === naviSink) naviSink.configure(rate, channels)
+                        if (!directAudio) {
+                            synchronized(audioPlaybackLock) {
+                                if (ttsSink === naviSink) naviSink.configure(rate, channels)
+                            }
                         }
                     },
                     onTtsPcm = { pcm, size ->
-                        synchronized(audioPlaybackLock) {
-                            if (ttsSink === naviSink) {
-                                onSpeechAudio?.invoke()
-                                routeAudio(naviSink, pcm, size)
+                        if (!directAudio) {
+                            synchronized(audioPlaybackLock) {
+                                if (ttsSink === naviSink) {
+                                    onSpeechAudio?.invoke()
+                                    routeAudio(naviSink, pcm, size)
+                                }
                             }
                         }
                     },
                     onMediaActivity = { activity -> onEngineMediaActivity(sink, activity) },
                     onTtsGate = { active ->
-                        synchronized(audioPlaybackLock) {
-                            if (ttsSink === naviSink) {
-                                if (!active) naviSink.clearPendingPcm()
-                                updateAudioPlayback(navigation = active)
+                        if (!directAudio) {
+                            synchronized(audioPlaybackLock) {
+                                if (ttsSink === naviSink) {
+                                    if (!active) naviSink.clearPendingPcm()
+                                    updateAudioPlayback(navigation = active)
+                                }
                             }
                         }
                     },
