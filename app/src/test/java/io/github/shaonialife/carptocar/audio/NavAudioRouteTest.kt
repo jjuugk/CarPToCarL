@@ -38,24 +38,34 @@ class NavAudioRouteTest {
         }
     }
 
-    /** 循环顺序必须是 混音 → 语音 → 混音，界面点一下就按下标走。 */
+    /** 循环顺序必须是 混音 → 语音 → 只推音乐 → 混音，界面点一下就按下标走。 */
     @Test
     fun nextCycles() {
         assertEquals(NavAudioRoute.SPEECH, NavAudioRoute.MIX.next())
-        assertEquals(NavAudioRoute.MIX, NavAudioRoute.SPEECH.next())
+        assertEquals(NavAudioRoute.DIRECT, NavAudioRoute.SPEECH.next())
+        assertEquals(NavAudioRoute.MIX, NavAudioRoute.DIRECT.next())
     }
 
-    /** 只有非混音才给出要建的 audioType；值必须与 AirPlayClient 的常量逐字节一致。 */
+    /** 只有 speechRecognition 才给出要建的 audioType；值必须与 AirPlayClient 的常量逐字节一致。 */
     @Test
     fun audioTypeMatchesProtocolStrings() {
         assertNull(NavAudioRoute.MIX.audioType)
         assertEquals("speechRecognition", NavAudioRoute.SPEECH.audioType)
+        assertNull(NavAudioRoute.DIRECT.audioType)
+    }
+
+    /** 直通档只认 DIRECT 自己：别让 `isDirect` 跟着枚举顺序漂。 */
+    @Test
+    fun onlyDirectIsDirect() {
+        assertEquals(true, NavAudioRoute.DIRECT.isDirect)
+        assertEquals(false, NavAudioRoute.MIX.isDirect)
+        assertEquals(false, NavAudioRoute.SPEECH.isDirect)
     }
 
     /** 已移除的档位不能再出现在枚举里（防止有人把 alert 加回来）。 */
     @Test
     fun alertIsGone() {
-        assertEquals(listOf("MIX", "SPEECH"), NavAudioRoute.entries.map { it.name })
+        assertEquals(listOf("MIX", "SPEECH", "DIRECT"), NavAudioRoute.entries.map { it.name })
     }
 
     /** 界面各位置的文案不能有空的（空说明等于用户不知道自己在切什么）。 */

@@ -18,6 +18,19 @@ import android.content.Context
  *
  *  - [MIX]：与媒体混成一条流（**默认**）。当前行为，AirPlay/CarPlay 的标准做法。
  *  - [SPEECH]：独立流，`audioType=speechRecognition`。车机的 Siri 档。
+ *  - [DIRECT]：**只推音乐**（1.2.71 新增，实车排查用）。不连 9241、不进混音器，
+ *    媒体 PCM 到齐一帧（352 样本）就封包发走。见下面「为什么要有 DIRECT」。
+ *
+ * ## 为什么要有 DIRECT（2026-11-19）
+ *
+ * 混音器是为了解决「两路同时推、RTP 时钟 2×」而生的，代价是一整套状态机（定拍、
+ * 空载补静音、duck、水位裁剪、暂停 15 秒窗口）。排查「音乐本身就不对」时，
+ * 这套机制自己就是变量：到底是引擎的 PCM 有问题，还是泵/混音把它弄坏了，日志分不清。
+ *
+ * DIRECT 把这层全部摘掉：**一条通道、一个读线程、到齐一帧就发**，剩下的只有重采样
+ * 和封包。音乐仍走 9240，导航播报（9241）在这个档位下直接不接——车机上听不到导航，
+ * 这是刻意的取舍，不是缺陷。它也不是「更好的默认值」：没有定拍泵就没有空载静音帧，
+ * 引擎不推 PCM 时车机侧 jitter buffer 会被排空，恢复播放可能卡一下。
  *
  * ## alert 档已被移除（1.2.58，实车证伪）
  *
@@ -36,10 +49,11 @@ import android.content.Context
 enum class NavAudioRoute {
     MIX,
     SPEECH,
+    DIRECT,
     ;
 
     /**
-     * 这条路由要建的那条独立流用哪个 `audioType`；[MIX] 返回 null（不建流）。
+     * 这条路由要建的那条独立流用哪个 `audioType`；[MIX] / [DIRECT] 返回 null（不建流）。
      *
      * 取值必须与 `AirPlayClient.AUDIO_TYPE_*` 常量逐字节一致——车机按字符串匹配档位。
      */
@@ -48,6 +62,7 @@ enum class NavAudioRoute {
             when (this) {
                 MIX -> null
                 SPEECH -> "speechRecognition"
+                DIRECT -> null
             }
 
     /** 界面与日志用的短名。 */
@@ -56,7 +71,11 @@ enum class NavAudioRoute {
             when (this) {
                 MIX -> "混音"
                 SPEECH -> "speechRecognition 独立流"
+                DIRECT -> "只推音乐（直通）"
             }
+
+    /** 直通档：不接 9241、不混音。音频链路上一切「智能」都让位给「把 PCM 原样送出去」。 */
+    val isDirect: Boolean get() = this == DIRECT
 
     /** 界面上的一句话说明（切换后提示用户会付出什么）。 */
     val detail: String
@@ -66,6 +85,9 @@ enum class NavAudioRoute {
                 SPEECH ->
                     "导航走车机的语音助手档，可能被当成 Siri（抢麦、弹语音界面）；" +
                         "车机没声明该档、或该档不收 PCM 时自动回退混音"
+                DIRECT ->
+                    "只接媒体 9240，不混音、不定拍：PCM 到齐一帧就发（**车机上听不到导航播报**）；" +
+                        "排查「音乐本身不对」时用它把混音器排除在外"
             }
 
     /** 循环到下一个取值（界面点一下切一档）。 */

@@ -66,6 +66,14 @@ class CarLifeHuClient(
      * 采样率也可能不同（TTS 常见 16k 单声道），所以必须各自带格式送进发送端重采样。
      */
     private val onTtsPcm: (pcm: ByteArray, size: Int) -> Unit = { _, _ -> },
+    /**
+     * 是否连 TTS 通道（9241）。
+     *
+     * 关掉时（设置项 `NavAudioRoute.DIRECT` = 只推音乐）端口连列表里就不带 9241，
+     * 读线程、格式宣告、起停门禁、沉默看门狗一并省掉——引擎侧也就不会为一条没人
+     * 读的流做编码。导航播报在这档下**彻底听不到**，这是刻意的取舍。
+     */
+    private val ttsEnabled: Boolean = true,
     /** 媒体通道与模块焦点事件回调（关联为单一播放周期，见 [CarLifeMediaPlayback]）。 */
     private val onMediaActivity: (activity: CarLifeMediaActivity) -> Unit = {},
     /** TTS 导航播报起停边沿回调（0x40001/0x40003 置 true，0x40002 或断链置 false）。 */
@@ -511,7 +519,7 @@ class CarLifeHuClient(
     fun start(): Boolean {
         if (running.get()) return true
         log("CARLIFE: 连接本机车机端口 $host …")
-        for (port in PORTS) {
+        for (port in ports()) {
             try {
                 sockets[port] = openPortSocket(port)
             } catch (error: Exception) {
@@ -553,7 +561,8 @@ class CarLifeHuClient(
         }
         // 音频：媒体（9240）/ TTS（9241）各挂一条读线程，挂上即为沉默判定的宽限起点
         sockets[CarLifeProtocol.PORT_MEDIA]?.let { openAudio(mediaChan, it) }
-        sockets[CarLifeProtocol.PORT_TTS]?.let { openAudio(ttsChan, it) }
+        // 只推音乐档（ttsEnabled=false）连端口都不带，这里自然为 null
+        if (ttsEnabled) sockets[CarLifeProtocol.PORT_TTS]?.let { openAudio(ttsChan, it) }
         startReader("carlife-heartbeat") { heartbeatLoop() }
         // 视频通道看门狗：冷启动期被引擎 reset、或中途断链时自动重连并重发编码初始化。
         startReader("carlife-video-dog") { videoSupervisor() }
@@ -1823,7 +1832,7 @@ class CarLifeHuClient(
             Thread.sleep(AUDIO_DOG_POLL_MS)
             if (!running.get()) return
             superviseAudio(mediaChan)
-            superviseAudio(ttsChan)
+            if (ttsEnabled) superviseAudio(ttsChan)
         }
     }
 
@@ -2243,14 +2252,32 @@ class CarLifeHuClient(
         private const val TOUCH_RECONNECT_COOLDOWN_MS = 1_000L
         private const val TOUCH_FORCE_RETRY_MIN_MS = 200L
 
-        private val PORTS = intArrayOf(
-            CarLifeProtocol.PORT_CMD,
-            CarLifeProtocol.PORT_VIDEO,
-            CarLifeProtocol.PORT_MEDIA,
-            CarLifeProtocol.PORT_TTS,
-            CarLifeProtocol.PORT_VR,
-            CarLifeProtocol.PORT_TOUCH,
-            CarLifeProtocol.PORT_DATA,
-        )
+        // 端口清单已挪到实例方法 [ports]：关掉 TTS 时不该连 9241，而那是实例级开关。
     }
+
+    /**
+     * 本次要连的端口。关掉 TTS（只推音乐的直通档）时不带 9241——端口都不连，
+     * 引擎就不会为一条没人读的流编码，看门狗也不会把它「长期静默」当故障。
+     */
+    private fun ports(): IntArray =
+        if (ttsEnabled) {
+            intArrayOf(
+                CarLifeProtocol.PORT_CMD,
+                CarLifeProtocol.PORT_VIDEO,
+                CarLifeProtocol.PORT_MEDIA,
+                CarLifeProtocol.PORT_TTS,
+                CarLifeProtocol.PORT_VR,
+                CarLifeProtocol.PORT_TOUCH,
+                CarLifeProtocol.PORT_DATA,
+            )
+        } else {
+            intArrayOf(
+                CarLifeProtocol.PORT_CMD,
+                CarLifeProtocol.PORT_VIDEO,
+                CarLifeProtocol.PORT_MEDIA,
+                CarLifeProtocol.PORT_VR,
+                CarLifeProtocol.PORT_TOUCH,
+                CarLifeProtocol.PORT_DATA,
+            )
+        }
 }

@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.carlife
 import android.content.Context
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSource
+import io.github.shaonialife.carptocar.audio.NavAudioRoute
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSink
@@ -989,6 +990,14 @@ object CarLifeHijack {
                     source = AudioSource.NAV,
                 )
             if (!publishAudioSource(sink, naviSink)) return
+            // 「只推音乐」档（NavAudioRoute.DIRECT）：不接 9241、不混音、不定拍。
+            // 音频发送端自己的直通路径由 SessionController 按同一设置项开（directPcm）。
+            val directAudio = NavAudioRoute.load(appContext) == NavAudioRoute.DIRECT
+            if (directAudio) {
+                logSink?.invoke(
+                    "CARLIFE: 音频=只推音乐（直通：不接 9241、不混音、不定拍；导航播报不会出声）",
+                )
+            }
             val hu =
                 CarLifeHuClient(
                     host = "127.0.0.1",
@@ -1003,6 +1012,8 @@ object CarLifeHijack {
                         }
                     },
                     onAudioPcm = { pcm, size -> routeAudio(sink, pcm, size) },
+                    // 只推音乐档（NavAudioRoute.DIRECT）：9241 连都不连，导航播报这一路彻底不存在
+                    ttsEnabled = !directAudio,
                     // 导航播报：TTS 通道独立格式、独立 sink，喂给同一个音频发送端
                     onTtsFormat = { rate, channels ->
                         synchronized(audioPlaybackLock) {

@@ -65,6 +65,13 @@ class AudioSender(
      * 发一个 [AudioSyncPacket] 建立 RTP↔NTP 锚点；0 = 车机没给（旧车机），只发音频。
      */
     private val controlPort: Int = 0,
+    /**
+     * 直通（不分路、不混音、不定拍）：见 [feedDirect]。
+     *
+     * 由设置项 [NavAudioRoute.DIRECT] 打开，只对**外部注入 PCM**（CarLife 直通）生效；
+     * 播放捕获模式走 [runCaptureLoop]，与本开关无关。
+     */
+    private val directPcm: Boolean = false,
 ) : AudioSink {
     companion object {
         const val CHANNELS = 2
@@ -475,6 +482,17 @@ class AudioSender(
     @Synchronized
     fun onRecorded() {
         if (!running.get() || record != null || pumpThread != null) return
+        if (directPcm) {
+            // 直通档不建泵线程：出帧由 [feedDirect] 跟着引擎的到达节奏走。
+            // 仍要起同步包线程——接收端靠 RTP↔NTP 锚点排播，缺了它可能收包但不响。
+            if (!directStarted.compareAndSet(false, true)) return
+            startSyncLoop()
+            log(
+                "AUDIO: RECORD 已激活——直通模式（无混音泵：PCM 到齐 ${directFrame.size}B 一帧即发，" +
+                    "每包 ${samplesPerPacket} 样本）",
+            )
+            return
+        }
         startSyncLoop()
         startPump()
         log("AUDIO: RECORD 已激活——开始发同步包与混音帧")
@@ -501,6 +519,19 @@ class AudioSender(
 
     /** 混音泵：唯一调用编码/封包/发送的线程（直通模式下）。 */
     private var pumpThread: Thread? = null
+
+    /** [directPcm] 模式下是否已经起过（RECORD 可能被多条路径重复通知）。 */
+    private val directStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 直通模式的待发缓冲：只有注入线程写、同线程发，锁只防 [clearPcm] 那条并发路径。 */
+    private val directLock = Any()
+
+    private var directBuf = ByteArray(PACKET_BYTES * 16)
+
+    private var directLen = 0
+
+    /** 复用的一帧缓冲（[dispatchPcm] 内部会再拷贝，不会别名的）。 */
+    private val directFrame = ByteArray(framePcmBytes)
 
     /** 泵线程复用的输出缓冲，避免每帧 4KB 的垃圾。 */
     private val mixFrameBuffer = ByteArray(samplesPerPacket.toInt() * CHANNELS * 2)
@@ -681,6 +712,11 @@ class AudioSender(
     fun beginIdleFill(reason: String) {
         if (!running.get()) return
         idleFillAfterMillis = 0L
+        if (directPcm) {
+            // 直通档没有泵，也就不存在「补静音」：引擎不推就没有包，车机侧缓冲会排空。
+            log("AUDIO: $reason → 直通模式：引擎不推 PCM 就不发包（不补静音，恢复可能卡一下）")
+            return
+        }
         log("AUDIO: $reason → 泵线程继续按实时速率补静音帧（RTP 连续，恢复不再卡一下）")
     }
 
@@ -688,6 +724,10 @@ class AudioSender(
     fun endIdleFill() {
         if (idleFillAfterMillis == IDLE_FILL_AFTER_MILLIS) return
         idleFillAfterMillis = IDLE_FILL_AFTER_MILLIS
+        if (directPcm) {
+            log("AUDIO: 引擎音频恢复（直通模式：跟着引擎的到达节奏发，无泵）")
+            return
+        }
         log("AUDIO: 引擎音频恢复（泵线程不受影响，仍按实时速率出帧）")
     }
 
@@ -718,11 +758,78 @@ class AudioSender(
         if (size <= 0) return
         lastRealFeedAt = android.os.SystemClock.uptimeMillis()
         val resampled = alignPcm(source, srcPcm, size, srcRate, srcChannels) ?: return
+        if (directPcm) {
+            // 直通：不走混音器、不进环形缓冲，见 [feedDirect]
+            feedDirect(resampled, source)
+            return
+        }
         mixer.feed(source, resampled, 0, resampled.size)
     }
 
+    /**
+     * 直通写入：到齐一帧就封包发走。
+     *
+     * 与混音路径的区别（这就是 [NavAudioRoute.DIRECT] 想要的全部）：
+     *  - **不定拍**：没有泵线程，没有 nanoTime 推到第几帧的计算，到多少发多少；
+     *  - **不补静音**：引擎不推 PCM 就不发（车机 jitter buffer 会排空，恢复时可能卡一下）；
+     *  - **不相加**：只有一路源，不存在 duck / 水位裁剪 / 双路时钟 2× 的问题。
+     *
+     * 时间戳仍按 `samplesPerPacket` 逐包推进（[sendPayload]），而引擎的推流速率本身就是
+     * 实时的，所以 RTP 时钟与墙钟长期一致；唯一的偏差是引擎开局的突发（它自己的解码
+     * 缓冲一次推几百毫秒）——这里照发，让车机的 jitter buffer 去吸收，不做水位裁剪。
+     *
+     * 代价：编码 + 加密 + UDP 发送现在就发生在引擎的 TCP 读线程上。UDP 是非阻塞的
+     * （缓冲满就丢），AAC 编码一帧 1024 样本在本机约 1~2ms，因此不会把引擎反压住；
+     * 这也是把这个开关做成「排查档」而不是默认档的原因之一。
+     */
+    private fun feedDirect(
+        pcm: ByteArray,
+        source: AudioSource,
+    ) {
+        // 播报路在这个档位不该有数据（9241 根本不接）；真来了也不许污染音乐的时间轴。
+        if (source != AudioSource.MEDIA) return
+        // RECORD 之前不发：抢跑的 RTP 会被车机拒掉，或者提前把它的 jitter buffer 填偏
+        // （与混音路径「泵在 onRecorded 才启动」同一条约束）。
+        if (!directStarted.get()) return
+        val frameBytes = directFrame.size
+        synchronized(directLock) {
+            while (directLen + pcm.size > directBuf.size) {
+                directBuf = directBuf.copyOf(directBuf.size * 2)
+            }
+            pcm.copyInto(directBuf, directLen)
+            directLen += pcm.size
+        }
+        // 派发在锁外：dispatchPcm 失败时会调 stop()（要拿实例锁），锁内派发有机会互相等死。
+        // 单读线程（9240 只有一条）保证了 directFrame 不会被第二个人改写。
+        while (true) {
+            val frameReady =
+                synchronized(directLock) {
+                    if (directLen < frameBytes) {
+                        false
+                    } else {
+                        directBuf.copyInto(directFrame, 0, 0, frameBytes)
+                        if (directLen > frameBytes) {
+                            directBuf.copyInto(directBuf, 0, frameBytes, directLen)
+                        }
+                        directLen -= frameBytes
+                        true
+                    }
+                }
+            if (!frameReady) break
+            dispatchPcm(directFrame)
+        }
+    }
+
     /** 清空某一路尚未混出的 PCM（车机暂停/静音时立即止声，不影响另一路与 RTP 时间轴）。 */
-    fun clearPcm(source: AudioSource) = mixer.clear(source)
+    fun clearPcm(source: AudioSource) {
+        if (!directPcm) {
+            mixer.clear(source)
+            return
+        }
+        // 直通档只有音乐一路：播报路的清空请求不该动音乐的待发样本
+        if (source == AudioSource.NAV) return
+        synchronized(directLock) { directLen = 0 }
+    }
 
     /**
      * 用户手动「重启音频」（方向盘语音键三连击，见 [io.github.shaonialife.carptocar.carlife.VoiceKeyGesture]）。
@@ -746,6 +853,11 @@ class AudioSender(
         }
         lastRealFeedAt = 0L
         resamplers.forEach { it.reset() }
+        if (directPcm) {
+            synchronized(directLock) { directLen = 0 }
+            log("AUDIO: 直通模式已清空待发 PCM（重采样相位归零；RTP 时间轴保持连续）——$reason")
+            return
+        }
         mixer.reset()
         log(
             "AUDIO: 已重置混音泵（清空两路缓冲、定拍原点重排；RTP 时间轴保持连续）——$reason",
@@ -877,7 +989,12 @@ class AudioSender(
         healthThread = null
         pumpThread = null
         thread = null
-        mixer.reset()
+        if (directPcm) {
+            synchronized(directLock) { directLen = 0 }
+            directStarted.set(false)
+        } else {
+            mixer.reset()
+        }
         restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
             // 「已就地补发」只说明我们这一侧没丢包，不代表车机收到了：ICMP 端口不可达

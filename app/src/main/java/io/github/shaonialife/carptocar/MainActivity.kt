@@ -1871,6 +1871,7 @@ class MainActivity : AppCompatActivity() {
                 when (route) {
                     NavAudioRoute.MIX -> "混音"
                     NavAudioRoute.SPEECH -> "语音识别"
+                    NavAudioRoute.DIRECT -> "只推音乐"
                 }
             navNote.text = route.detail
         }
@@ -1881,10 +1882,12 @@ class MainActivity : AppCompatActivity() {
             NavAudioRoute.save(ctx, next)
             refreshNavAudio()
             snack(
-                if (next == NavAudioRoute.MIX) {
-                    "导航播报已回到混音（下次连接起效）"
-                } else {
-                    "导航播报：${next.label}（下次连接起效；车机没声明该档会自动回退混音）"
+                when (next) {
+                    NavAudioRoute.MIX -> "导航播报已回到混音（下次连接起效）"
+                    NavAudioRoute.SPEECH ->
+                        "导航播报：${next.label}（下次连接起效；车机没声明该档会自动回退混音）"
+                    NavAudioRoute.DIRECT ->
+                        "只推音乐（直通）：不接导航播报、不用混音器，下次连接起效"
                 },
             )
         }

@@ -4208,6 +4208,20 @@ object SessionController {
             }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
             var ordered = AudioProfileMemory.order(candidates, entry)
+            // 「只推音乐」档（NavAudioRoute.DIRECT）要求音频链路里没有编码器：
+            // 只用 PCM 档直通；车机真没声明 PCM 时只能退回 AAC（那时编码不可避免，日志说明）。
+            if (NavAudioRoute.load(context.applicationContext).isDirect) {
+                val pcmOnly = ordered.filter { it.codec == io.github.shaonialife.carptocar.audio.AudioCodec.PCM }
+                if (pcmOnly.isEmpty()) {
+                    appendLog(
+                        "AUDIO: 只推音乐档要 PCM 直通，但车机只声明了 AAC 档" +
+                            "（候选=${ordered.map { it.label }}）→ 仍要编码，这不是纯直通",
+                    )
+                } else {
+                    ordered = pcmOnly
+                    appendLog("AUDIO: 只推音乐档——只用 PCM 档（跳过 AAC 编码）")
+                }
+            }
             // 采样率偏好：把用户指定率的档提到最前（与 CarLife 引擎宣告的 MEDIA_SAMPLE_RATE
             // 两端对齐，避免 44.1↔48 重采样）。只重排不删除，另一率的档仍留作兜底。
             val ratePref = io.github.shaonialife.carptocar.audio.AudioRatePreference.load(appContext)
@@ -4303,6 +4317,11 @@ object SessionController {
                     // 同步包目标端口：车机在 SETUP 应答里下发。缺了它就没有 RTP↔NTP 锚点，
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
+                    // 「只推音乐」档：音频发送端走直通路径（无混音泵、到齐一帧即发）。
+                    // 与 CarLifeHijack 读的是同一个设置项，两边必须一致——那边决定接不接 9241，
+                    // 这边决定 PCM 怎么出路。
+                    directPcm =
+                        NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
                 )
             audioSender = sender
             if (!sender.startPassthrough()) {
@@ -4573,6 +4592,8 @@ object SessionController {
                 streamType = profile.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                // 音频流重建也跟随「只推音乐」档，否则重建一次就悄悄回到混音路径
+                directPcm = NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
@@ -4683,6 +4704,7 @@ object SessionController {
                 streamType = target.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                directPcm = NavAudioRoute.load(context.applicationContext) == NavAudioRoute.DIRECT,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
