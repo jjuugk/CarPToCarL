@@ -18,7 +18,7 @@ class ProtocolModulesTest {
     fun carLifeDeclaresSourcesAndControlConsumers() {
         val module = CarLifeModule()
         assertEquals(
-            setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS),
+            setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS, Capability.PLAYBACK_INTENT),
             module.provides(),
         )
         assertEquals(
@@ -35,7 +35,7 @@ class ProtocolModulesTest {
             module.provides(),
         )
         assertEquals(
-            setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS),
+            setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS, Capability.PLAYBACK_INTENT),
             module.consumes(),
         )
     }
@@ -270,5 +270,56 @@ class ProtocolModulesTest {
             )
 
         assertFalse(result.handled)
+    }
+
+    // ---- 阶段 6：播放意图收口（源端状态 → 汇侧资源调和）----
+
+    /**
+     * 播放意图从 CarLife（源）投给 CarPlay（汇）：三个布尔原样到达。
+     * 与 AUDIO_SOURCE 的区别是「要不要保持一条流」，不是「有没有样本」。
+     */
+    @Test
+    fun playbackIntentReachesCarPlayWithAllThreeFlags() {
+        var seen: List<Boolean> = emptyList()
+        ProtocolRegistry.register(CarLifeModule())
+        ProtocolRegistry.register(
+            CarPlayModule(onPlaybackIntent = { media, navigation, newMedia -> seen = listOf(media, navigation, newMedia); true }),
+        )
+
+        val handled =
+            ProtocolRegistry
+                .route(
+                    ProtocolEvent.PlaybackIntent(
+                        media = true,
+                        navigation = false,
+                        newMediaIntent = true,
+                        from = ProtocolId.CARLIFE,
+                    ),
+                    Delivery.FIRST_MATCH,
+                ).handled
+
+        assertTrue(handled)
+        assertEquals(listOf(true, false, true), seen)
+    }
+
+    /**
+     * `SessionController.onSourceAudioPlayback` 的二分派开关。
+     *
+     * 必须只有 CarPlay 算消费者：CarLife 声明的是 provides(PLAYBACK_INTENT)。
+     * 若顺序搞反（CarLife 被当成消费者），事件会被它吞掉（返回 false），
+     * `audioIntent.setPlayback` 与 `reconcile()` 就再也不会执行——表现为
+     * 「有声音但音频流不切换 / 切歌后不重新协商」。
+     */
+    @Test
+    fun playbackIntentHasConsumerOnlyAfterCarPlayRegisters() {
+        ProtocolRegistry.register(CarLifeModule())
+        assertFalse(ProtocolRegistry.hasConsumer(Capability.PLAYBACK_INTENT))
+
+        ProtocolRegistry.register(CarPlayModule())
+        assertTrue(ProtocolRegistry.hasConsumer(Capability.PLAYBACK_INTENT))
+        assertEquals(
+            listOf(ProtocolId.CARPLAY),
+            ProtocolRegistry.consumers(Capability.PLAYBACK_INTENT).map { it.id },
+        )
     }
 }

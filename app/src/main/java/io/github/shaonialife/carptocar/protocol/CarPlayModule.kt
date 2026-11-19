@@ -20,6 +20,8 @@ class CarPlayModule(
     private val onVideoSource: (Boolean) -> Boolean = { false },
     private val onAudioSource: (Boolean) -> Boolean = { false },
     private val onLyrics: (List<String>, Int) -> Boolean = { _, _ -> false },
+    private val onPlaybackIntent: (media: Boolean, navigation: Boolean, newMediaIntent: Boolean) -> Boolean =
+        { _, _, _ -> false },
 ) : ProtocolModule {
     override val id: ProtocolId = ProtocolId.CARPLAY
 
@@ -33,7 +35,13 @@ class CarPlayModule(
         )
 
     override fun consumes(): Set<Capability> =
-        setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS)
+        setOf(
+            Capability.VIDEO_SOURCE,
+            Capability.AUDIO_SOURCE,
+            Capability.MEDIA_LYRICS,
+            // 源端说「有声音」时，由 CarPlay 侧决定开/关音频流
+            Capability.PLAYBACK_INTENT,
+        )
 
     override fun start(): Boolean = starter()
 
@@ -42,6 +50,8 @@ class CarPlayModule(
     override fun onEvent(event: ProtocolEvent): Boolean =
         when (event) {
             is ProtocolEvent.Lyrics -> onLyrics(event.lines, event.lineIndex)
+            is ProtocolEvent.PlaybackIntent ->
+                onPlaybackIntent(event.media, event.navigation, event.newMediaIntent)
             is ProtocolEvent.MediaInfo -> false // 车机卡是产出/显示方，CarPlay 不回头消费
             is ProtocolEvent.MediaKey,
             is ProtocolEvent.VoiceKey,

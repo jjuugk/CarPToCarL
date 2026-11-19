@@ -566,14 +566,15 @@ object SessionController {
      * 变的只是入口：手写的三段式变成「按 [Capability] 路由」。
      *
      * 已收口：媒体键（→ [consumeMediaKeyByCar]）、语音键（→ [sendVoiceHardKey]）、
-     * 触摸（→ `CarLifeHijack.handleTouch`）。三者共同点：上游状态机（`VoiceKeyRouter`
-     * 的边沿判定与 PTT 收尾、`TouchRouter` 的槽位分流）都留在原处，只把**判定完的动作**
-     * 投出来，所以换入口不改变时序。
+     * 触摸（→ `CarLifeHijack.handleTouch`）、播放意图（→ [applyPlaybackIntent]）。
+     * 共同点：上游状态机（`VoiceKeyRouter` 的边沿判定与 PTT 收尾、`TouchRouter` 的槽位分流、
+     * `AudioIntent` 的周期登记）都留在原处，只把**判定完的动作**投出来，所以换入口不改时序。
      *
-     * 未收口：GPS——`CarGpsFix` 有 17 个字段（含 DOP、卫星数、UTC 时分秒），
-     * 塞进通用事件是抽象泄漏，砍字段又会让引擎拿到半份快照；播放意图——
-     * `onSourceAudioPlayback` 是 `audioIntent.setPlayback` + `resourceStreams.reconcile()`，
-     * 不是布尔源信号。两者都要先设计专门的事件体。
+     * **刻意不接：GPS。** `CarGpsFix` 是 CarLife 协议的单位约定（度 / 0.1 米 / 0.01 km/h），
+     * 且只有 CarLife 一个消费者。做成通用事件只有两条路：把 CarLife 的单位搬进聚合层
+     * （让 protocol 认识 0x18010 的编码约定），或者砍掉 DOP / 卫星数 / UTC 时分秒
+     * （引擎会拿到半份快照）。两条都比现状差，所以这条留在 `onCarLocation` 里不动。
+     * 将来真有第二种协议要发定位，再按那时的单位差异设计事件体也不迟。
      *
      * 注意：这里**不**把 `start()`/`stop()` 绑到 `CarLifeHijack.prewarm()`/`.stop()`。
      * 门面的生命周期归会话流程管（`ensureSessionObjects` 与会话结束路径），
@@ -582,7 +583,14 @@ object SessionController {
     private fun installProtocolModules() {
         if (protocolModulesInstalled) return
         protocolModulesInstalled = true
-        ProtocolRegistry.register(CarPlayModule())
+        ProtocolRegistry.register(
+            CarPlayModule(
+                onPlaybackIntent = { media, navigation, newMediaIntent ->
+                    applyPlaybackIntent(media, navigation, newMediaIntent)
+                    true
+                },
+            ),
+        )
         ProtocolRegistry.register(
             CarLifeModule(
                 onMediaKey = ::consumeMediaKeyByCar,
@@ -2848,11 +2856,38 @@ object SessionController {
         }
     }
 
-    /** 源端播放状态仅登记播放周期，具体资源与音频流切换统一在会话工作线程执行。 */
+    /**
+     * 源端播放状态：登记播放周期，具体资源与音频流切换统一在会话工作线程执行。
+     *
+     * 与控制事件同一套互斥双路径：装配了协议门面就走 Registry 的 FIRST_MATCH
+     * （`CarPlayModule.onPlaybackIntent` 委托回 [applyPlaybackIntent]），
+     * 未装配直接调本地函数；两路共用同一份实现，不会重复调和资源。
+     */
     fun onSourceAudioPlayback(
         media: Boolean,
         navigation: Boolean,
         newMediaIntent: Boolean = false,
+    ) {
+        if (ProtocolRegistry.hasConsumer(Capability.PLAYBACK_INTENT)) {
+            ProtocolRegistry.route(
+                ProtocolEvent.PlaybackIntent(
+                    media = media,
+                    navigation = navigation,
+                    newMediaIntent = newMediaIntent,
+                    from = ProtocolId.CARLIFE,
+                ),
+                Delivery.FIRST_MATCH,
+            )
+            return
+        }
+        applyPlaybackIntent(media, navigation, newMediaIntent)
+    }
+
+    /** 播放意图的唯一实现：门面委托与未装配路径都落在这里。 */
+    private fun applyPlaybackIntent(
+        media: Boolean,
+        navigation: Boolean,
+        newMediaIntent: Boolean,
     ) {
         audioIntent.setPlayback(media, navigation, newMediaIntent)
         resourceStreams?.reconcile()

@@ -83,4 +83,20 @@ sealed class ProtocolEvent {
     ) : ProtocolEvent() {
         override val capability: Capability = Capability.MEDIA_LYRICS
     }
+
+    /**
+     * 源端播放状态。与 [Capability.AUDIO_SOURCE] 的区别是「要不要为它保持一条流」，
+     * 而不是「有没有样本」——汇侧收到后做资源调和，不接收数据。
+     *
+     * [newMediaIntent] 表示这是**新发起**的一次媒体播放（而不是同一段声音的持续状态），
+     * 汇侧据此决定要不要重新协商音频流而不是沿用现有那条。
+     */
+    data class PlaybackIntent(
+        val media: Boolean,
+        val navigation: Boolean,
+        val newMediaIntent: Boolean = false,
+        override val from: ProtocolId,
+    ) : ProtocolEvent() {
+        override val capability: Capability = Capability.PLAYBACK_INTENT
+    }
 }

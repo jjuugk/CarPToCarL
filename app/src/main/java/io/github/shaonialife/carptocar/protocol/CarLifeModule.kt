@@ -25,7 +25,13 @@ class CarLifeModule(
     override val id: ProtocolId = ProtocolId.CARLIFE
 
     override fun provides(): Set<Capability> =
-        setOf(Capability.VIDEO_SOURCE, Capability.AUDIO_SOURCE, Capability.MEDIA_LYRICS)
+        setOf(
+            Capability.VIDEO_SOURCE,
+            Capability.AUDIO_SOURCE,
+            Capability.MEDIA_LYRICS,
+            // 播放状态由引擎驱动（9240/9241 有声音 → 汇侧据此保持流）
+            Capability.PLAYBACK_INTENT,
+        )
 
     override fun consumes(): Set<Capability> =
         setOf(Capability.MEDIA_KEY, Capability.VOICE_KEY, Capability.GPS, Capability.TOUCH)
@@ -42,6 +48,7 @@ class CarLifeModule(
             is ProtocolEvent.Touch -> onTouch(event.down, event.x, event.y, event.pointerId)
             is ProtocolEvent.MediaInfo,
             is ProtocolEvent.Lyrics,
-            -> false // CarLife 是这两类的产出方，不消费
+            is ProtocolEvent.PlaybackIntent,
+            -> false // CarLife 是这几类的产出方，不消费
         }
 }
