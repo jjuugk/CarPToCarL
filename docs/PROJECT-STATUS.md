@@ -163,20 +163,23 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | 1 | `3c74428` | `protocol/` 抽象：`ProtocolId` / `Capability` / `ProtocolEvent` / `ProtocolModule` / `ProtocolRegistry` / 数据契约 + 8 例测试 | ✅ |
 | 2 | `9492a57` | `H264Sps` 从 `carlife/` 移到 `video/`，解除 carlife↔video 跨模块环（908 例通过） | ✅ |
 | 3 | `28bf7b9` | `CarPlayModule` / `CarLifeModule` 门面，**纯委托注入**（不 import 协议实现，可纯 JVM 单测）+ 8 例 | ✅ |
-| 4 | 本次 | **媒体键收口**：`dispatchMediaKey` 走 Registry 的 `FIRST_MATCH`；未装配走本地原路径，二者互斥并共用 `consumeMediaKeyByCar` 一份实现。+ 4 例接线契约测试（全量 920 例） | ✅ **部分完成** |
+| 4 | `68b0c00` | **媒体键收口**：`dispatchMediaKey` 走 Registry 的 `FIRST_MATCH`；未装配走本地原路径，二者互斥并共用 `consumeMediaKeyByCar` 一份实现。+ 4 例接线契约测试 | ✅ |
+| 5 | 本次 | **语音键 + 触摸收口**：共同点是「输入状态机留在原处，只投判定完的动作」——`VoiceKeyRouter` 交出的 VR_START/VR_STOP 硬键码走 `dispatchVoiceHardKey`；`TouchRouter` 在槽位分流前走 `dispatchTouch`。+ 4 例契约测试（全量 924 例） | ✅ |
 
 阶段 4 首轮曾**整体**受阻回退：`dispatchMediaKey`、`voiceKey`（`VoiceKeyRouter` 状态机）、`carNmea`（`NmeaAssembler` 合并器）、`carLifeCommandSender`（独立线程池）四者紧耦合；当时还臆造了并不存在的 `prewarmCarLife()` / `NmeaAssembler.Fix`，已全部 `checkout` 回退，**没有提交错误代码**。
 
-本轮改用**互斥双路径**破解，不需要先给状态机做适配层：把媒体键原来的前两步抽成 `consumeMediaKeyByCar`，`dispatchMediaKey` 按 `ProtocolRegistry.hasConsumer(MEDIA_KEY)` 二选一——装配了走能力路由（门面委托回同一函数），没装配直接调本地函数。语义等价、不会重复消费。
+阶段 4 改用**互斥双路径**破解，不需要先给状态机做适配层：把媒体键原来的前两步抽成 `consumeMediaKeyByCar`，`dispatchMediaKey` 按 `ProtocolRegistry.hasConsumer(MEDIA_KEY)` 二选一——装配了走能力路由（门面委托回同一函数），没装配直接调本地函数。语义等价、不会重复消费。
 
-**仍未收口（有真实语义鸿沟，别硬接）**：
+阶段 5 的关键判据（为什么语音键/触摸能收、GPS/播放意图不能）：收口的前提是**事件体能装下已经判定完的动作**。
+语音键交出的就是 `0x21`/`0x22` 两个硬键码，触摸交出的是 `(down, x, y, slot)` 四个值——都能无损装进事件。
+GPS 和播放意图装不下，见下。
 
-- 语音键：`VoiceKeyRouter` 收的是原始「按下/松开」，事件模型收的是「已判定动作」（`longPress`），差一层边沿判定；且下发走异步队列，返回值无法回传，`FIRST_MATCH` 的短路语义在这里没有意义。
-- GPS：`onCarLocation` 收 NMEA 语句列表，要做分条合并 + `hasPosition` 判空 + 开关判断；`ProtocolEvent.Gps` 只有 4 个字段，`CarGpsFix` 还带 fixQuality/UTC 日期，强转会丢字段。
-- 触摸：`ProtocolEvent.Touch` 的坐标系与车机视图像素之间还有换算层。
-- 播放意图：`onSourceAudioPlayback(media, navigation, newMediaIntent)` 是 `audioIntent.setPlayback` + `resourceStreams.reconcile()`，不是布尔源信号，`onSourceAvailable` 对不上。
+**仍未收口（事件体装不下，别硬接）**：
 
-这四类要接入，必须先单独做接口适配层，并需实车验证。
+- GPS：`onCarLocation` 收 NMEA 语句列表并合并成 `CarGpsFix`，后者有 **17 个字段**（经纬度、海拔、速度、航向、fixQuality、卫星数×2、HDOP/PDOP/VDOP、UTC 年月日时分秒）。塞进 `ProtocolEvent.Gps` 是抽象泄漏，砍字段又会让引擎拿到半份快照。
+- 播放意图：`onSourceAudioPlayback(media, navigation, newMediaIntent)` 是 `audioIntent.setPlayback` + `resourceStreams.reconcile()` 的**组合动作**，不是布尔源信号，`onSourceAvailable` 对不上。
+
+这两者要接入，必须先设计专门的事件体，并需实车验证。
 
 ---
 
@@ -235,7 +238,7 @@ MIB3 车控三篇（EA / VIWI / 控制交接，1.2.29 后删）· 画面停摆�
 
 **5. 接收端不可观测**：WinPlay 不回报 `statsDictionary`；它每 10 秒一次的 682ms `ptsGapMs` 重锚是接收端行为，本项目未改。意味着「车机侧卡顿」无法直接取证。
 **6. 发版 tag 缺口**：`v1.2.66`～`v1.2.70` 本地无 tag。
-**7. 重构阶段 4 媒体键已收口，语音键/GPS/触摸/播放意图仍需接口适配层**：见 §5.3。
+**7. 重构已收口媒体键/语音键/触摸，GPS 与播放意图仍需专门事件体**：见 §5.3。
 **8. 早期文档结论有 11 处过时/自相矛盾**：已在 `PROJECT-GUIDE.md` §7 收敛成 8 条红线，归档 5 篇彻底失效文档（见 §10）。
 
 ---

@@ -122,13 +122,12 @@
 
 入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **118** 个文件 / **900** 例，重点覆盖协议编解码与密码学。
 
-> **重构分支 `refactor/protocol-modules`**（未合并）：177 个主源码文件 / 120 测试文件 / **920** 例。
+> **重构分支 `refactor/protocol-modules`**（未合并）：177 个主源码文件 / 120 测试文件 / **924** 例。
 > `protocol/` 抽象（`ProtocolModule` / `ProtocolRegistry` / `Capability` / `ProtocolEvent`）与
-> `CarPlayModule` / `CarLifeModule` 两个纯委托门面已就位；**媒体键已收口**——装配后
-> `dispatchMediaKey` 走 Registry 的 `FIRST_MATCH`，未装配走本地原路径，二者互斥且共用
-> `consumeMediaKeyByCar` 一份实现（杜绝行为分叉）。语音键 / GPS / 触摸 / 播放意图是状态机输入
-> （边沿判定、NMEA 分条合并、坐标换算），语义与通用事件不同级，需单独一轮做适配层。
-> 详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
+> `CarPlayModule` / `CarLifeModule` 两个纯委托门面已就位；**媒体键 / 语音键 / 触摸三条已收口**——
+> 装配后走 Registry 的 `FIRST_MATCH`，未装配走本地原路径，二者互斥且共用同一份实现。
+> 剩下 GPS（`CarGpsFix` 17 个字段，通用事件装不下）与播放意图（三元组 + `reconcile`，
+> 非布尔源信号）需要专门的事件体。详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
 
 ---
 

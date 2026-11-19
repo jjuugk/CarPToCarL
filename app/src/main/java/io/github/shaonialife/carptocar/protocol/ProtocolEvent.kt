@@ -19,7 +19,15 @@ sealed class ProtocolEvent {
         override val capability: Capability = Capability.MEDIA_KEY
     }
 
-    /** 车机语音键。longPress 为真时表示长按收尾。 */
+    /**
+     * 语音会话控制：CarPlay 侧判定完手势后，要求引擎起/停语音识别。
+     *
+     * [keyCode] 是**要下发给引擎的硬键码**（`VR_START` 起识别 / `VR_STOP` 收尾），
+     * 不是车机原始按键动作——原始「按下/松开」的边沿判定留在 `VoiceKeyRouter` 里，
+     * 它属于输入侧状态机，不该跨模块。这里只表达「判定完了，请引擎执行」。
+     *
+     * [longPress] 仅作诊断标记（PTT 收尾还是短按），消费方可以忽略。
+     */
     data class VoiceKey(
         val keyCode: Int,
         val longPress: Boolean = false,
@@ -51,9 +59,14 @@ sealed class ProtocolEvent {
         override val capability: Capability = Capability.MEDIA_INFO
     }
 
-    /** 触摸/旋钮输入。坐标以车机视图像素为单位。 */
+    /**
+     * 触摸输入。坐标以车机视图像素为单位，[pointerId] 是触摸槽位（本机 HID 最多两槽）。
+     *
+     * 只有按下/抬起两态：车机触控报文是**状态式**的（按住期间持续推 down=true），
+     * 没有独立的 MOVE 动作，中间位移由同槽位连续的 down 帧携带。
+     */
     data class Touch(
-        val action: Int,
+        val down: Boolean,
         val x: Int,
         val y: Int,
         val pointerId: Int = 0,

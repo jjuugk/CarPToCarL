@@ -20,7 +20,7 @@ class CarLifeModule(
     private val onMediaKey: (keyCode: Int) -> Boolean = { false },
     private val onVoiceKey: (keyCode: Int, longPress: Boolean) -> Boolean = { _, _ -> false },
     private val onGps: (latitude: Double, longitude: Double, bearing: Float?, speed: Float?) -> Boolean = { _, _, _, _ -> false },
-    private val onTouch: (action: Int, x: Int, y: Int, pointerId: Int) -> Boolean = { _, _, _, _ -> false },
+    private val onTouch: (down: Boolean, x: Int, y: Int, pointerId: Int) -> Boolean = { _, _, _, _ -> false },
 ) : ProtocolModule {
     override val id: ProtocolId = ProtocolId.CARLIFE
 
@@ -39,7 +39,7 @@ class CarLifeModule(
             is ProtocolEvent.MediaKey -> onMediaKey(event.keyCode)
             is ProtocolEvent.VoiceKey -> onVoiceKey(event.keyCode, event.longPress)
             is ProtocolEvent.Gps -> onGps(event.latitude, event.longitude, event.bearing, event.speed)
-            is ProtocolEvent.Touch -> onTouch(event.action, event.x, event.y, event.pointerId)
+            is ProtocolEvent.Touch -> onTouch(event.down, event.x, event.y, event.pointerId)
             is ProtocolEvent.MediaInfo,
             is ProtocolEvent.Lyrics,
             -> false // CarLife 是这两类的产出方，不消费

@@ -8,6 +8,11 @@ import io.github.shaonialife.carptocar.launcher.LetterboxHintController
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.resolveCardGesture
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
+import io.github.shaonialife.carptocar.protocol.Capability
+import io.github.shaonialife.carptocar.protocol.Delivery
+import io.github.shaonialife.carptocar.protocol.ProtocolEvent
+import io.github.shaonialife.carptocar.protocol.ProtocolId
+import io.github.shaonialife.carptocar.protocol.ProtocolRegistry
 import io.github.shaonialife.carptocar.render.CARD_MARGIN_PX
 import io.github.shaonialife.carptocar.input.CarInputClient
 
@@ -89,7 +94,7 @@ object TouchRouter {
         // 旧顺序会把它当成空槽直接 return，于是 UP 永远送不到引擎 —— 引擎侧
         // eventIng 一直是 true，后续拖拽全部被当成同一次手势的 MOVE，
         // 表现就是「点一下之后拖不动、只能再点一下复位」。
-        if (CarLifeHijack.handleTouch(contact.slot, contact.xPixels, contact.yPixels, contact.down)) {
+        if (dispatchTouch(contact)) {
             return
         }
         // 空闲槽占位（未按下且 0,0）忽略
@@ -297,6 +302,29 @@ object TouchRouter {
             if (launcher.dockAtBottom) px - CARD_MARGIN_PX else px - dockW,
         )
     }
+
+    /**
+     * 触摸的第一道分派：CarLife 本地劫持生效时走它的触控通道回传（不需要 Shizuku）。
+     *
+     * 装配了协议门面就走 Registry 的 FIRST_MATCH（`CarLifeModule.onTouch` 委托回
+     * `CarLifeHijack.handleTouch`），未装配直接调同一个函数——两种运行态互斥，行为一致。
+     */
+    private fun dispatchTouch(contact: Contact): Boolean =
+        if (ProtocolRegistry.hasConsumer(Capability.TOUCH)) {
+            ProtocolRegistry
+                .route(
+                    ProtocolEvent.Touch(
+                        down = contact.down,
+                        x = contact.xPixels,
+                        y = contact.yPixels,
+                        pointerId = contact.slot,
+                        from = ProtocolId.CARPLAY,
+                    ),
+                    Delivery.FIRST_MATCH,
+                ).handled
+        } else {
+            CarLifeHijack.handleTouch(contact.slot, contact.xPixels, contact.yPixels, contact.down)
+        }
 
     fun reset() {
         pressed = false

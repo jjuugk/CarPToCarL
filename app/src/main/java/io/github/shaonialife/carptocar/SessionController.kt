@@ -565,10 +565,15 @@ object SessionController {
      * 真实动作全部委托回本类已有函数，所以装配前后**行为等价**——
      * 变的只是入口：手写的三段式变成「按 [Capability] 路由」。
      *
-     * 已收口：媒体键（`CarLifeModule.onMediaKey` → [consumeMediaKeyByCar]）。
-     * 暂未收口：语音键 / GPS / 触摸——它们各自带状态机（`VoiceKeyRouter` 的
-     * 按下-松开边沿判定、`NmeaAssembler` 的 GGA/RMC/GSA 分条合并、触摸的坐标系换算），
-     * 改走事件会改变时序语义，必须单独一轮先设计适配层再动。
+     * 已收口：媒体键（→ [consumeMediaKeyByCar]）、语音键（→ [sendVoiceHardKey]）、
+     * 触摸（→ `CarLifeHijack.handleTouch`）。三者共同点：上游状态机（`VoiceKeyRouter`
+     * 的边沿判定与 PTT 收尾、`TouchRouter` 的槽位分流）都留在原处，只把**判定完的动作**
+     * 投出来，所以换入口不改变时序。
+     *
+     * 未收口：GPS——`CarGpsFix` 有 17 个字段（含 DOP、卫星数、UTC 时分秒），
+     * 塞进通用事件是抽象泄漏，砍字段又会让引擎拿到半份快照；播放意图——
+     * `onSourceAudioPlayback` 是 `audioIntent.setPlayback` + `resourceStreams.reconcile()`，
+     * 不是布尔源信号。两者都要先设计专门的事件体。
      *
      * 注意：这里**不**把 `start()`/`stop()` 绑到 `CarLifeHijack.prewarm()`/`.stop()`。
      * 门面的生命周期归会话流程管（`ensureSessionObjects` 与会话结束路径），
@@ -578,7 +583,13 @@ object SessionController {
         if (protocolModulesInstalled) return
         protocolModulesInstalled = true
         ProtocolRegistry.register(CarPlayModule())
-        ProtocolRegistry.register(CarLifeModule(onMediaKey = ::consumeMediaKeyByCar))
+        ProtocolRegistry.register(
+            CarLifeModule(
+                onMediaKey = ::consumeMediaKeyByCar,
+                onVoiceKey = { keycode, _ -> sendVoiceHardKey(keycode) },
+                onTouch = { down, x, y, slot -> CarLifeHijack.handleTouch(slot, x, y, down) },
+            ),
+        )
         appendLog("PROTO: 协议门面已装配 —— ${ProtocolRegistry.all().joinToString { it.id.name }}")
     }
 
@@ -1011,6 +1022,37 @@ object SessionController {
         return MediaKeyRoute.carLifeHardKeyTakes(keyCode) && CarLifeHijack.sendMediaKey(keyCode)
     }
 
+    /**
+     * 语音键硬键下发。由 [VoiceKeyRouter] 在判定出「起/停识别」后调用，
+     * 已经在 `carlife-cmd` 队列线程上——这里不再切线程。
+     *
+     * 与 [dispatchMediaKey] 同一套互斥双路径：装配了协议门面就走 Registry 的
+     * FIRST_MATCH（`CarLifeModule.onVoiceKey` 委托回 [sendVoiceHardKey]），
+     * 未装配直接调本地函数；两路共用同一份实现，不会重复下发。
+     *
+     * 日志里的「已送达 / 未送达」只在 [CarLifeHijack.sendVoiceKey] 返回 false 时才有信息量，
+     * 它表示「socket 写失败」，不是「引擎收到了」——这台车机的硬键本来就没有回执。
+     */
+    private fun dispatchVoiceHardKey(keycode: Int) {
+        val ok =
+            if (ProtocolRegistry.hasConsumer(Capability.VOICE_KEY)) {
+                ProtocolRegistry
+                    .route(
+                        ProtocolEvent.VoiceKey(keyCode = keycode, from = ProtocolId.CARPLAY),
+                        Delivery.FIRST_MATCH,
+                    ).handled
+            } else {
+                sendVoiceHardKey(keycode)
+            }
+        appendLog(
+            "CARLIFE: 车机语音键 0x%02X → 0x68008 ".format(keycode) +
+                if (ok) "已送达" else "未送达（CarLife 未接管）",
+        )
+    }
+
+    /** 语音硬键的唯一实现：门面委托与未装配路径都落在这里。 */
+    private fun sendVoiceHardKey(keycode: Int): Boolean = CarLifeHijack.sendVoiceKey(keycode)
+
     /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
     private val carNmea = NmeaAssembler()
 
@@ -1046,15 +1088,9 @@ object SessionController {
      */
     private val voiceKey =
         VoiceKeyRouter(
-            send = { keycode ->
-                carLifeCommandSender.execute {
-                    val ok = CarLifeHijack.sendVoiceKey(keycode)
-                    appendLog(
-                        "CARLIFE: 车机语音键 0x%02X → 0x68008 ".format(keycode) +
-                            if (ok) "已送达" else "未送达（CarLife 未接管）",
-                    )
-                }
-            },
+            // 边沿判定、PTT 收尾、三连击都在 VoiceKeyRouter 里完成；这里拿到的已经是
+            // 「判定完的动作」（VR_START/VR_STOP 硬键码），只负责下发。
+            send = { keycode -> carLifeCommandSender.execute { dispatchVoiceHardKey(keycode) } },
             log = ::appendLog,
             // 短按三次 = 重启音频（见 VoiceKeyGesture 注释）。回调里只做一次线程切换：
             // 重启要跑 RTSP SETUP/RECORD，绝不能占 iAP2 事件线程，也不该挤 CarLife 命令队列。

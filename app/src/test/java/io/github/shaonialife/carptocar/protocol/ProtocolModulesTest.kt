@@ -145,6 +145,8 @@ class ProtocolModulesTest {
 
         ProtocolRegistry.register(CarLifeModule())
         assertTrue(ProtocolRegistry.hasConsumer(Capability.MEDIA_KEY))
+        assertTrue(ProtocolRegistry.hasConsumer(Capability.VOICE_KEY))
+        assertTrue(ProtocolRegistry.hasConsumer(Capability.TOUCH))
     }
 
     /** 已装配分支：事件来源是 SYSTEM（车机/系统媒体键，不是某个协议模块）也必须能到达 CarLife。 */
@@ -197,5 +199,76 @@ class ProtocolModulesTest {
         ProtocolRegistry.stopAll()
 
         assertEquals(0, stops)
+    }
+
+    // ---- 阶段 5：语音键与触摸收口（输入状态机留在原地，只投「判定完的动作」）----
+
+    /** 语音键：VoiceKeyRouter 判定后的硬键码经 Registry 投给 CarLife，参数原样到达。 */
+    @Test
+    fun installedFleetConsumesVoiceHardKey() {
+        val seen = mutableListOf<Int>()
+        ProtocolRegistry.register(CarPlayModule())
+        ProtocolRegistry.register(
+            CarLifeModule(onVoiceKey = { code, _ -> seen += code; true }),
+        )
+
+        val handled =
+            ProtocolRegistry
+                .route(
+                    ProtocolEvent.VoiceKey(keyCode = 0x21, from = ProtocolId.CARPLAY),
+                    Delivery.FIRST_MATCH,
+                ).handled
+
+        assertTrue(handled)
+        assertEquals(listOf(0x21), seen)
+    }
+
+    /** 引擎没接管时为 false，调用方据此写「未送达」日志——既不能静默，也不该抛。 */
+    @Test
+    fun unhandledVoiceKeyReportsFalseSoCallerCanLog() {
+        ProtocolRegistry.register(CarLifeModule(onVoiceKey = { _, _ -> false }))
+
+        val result =
+            ProtocolRegistry.route(
+                ProtocolEvent.VoiceKey(keyCode = 0x22, from = ProtocolId.CARPLAY),
+                Delivery.FIRST_MATCH,
+            )
+
+        assertFalse(result.handled)
+    }
+
+    /** 触摸：down / 坐标 / 槽位必须原样到达——错一位点击就漂到别的槽或位置。 */
+    @Test
+    fun touchCarriesDownCoordinatesAndSlotVerbatim() {
+        var seen: List<Any> = emptyList()
+        ProtocolRegistry.register(
+            CarLifeModule(
+                onTouch = { down, x, y, slot -> seen = listOf(down, x, y, slot); true },
+            ),
+        )
+
+        val handled =
+            ProtocolRegistry
+                .route(
+                    ProtocolEvent.Touch(down = true, x = 320, y = 180, pointerId = 1, from = ProtocolId.CARPLAY),
+                    Delivery.FIRST_MATCH,
+                ).handled
+
+        assertTrue(handled)
+        assertEquals(listOf(true, 320, 180, 1), seen)
+    }
+
+    /** CarLife 未激活（handleTouch 返回 false）时必须交还调用方继续走注入路径，不能被吞。 */
+    @Test
+    fun unhandledTouchLeavesRoomForVirtualDisplayInjection() {
+        ProtocolRegistry.register(CarLifeModule(onTouch = { _, _, _, _ -> false }))
+
+        val result =
+            ProtocolRegistry.route(
+                ProtocolEvent.Touch(down = false, x = 0, y = 0, pointerId = 0, from = ProtocolId.CARPLAY),
+                Delivery.FIRST_MATCH,
+            )
+
+        assertFalse(result.handled)
     }
 }

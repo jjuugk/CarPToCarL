@@ -681,7 +681,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 ### 协议聚合层（`protocol/`）
 
 > 由分支 `refactor/protocol-modules` 引入，**尚未合并到 main**。合入后 `protocol/` 由 2 个文件
-> 增至 10 个、主源码 169 → 177 个文件、用例 900 → 920 例。
+> 增至 10 个、主源码 169 → 177 个文件、用例 900 → 924 例。
 
 三个协议包**互不 import**，交互一律经 `ProtocolRegistry` 按能力接线：
 
@@ -692,10 +692,20 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 | `ProtocolRegistry` | 唯一装配点。三种投递：`BIND`（源汇配对）/ `FIRST_MATCH`（控制竞争）/ `ALL`（状态广播） |
 | `CarPlayModule` / `CarLifeModule` | 纯委托门面，不 import 任何协议实现；真实动作由 `SessionController` 注入 |
 
-已收口的只有**媒体键**：装配后 `dispatchMediaKey` 走 `FIRST_MATCH` 能力路由，
-未装配走本地原路径，两者互斥且共用 `consumeMediaKeyByCar` 一份实现（避免行为分叉）。
-语音键 / GPS / 触摸 / 播放意图仍是状态机输入（边沿判定、NMEA 分条合并、坐标换算），
-语义与通用事件不同级，需先做适配层才能接入。
+已收口三条，共同点是：**输入状态机留在原处，只把判定完的动作投出来**，所以换入口不改时序。
+
+| 事件 | 上游状态机 | 动作入口 |
+|---|---|---|
+| 媒体键 | `MediaSessionsState` + `MediaKeyRoute` 白名单 | `dispatchMediaKey` → `consumeMediaKeyByCar` |
+| 语音键 | `VoiceKeyRouter`（边沿判定 / PTT 收尾 / 三连击） | `dispatchVoiceHardKey` → `sendVoiceHardKey` |
+| 触摸 | `TouchRouter` 槽位分流 | `dispatchTouch` → `CarLifeHijack.handleTouch` |
+
+装配后一律走 `FIRST_MATCH` 能力路由，未装配走本地原路径，两者**互斥**且共用同一份实现
+（`consumeMediaKeyByCar` / `sendVoiceHardKey` / `CarLifeHijack.handleTouch`）。
+
+未收口两条，都是**事件体装不下**：GPS 的 `CarGpsFix` 有 17 个字段（DOP、卫星数、UTC 时分秒），
+塞进通用事件是抽象泄漏、砍字段又会让引擎拿到半份快照；播放意图是
+`audioIntent.setPlayback` + `resourceStreams.reconcile()` 的组合，不是布尔源信号。
 
 ### 根目录
 
