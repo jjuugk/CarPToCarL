@@ -5,7 +5,7 @@ import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSource
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
-import io.github.shaonialife.carptocar.video.VideoSender
+import io.github.shaonialife.carptocar.video.VideoSink
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -160,7 +160,7 @@ object CarLifeHijack {
 
     /** 当前会话的视频通道；为 null 时收到的帧只进 GOP 缓存。 */
     @Volatile
-    private var sender: VideoSender? = null
+    private var sender: VideoSink? = null
 
     /**
      * 「当期首帧已送达 → 需要补一次 RECORD」的一次性标记。
@@ -821,7 +821,7 @@ object CarLifeHijack {
      * 开关见 [io.github.shaonialife.carptocar.video.FirstFramePolicy]（可一键回退）。
      */
     fun attach(
-        videoSender: VideoSender,
+        videoSender: VideoSink,
         log: (String) -> Unit,
     ): Unit =
         synchronized(videoDeliveryLock) {
@@ -854,7 +854,7 @@ object CarLifeHijack {
                 var pushed = 0
                 for ((frame, keyFrame) in pending) {
                     // 缓存帧本来就是旧的，不传 sourceTimestamp（避免被算成排队延迟）
-                    if (sender !== videoSender || !videoSender.submitH264(frame, keyFrame)) break
+                    if (sender !== videoSender || !videoSender.submitH264(frame, keyFrame, null)) break
                     pushed++
                 }
                 log("CARLIFE: 缓存回放已推送 $pushed/${pending.size} 帧——后续实时直通")
@@ -901,7 +901,7 @@ object CarLifeHijack {
      * 接上通道后 3 秒仍一帧都送不出去，说明 VideoConfig 卡住了（SPS 缺失）。
      * 再补一次编码器重建；重建后引擎必然发「SPS+PPS+IDR」，链路自愈。
      */
-    private fun startFirstFrameWatchdog(videoSender: VideoSender) {
+    private fun startFirstFrameWatchdog(videoSender: VideoSink) {
         val base = framesDelivered
         Thread {
             try {

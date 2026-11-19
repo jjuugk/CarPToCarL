@@ -1,6 +1,6 @@
 package io.github.shaonialife.carptocar.carlife
 
-import io.github.shaonialife.carptocar.audio.AudioSender
+import io.github.shaonialife.carptocar.audio.AudioSink
 import io.github.shaonialife.carptocar.audio.AudioSource
 
 /**
@@ -212,7 +212,7 @@ internal class CarLifeAudioSink(
         // 导航播报独立流（实验，设置项 NavAudioRoute）：那条流真的在跑时，9241 的 PCM 不
         // 再进主混音器，直接投给独立发送端。按 MEDIA 喂是刻意的——它的混音器只有这一路
         // 在跑，NAV 路没人喂；喂 MEDIA 也顺带避开了「自己 duck 自己」。
-        val navSender =
+        val navSender: AudioSink? =
             if (source == AudioSource.NAV) {
                 io.github.shaonialife.carptocar.SessionController.navAudioSender?.takeIf { it.isRunning }
             } else {
@@ -222,7 +222,7 @@ internal class CarLifeAudioSink(
             navSender.feedPcm(pcm, size, srcRate, srcChannels, AudioSource.MEDIA)
             return
         }
-        val sender = io.github.shaonialife.carptocar.SessionController.audioSender
+        val sender: AudioSink? = io.github.shaonialife.carptocar.SessionController.audioSender
         if (sender == null || !sender.isRunning) return
         // 直通：交给 AudioSender 重采样 + 写入该源的环形缓冲（混音与发送在泵线程）
         sender.feedPcm(pcm, size, srcRate, srcChannels, source)

@@ -80,7 +80,7 @@ class VideoSender(
      */
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
     private val clockMillis: () -> Long = { defaultMonotonicMillis() },
-) {
+) : VideoSink {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
     @Volatile
@@ -257,7 +257,7 @@ class VideoSender(
     private var framesSent = 0L
 
     /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
-    val isRunning: Boolean get() = running.get()
+    override val isRunning: Boolean get() = running.get()
 
     /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
     val framesSentTotal: Long get() = framesSent
@@ -278,7 +278,7 @@ class VideoSender(
      * 只观测、不主动关 socket：永久阻塞的写没法安全取消（关 socket 会把好链路一起拆），
      * 真要处置交给停摆看门狗的分级干预。
      */
-    fun noteWriteStall() {
+    override fun noteWriteStall() {
         val startedAt = writeStartedAt
         if (startedAt == 0L) return
         val now = monotonicMillis()
@@ -689,7 +689,7 @@ class VideoSender(
      * 计数器归零 = ChaCha/AES 的 nonce 复用，车机侧 AEAD 校验必然失败，
      * 表现就是「重连后一帧都过不去」。只有换整轮会话（新 SETUP）才允许归零。
      */
-    fun onSourceRestart(reason: String) {
+    override fun onSourceRestart(reason: String) {
         if (!running.get()) return
         // 标记「下一帧新 IDR 到来前必须重发 VideoConfig」，但不要在此刻把 configSent 清成 false：
         // 若车机解码器已吃过上一份 avcC 且手里还有配套的 lastIdrNals，源重建空窗期仍靠旧 IDR 保活，
@@ -730,7 +730,7 @@ class VideoSender(
      *
      * 已有 csd 时不覆盖：真实码流里的 SPS 永远比缓存更可信。
      */
-    fun seedCsd(annexB: ByteArray) {
+    override fun seedCsd(annexB: ByteArray) {
         if (cachedCsd != null) return
         val nals = splitAnnexB(annexB)
         val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 } ?: return
@@ -747,10 +747,10 @@ class VideoSender(
      *   缓存回放（[CarLifeHijack.attach] 补历史 GOP）**不要**传：那批帧本来就旧，
      *   传进来会被误判成「已经在排队」。
      */
-    fun submitH264(
+    override fun submitH264(
         data: ByteArray,
         keyFrame: Boolean,
-        sourceTimestampMs: Long? = null,
+        sourceTimestampMs: Long?,
     ): Boolean {
         if (!running.get()) return false
         val output = try {
@@ -897,7 +897,7 @@ class VideoSender(
             }
         // SPS/PPS + IDR 拼成一段 AnnexB 一次提交：submitH264 会先发 VideoConfig 再发帧，
         // 并把这一帧记成 lastIdrNals，空闲保活会持续重发维持显示，直到 CarLife 接管。
-        val sent = submitH264(frame.csd + frame.idr, true)
+        val sent = submitH264(frame.csd + frame.idr, true, null)
         if (sent) {
             log("VIDEO: 已向车机推送提示帧（${lines.firstOrNull() ?: ""}）")
         } else {

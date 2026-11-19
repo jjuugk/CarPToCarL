@@ -119,11 +119,11 @@ class CarLifeVideoReplayOrderTest {
                 val input = DataInputStream(accepted.getInputStream())
 
                 // 新流首帧前到达的 P 帧必须被挡住，绝不能抢在 VideoConfig+IDR 前写出。
-                assertFalse(sender.submitH264(annexBP, keyFrame = false))
+                assertFalse(sender.submitH264(annexBP, keyFrame = false, sourceTimestampMs = null))
 
                 // 注入带裁剪 SPS 的 IDR + 紧随的 P 帧。
-                assertTrue(sender.submitH264(annexBKey, keyFrame = true))
-                assertTrue(sender.submitH264(annexBP, keyFrame = false))
+                assertTrue(sender.submitH264(annexBKey, keyFrame = true, sourceTimestampMs = null))
+                assertTrue(sender.submitH264(annexBP, keyFrame = false, sourceTimestampMs = null))
 
                 // 第 1 包必须是 VideoConfig (opcode=1)，且头部声明的是裁剪后 visible 1412x654。
                 val cfgHead = ByteArray(128)
@@ -198,7 +198,7 @@ class CarLifeVideoReplayOrderTest {
                 val input = DataInputStream(accepted.getInputStream())
 
                 // 1) 首帧 SPS+PPS+IDR1：发出 VideoConfig + IDR1 (nonce=0)
-                assertTrue(sender.submitH264(annexB(sps, pps, idr1), keyFrame = true))
+                assertTrue(sender.submitH264(annexB(sps, pps, idr1), keyFrame = true, sourceTimestampMs = null))
                 readPacket(input).also { (op, _, _) -> assertEquals(1, op) }
                 readPacket(input).also { (op, head, body) ->
                     assertEquals(0, op)
@@ -209,7 +209,7 @@ class CarLifeVideoReplayOrderTest {
                 // 2) CarLife 源重建空窗期：P 帧必须挡住，但空闲保活仍必须能重发旧 IDR1 (nonce=1)，防止车机 30s 零帧拆链
                 sender.onSourceRestart("CarLife 会话重建")
                 clock.addAndGet(200L)
-                assertFalse(sender.submitH264(annexB(pFrame), keyFrame = false))
+                assertFalse(sender.submitH264(annexB(pFrame), keyFrame = false, sourceTimestampMs = null))
                 clock.addAndGet(1_500L)
                 sender.resendIdleFrameForTest()
                 readPacket(input).also { (op, head, body) ->
@@ -220,7 +220,7 @@ class CarLifeVideoReplayOrderTest {
 
                 // 3) 新会话首个裸 IDR2 到达（无内联 SPS，走缓存 csd 兜底）：重发 VideoConfig + IDR2 (nonce=2，绝不归零)
                 clock.addAndGet(100L)
-                assertTrue(sender.submitH264(annexB(idr2), keyFrame = true))
+                assertTrue(sender.submitH264(annexB(idr2), keyFrame = true, sourceTimestampMs = null))
                 readPacket(input).also { (op, _, _) -> assertEquals(1, op) }
                 readPacket(input).also { (op, head, body) ->
                     assertEquals(0, op)

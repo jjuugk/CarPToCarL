@@ -65,7 +65,7 @@ class AudioSender(
      * 发一个 [AudioSyncPacket] 建立 RTP↔NTP 锚点；0 = 车机没给（旧车机），只发音频。
      */
     private val controlPort: Int = 0,
-) {
+) : AudioSink {
     companion object {
         const val CHANNELS = 2
 
@@ -246,7 +246,7 @@ class AudioSender(
     private var lastLogAt = 0L
     private var readFailures = 0
 
-    val isRunning: Boolean get() = running.get()
+    override val isRunning: Boolean get() = running.get()
 
     /** 静音前的手机媒体音量 index（-1 = 未静音）。 */
     private var mutedOriginalVolume = -1
@@ -707,12 +707,12 @@ class AudioSender(
      * @param srcChannels 输入声道数（1 或 2；其它按 2 处理）
      * @param source   哪一路（媒体/播报），决定进哪个环形缓冲、用哪份重采样器
      */
-    fun feedPcm(
+    override fun feedPcm(
         srcPcm: ByteArray,
         size: Int,
-        srcRate: Int = 0,
-        srcChannels: Int = 2,
-        source: AudioSource = AudioSource.MEDIA,
+        srcRate: Int,
+        srcChannels: Int,
+        source: AudioSource,
     ) {
         if (!running.get() || record != null) return // 采集模式在跑时不接受注入
         if (size <= 0) return
