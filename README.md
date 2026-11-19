@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk)**
-> —— 主线固定直链（当前 1.2.70，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk)**
+> —— 主线固定直链（当前 1.2.71，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.70，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.70.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.71，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.71.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.70`（正式版；非阻塞发包消除 700ms 级阻塞 + 媒体采样率三档两端对齐；听感未实车复测。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.71`（正式版；协议模块化重构 + 删掉混音器与定拍泵（媒体 PCM 直通）+ 导航改投 `101/default` 单声道；均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,70 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.71 —— 2026-11-19（协议模块化重构 + 音频链路只剩一条路，正式版）
+
+这一版没有新功能，只有**删**：把 1.2.67~1.2.70 为「顿挫」叠上去的音频补丁层，与 v1.2.70 之后的
+协议模块化一起收口。目的只有一个——**让变量变少**，以后再查「音乐不对」时不必先怀疑自己加的泵。
+
+**一、协议模块化重构（行为零变更）**
+
+- 新增协议抽象层 `protocol/` 与聚合 `Registry`，`CarPlayModule` / `CarLifeModule` 两个门面收口
+  （`3c74428` → `28bf7b9`）；
+- `H264Sps` 移入 `video/`，解除 `carlife ↔ video` 的跨模块环（`9492a57`）；
+- 媒体键、触摸、语音键、GPS、播放意图全部改走**能力路由**：车机没声明就不接，GPS 明确不接
+  （`68b0c00` / `9df34e0` / `0268578`）；
+- 数据面抽出 `VideoSink` / `AudioSink` 契约，`carlife` 不再依赖具体发送端（`c583fea`）；
+- 文档收敛：正文只留 `docs/PROTOCOL-MODULES.md`，README 退回速览；新增 `docs/PROJECT-GUIDE.md`
+  与 `docs/PROJECT-STATUS.md`（项目体检报告，`d09c853`）。
+
+**二、音频链路删繁：混音器与定拍泵整体删除（`0c84e8c`）**
+
+1.2.67 为「一顿一顿」引入的定拍泵、双路相加、duck、水位裁剪、空载补静音、停拍归因、混音体检，
+在 1.2.70 的录音复盘之后已经变成**排查变量本身**（手机侧音频连续、停拍归因指向发包阻塞）。
+本版整体删除，音频只剩一条出帧路径：**PCM 到齐一帧（352 样本）就封包发走**。
+媒体档位改为 **PCM 优先、AAC 仅兜底**（直通不编码）；奥迪仍走 `100/media` PCM 48k 立体声，
+宝马没有 PCM 位，只能落到 `102/media` AAC-LC 44.1k。
+
+代价是刻意保留的：源头不推 PCM 就不发包，车机 jitter buffer 会排空，恢复瞬间可能卡一下——
+补静音帧正是被删掉的那一部分。
+
+**三、导航播报改投 `101 AltAudio / default`（`0c84e8c`）**
+
+真 CarPlay 的导航提示音本来就走这条 alt audio 通道，车机按提示音处理、要不要压低媒体由它决定，
+发送端不再混音。该档建不起来（车机未声明 / SETUP 被拒 / 发送端起不来）时**导航无声、媒体不受影响**，
+日志写明原因，**绝不回落到媒体流**——那等于把删掉的混音偷偷加回来。设置里「导航播报通道」一行与
+`NavAudioRoute` 枚举（含 1.2.58 已证伪、会以 400 弄死整条会话的 `alert` 档）一并删除。
+
+**四、`101/default` 支持单声道 PCM（`b91439d`）**
+
+复盘 11-19 的 `/info`：奥迪 `101/default` 位图是 `0x40004400`（bit30 Opus 48k mono +
+bit14 PCM 48k mono + bit10 PCM 44.1k mono），**一个立体声位都没有**；此前只认 bit15/bit11
+两个立体声位，所以这条「唯一没试过的新路」其实卡在格式位、而不是通路上。
+
+- `AudioProfile` 增加 `channels`（默认 2，放在参数表末尾，不打乱既有位置参数调用）；
+- 新增 `PCM 48k 单声道`（`1<<14`）/`PCM 44.1k 单声道`（`1<<10`）两个格式位，
+  `audioProfileForType` 的优先级表改为「101 全组合 → 100 全组合，每档内立体声先于单声道」；
+- `AudioSender` 的包长、采集掩码、AAC 编码器、自检解码全部跟着声道数走（单声道 704B / 立体声 1408B）；
+- `alignPcm` 增加立体声→单声道下混（左右平均；直接丢一边会让只在一侧的音源消失）。
+
+宝马 `101/default` 只有 `0x01000000`（AAC-ELD 44.1k 立体声），项目没有 ELD 编码器，所以
+**这条通道在宝马上仍然建不起来、导航无声**——这是协议侧事实，不是本版能修的。
+
+**五、音频配置守卫收紧（`29a65ca`）**
+
+现场（11-19 22:00）：车机已经在推流，日志里仍反复出现 HFP/A2DP `CONNECTING → DISCONNECTED`。
+原守卫只在循环头看退出条件，而一次 `connectedNames()` + `disconnectAddress()` 往返要 1~2 秒，
+这几百毫秒里首帧/端点可能已经就绪，守卫仍把刚连上的配置文件掐一次。改为 `AudioGuardGate`
+纯逻辑判定：会话已激活时连线程都不起（只记一行跳过原因）、断开动作前二次确认，收工/中断/超时
+都带原因与断开次数。
+
+**六、验证与诚实边界**
+
+906 例单测 0 失败。**导航走 `101/default` 单声道、直通不再补静音、守卫收紧，三项均未实车验证**。
+上车后先看这几行：`AUDIO: 音频档位候选=[…]`（第一条即实际 SETUP 成功那条）、
+`AUDIO: 已启动直通模式（… 通路=t100/PCM，目标 48000Hz 立体声）`、
+`AUDIO: 导航流（101/default）→ …`（失败时后面直接写原因）。
 
 ### 1.2.70 —— 2026-11-18（音频顿挫两处修复 + 媒体采样率两端对齐，正式版）
 
