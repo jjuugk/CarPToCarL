@@ -672,14 +672,18 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 三处交叉：`net/` 放 AirPlay 服务发现（`AirPlayFeatures` / `CarPlayCtrlAdvertiser`）；
 `transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议。
-测试目录镜像同一套包名。47 篇专题文档的状态标注索引见 [docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)。
+测试目录镜像同一套包名。
+
+文档三入口：[docs/README.md](docs/README.md)（docs 目录地图，按角色给阅读路径）·
+[docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)（42 篇专题文档的状态标注索引 + 排障决策表）·
+[docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
 
 ### 根目录
 
 ```
 CarPToCarL/
 ├── app/                          # 唯一的 Android 应用模块
-├── docs/                         # 协议知识库与逆向结论（含 PROJECT-GUIDE.md 总入口）
+├── docs/                         # 协议知识库与逆向结论（README 目录地图 / PROJECT-GUIDE 导航 / PROJECT-STATUS 体检 / archive 归档）
 ├── gradle/wrapper/               # wrapper（指向项目内 .tools/ 的发行版 zip）
 ├── .tools/                       # 自包含工具链：JDK17 / Android SDK34 / Gradle 8.10.2 / platform-tools
 ├── build.gradle.kts              # 根构建脚本
@@ -2248,7 +2252,7 @@ RECORD** 才能把它纳入会话。不补的后果就是接收端对 SETUP 回 
 **四、验证**
 
 单测 **569 例 0 失败**（较 1.2.33 少 7 例，即删掉的 `StallJudgeTest`）。
-`docs/video-stall-recovery-20261108.md` 顶部已标注「只作历史记录」，当前实现以代码为准。
+`docs/archive/video-stall-recovery-20261108.md` 顶部已标注「只作历史记录」，当前实现以代码为准。
 
 ### 1.2.33 —— 2026-11-10（链路层认得出「车机拒绝」：`FF 55` 握手族不再被静默丢弃，正式版）
 
@@ -3027,7 +3031,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 ### 1.2.18 —— 2026-11-04（奥迪 MIB3：EA 隧道不再写死链路 + 音频静音保活，正式版）
 
 > 样本 `CarPToCarL-log-20261104-083034.txt`（1.2.17，`Audi_MMI_8349` / `AUDI 4260` /
-> `DELPHI`）。分析与证据链见 [docs/audi-mib3-ea-tunnel-20261104.md](docs/audi-mib3-ea-tunnel-20261104.md)。
+> `DELPHI`）。分析与证据链见 [docs/archive/audi-mib3-ea-tunnel-20261104.md](docs/archive/audi-mib3-ea-tunnel-20261104.md)（已归档，仅历史）。
 
 - **车机控制读不到数据 → 是它把整条 iAP2 链路写死的**：面板在 0xEA03（EA 会话状态）
   还没到时就发了 8 条 0xEA04（viwi GET）。三轮会话全部在**同一个序号**上出事——
@@ -3108,7 +3112,7 @@ CarLife 完全用手机定位；打开时也只转车机真给了坐标的样本
 > 首页多了一张「MIB3 车机控制」卡，点开是一个**只读 + 控制**两段式面板。链路是
 > iAP2 的 EA 隧道（`0xEA00` 建会话、`0xEA03` 状态、`0xEA04` 数据），车机那头接到
 > 内部 viwi 总线 `127.0.0.1:14751`。细节与「哪些是猜的」见
-> [`docs/mib3-viwi-control.md`](docs/mib3-viwi-control.md)。
+> [`docs/archive/mib3-viwi-control.md`](docs/archive/mib3-viwi-control.md)（已归档，仅历史）。
 
 - **为什么不是 iAP2 加开关**：iAP2 里没有任何控制车辆的消息，`vehicleStatus`
   （`0xA100`/`0xA101`）在 MIB3 上还是 `enabled:false` 且只有「车 → 手机」一个方向。

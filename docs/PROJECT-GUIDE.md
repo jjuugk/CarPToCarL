@@ -2,7 +2,10 @@
 
 > 定位：**导航 + 现行结论摘要**。原始证据、日志时间线和逐版变更仍在 [README.md](../README.md) 与各专题文档；
 > 本文件只做收拢、标注状态、指出冲突。冲突时**以文档中最后一次更新为准**，不要照抄早期结论。
-> 核对基线：2026-11-19 · `main` @ `b7506d3` · v1.2.70（900 例单测 0 失败，听感顿挫修复未实车验证）。
+> 核对基线：2026-11-19 · `main` @ `95f8b6b` · v1.2.70（900 例单测 0 失败，听感顿挫修复未实车验证）。
+>
+> 两个配套入口：[`README.md`](README.md)（docs 目录地图，按角色给阅读路径）、
+> [`PROJECT-STATUS.md`](PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
 
 ---
 
@@ -77,7 +80,11 @@
 | 🧪 实验/待验 | 双指缩放（0x68001 复合动作）、车机 GPS 转发、歌词顶替 title、车机麦克风上行（**宝马 G38 实测会把车机打死，现按 `audioInputFormats` 门控**） |
 | ⛔ 已移除 | MIB3 车控三篇（EA / VIWI / 控制交接，1.2.29 后整体删除）、画面停摆分级干预（1.2.34 后看门狗只观测）、Shizuku、自动拉起 CarLife |
 
-**尚未实车验证的修复**（看版本历史时别当成已证实）：1.2.47 导航独立流、1.2.50 封面/窗口、1.2.52 静音、1.2.64 四项、1.2.65 两项、**1.2.70 非阻塞发包与采样率对齐**（日志证据充分，但听感未复测）。
+**尚未实车验证的修复**（看版本历史时别当成已证实）：1.2.47 导航独立流、1.2.50 封面/窗口、1.2.52 静音、**1.2.70 非阻塞发包与采样率对齐**（日志证据充分，但听感未复测）。
+
+> **1.2.64 / 1.2.65 的修复已被整批回滚**（`ab7f7d5`…`c39ff97` 一组 Revert，1.2.66–1.2.68），
+> 当前代码里**不存在**：抗冻结四项、语音键三连击、RTP 交付对账 32 帧、bit37 直连、编码解耦一拍一包。
+> 只有经日志复核的两项（非阻塞发包、采样率对齐）在 1.2.70 重新落地。读版本历史时按此口径。
 
 ---
 
@@ -101,7 +108,7 @@
 
 ## 5. 代码地图
 
-单模块 Android 应用，主源码 **169** 个 Kotlin 文件，按链路职责切包（协议主干 + 功能分层）：
+单模块 Android 应用，`main` 主源码 **169** 个 Kotlin 文件，按链路职责切包（协议主干 + 功能分层）：
 
 | 包 | 职责 | 包 | 职责 |
 |---|---|---|---|
@@ -111,14 +118,22 @@
 | `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、消费键、CarInput（AIDL） |
 | `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活 |
 | `launcher` / `render` | 隐形屏（保留非默认）/ EGL 合成 | `ui` / `legal` / `util` | 暗幕、免责声明、日志导出等 |
+| `protocol` | **重构分支新增**：协议抽象层 + 注册表 + 两门面 | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
 
 入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **118** 个文件 / **900** 例，重点覆盖协议编解码与密码学。
 
+> **重构分支 `refactor/protocol-modules`**（未合并）：177 个主源码文件 / 120 测试文件 / **916** 例。
+> 已建 `protocol/` 抽象（`ProtocolModule` / `ProtocolRegistry` / `Capability` / `ProtocolEvent`）与
+> `CarPlayModule` / `CarLifeModule` 两个纯委托门面；阶段 4（`SessionController` 瘦身、走 Registry 路由）
+> 因 `dispatchMediaKey` / `VoiceKeyRouter` / `NmeaAssembler` / `carLifeCommandSender` 紧耦合而回退，
+> 需先做接口适配层。详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
+
 ---
 
-## 6. 文档索引（docs/ 全部 47 篇）
+## 6. 文档索引（docs/ 现行 42 篇 + 归档 5 篇）
 
 > 6.1 是跨主题精选的阅读顺序；6.2–6.7 按主题完整列出，少量重复项用「见…」交叉引用。
+> 已整体失效或外部存档的 5 篇移入 [`archive/`](archive/README.md)，仍在下方标出路径以便对照旧链接。
 
 图例：✅ 实车验证 · 🧩 已实现 · 📐 规范/调研 · 🗄 外部存档（勿当现状） · ⛔ 已废弃（仅历史） · ⚠️ 含自我更正/待验证
 
@@ -145,7 +160,7 @@
 | `ocarplay-crosscheck-20261108.md` | 📐 | 接收端对照：FreshAuthPolicy、coded/visible/declared 三值诊断；只收 SPS 66/77/88 |
 | `cadillac-ct5-carplay-apk-analysis.md` | 📐 | CT5 反编译：三档报文体、双向+方向回退、按声明裁剪 |
 | `cardeck-0.1.28-port.md` | ⚠️ | 四项移植；11-10 更正：0x4E0D 改回「未声明不发」，ACK≠业务认账 |
-| `connect-protocol-and-models.md` | 🗄 | 外部存档（AuDiCar 1.0.51），9 台奥迪机型；文档自述勿当现状引用 |
+| [`archive/connect-protocol-and-models.md`](archive/connect-protocol-and-models.md) | 🗄 | 外部存档（AuDiCar 1.0.51），9 台奥迪机型；文档自述勿当现状引用 |
 | `WIRED-CARPLAY-FEASIBILITY.md` | 📐 | 有线路线否决：四道 Android 门，唯一现实解是 USB gadget 硬件 |
 | `changes-20261104.md` | 🧩 | 1.2.18→1.2.20 改动总账；编码尺寸五补丁、4580 重连三改 |
 
@@ -187,7 +202,7 @@
 | `stream-order-audio-first-20261109.md` | ✅ | RECORD 优先（奥迪）/ 音频优先（JYBOX）各有适用范围，按型号记忆 |
 | `carplay-mic-uplink-20261108.md` | ⚠️ | 方案两次推翻；最后结论：按本档 `audioInputFormats` 判据，media 档塞端口会打死车机 |
 | `carplay-no-projection-conditions.md` | 📐 | 4580 固件五道门（Coding/FEC→USB→激活→StartSession→屏幕接管）；静态逆向 |
-| `video-stall-recovery-20261108.md` | ⛔ | 干预部分 1.2.34 全删；仅「最后一帧距今」判据仍有效 |
+| [`archive/video-stall-recovery-20261108.md`](archive/video-stall-recovery-20261108.md) | ⛔ | 干预部分 1.2.34 全删；仅「最后一帧距今」判据仍有效 |
 | `videoconfig-canvas-contract.md` | ⚠️ | 见优先读 |
 
 ### 6.6 车厂固件 / 黑屏 / 已废弃线
@@ -198,9 +213,9 @@
 | `mib3-carplay-display-contract.md` | 📐 | 4580 固件：窗口写死 1412×654@(128,66)；badFramesThreshold=4；timestamps=false |
 | `mib3-firmware-3874.md` | 📐 | 重传 30→取双方较小值；显式 AVC Baseline + level；单指限制是车机侧 |
 | `mib3-firmware-c8-4580.md` | 📐 | EA 经 VIWI 桥接；0xEA00 催问一次；pair-setup 有防爆破 |
-| `audi-mib3-ea-tunnel-20261104.md` | ⛔ | 1.2.29 后 EA 会话整体移除；0xEA04/0xEA03 顺序错致 115 号包不 ACK |
-| `mib3-viwi-control.md` | ⛔ | 同上；车控端点取证，五项推断从未验证 |
-| `mib3-control-handover.md` | ⛔ | 同上；安全红线：只在车停稳时试写 |
+| [`archive/audi-mib3-ea-tunnel-20261104.md`](archive/audi-mib3-ea-tunnel-20261104.md) | ⛔ | 1.2.29 后 EA 会话整体移除；0xEA04/0xEA03 顺序错致 115 号包不 ACK |
+| [`archive/mib3-viwi-control.md`](archive/mib3-viwi-control.md) | ⛔ | 同上；车控端点取证，五项推断从未验证 |
+| [`archive/mib3-control-handover.md`](archive/mib3-control-handover.md) | ⛔ | 同上；安全红线：只在车停稳时试写 |
 
 ### 6.7 合规
 
@@ -217,7 +232,8 @@
 5. **麦克风上行两次推翻** —— 独立 input 探针作废；media 档塞 dataPort 会打死宝马 G38。
 6. **MIB3 EA 三连篇已废弃** —— 固件分析篇里 EA 相关描述按历史处理。
 7. **停摆分级干预已移除** —— 看门狗只观测，不再重建编码器/会话。
-8. **外部存档勿当现状** —— `connect-protocol-and-models.md` 基于另一项目 1.0.51。
+8. **外部存档勿当现状** —— [`archive/connect-protocol-and-models.md`](archive/connect-protocol-and-models.md) 基于另一项目 1.0.51。
+9. **1.2.64 / 1.2.65 的修复已回滚** —— 版本历史里的抗冻结、三连击、交付对账、bit37 直连、编码解耦均不在当前代码，仅 1.2.70 重新落地了非阻塞发包与采样率两项。
 
 **合规红线**：不卖 APK/订阅，只收赞助或技术支持；仓库不含反编译产物、厂商 SDK、抓包二进制、私钥和真实车机名；提交前 `scripts/check-no-vendor-artifacts.sh` 守卫。
 
@@ -242,5 +258,7 @@
 
 - 新诊断文档命名 `主题-YYYYMMDD.md`；文首写明**一句话结论 + 状态（实证/假设/已废弃）**。
 - 结论被推翻时**在原文追加更正章节并注明日期**，不要删历史；本指南同步改状态标签。
+- 功能被整体移除、结论被实车推翻且无复用价值、或来自其它项目时，`git mv` 到 [`archive/`](archive/README.md)，
+  并同步三处：本指南索引与状态、根 `README.md` 链接、`archive/README.md` 原因表。
 - 引用文档时链接到具体文件，不复制大段日志；参数/门限写清数值和来源（实测/固件/推断）。
-- 本指南随发版核对一次：版本基线、状态标签、未验证清单。
+- 本指南随发版核对一次：版本基线、状态标签、未验证清单；项目级状态变化同步到 [`PROJECT-STATUS.md`](PROJECT-STATUS.md)。
