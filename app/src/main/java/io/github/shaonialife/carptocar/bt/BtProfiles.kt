@@ -114,12 +114,22 @@ object BtProfiles {
     }
 
     /**
-     * 音频配置守卫：**会话期间持续**把该设备的 HFP/A2DP 断开（2026-11-08 按宝马 fork 移植）。
+     * 音频配置守卫：**建链期持续**把该设备的 HFP/A2DP 断开（2026-11-08 按宝马 fork 移植）。
      *
      * 为什么一次性 [disconnect] 不够：车机（以及它那一侧的蓝牙栈）会在我们断开后
      * 自己把配置文件再拉回来——宝马 NBT EVO + 荣耀实测，握手期会有 2~4 分钟的
      * 「连上又断」循环，期间车机只要看到 HFP/A2DP 在线就不开放 iAP2 窗口。所以要在
      * 整段建链期反复确认它没被拉起来，iAP2 会话一建立（或用户断开）就收工。
+     *
+     * ## 2026-11-19 收紧（v1.2.70 之后）
+     *
+     * 原实现只在**循环头**看退出条件，而一次 `connectedNames()` + `disconnectAddress()`
+     * 往返可以花 1~2 秒（代理查询 + 等断开确认 + 设备级兜底）。这几百毫秒里首帧完全
+     * 可能已经到了、CarPlay 端点也已经拿到，于是守卫还是把已经连上的 HFP/A2DP 掐了
+     * 一次——用户听到的就是「声音在车机和手机之间来回跳」。现在两点改了：
+     * 1. **断开前二次确认**：真到要动手那一刻再看一次 [shouldStop]，命中就保持在线；
+     * 2. **退出原因显式化**：[stopLabel] 由调用方给出「哪个条件让它收的工」，
+     *    日志里能一眼区分「用户断开 / iAP2 bring-up / 端点拿到 / 已在推流」。
      *
      * 跑在独立后台线程上；本方法阻塞到退出为止，返回「实际断开了几次」。
      */
@@ -128,6 +138,7 @@ object BtProfiles {
         addressProvider: () -> String?,
         shouldStop: () -> Boolean,
         onEvent: (String) -> Unit,
+        stopLabel: () -> String = { "会话已激活" },
     ): Int {
         val started = SystemClock.uptimeMillis()
         var drops = 0
@@ -136,7 +147,11 @@ object BtProfiles {
             "BT-GUARD: 开始盯音频配置文件（每 ${AudioProfileGuardPolicy.POLL_MILLIS}ms 一次，" +
                 "上限 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s，iAP2 会话建立即收工）",
         )
-        while (!shouldStop()) {
+        while (true) {
+            if (shouldStop()) {
+                onEvent("BT-GUARD: ${stopLabel()} → 立即收工（本次共断开 $drops 次）")
+                return drops
+            }
             val elapsed = SystemClock.uptimeMillis() - started
             if (!AudioProfileGuardPolicy.shouldKeepGuarding(elapsed)) {
                 onEvent(
@@ -158,6 +173,16 @@ object BtProfiles {
                 idlePolls = 0
                 val before = connectedNames(context, address)
                 if (before.isNotEmpty()) {
+                    // 二次确认：查状态本身就要几十~几百毫秒，这段时间里会话可能刚好
+                    // 起来。会话既已激活就别再动它——保持现有连接，让声音留在它该在
+                    // 的地方，别在推流中途把车机的音频路径掐断再让它自己拉回来。
+                    if (shouldStop()) {
+                        onEvent(
+                            "BT-GUARD: ${stopLabel()} → 取消本次断开" +
+                                "（${before.joinToString("/")} 保持在线），收工（本次共断开 $drops 次）",
+                        )
+                        return drops
+                    }
                     val dropped = disconnectAddress(context, address)
                     if (dropped.isNotEmpty()) {
                         drops++
@@ -171,10 +196,10 @@ object BtProfiles {
             try {
                 Thread.sleep(AudioProfileGuardPolicy.POLL_MILLIS)
             } catch (_: InterruptedException) {
+                onEvent("BT-GUARD: 线程被中断 → 收工（本次共断开 $drops 次）")
                 return drops
             }
         }
-        return drops
     }
 
     /** 断开后仍在线的配置文件（用于日志判断是否真的断开）。 */

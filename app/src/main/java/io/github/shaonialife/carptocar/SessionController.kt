@@ -19,6 +19,7 @@ import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
 import io.github.shaonialife.carptocar.airplay.AirPlaySessionPolicy
+import io.github.shaonialife.carptocar.bt.AudioGuardGate
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
@@ -2122,8 +2123,19 @@ object SessionController {
      *
      * 退出条件（任一命中）：用户断开、iAP2 会话建立（[BtSessionGate.sessionActive]）、
      * 已经开始推流、或盯满 [AudioProfileGuardPolicy.MAX_MILLIS]。
+     *
+     * 2026-11-19 收紧：会话一旦激活就**连一轮都不跑**（以前是先起线程、下一拍才发
+     * 现该停，这中间仍可能把刚连上的 HFP/A2DP 掐一次），断开动作前还会二次确认，
+     * 收工时把「因为哪个条件停的」写进日志——见 [AudioGuardGate]。
      */
     private fun startAudioProfileGuard() {
+        guardStopReason()?.let { reason ->
+            appendLog(
+                "BT-GUARD: $reason——会话已激活，" +
+                    "本轮不再盯音频配置文件（不主动断开 HFP/A2DP）",
+            )
+            return
+        }
         if (!audioGuardRunning.compareAndSet(false, true)) return
         Thread({
             val ctx = appContext
@@ -2137,15 +2149,11 @@ object SessionController {
                             BtSessionGate.activePeerAddress
                                 ?: TargetDevicePrefs.get(appCtx)?.address
                         },
-                        shouldStop = {
-                            !sessionWanted ||
-                                BtSessionGate.iap2Ready ||
-                                BtSessionGate.sessionActive ||
-                                isStreaming()
-                        },
+                        shouldStop = { guardStopReason() != null },
                         onEvent = { line -> appendLog(line) },
+                        stopLabel = { guardStopReason() ?: "会话状态已变化" },
                     )
-                appendLog("BT-GUARD: 守卫收工（共断开 $drops 次）")
+                appendLog("BT-GUARD: 守卫线程结束（共断开 $drops 次）")
             } catch (error: Throwable) {
                 appendLog("BT-GUARD: 守卫异常 - ${error.message ?: error.javaClass.simpleName}")
             } finally {
@@ -2156,6 +2164,17 @@ object SessionController {
             start()
         }
     }
+
+    /**
+     * 音频配置守卫该不该收工、因为哪个条件（`null` = 继续盯）。判定在 [AudioGuardGate]。
+     */
+    private fun guardStopReason(): String? =
+        AudioGuardGate.stopReason(
+            sessionWanted = sessionWanted,
+            iap2Ready = BtSessionGate.iap2Ready,
+            sessionActive = BtSessionGate.sessionActive,
+            streaming = isStreaming(),
+        )
 
     /**
      * 一轮建链失败后的自动重试（3s / 10s / 30s 三档）。
