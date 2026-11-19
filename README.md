@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.70`（正式版；**本次核心是「音频顿挫的两处修复 + 媒体采样率两端对齐」**。①数据口从阻塞式 `DatagramSocket` 改回**非阻塞 `DatagramChannel`**——实车日志证明 `sendto()` 在车机暂停/拥塞时阻塞 700~791ms（CPU 仅 +17ms、发包占 95%），把整个定拍泵线程拖死，改后缓冲满即丢包保节拍；②新增**媒体采样率三档选项**（自动/48k/44.1k）：解包 CarLife 引擎证实其采样率由车机下发的 `MEDIA_SAMPLE_RATE` 决定、并非恒定 48k，App 通过 98386 直接宣告并优先协商同率档，避免 44.1↔48 重采样；界面实时显示引擎源率与车机协商率。合并了 1.2.62 的三档连接容错与 1.2.63~65 被回滚后重新验证的改动。版本号唯一来源仍是 `app/build.gradle.kts` 顶部 `appVersionName`） |
+| 当前版本 | `1.2.70`（正式版；非阻塞发包消除 700ms 级阻塞 + 媒体采样率三档两端对齐；听感未实车复测。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.70.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.70/CarPToCarL-1.2.70.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -53,38 +53,28 @@
 
 ### 与参考项目 CarDeck 的关系
 
-[CarDeck](https://github.com/shaonialife/cardeck) 是一个**独立项目**（MIT 许可，版权归其作者，
-与本项目**不是同一作者**），目标同样是「让 Android 手机扮演 CarPlay 发送端」。本项目在开发中
-**参考了它的 iAP2 / AirPlay 协议实现、密码学封装、蓝牙链路与工程骨架**；按其 MIT 许可，
-版权与许可声明已保留在 [NOTICE](NOTICE) 第 0 节。运行时仍可见的历史命名（日志目录
-`下载/CarDeck`、进程启动行 `CarDeck`）沿用自参考对象，不代表依赖该应用。
+[CarDeck](https://github.com/shaonialife/cardeck) 是**独立项目**（MIT，非同一作者），本项目参考了它的
+iAP2 / AirPlay 协议实现、密码学封装与工程骨架，声明见 [NOTICE](NOTICE) 第 0 节。日志目录 `下载/CarDeck`
+与进程名 `CarDeck` 是历史沿用，不代表运行时依赖。差别只在**画面来源**：
 
-两者真正的区别在**画面来源**：
-
-| | CarDeck | CarPToCarL（本项目） |
+| | CarDeck | 本项目 |
 |---|---|---|
-| 画面来源 | 自绘隐形屏（受信虚拟屏跑手机应用）+ Shizuku 触摸注入 | **劫持本机 CarLife+ 引擎码流，不重编码** |
-| 触摸通路 | Shizuku 直注虚拟屏 | 车机 → HID → CarLife 9340 通道注入 |
-| 依赖 | 需要 Shizuku | **不依赖 Shizuku**（2026-10-24 起移除） |
-| 目标 | 隐形屏启动器 | 无线 CarPlay 投屏网关 |
+| 画面 | 自绘隐形屏 + Shizuku 注入 | **CarLife+ 码流直通，不重编码**；触摸走 HID → CarLife 9340 |
+| 依赖 | 需要 Shizuku | **不需要**（2026-10-24 移除） |
 
-两个仓库都未声明或使用任何第三方的 MFi 授权，法律边界见
-[docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)。
+两者均未使用第三方 MFi 授权，边界见 [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)。
 
 ### 方向说明
 
-- 本项目是**发送端**（手机扮演 iPhone），与 DiPlay / xcertplay 这类**接收端**（扮演车机）方向相反。  
-  **DiPlay 是 xcertplay 的衍生版，是本项目实际使用的测试台**。
-- 发送端**不需要苹果签名身份**：iAP2 认证是单向的（手机验证车机的 MFi 证书，车机信任手机自报结果）。
-- **有线 USB 路线已排除**（App 无法控制 USB gadget，测试机 BL 无法解锁），只走无线。
-  卡在哪一层、三条可能的绕法（root 手搓 gadget / 树莓派当 USB 翻译器 / 等 dongle）、
-  将来若要做该怎么起步，见 [docs/WIRED-CARPLAY-FEASIBILITY.md](docs/WIRED-CARPLAY-FEASIBILITY.md)。
+- 本项目是**发送端**（手机扮演 iPhone）；DiPlay / xcertplay 是**接收端**（DiPlay 为 xcertplay 衍生版，是本项目测试台）。
+- 发送端**不需要苹果签名身份**：iAP2 认证单向（手机验证车机 MFi 证书，车机信任手机自报结果）。
+- **有线 USB 已排除**（App 控制不了 USB gadget，测试机 BL 无法解锁），只走无线；绕法见
+  [docs/WIRED-CARPLAY-FEASIBILITY.md](docs/WIRED-CARPLAY-FEASIBILITY.md)。
 
-### 背景：为什么需要它
+### 背景
 
-Android 手机连 CarPlay 车机，官方路径不存在。本项目的做法是：既然车机只认 CarPlay，  
-那就让手机**冒充 iPhone** 完成 iAP2 + AirPlay 全链路；既然手机侧最完整的车机界面是原生  
-CarLife+，那就把它的视频/音频流**截下来直通**给车机。两边各自用最成熟的实现，中间只做搬运。
+Android 手机连 CarPlay 车机没有官方路径。本方案让手机冒充 iPhone 跑通 iAP2 + AirPlay，
+再把手机侧最完整的车机界面（原生 CarLife+）的视频与音频**截下来直通**给车机——中间只做搬运。
 
 ---
 
@@ -642,7 +632,7 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ```bash
 ./gradlew :app:assembleRelease      # 发布包（1.0.0 起为正式版；需联网下载 lint-gradle，曾缺失时用 --offline 会失败）
-./gradlew testDebugUnitTest         # 单元测试（97 个测试文件）
+./gradlew testDebugUnitTest         # 单元测试（118 个测试文件 / 900 例）
 ./gradlew :app:lintDebug            # lint 检查
 ```
 
@@ -669,14 +659,27 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 ## 七、工程结构
 
-单模块 Android 应用（`app/`），主源码 83 个 Kotlin 文件，按**链路职责**切分。
+单模块 Android 应用（`app/`）：主源码 **169** 个 Kotlin 文件，测试 **118** 个文件 / **900** 个用例。
+
+### 代码是不是按协议分组？——主干是，但不是全部
+
+| 分组 | 包 | 文件 | 依据 |
+|---|---|---|---|
+| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 60 | 三种协议各占一个独立包；`protocol` 做跨协议审计 |
+| 承载层（按通道） | `bt` / `net` / `transport` | 30 | 蓝牙、网络、iAP2 隧道各管一条承载 |
+| 数据面（按功能） | `audio` / `video` / `input` / `media` / `capture` / `render` | 31 | 跨协议复用，不绑定某一种协议 |
+| 应用与基础设施（按功能） | 根入口 / `session` / `service` / `launcher` / `ui` / `util` / `legal` | 48 | 编排、保活、界面、工具 |
+
+三处交叉：`net/` 放 AirPlay 服务发现（`AirPlayFeatures` / `CarPlayCtrlAdvertiser`）；
+`transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议。
+测试目录镜像同一套包名。47 篇专题文档的状态标注索引见 [docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)。
 
 ### 根目录
 
 ```
 CarPToCarL/
 ├── app/                          # 唯一的 Android 应用模块
-├── docs/                         # 协议知识库与逆向结论
+├── docs/                         # 协议知识库与逆向结论（含 PROJECT-GUIDE.md 总入口）
 ├── gradle/wrapper/               # wrapper（指向项目内 .tools/ 的发行版 zip）
 ├── .tools/                       # 自包含工具链：JDK17 / Android SDK34 / Gradle 8.10.2 / platform-tools
 ├── build.gradle.kts              # 根构建脚本
@@ -690,87 +693,67 @@ CarPToCarL/
 └── README.md                     # 本文档
 ```
 
-### docs/（逆向与协议沉淀）
-
-| 文档                                                                             | 内容                        |
-| ------------------------------------------------------------------------------ | ------------------------- |
-| [docs/carlife-hijack-findings.md](docs/carlife-hijack-findings.md)             | CarLife 协议逆向发现（端口、消息号、时序） |
-| [docs/carlife-hijack-integration.md](docs/carlife-hijack-integration.md)       | 劫持功能的集成实现                 |
-| [docs/carlife-wireless-verification.md](docs/carlife-wireless-verification.md) | 无线链路验证记录                  |
-| [docs/PROTOCOL-NOTES.md](docs/PROTOCOL-NOTES.md)                               | iAP2 / AirPlay 协议依据       |
-| [docs/carplay-connection-layers-20261109.md](docs/carplay-connection-layers-20261109.md) | CarPlay 连接分层导览（L1 蓝牙 → L5 编排，含症状→层判据表） |
-| [docs/CARLIFE-GATEWAY-FEASIBILITY.md](docs/CARLIFE-GATEWAY-FEASIBILITY.md)     | 网关方案可行性评估                 |
-| [docs/LEGAL-NOTES.md](docs/LEGAL-NOTES.md)                                     | 开源 / 收费的法律风险梳理与商业化清单      |
-| [docs/process-freeze-recovery.md](docs/process-freeze-recovery.md)             | 进程被系统冻结的判定、PROC 日志与解冻后自动恢复 |
-| [docs/audio-channel-watchdog.md](docs/audio-channel-watchdog.md)               | 音频通道（9240 / 9241）断链与沉默看门狗：为何「有画面没声音」 |
-| [docs/connect-hardening.md](docs/connect-hardening.md)                         | 配对失败定性、候选地址、阶段预算、多屏选择：连接健壮性四处加固 |
-
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 
-
 ```
-├── MainActivity.kt               # 手机侧操作台 UI（连接 / 声音 / 暗幕 / 日志 / 免责声明）
+├── MainActivity.kt               # 操作台 UI（连接 / 声音 / 暗幕 / 日志）
 ├── SessionController.kt          # 会话总管（进程级单例）：链路生命周期、配对、WiFi、取消
-├── SenderApp.kt                  # Application（未捕获异常兜底、包变化失效缓存）
-├── carlife/       (5)            # 本地 CarLife 劫持（HU 客户端 / 协议 / 音频 / 画质配置）
-├── iap2/          (8)            # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
-├── airplay/      (10)            # AirPlay 配对 / 控制通道 / 流协商 / 加密 / Timing
-├── audio/         (6)            # 音频通道（AAC 编码 / 播放捕获 → RTP/ChaCha20）
-├── video/         (1)            # H.264 推流（VideoSender，含 SPS 解析与声明对齐）
-├── bt/            (5)            # RFCOMM 双向（Server 等回连 / Client 真车主动连）
-├── launcher/     (11)            # 隐形屏启动器（保留，非默认画面来源）
-│   └── settings/  (2)            #   设置面板（显示缩放、应用方向兼容）
-├── render/        (2)            # EGL 多屏合成 → 编码 Surface
-├── input/         (4)            # 触摸分流 + 消费键 + CarInput 客户端
-├── capture/       (2)            # 画面源
-├── net/           (6)            # WiFi 入网 / mDNS 发现与 ctrl 广播
-├── media/         (2)            # 通知使用权 → 媒体会话（音乐卡 / 歌词数据源）
-├── service/       (1)            # 前台保活服务
-├── transport/     (2)            # 传输层封装
-├── ui/            (5)            # 暗幕、波形图、壁纸、深色弹窗、面板尺寸
-├── legal/         (3)            # 免责声明
-└── util/          (5)            # 后台任务池、日志导出、设备标识
+├── SenderApp.kt                  # Application（异常兜底、包变化失效缓存）
+├── carlife/       (12)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
+├── iap2/          (22)           # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
+├── airplay/       (24)           # AirPlay 配对 / 控制通道 / 流协商 / 加密 / Timing
+├── protocol/       (2)           # 跨协议代际与一致性审计
+├── bt/            (15)           # RFCOMM 双向（Server 等回连 / Client 主动连）
+├── net/           (13)           # WiFi 入网 / mDNS 发现 / ctrl 广播
+├── transport/      (2)           # iAP2 隧道封装（Iap2LinkChannel）
+├── audio/         (11)           # AAC 编码 / 播放捕获 → RTP/ChaCha20
+├── video/          (6)           # H.264 推流 / SPS 解析 / VideoConfig 声明
+├── input/          (8)           # 触摸分流 / 消费键 / CarInput
+├── media/          (2)           # 通知使用权 → 媒体会话
+├── capture/        (2)           # 画面源
+├── render/         (2)           # EGL 多屏合成 → 编码 Surface
+├── session/        (5)           # 会话编排：预检 / 取消 / 权限修复 / 尝试门
+├── service/        (5)           # 前台保活 / 冻结恢复 / 通知动作
+├── launcher/      (11)           # 隐形屏启动器（保留，非默认画面来源）
+│   └── settings/   (4)           #   设置面板（显示缩放、应用方向兼容）
+├── ui/             (5)           # 暗幕、波形图、壁纸、深色弹窗、面板尺寸
+├── legal/          (3)           # 免责声明
+└── util/          (12)           # 后台任务池、日志导出、设备标识
 ```
 
 ### 各包职责速查
 
-| 包                       | 定位          | 关键内容                                           |
-| ----------------------- | ----------- | ---------------------------------------------- |
-| `carlife`               | CarLife 劫持  | 冒充车机连本机 CarLife+，H.264/PCM 直通，98386/98311 参数下发 |
-| `iap2`                  | iAP2 协议链路   | Link 引擎、CSM、发送端会话状态机、NowPlaying                |
-| `airplay`               | AirPlay 主会话 | PairVerify、控制通道、流协商、FairPlay/ChaCha 加密、Timing  |
-| `video`                 | 视频推流        | H.264 封装、GOP 缓存、SPS 解析、`VideoConfig` 声明对齐      |
-| `audio`                 | 音频通道        | AAC 编码、播放捕获、RTP 封装                             |
-| `bt`                    | 蓝牙链路        | RFCOMM Server/Client、目标车机设备                    |
-| `net`                   | 网络入网        | WiFi、mDNS 发现、ctrl 广播                           |
-| `launcher`              | 隐形桌面        | Dock、应用网格、地图屏（保留能力，默认不走）                       |
-| `render`                | 画面合成        | EGL 多屏合成 → 编码 Surface                          |
-| `input`                 | 输入链路        | 触摸分流、消费键、CarInput                              |
-| `media`                 | 媒体会话        | 通知使用权、音乐与歌词数据源                                 |
-| `service`               | 前台服务        | 连接/投屏保活                                        |
-| `ui` / `legal` / `util` | 通用          | 暗幕、免责声明、日志导出等                                  |
+| 包 | 定位 | 关键内容 |
+|---|---|---|
+| `carlife` | CarLife 劫持 | 冒充车机连本机 CarLife+，H.264/PCM 直通，98386/98311 下发 |
+| `iap2` | iAP2 协议链路 | Link 引擎、CSM、发送端会话状态机、NowPlaying |
+| `airplay` | AirPlay 主会话 | PairVerify、控制通道、流协商、FairPlay/ChaCha 加密、Timing |
+| `protocol` | 跨协议审计 | 协议代际切换与一致性审计码 |
+| `bt` / `net` / `transport` | 承载层 | RFCOMM Server/Client、WiFi 入网与 mDNS、iAP2 隧道 |
+| `audio` / `video` | 媒体面 | AAC 编码与 RTP 封装、H.264 推流与 VideoConfig 声明对齐 |
+| `input` / `media` / `capture` / `render` | 输入与画面 | 触摸分流、通知使用权、画面源、EGL 合成 |
+| `session` / `service` | 编排与保活 | 会话预检与取消、前台服务与冻结恢复 |
+| `launcher` / `ui` / `legal` / `util` | 通用 | 隐形桌面（保留）、界面组件、免责声明、日志导出 |
 
 ### AIDL
 
 ```
-
 app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
-
 ```
 
 跨进程传输触摸/输入事件（`input/` 包下客户端通过 Binder 调用）。
 
 ### 单元测试
 
-`app/src/test/java/io/github/shaonialife/carptocar/`，共 **97** 个测试文件、729 个用例，重点覆盖协议编解码与密码学：
+`app/src/test/java/io/github/shaonialife/carptocar/`，共 **118** 个测试文件、**900** 个用例，
+目录与源码包一一对应，重点覆盖协议编解码与密码学：
 
-- `airplay/`：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
-- `iap2/`：编解码、Link 引擎、发送端会话
-- `audio/`：AAC 编码、载荷封装
-- `video/`：SPS 解析（含宏块对齐与 frame_cropping 的回归用例）
-- `input/` `launcher/` `net/` `ui/` `util/` 等：各自单元逻辑
+- `airplay/`（21）：PairVerify、BinaryPlist、控制通道加密、流帧加密、Timing
+- `iap2/`（23）：编解码、Link 引擎、发送端会话
+- `carlife/`（10）、`audio/`（12）、`video/`（7）、`net/`（9）、`bt/`（7）：协议与数据面回归
+- `input/` `launcher/` `session/` `ui/` `util/` 等：各自单元逻辑
 
-> 早期版本依赖 **Shizuku**（虚拟屏注入 / 触摸注入），2026-10-24 起已**移除**，  
+> 早期版本依赖 **Shizuku**（虚拟屏注入 / 触摸注入），2026-10-24 起已**移除**；
 > 代码中 `shizuku/` 目录与 `ShizukuGate` 均已删除，残留文字仅为历史注释。
 
 ---
