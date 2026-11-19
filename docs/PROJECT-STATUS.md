@@ -5,7 +5,7 @@
 > 本文件是**体检报告**（现在处于什么状态、哪些是已证实的、哪些还是推断）。
 >
 > 数据截止 **2026-11-19 18:30**。全部数字取自仓库实际状态（`git`、`docs/`、构建配置），不是估算。
-> 基线：`main` @ `95f8b6b`，正式版 **v1.2.70**；另有重构分支 `refactor/protocol-modules` @ `28bf7b9`（3 提交，未合并）。
+> 基线：`main` @ `95f8b6b`，正式版 **v1.2.70**；另有重构分支 `refactor/protocol-modules` @ `0268578`（7 提交，未合并）。
 
 ---
 
@@ -135,20 +135,20 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | 口径 | 主源码 | 测试文件 | 测试用例 | 说明 |
 |---|---|---|---|---|
 | `main`（发布线） | 169 | 118 | 900 | 对应 1.2.70 |
-| `refactor/protocol-modules` | 177 | 120 | 916 | +8 个 `protocol/` 抽象文件、+2 个门面、+16 例测试 |
+| `refactor/protocol-modules` | 179 | 120 | 926 | +8 个 `protocol/` 抽象文件、+2 个门面、+2 个数据面契约、+26 例测试 |
 
 `main` 口径 58,600 行主源码 / 16,062 行测试 ≈ **1 : 0.27**，重点覆盖协议编解码与密码学。
 
-### 5.2 包结构（重构分支，177 文件）
+### 5.2 包结构（重构分支，179 文件）
 
 | 包 | 文件 | 职责 | 包 | 文件 | 职责 |
 |---|---|---|---|---|---|
 | `airplay` | 24 | PairVerify、控制通道、流协商、加密、Timing | `iap2` | 22 | Link/CSM/发送端会话/NowPlaying |
 | `launcher` | 15 | 隐形屏（保留非默认）/ EGL 合成 | `bt` | 15 | RFCOMM Server/Client |
 | `net` | 13 | WiFi 入网、mDNS 发现与 ctrl 广播 | `util` | 12 | 日志、导出、时钟等 |
-| `carlife` | 11 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 11 | AAC 编码、播放捕获、RTP 封装 |
+| `carlife` | 11 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 12 | AAC 编码、播放捕获、RTP 封装、`AudioSink` |
 | `protocol` | 10 | **重构新增**：抽象层 + 注册表 + 两个协议门面 | `input` | 8 | 触摸分流、消费键、CarInput(AIDL) |
-| `video` | 7 | H.264 封装、SPS 解析、VideoConfig 声明 | `ui` / `session` / `service` | 5 / 5 / 5 | 界面 / 会话总管 / 前台保活 |
+| `video` | 8 | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` | `ui` / `session` / `service` | 5 / 5 / 5 | 界面 / 会话总管 / 前台保活 |
 | `legal` | 3 | 免责声明 | `transport` / `render` / `media` / `capture` | 2 各 | iAP2 链路通道 / 合成 / 通知歌词 / 采集 |
 | 根入口 | 3 | `MainActivity` / `SenderApp` / … | | | |
 
@@ -164,22 +164,30 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | 2 | `9492a57` | `H264Sps` 从 `carlife/` 移到 `video/`，解除 carlife↔video 跨模块环（908 例通过） | ✅ |
 | 3 | `28bf7b9` | `CarPlayModule` / `CarLifeModule` 门面，**纯委托注入**（不 import 协议实现，可纯 JVM 单测）+ 8 例 | ✅ |
 | 4 | `68b0c00` | **媒体键收口**：`dispatchMediaKey` 走 Registry 的 `FIRST_MATCH`；未装配走本地原路径，二者互斥并共用 `consumeMediaKeyByCar` 一份实现。+ 4 例接线契约测试 | ✅ |
-| 5 | 本次 | **语音键 + 触摸收口**：共同点是「输入状态机留在原处，只投判定完的动作」——`VoiceKeyRouter` 交出的 VR_START/VR_STOP 硬键码走 `dispatchVoiceHardKey`；`TouchRouter` 在槽位分流前走 `dispatchTouch`。+ 4 例契约测试（全量 924 例） | ✅ |
+| 5 | `9df34e0` | **语音键 + 触摸收口**：共同点是「输入状态机留在原处，只投判定完的动作」——`VoiceKeyRouter` 交出的 VR_START/VR_STOP 硬键码走 `dispatchVoiceHardKey`；`TouchRouter` 在槽位分流前走 `dispatchTouch`。+ 4 例契约测试 | ✅ |
+| 6 | `c583fea` | **数据面抽契约**：新增 `video.VideoSink` / `audio.AudioSink`，两个发送端反向实现；`CarLifeHijack.attach` 与 `CarLifeAudioSink` 改持接口。**carlife 不再 import `VideoSender`/`AudioSender`**，第三种协议接画面只需实现契约 | ✅ |
+| 7 | `0268578` | **播放意图收口**：新增 `Capability.PLAYBACK_INTENT` / `ProtocolEvent.PlaybackIntent`，`onSourceAudioPlayback` 走 `FIRST_MATCH`；`CarPlayModule` 首次真实消费事件。+ 2 例（全量 926 例） | ✅ |
 
 阶段 4 首轮曾**整体**受阻回退：`dispatchMediaKey`、`voiceKey`（`VoiceKeyRouter` 状态机）、`carNmea`（`NmeaAssembler` 合并器）、`carLifeCommandSender`（独立线程池）四者紧耦合；当时还臆造了并不存在的 `prewarmCarLife()` / `NmeaAssembler.Fix`，已全部 `checkout` 回退，**没有提交错误代码**。
 
 阶段 4 改用**互斥双路径**破解，不需要先给状态机做适配层：把媒体键原来的前两步抽成 `consumeMediaKeyByCar`，`dispatchMediaKey` 按 `ProtocolRegistry.hasConsumer(MEDIA_KEY)` 二选一——装配了走能力路由（门面委托回同一函数），没装配直接调本地函数。语义等价、不会重复消费。
 
-阶段 5 的关键判据（为什么语音键/触摸能收、GPS/播放意图不能）：收口的前提是**事件体能装下已经判定完的动作**。
-语音键交出的就是 `0x21`/`0x22` 两个硬键码，触摸交出的是 `(down, x, y, slot)` 四个值——都能无损装进事件。
-GPS 和播放意图装不下，见下。
+收口的判据：**事件体能装下「已经判定完的动作」**。语音键交出 `0x21`/`0x22` 两个硬键码，触摸交出 `(down, x, y, slot)`，
+播放意图交出三个布尔——都能无损装进事件。装不下的就不接，见下。
 
-**仍未收口（事件体装不下，别硬接）**：
+**刻意不接：GPS。** `CarGpsFix` 是 CarLife 协议的单位约定（度 / 0.1 米 / 0.01 km/h），
+且只有 CarLife 一个消费者。做成通用事件只有两条路：把 CarLife 的单位搬进聚合层
+（让 `protocol` 认识 0x18010 的编码约定），或砍掉 DOP / 卫星数 / UTC 时分秒
+（引擎拿到半份快照）。两条都更差，所以留在 `onCarLocation` 不动。
+真出现第二种定位来源时，再按那时的单位差异设计事件体。
 
-- GPS：`onCarLocation` 收 NMEA 语句列表并合并成 `CarGpsFix`，后者有 **17 个字段**（经纬度、海拔、速度、航向、fixQuality、卫星数×2、HDOP/PDOP/VDOP、UTC 年月日时分秒）。塞进 `ProtocolEvent.Gps` 是抽象泄漏，砍字段又会让引擎拿到半份快照。
-- 播放意图：`onSourceAudioPlayback(media, navigation, newMediaIntent)` 是 `audioIntent.setPlayback` + `resourceStreams.reconcile()` 的**组合动作**，不是布尔源信号，`onSourceAvailable` 对不上。
+**刻意不接：歌词/媒体信息。** 三条来源（CarLife 0x10035、系统 MediaSession、0x10036 进度）
+最终都汇到 `pushNowPlayingAll()` 这个**无载荷触发**——数据从全局状态读，走事件只是多一次分配。
+等真有第二种协议要推 NowPlaying 再改。
 
-这两者要接入，必须先设计专门的事件体，并需实车验证。
+**仍未做：`SessionController` 瘦身。** 它仍是真正的编排中心（31 处跨协议 import），
+Registry 只是插在中间。要把实例创建/生命周期也移进门面，等于重构整个会话状态机
+（建链、重试、WiFi 绑定、mDNS、权限修复都缠在一起），风险远高于收益，**建议实车验证后再单独评估**。
 
 ---
 
