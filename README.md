@@ -665,78 +665,26 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 | 分组 | 包 | 文件 | 依据 |
 |---|---|---|---|
-| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 67 | 三种协议各占一个独立包，**互不调用**；仅 `iap2` 共享 `carlife` 两个数据类型。`protocol` 是聚合层（见下节） |
+| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 67 | 三种协议各占一个独立包，**互不调用**；仅 `iap2` 共享 `carlife` 两个数据类型。`protocol` 是能力聚合层 |
 | 承载层（按通道） | `bt` / `net` / `transport` | 30 | 蓝牙、网络、iAP2 隧道各管一条承载 |
 | 数据面（按功能） | `audio` / `video` / `input` / `media` / `capture` / `render` | 35 | 跨协议复用，不绑定某一种协议 |
 | 应用与基础设施（按功能） | 根入口 / `session` / `service` / `launcher` / `ui` / `util` / `legal` | 48 | 编排、保活、界面、工具 |
 
 三处交叉：`net/` 放 AirPlay 服务发现（`AirPlayFeatures` / `CarPlayCtrlAdvertiser`）；
-`transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议——
-它是聚合层，只认 `Capability`，不认具体协议。测试目录镜像同一套包名。
+`transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议——它是
+**能力聚合层**，只认 `Capability` 不认具体协议：跨协议交互经 `ProtocolRegistry` 接线
+（`BIND` 源汇配对 / `FIRST_MATCH` 控制竞争 / `ALL` 状态广播），`CarPlayModule`、`CarLifeModule`
+是纯委托门面（构造参数全是 lambda，不 import 任何协议实现），数据面靠 `video.VideoSink` /
+`audio.AudioSink` 两个契约，`carlife` 不再依赖具体发送类。测试目录镜像同一套包名。
+
+> **协议模块化的完整说明在 [docs/PROTOCOL-MODULES.md](docs/PROTOCOL-MODULES.md)**：分层图、包级
+> 依赖实测、能力矩阵、媒体键时序、契约前后对比、十个提交演进、接第三种协议五步、已知缺口与
+> 实车验证清单。该重构 2026-11-19 已快进并入 `main`（`be02fdc`，无 merge commit），旧 `main`
+> 备份在 `backup/main-pre-protocol-20261119`。README 只保留上面这段速览，不重复正文。
 
 文档三入口：[docs/README.md](docs/README.md)（docs 目录地图，按角色给阅读路径）·
 [docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)（43 篇专题文档的状态标注索引 + 排障决策表）·
 [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
-
-### 协议聚合层（`protocol/`）
-
-> 由分支 `refactor/protocol-modules` 引入，2026-11-19 已**快进并入 main**（`main` = `be02fdc`，
-> 旧 main 备份在 `backup/main-pre-protocol-20261119`）。完整说明见
-> [docs/PROTOCOL-MODULES.md](docs/PROTOCOL-MODULES.md)（含分层图 / 能力矩阵 / 时序图 / 缺口清单）。
-
-三个协议包**互不调用**（唯一例外：`iap2` 共享 `carlife` 的两个数据类型），跨协议交互一律经
-`ProtocolRegistry` 按能力接线：
-
-```mermaid
-flowchart LR
-    APP["SessionController<br/>应用编排"] --> REG["ProtocolRegistry<br/>BIND / FIRST_MATCH / ALL"]
-    REG --> CPM["CarPlayModule"]
-    REG --> CLM["CarLifeModule"]
-    CPM -. "lambda 注入" .-> IAP2["iap2 / airplay"]
-    CLM -. "lambda 注入" .-> CL["carlife"]
-    CL --> SINK["video.VideoSink<br/>audio.AudioSink"]
-```
-
-| 组件 | 作用 |
-|---|---|
-| `ProtocolModule` | 门面接口：声明 `provides()` / `consumes()`，`onEvent()` 处理事件 |
-| `Capability` / `ProtocolEvent` | 路由键与事件体；事件只放值类型，单测可纯 JVM 跑 |
-| `ProtocolRegistry` | 唯一装配点。三种投递：`BIND`（源汇配对）/ `FIRST_MATCH`（控制竞争）/ `ALL`（状态广播） |
-| `CarPlayModule` / `CarLifeModule` | 纯委托门面，不 import 任何协议实现；真实动作由 `SessionController` 注入 |
-
-#### 控制面：四条已收口
-
-共同点是**输入状态机留在原处，只把判定完的动作投出来**，所以换入口不改时序。
-
-| 事件 | 上游状态机 | 动作入口 |
-|---|---|---|
-| 媒体键 | `MediaSessionsState` + `MediaKeyRoute` 白名单 | `dispatchMediaKey` → `consumeMediaKeyByCar` |
-| 语音键 | `VoiceKeyRouter`（边沿判定 / PTT 收尾 / 三连击） | `dispatchVoiceHardKey` → `sendVoiceHardKey` |
-| 触摸 | `TouchRouter` 槽位分流 | `dispatchTouch` → `CarLifeHijack.handleTouch` |
-| 播放意图 | `AudioIntent` 周期登记 | `onSourceAudioPlayback` → `applyPlaybackIntent` |
-
-装配后一律走 `FIRST_MATCH` 能力路由，未装配走本地原路径，两者**互斥**且共用同一份实现
-（`consumeMediaKeyByCar` / `sendVoiceHardKey` / `CarLifeHijack.handleTouch` / `applyPlaybackIntent`）。
-
-#### 数据面：`VideoSink` / `AudioSink` 契约
-
-`carlife` 原先直接持有 `VideoSender`/`AudioSender` **具体类**，等于在编译期绑死了 AirPlay 的
-发送实现。现在只依赖两个极小契约（视频 5 个方法、音频 2 个），实现类反向实现它们：
-
-```
-carlife ──depends on──> video.VideoSink   <──implements── video.VideoSender
-        ──depends on──> audio.AudioSink   <──implements── audio.AudioSender
-```
-
-效果：第三种协议要接管画面，实现 `VideoSink` 即可，`carlife` 一行不用改。
-
-#### 刻意不接：GPS 与歌词桥接
-
-- **GPS**：`CarGpsFix` 是 CarLife 协议的单位约定（度 / 0.1 米 / 0.01 km/h），且只有 CarLife
-  一个消费者。做成通用事件只有两条路——把 CarLife 的单位搬进聚合层，或砍掉 DOP / 卫星数 /
-  UTC 时分秒让引擎拿半份快照。两条都更差，所以留在 `onCarLocation` 不动。
-- **歌词/媒体信息**：三条来源最终都汇到 `pushNowPlayingAll()` 这个**无载荷触发**，数据从
-  全局状态读，走事件只是多一次分配。等真有第二种协议要推 NowPlaying 再改。
 
 ### 根目录
 

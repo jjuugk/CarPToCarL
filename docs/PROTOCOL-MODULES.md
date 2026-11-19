@@ -423,8 +423,10 @@ protocol/
 
 ## 15. 相关文档
 
-- [`../README.md`](../README.md) §七 —— 工程结构与包职责速查
+- [`../README.md`](../README.md) §七「工程结构」——**只有速览**（分组表 + 一段能力聚合说明 +
+  目录树），重构正文一律以本篇为准，两边不重复维护
 - [`PROJECT-STATUS.md`](PROJECT-STATUS.md) —— 项目体检：版本 / 代码规模 / 风险 / 未验证清单
+- [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) —— 43 篇文档的索引与排障决策表
 - [`PROJECT-GUIDE.md`](PROJECT-GUIDE.md) —— 47 篇文档状态索引与排障决策表
 - [`carplay-connection-layers-20261109.md`](carplay-connection-layers-20261109.md) —— L1–L5 全局架构（协议链路视角）
 - [`PROTOCOL-NOTES.md`](PROTOCOL-NOTES.md) —— 协议细节与逆向结论
