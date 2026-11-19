@@ -61,4 +61,13 @@ sealed class ProtocolEvent {
     ) : ProtocolEvent() {
         override val capability: Capability = Capability.TOUCH
     }
+
+    /** 逐行歌词，来自 CarLife 引擎（iAP2 没有歌词字段，靠顶替 title 上车机）。 */
+    data class Lyrics(
+        val lines: List<String>,
+        val lineIndex: Int = 0,
+        override val from: ProtocolId,
+    ) : ProtocolEvent() {
+        override val capability: Capability = Capability.MEDIA_LYRICS
+    }
 }
