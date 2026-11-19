@@ -1,4 +1,4 @@
-package io.github.shaonialife.carptocar.carlife
+package io.github.shaonialife.carptocar.video
 
 /**
  * H.264 SPS 解析：区分宏块对齐编码尺寸（coded）与裁剪后的真实画面尺寸（visible）。

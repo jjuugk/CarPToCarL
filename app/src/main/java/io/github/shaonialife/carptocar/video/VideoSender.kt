@@ -7,7 +7,6 @@ import android.view.Surface
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.BinaryPlist
 import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
-import io.github.shaonialife.carptocar.carlife.H264Sps
 import io.github.shaonialife.carptocar.net.TcpLiveness
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
