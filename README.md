@@ -280,6 +280,7 @@ App 侧不需要再改什么：`carlife_fps` 默认就是 **60**，连接建立 
 | 车机分辨率自适应         | ⚠️    | 98311 上报车机真实视图 + `needAdapterScreen=true`；**但受厂商 mix 层限制，实际码流可能仍为 1280×720 或 1080p** |
 | 触摸回传             | ✅     | 车机触摸 → CarLife 通道注入；坐标以 **SPS 真实分辨率**为基准，触摸异步队列不积压                                   |
 | 双指触控（缩放）      | 🧪     | 1.0.7 起双指手势改走复合动作通道 `0x68001`（动作码带指针索引），单指仍走单点通道；详见 [docs/touch-multitouch.md](docs/touch-multitouch.md) |
+| 旋钮焦点模式（实验）   | 🧪     | 默认关。开启后 98386 声明 `FOCUS_UI = 1`，iDrive 旋钮转动/按下/返回改发 CarLife 焦点键 `SELECTOR_NEXT`(0x06) / `SELECTOR_PREVIOUS`(0x07) / `OK`(0x14) / `BACK`(0x0E)，而不是合成上下滑动；键值与键名取自百度开源车机端 [apollo-DuerOS](https://github.com/milesking/apollo-DuerOS)。下次连接起效 |
 | 启动后自动连接       | ✅     | 打开 App 即自动发起连接，**默认开启**；「连接准备」里可关掉改为手动。2026-10-25 荣耀 PTP-AN10 冷启动实测：无人操作即可自动建会话并推流 |
 | 目标帧率跟随车机     | ✅     | 车机 `/info displays[0].maxFPS` 报了就按它出帧（夹在 24–120），没报按 60；判定见 [app/src/main/java/io/github/shaonialife/carptocar/video/StreamFps.kt](app/src/main/java/io/github/shaonialife/carptocar/video/StreamFps.kt) |
 | 60fps 投屏         | ✅     | 手机端「荣耀车联 → 设置 → 投屏显示设置 → 帧率 = 60」；默认档为 20fps                                         |

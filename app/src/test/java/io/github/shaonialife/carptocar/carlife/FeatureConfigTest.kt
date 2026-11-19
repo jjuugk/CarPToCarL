@@ -74,4 +74,30 @@ class FeatureConfigTest {
             assertEquals("$label 的值应写进 field2", value, payload[valueIndex].toInt())
         }
     }
+
+    @Test
+    fun focusUiAbsentByDefault() {
+        // 旋钮焦点模式默认关：不下发 FOCUS_UI，条数仍 5（与开关加入前逐字节一致）。
+        val payload = CarLifeProtocol.featureConfig()
+        assertEquals("默认条数 5", 5, payload[1].toInt())
+        assertTrue("默认不能出现 FOCUS_UI", !asText(payload).contains("FOCUS_UI"))
+    }
+
+    @Test
+    fun focusUiCarriedWhenEnabled() {
+        // 键名与取值同百度开源车机端 FeatureConfigManager：key="FOCUS_UI"，value=1。
+        val payload = CarLifeProtocol.featureConfig(focusUi = true)
+        val text = asText(payload)
+        assertEquals("带 FOCUS_UI 时条数 6", 6, payload[1].toInt())
+        val at = text.indexOf("FOCUS_UI")
+        assertTrue("必须带 FOCUS_UI：$text", at >= 0)
+        val valueIndex = at + "FOCUS_UI".length + 1 // +1 跳过 field2 tag(0x10)
+        assertEquals("FOCUS_UI 的值应为 1", 1, payload[valueIndex].toInt())
+    }
+
+    @Test
+    fun focusUiAndSampleRateCountTogether() {
+        val payload = CarLifeProtocol.featureConfig(mediaSampleRate = 1, focusUi = true)
+        assertEquals("两项都带时条数 7", 7, payload[1].toInt())
+    }
 }
