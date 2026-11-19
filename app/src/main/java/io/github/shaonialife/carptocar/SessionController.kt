@@ -4324,6 +4324,7 @@ object SessionController {
                     // 同步包目标端口：车机在 SETUP 应答里下发。缺了它就没有 RTP↔NTP 锚点，
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
+                    channelCount = profile.channels,
                 )
             audioSender = sender
             if (!sender.startPassthrough()) {
@@ -4420,6 +4421,7 @@ object SessionController {
                 streamType = profile.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                channelCount = profile.channels,
             )
         if (!nav.startPassthrough()) {
             appendLog("AUDIO: 导航流（101/$audioType）发送端启动失败 —— 导航播报将无声")
@@ -4594,6 +4596,7 @@ object SessionController {
                 streamType = profile.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                channelCount = profile.channels,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
@@ -4704,6 +4707,7 @@ object SessionController {
                 streamType = target.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                channelCount = target.channels,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {

@@ -59,6 +59,18 @@ data class AudioProfile(
      * `null` = `/info` 没给这一档（或没拿到 /info），此时保守不声明。
      */
     val inputFormats: Long? = null,
+    /**
+     * 该档的声道数：1 = 单声道，2 = 立体声（默认）。
+     *
+     * 为什么要有（1.2.72）：`101 AltAudio / default` 上，奥迪 MIB3 只声明**单声道** PCM
+     * （`0x40004400`：bit14 = PCM48k mono + bit10 = PCM44.1k mono + bit30 = Opus48k mono）。
+     * 发送端固定发立体声就永远挑不到那一档——导航播报也就没有通路。车机按 SETUP 里的
+     * 格式位解码，所以这里必须与位图逐位对应。
+     *
+     * 放在**参数表末尾**是刻意的：`audioCandidates` 里有一处按位置传前四个参数的构造，
+     * 插在中间会把 latencyMs 挤歪（编译期就炸，但没必要让人踩一次）。
+     */
+    val channels: Int = 2,
 ) {
     /**
      * 这一档有没有麦克风输入能力：`null` 未知、`false` 车机明确说没有、`true` 有。
@@ -81,5 +93,5 @@ data class AudioProfile(
     val label: String
         get() =
             "${if (isInput) "↑" else ""}t$streamType/$audioType/0x${formatBit.toString(16)}" +
-                "(${sampleRate}Hz,${codec.name},$latencyMs ms)"
+                "(${sampleRate}Hz,${if (channels == 1) "单声道" else "立体声"},${codec.name},$latencyMs ms)"
 }

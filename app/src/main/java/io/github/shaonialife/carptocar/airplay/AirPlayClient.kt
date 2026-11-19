@@ -2494,6 +2494,18 @@ class AirPlayClient(
         /** 音频格式位：PCM 44100Hz 16bit 立体声（1<<11；48k 不可用时的回退）。 */
         const val AUDIO_FORMAT_PCM_44K_STEREO = 1L shl 11
 
+        /**
+         * 音频格式位：PCM 48000Hz 16bit **单声道**（1<<14）。
+         *
+         * 这条位不是可有可无：`101 AltAudio / default` 上，奥迪 MIB3 只声明单声道 PCM
+         * （`0x40004400` = bit14/bit10/bit30）。发送端固定立体声就永远挑不到该档，
+         * 导航播报也就没有通路（2026-11-19 复盘结论）。
+         */
+        const val AUDIO_FORMAT_PCM_48K_MONO = 1L shl 14
+
+        /** 音频格式位：PCM 44100Hz 16bit 单声道（1<<10；与 bit11 的立体声版成对）。 */
+        const val AUDIO_FORMAT_PCM_44K_MONO = 1L shl 10
+
         /** AAC-LC 44100Hz 立体声（1<<22；catplay `AAC_LC_44100_STEREO`）。 */
         const val AUDIO_FORMAT_AAC_LC_44K_STEREO = 1L shl 22
 
@@ -3152,17 +3164,24 @@ class AirPlayClient(
             (info["audioFormats"] as? List<*>)
                 ?.mapNotNull { it as? Map<*, *> }
                 .orEmpty()
-        // 顺序即优先级：101 AltAudio 全组合（PCM 48k/44.1k → AAC-LC 48k/44.1k），
+        // 顺序即优先级：101 AltAudio 全组合（PCM 48k/44.1k × 立体声/单声道 → AAC-LC），
         // 再退到 100 MainAudio 的同名档——车机只在 100 上声明 default 时也能出声，
         // 但仍然是独立流，不进媒体那一条。
+        //
+        // **单声道必须排在对应立体声之后但同率之前**：奥迪 101/default 只有 mono 位，
+        // 排太靠后会让 44.1k 立体声先命中（多一次重采样，甚至位图里根本没有）。
         val ordered =
             listOf(
                 AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_STEREO,
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_MONO,
                 AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_STEREO,
+                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_MONO,
                 AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_48K_STEREO,
                 AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_LC_44K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_MONO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,
+                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_MONO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_48K_STEREO,
                 AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_LC_44K_STEREO,
             )
@@ -3184,12 +3203,14 @@ class AirPlayClient(
             return null
         }
         val (streamType, bit) = hit
-        val (rate, codec) =
+        val (rate, codec, channels) =
             when (bit) {
-                AUDIO_FORMAT_PCM_48K_STEREO -> 48_000 to AudioCodec.PCM
-                AUDIO_FORMAT_PCM_44K_STEREO -> 44_100 to AudioCodec.PCM
-                AUDIO_FORMAT_AAC_48K_STEREO -> 48_000 to AudioCodec.AAC_LC
-                else -> 44_100 to AudioCodec.AAC_LC
+                AUDIO_FORMAT_PCM_48K_STEREO -> Triple(48_000, AudioCodec.PCM, 2)
+                AUDIO_FORMAT_PCM_48K_MONO -> Triple(48_000, AudioCodec.PCM, 1)
+                AUDIO_FORMAT_PCM_44K_STEREO -> Triple(44_100, AudioCodec.PCM, 2)
+                AUDIO_FORMAT_PCM_44K_MONO -> Triple(44_100, AudioCodec.PCM, 1)
+                AUDIO_FORMAT_AAC_48K_STEREO -> Triple(48_000, AudioCodec.AAC_LC, 2)
+                else -> Triple(44_100, AudioCodec.AAC_LC, 2)
             }
         val channel =
             declared.firstOrNull {
@@ -3204,6 +3225,9 @@ class AirPlayClient(
                 latencyMs = latencyFor(info, wanted, streamType),
                 streamType = streamType,
                 codec = codec,
+                // 单声道档（奥迪 101/default 的 bit14/bit10）必须原样告诉发送端：
+                // 立体声负载推到单声道档上会被解成噪声或直接不出声。
+                channels = channels,
                 // 输入位图照原样带出仅供诊断：麦克风端口**绝不**挂这条流
                 // （输入端口只属于 media 档，挂错会让车机关通道甚至重启整机）
                 inputFormats = (channel?.get("audioInputFormats") as? Number)?.toLong(),

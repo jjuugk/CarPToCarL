@@ -75,6 +75,13 @@ class AudioSender(
      * 发一个 [AudioSyncPacket] 建立 RTP↔NTP 锚点；0 = 车机没给（旧车机），只发音频。
      */
     private val controlPort: Int = 0,
+    /**
+     * 该流的声道数（1 = 单声道，2 = 立体声）。
+     *
+     * 必须与 SETUP 里声明的格式位一致：`101 AltAudio/default` 上奥迪只给**单声道** PCM
+     * （bit14/bit10），发立体声负载过去会被解成噪声或干脆不响。媒体流仍是立体声。
+     */
+    private val channelCount: Int = CHANNELS,
 ) : AudioSink {
     companion object {
         const val CHANNELS = 2
@@ -205,9 +212,12 @@ class AudioSender(
     private var markerPending = true
     private var selfChecked = false
 
+    /** 一包负载字节数（按本流声道数：立体声 1408B / 单声道 704B）。 */
+    private val packetBytes: Int = SAMPLES_PER_PACKET * channelCount * 2
+
     /** 每包/每帧对应的 PCM 字节数（PCM 通路=一包的负载；AAC 通路=一帧的输入）。 */
     private val framePcmBytes: Int
-        get() = if (codec == AudioCodec.AAC_LC) AacLcEncoder.pcmBytes(CHANNELS) else PACKET_BYTES
+        get() = if (codec == AudioCodec.AAC_LC) AacLcEncoder.pcmBytes(channelCount) else packetBytes
 
     /** 每包推进的样本数（AAC 一帧 1024，PCM 一包 352）。 */
     private val samplesPerPacket: Long
@@ -245,7 +255,7 @@ class AudioSender(
     /** 待发缓冲的锁：只有注入/采集线程写，[clearPcm] 与 stop() 会并发清空。 */
     private val pcmLock = Any()
 
-    private var pcmBuf = ByteArray(PACKET_BYTES * 16)
+    private var pcmBuf = ByteArray(packetBytes * 16)
 
     private var pcmLen = 0
 
@@ -364,7 +374,7 @@ class AudioSender(
 
             // AAC 通路先把编码器立起来：编不出来就没必要采集（也避免「有包无声」的假象）
             if (codec == AudioCodec.AAC_LC) {
-                val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
+                val encoder = AacLcEncoder(sampleRate, channelCount, wrapAdts = adtsFrames, log = log)
                 if (!encoder.start()) {
                     client.close()
                     socket = null
@@ -379,7 +389,9 @@ class AudioSender(
                     .Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+                    .setChannelMask(
+                        if (channelCount == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO,
+                    )
                     .build()
             val recorder =
                 AudioRecord
@@ -401,7 +413,7 @@ class AudioSender(
             running.set(true)
             mutePhoneMedia()
             log(
-                "AUDIO: 已启动（播放捕获 ${sampleRate}Hz 立体声 → $host:$dataPort，" +
+                "AUDIO: 已启动（播放捕获 ${sampleRate}Hz ${if (channelCount == 1) "单声道" else "立体声"} → $host:$dataPort，" +
                     "通路=t$streamType/${codec.name}，" +
                     if (codec == AudioCodec.AAC_LC) {
                         "每包 1 个 AAC 帧（${AacLcEncoder.FRAME_SAMPLES} 采样" +
@@ -457,7 +469,7 @@ class AudioSender(
             socket = client
 
             if (codec == AudioCodec.AAC_LC) {
-                val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
+                val encoder = AacLcEncoder(sampleRate, channelCount, wrapAdts = adtsFrames, log = log)
                 if (!encoder.start()) {
                     client.close()
                     socket = null
@@ -471,7 +483,7 @@ class AudioSender(
             // 静音 STREAM_MUSIC 可能破坏引擎的采集源（采集点不确定，不能赌是 REMOTE_SUBMIX）。
             log(
                 "AUDIO: 已启动直通模式（外部注入 PCM → $host:$dataPort，" +
-                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声；RECORD 后开始发包）",
+                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz ${if (channelCount == 1) "单声道" else "立体声"}；RECORD 后开始发包）",
             )
             true
         } catch (error: Exception) {
@@ -612,10 +624,14 @@ class AudioSender(
         val inRate = if (srcRate > 0) srcRate else sampleRate
         val inCh = if (srcChannels == 1) 1 else 2
 
-        // 先处理声道：单声道 → 立体声（复制到左右）
+        // 先对齐声道：
+        //  - 单声道 → 立体声：复制到左右；
+        //  - 立体声 → 单声道：左右取平均（直接丢掉一边会让只在一侧的音源消失）；
+        //  - 相同：原样。
+        // 目标声道由 SETUP 的格式位决定（奥迪 101/default 只有单声道位，见 [channelCount]）。
         val rateAligned: ByteArray
         var rateChannels = inCh
-        if (inCh == 1 && CHANNELS == 2) {
+        if (inCh == 1 && channelCount == 2) {
             val monoFrames = size / 2
             val out = ByteArray(monoFrames * 4)
             var i = 0
@@ -632,6 +648,24 @@ class AudioSender(
             }
             rateAligned = out
             rateChannels = 2
+        } else if (inCh == 2 && channelCount == 1) {
+            val frames = size / 4
+            val out = ByteArray(frames * 2)
+            var i = 0
+            var o = 0
+            while (i + 3 < size) {
+                val left =
+                    (((src[i + 1].toInt() and 0xFF) shl 8) or (src[i].toInt() and 0xFF)).toShort().toInt()
+                val right =
+                    (((src[i + 3].toInt() and 0xFF) shl 8) or (src[i + 2].toInt() and 0xFF)).toShort().toInt()
+                val mixed = (left + right) / 2
+                out[o] = (mixed and 0xFF).toByte()
+                out[o + 1] = ((mixed shr 8) and 0xFF).toByte()
+                i += 4
+                o += 2
+            }
+            rateAligned = out
+            rateChannels = 1
         } else {
             rateAligned = if (size == src.size) src else src.copyOf(size)
         }
@@ -1127,7 +1161,7 @@ class AudioSender(
         Thread(
             {
                 try {
-                    val result = AacLcEncoder.decodePeak(payload, sampleRate, CHANNELS)
+                    val result = AacLcEncoder.decodePeak(payload, sampleRate, channelCount)
                     if (result == null) {
                         log("AUDIO: 自检 = 本机解码器没解出样本（首帧 ${payload.size}B）——无法证伪，继续推流")
                         return@Thread
