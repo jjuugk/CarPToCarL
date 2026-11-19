@@ -231,6 +231,49 @@ object NotificationAccess {
         }
     }
 
+    /**
+     * 「组件开关」重绑：把本服务组件 DISABLED → ENABLED 走一遍。
+     *
+     * 依据：监听器绑不上时，历史上唯一确定有效的动作是**重装 APK**（NMS 收到
+     * `ACTION_PACKAGE_REPLACED/CHANGED` 后重新解析监听器并重绑）。改自己组件的
+     * enabled 状态同样会发 `ACTION_PACKAGE_CHANGED`，且**不需要任何权限**；
+     * 这是 [requestSystemRebind] 在 MagicOS 上失效后剩下的最后一条自助通道。
+     *
+     * 每进程只尝试一次：失败就交给 [MediaSessionFallback] 兜底，别来回折腾组件状态。
+     * 两次调用是同步连续的（先 DISABLED 再 ENABLED），最终状态一定是 ENABLED，
+     * 不存在把服务永久关掉的风险。
+     *
+     * @return true = 已发出开关动作（不代表系统一定重绑成功）
+     */
+    fun toggleComponentForRebind(
+        context: Context,
+        log: (String) -> Unit,
+    ): Boolean {
+        if (serviceConnected) return false
+        if (!componentToggled.compareAndSet(false, true)) return false
+        return runCatching {
+            val pm = context.packageManager
+            val cn = MediaListenerService.componentName(context)
+            pm.setComponentEnabledSetting(
+                cn,
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP,
+            )
+            pm.setComponentEnabledSetting(
+                cn,
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP,
+            )
+            log("MEDIA: 已尝试组件开关重绑（DISABLED→ENABLED，等价于重装包触发的重绑路径）")
+            true
+        }.getOrElse {
+            log("MEDIA: 组件开关重绑失败 - ${it.message}")
+            false
+        }
+    }
+
+    private val componentToggled = AtomicBoolean(false)
+
     private var lastRebindRequestAt = 0L
 
     /** 「已请求重绑」这行日志的上次写入时刻：[now] 也是 elapsedRealtime，单位一致。 */

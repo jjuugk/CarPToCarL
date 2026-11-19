@@ -56,6 +56,7 @@ import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
+import io.github.shaonialife.carptocar.media.MediaSessionFallback
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
@@ -472,6 +473,9 @@ object SessionController {
         installAppStateBridge()
         installProtocolModules()
         startMediaWatchdog()
+        // 监听器没被系统绑上时的兜底（荣耀常态）：自己枚举会话，
+        // 媒体键直投不再依赖「服务是否被绑上」。
+        MediaSessionFallback.start(context.applicationContext, ::appendLog)
         // 「车机只认苹果设备」兼容模式（默认开，2026-11-08 起）：App 一起来就挂上
         // 占位 SDP 并常开监听——车机是在 discovery/配对阶段就把设备判成「不支持
         // Apple CarPlay」的，等用户点「启动连接」才注册已经晚了。
@@ -512,16 +516,26 @@ object SessionController {
                 val context = appContext ?: continue
                 attempts++
                 NotificationAccess.requestSystemRebind(context, ::appendLog)
-                // requestRebind 在部分 ROM（荣耀 MagicOS 实测）不生效：系统只认
-                // 「通知使用权」设置页里的手动关→开。3 次（≈24s）仍没绑上就明说，
-                // 免得用户对着没有歌名的车机猜。
+                // requestRebind 在荣耀 MagicOS 上不生效（实测：只写日志、系统不动）。
+                // 再补一次「组件开关」——它等价于重装 APK 触发的 PACKAGE_CHANGED 重绑，
+                // 且改自己的组件不需要任何权限。两招都无效时由 MediaSessionFallback
+                // 顶着，用户不需要去设置页手动关开。
+                if (attempts == 2) NotificationAccess.toggleComponentForRebind(context, ::appendLog)
+                // 3 次（≈24s）仍没绑上：兜底在出数据就只在日志里说明，不再要求用户操作。
                 if (!hinted && attempts >= 3) {
                     hinted = true
                     appendLog(
-                        "MEDIA: ⚠ 通知使用权已授权但系统始终没绑定监听器——" +
-                            "请到「设置 → 通知使用权」把本应用关掉再打开一次（车机歌名依赖它）",
+                        if (MediaSessionFallback.isWorking) {
+                            "MEDIA: 通知监听器未被系统绑定——已由会话轮询兜底接管" +
+                                "（媒体键/播放状态正常，封面可能缺失）"
+                        } else {
+                            "MEDIA: 通知监听器未被系统绑定，兜底轮询也没拿到会话——" +
+                                "请到「设置 → 通知使用权」把本应用关掉再打开一次"
+                        },
                     )
-                    uiHintSink?.invoke("车机歌名不显示：请到「设置 → 通知使用权」把本应用关掉再打开")
+                    if (!MediaSessionFallback.isWorking) {
+                        uiHintSink?.invoke("车机歌名不显示：请到「设置 → 通知使用权」把本应用关掉再打开")
+                    }
                 }
             }
         }, "media-watchdog").apply { isDaemon = true }.start()
