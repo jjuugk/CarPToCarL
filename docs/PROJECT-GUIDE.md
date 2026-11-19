@@ -118,15 +118,17 @@
 | `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、消费键、CarInput（AIDL） |
 | `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活 |
 | `launcher` / `render` | 隐形屏（保留非默认）/ EGL 合成 | `ui` / `legal` / `util` | 暗幕、免责声明、日志导出等 |
-| `protocol` | **重构分支新增**：协议抽象层 + 注册表 + 两门面 | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
+| `protocol` | **重构分支**：协议聚合层（门面 + 能力路由 + 代际审计） | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
 
 入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **118** 个文件 / **900** 例，重点覆盖协议编解码与密码学。
 
-> **重构分支 `refactor/protocol-modules`**（未合并）：177 个主源码文件 / 120 测试文件 / **916** 例。
-> 已建 `protocol/` 抽象（`ProtocolModule` / `ProtocolRegistry` / `Capability` / `ProtocolEvent`）与
-> `CarPlayModule` / `CarLifeModule` 两个纯委托门面；阶段 4（`SessionController` 瘦身、走 Registry 路由）
-> 因 `dispatchMediaKey` / `VoiceKeyRouter` / `NmeaAssembler` / `carLifeCommandSender` 紧耦合而回退，
-> 需先做接口适配层。详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
+> **重构分支 `refactor/protocol-modules`**（未合并）：177 个主源码文件 / 120 测试文件 / **920** 例。
+> `protocol/` 抽象（`ProtocolModule` / `ProtocolRegistry` / `Capability` / `ProtocolEvent`）与
+> `CarPlayModule` / `CarLifeModule` 两个纯委托门面已就位；**媒体键已收口**——装配后
+> `dispatchMediaKey` 走 Registry 的 `FIRST_MATCH`，未装配走本地原路径，二者互斥且共用
+> `consumeMediaKeyByCar` 一份实现（杜绝行为分叉）。语音键 / GPS / 触摸 / 播放意图是状态机输入
+> （边沿判定、NMEA 分条合并、坐标换算），语义与通用事件不同级，需单独一轮做适配层。
+> 详见 [`PROJECT-STATUS.md`](PROJECT-STATUS.md) §5.3。
 
 ---
 

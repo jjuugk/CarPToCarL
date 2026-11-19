@@ -56,6 +56,16 @@ object ProtocolRegistry {
         synchronized(lock) { modules.values.filter { capability in it.consumes() } }
 
     /**
+     * 是否已有模块声明消费该能力。
+     *
+     * 调用方用它区分「聚合层已装配」与「尚未装配」两种运行态：
+     * 已装配就完全交给 [route]，未装配才走本地原路径。两条路必须互斥，
+     * 否则同一次控制事件会被消费两次。
+     */
+    fun hasConsumer(capability: Capability): Boolean =
+        synchronized(lock) { modules.values.any { capability in it.consumes() } }
+
+    /**
      * 按 [Delivery] 策略投递事件，返回真正消费它的模块列表。
      *
      * 永远跳过事件的产出方自己——避免 CarLife 发的事件又被 CarLife 自己吃回去形成回环。
@@ -113,8 +123,11 @@ object ProtocolRegistry {
         synchronized(lock) { startedIds.clear() }
     }
 
-    /** 仅单测用：清空注册表，避免测试间互相污染。 */
+    /** 仅单测用：清空注册表与启动记录，避免测试间互相污染。 */
     fun reset() {
-        synchronized(lock) { modules.clear() }
+        synchronized(lock) {
+            modules.clear()
+            startedIds.clear()
+        }
     }
 }

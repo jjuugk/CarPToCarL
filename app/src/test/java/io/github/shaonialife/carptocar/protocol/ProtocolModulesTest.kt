@@ -127,4 +127,75 @@ class ProtocolModulesTest {
         assertEquals(1, starts)
         assertEquals(1, stops)
     }
+
+    // ---- 阶段 4 接线契约：SessionController.dispatchMediaKey 靠 hasConsumer 二选一 ----
+
+    /**
+     * `hasConsumer` 是「走聚合层还是走本地原路径」的开关，必须只认**消费方**。
+     * CarPlay 声明的是 provides(MEDIA_KEY)，若被误当成消费者，装配一半就会把
+     * 媒体键全部吞掉（CarPlayModule.onMediaKey 恒返回 false），车机按键彻底失灵。
+     */
+    @Test
+    fun hasConsumerCountsOnlyDeclaredConsumers() {
+        assertFalse(ProtocolRegistry.hasConsumer(Capability.MEDIA_KEY))
+
+        ProtocolRegistry.register(CarPlayModule())
+        assertFalse(ProtocolRegistry.hasConsumer(Capability.MEDIA_KEY))
+        assertTrue(ProtocolRegistry.hasConsumer(Capability.VIDEO_SOURCE))
+
+        ProtocolRegistry.register(CarLifeModule())
+        assertTrue(ProtocolRegistry.hasConsumer(Capability.MEDIA_KEY))
+    }
+
+    /** 已装配分支：事件来源是 SYSTEM（车机/系统媒体键，不是某个协议模块）也必须能到达 CarLife。 */
+    @Test
+    fun installedFleetConsumesSystemMediaKeyExactlyOnce() {
+        var calls = 0
+        var lastKey = -1
+        ProtocolRegistry.register(CarPlayModule())
+        ProtocolRegistry.register(
+            CarLifeModule(
+                onMediaKey = { lastKey = it; calls++; true },
+            ),
+        )
+
+        val handled =
+            ProtocolRegistry
+                .route(
+                    ProtocolEvent.MediaKey(keyCode = 87, from = ProtocolId.SYSTEM),
+                    Delivery.FIRST_MATCH,
+                ).handled
+
+        assertTrue(handled)
+        // 恰好一次：装配后调用方只走 Registry，不再回落本地函数（两者互斥）
+        assertEquals(1, calls)
+        assertEquals(87, lastKey)
+    }
+
+    /** 没人接管时 `handled` 必须为 false，调用方才好继续走 AudioManager 系统焦点兜底。 */
+    @Test
+    fun unhandledMediaKeyLeavesRoomForSystemFocusFallback() {
+        ProtocolRegistry.register(CarLifeModule(onMediaKey = { false }))
+
+        val result =
+            ProtocolRegistry.route(
+                ProtocolEvent.MediaKey(keyCode = 87, from = ProtocolId.SYSTEM),
+                Delivery.FIRST_MATCH,
+            )
+
+        assertFalse(result.handled)
+    }
+
+    /** reset 必须连启动记录一起清，否则下一个用例的 stopAll 会误调上一个用例的 stopper。 */
+    @Test
+    fun resetAlsoClearsStartedState() {
+        var stops = 0
+        ProtocolRegistry.register(CarLifeModule(stopper = { stops++ }))
+        ProtocolRegistry.startAll()
+
+        ProtocolRegistry.reset()
+        ProtocolRegistry.stopAll()
+
+        assertEquals(0, stops)
+    }
 }

@@ -665,18 +665,37 @@ adb shell "run-as io.github.shaonialife.carptocar cat files/main_debug.log"
 
 | 分组 | 包 | 文件 | 依据 |
 |---|---|---|---|
-| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 60 | 三种协议各占一个独立包；`protocol` 做跨协议审计 |
+| 协议栈（**按协议**） | `carlife` / `iap2` / `airplay` / `protocol` | 60 | 三种协议各占一个独立包，彼此不 import；`protocol` 是聚合层（见下节） |
 | 承载层（按通道） | `bt` / `net` / `transport` | 30 | 蓝牙、网络、iAP2 隧道各管一条承载 |
 | 数据面（按功能） | `audio` / `video` / `input` / `media` / `capture` / `render` | 31 | 跨协议复用，不绑定某一种协议 |
 | 应用与基础设施（按功能） | 根入口 / `session` / `service` / `launcher` / `ui` / `util` / `legal` | 48 | 编排、保活、界面、工具 |
 
 三处交叉：`net/` 放 AirPlay 服务发现（`AirPlayFeatures` / `CarPlayCtrlAdvertiser`）；
-`transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议。
-测试目录镜像同一套包名。
+`transport/Iap2LinkChannel` 属于 iAP2 却独立成包；`protocol/` 不对应任何单一协议——
+它是聚合层，只认 `Capability`，不认具体协议。测试目录镜像同一套包名。
 
 文档三入口：[docs/README.md](docs/README.md)（docs 目录地图，按角色给阅读路径）·
 [docs/PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md)（42 篇专题文档的状态标注索引 + 排障决策表）·
 [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
+
+### 协议聚合层（`protocol/`）
+
+> 由分支 `refactor/protocol-modules` 引入，**尚未合并到 main**。合入后 `protocol/` 由 2 个文件
+> 增至 10 个、主源码 169 → 177 个文件、用例 900 → 920 例。
+
+三个协议包**互不 import**，交互一律经 `ProtocolRegistry` 按能力接线：
+
+| 组件 | 作用 |
+|---|---|
+| `ProtocolModule` | 门面接口：声明 `provides()` / `consumes()`，`onEvent()` 处理事件 |
+| `Capability` / `ProtocolEvent` | 路由键与事件体；事件只放值类型，单测可纯 JVM 跑 |
+| `ProtocolRegistry` | 唯一装配点。三种投递：`BIND`（源汇配对）/ `FIRST_MATCH`（控制竞争）/ `ALL`（状态广播） |
+| `CarPlayModule` / `CarLifeModule` | 纯委托门面，不 import 任何协议实现；真实动作由 `SessionController` 注入 |
+
+已收口的只有**媒体键**：装配后 `dispatchMediaKey` 走 `FIRST_MATCH` 能力路由，
+未装配走本地原路径，两者互斥且共用 `consumeMediaKeyByCar` 一份实现（避免行为分叉）。
+语音键 / GPS / 触摸 / 播放意图仍是状态机输入（边沿判定、NMEA 分条合并、坐标换算），
+语义与通用事件不同级，需先做适配层才能接入。
 
 ### 根目录
 
@@ -706,7 +725,7 @@ CarPToCarL/
 ├── carlife/       (12)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
 ├── iap2/          (22)           # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
 ├── airplay/       (24)           # AirPlay 配对 / 控制通道 / 流协商 / 加密 / Timing
-├── protocol/       (2)           # 跨协议代际与一致性审计
+├── protocol/       (2)           # 跨协议代际与一致性审计（分支增至 10：聚合层）
 ├── bt/            (15)           # RFCOMM 双向（Server 等回连 / Client 主动连）
 ├── net/           (13)           # WiFi 入网 / mDNS 发现 / ctrl 广播
 ├── transport/      (2)           # iAP2 隧道封装（Iap2LinkChannel）
@@ -732,7 +751,7 @@ CarPToCarL/
 | `carlife` | CarLife 劫持 | 冒充车机连本机 CarLife+，H.264/PCM 直通，98386/98311 下发 |
 | `iap2` | iAP2 协议链路 | Link 引擎、CSM、发送端会话状态机、NowPlaying |
 | `airplay` | AirPlay 主会话 | PairVerify、控制通道、流协商、FairPlay/ChaCha 加密、Timing |
-| `protocol` | 跨协议审计 | 协议代际切换与一致性审计码 |
+| `protocol` | 跨协议审计 / 聚合 | 协议代际切换与一致性审计码；分支上是能力路由的装配点 |
 | `bt` / `net` / `transport` | 承载层 | RFCOMM Server/Client、WiFi 入网与 mDNS、iAP2 隧道 |
 | `audio` / `video` | 媒体面 | AAC 编码与 RTP 封装、H.264 推流与 VideoConfig 声明对齐 |
 | `input` / `media` / `capture` / `render` | 输入与画面 | 触摸分流、通知使用权、画面源、EGL 合成 |

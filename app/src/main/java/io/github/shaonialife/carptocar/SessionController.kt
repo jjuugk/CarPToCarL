@@ -70,8 +70,15 @@ import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
 import io.github.shaonialife.carptocar.net.WifiJoinGate
 import io.github.shaonialife.carptocar.net.WifiLinkWatchdog
 import io.github.shaonialife.carptocar.net.WifiSavedNetworks
+import io.github.shaonialife.carptocar.protocol.Capability
+import io.github.shaonialife.carptocar.protocol.CarLifeModule
+import io.github.shaonialife.carptocar.protocol.CarPlayModule
+import io.github.shaonialife.carptocar.protocol.Delivery
 import io.github.shaonialife.carptocar.protocol.ProtocolAudit
+import io.github.shaonialife.carptocar.protocol.ProtocolEvent
 import io.github.shaonialife.carptocar.protocol.ProtocolGeneration
+import io.github.shaonialife.carptocar.protocol.ProtocolId
+import io.github.shaonialife.carptocar.protocol.ProtocolRegistry
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
 import io.github.shaonialife.carptocar.session.AppStateReporter
@@ -463,6 +470,7 @@ object SessionController {
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
         installAppStateBridge()
+        installProtocolModules()
         startMediaWatchdog()
         // 「车机只认苹果设备」兼容模式（默认开，2026-11-08 起）：App 一起来就挂上
         // 占位 SDP 并常开监听——车机是在 discovery/配对阶段就把设备判成「不支持
@@ -545,6 +553,33 @@ object SessionController {
         appStateBridgeInstalled = true
         CarLifeHijack.onVoiceSession = { active -> appStateReporter.onEngineVoice(active) }
         CarLifeHijack.onSpeechAudio = { appStateReporter.onSpeechAudio() }
+    }
+
+    /** 协议门面是否已装配进聚合层（幂等）。 */
+    private var protocolModulesInstalled = false
+
+    /**
+     * 把两个协议门面注册进 [ProtocolRegistry]（幂等，见 [ensure]）。
+     *
+     * 这是「按协议分模块 + 统一聚合」的接线点：门面不持有状态，能力声明是静态的，
+     * 真实动作全部委托回本类已有函数，所以装配前后**行为等价**——
+     * 变的只是入口：手写的三段式变成「按 [Capability] 路由」。
+     *
+     * 已收口：媒体键（`CarLifeModule.onMediaKey` → [consumeMediaKeyByCar]）。
+     * 暂未收口：语音键 / GPS / 触摸——它们各自带状态机（`VoiceKeyRouter` 的
+     * 按下-松开边沿判定、`NmeaAssembler` 的 GGA/RMC/GSA 分条合并、触摸的坐标系换算），
+     * 改走事件会改变时序语义，必须单独一轮先设计适配层再动。
+     *
+     * 注意：这里**不**把 `start()`/`stop()` 绑到 `CarLifeHijack.prewarm()`/`.stop()`。
+     * 门面的生命周期归会话流程管（`ensureSessionObjects` 与会话结束路径），
+     * 注册表只负责事件路由，不该顺手拉起或停掉引擎。
+     */
+    private fun installProtocolModules() {
+        if (protocolModulesInstalled) return
+        protocolModulesInstalled = true
+        ProtocolRegistry.register(CarPlayModule())
+        ProtocolRegistry.register(CarLifeModule(onMediaKey = ::consumeMediaKeyByCar))
+        appendLog("PROTO: 协议门面已装配 —— ${ProtocolRegistry.all().joinToString { it.id.name }}")
     }
 
     /** 注册 CarLife 媒体信息 → iAP2 0x5001 的桥接（幂等，见 [ensure]）。 */
@@ -934,15 +969,23 @@ object SessionController {
      * 媒体信息、没有新的音频格式宣告、PCM 电平也不变。而 [CarLifeHijack.sendMediaKey]
      * 的返回值只是「socket 写成功」，却被当成「已接管」直接 `return`，把第 3 条——通知
      * 使用权坏掉（`requestRebind` 在某些 ROM 上无效）时**唯一还能用**的那条路——挡死了。
+     *
+     * 前两步现在住在 [consumeMediaKeyByCar] 里，入口有两条且**互斥**：
+     * 装配了协议门面就走 [ProtocolRegistry] 的 FIRST_MATCH 能力路由（CarLifeModule
+     * 委托回同一个函数），没装配就直接调本地函数。互斥是为了让同一次按键只被消费一次。
      */
     fun dispatchMediaKey(keyCode: Int) {
-        val action = MediaSessionsState.transportActionFor(keyCode)
-        if (action >= 0 && MediaSessionsState.dispatchTransport(action)) {
-            return
-        }
-        if (MediaKeyRoute.carLifeHardKeyTakes(keyCode) && CarLifeHijack.sendMediaKey(keyCode)) {
-            return
-        }
+        val handled =
+            if (ProtocolRegistry.hasConsumer(Capability.MEDIA_KEY)) {
+                ProtocolRegistry
+                    .route(
+                        ProtocolEvent.MediaKey(keyCode = keyCode, from = ProtocolId.SYSTEM),
+                        Delivery.FIRST_MATCH,
+                    ).handled
+            } else {
+                consumeMediaKeyByCar(keyCode)
+            }
+        if (handled) return
         // 回退：无活跃会话 / 动作不受支持时走系统焦点路由
         val ctx = appContext ?: return
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -951,6 +994,21 @@ object SessionController {
         // 这一行是「按键最终落到哪」的唯一凭据：只有直投与硬键都没接管才会出现。
         // 缺席即代表直投生效；出现且用户仍说没反应，才该去查系统焦点归属。
         appendLog("MEDIA: 直投未生效 → 系统焦点路由 ${MediaKeyRoute.label(keyCode)}")
+    }
+
+    /**
+     * 媒体键的两级原生消费：先让系统媒体会话直投，再让 CarLife 硬键接管。
+     *
+     * 这是 [dispatchMediaKey] 第三段兜底之前的全部逻辑，抽出来是为了让
+     * 「未装配协议门面的本地路径」与「CarLifeModule 的委托」共用**同一份实现**——
+     * 两处各写一遍必然分叉，而这段代码的每一行都对应过一次回归（见 [dispatchMediaKey] 的 KDoc）。
+     *
+     * @return true 表示已接管，调用方不应再走系统焦点路由。
+     */
+    private fun consumeMediaKeyByCar(keyCode: Int): Boolean {
+        val action = MediaSessionsState.transportActionFor(keyCode)
+        if (action >= 0 && MediaSessionsState.dispatchTransport(action)) return true
+        return MediaKeyRoute.carLifeHardKeyTakes(keyCode) && CarLifeHijack.sendMediaKey(keyCode)
     }
 
     /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
