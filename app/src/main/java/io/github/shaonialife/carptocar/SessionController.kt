@@ -18,6 +18,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
+import io.github.shaonialife.carptocar.audio.NavigationDucking
 import io.github.shaonialife.carptocar.airplay.AirPlaySessionPolicy
 import io.github.shaonialife.carptocar.bt.AudioGuardGate
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
@@ -1345,6 +1346,13 @@ object SessionController {
     @Volatile
     var navAudioSender: AudioSender? = null
 
+    /**
+     * 导航播报压低状态机。只在 101 导航流真建起来时创建——没有那条流时发 duck
+     * 只会把音乐压低、却拿不到导航补偿。会话退役时 close() 保证恢复音量。
+     */
+    @Volatile
+    private var navigationDucking: NavigationDucking? = null
+
     /** 本会话导航独立流实际用的档位（诊断用；null = 没建）。 */
     @Volatile
     var activeNavAudioProfile: AudioProfile? = null
@@ -1453,6 +1461,8 @@ object SessionController {
         }
         // 导航借用归还时若正在通话，通话流不拆
         if (audioInCallMode && client.phoneOwnsAudio) return audioSender?.isRunning == true
+        navigationDucking?.close()
+        navigationDucking = null
         val type = activeCallProfile?.streamType ?: activeAudioProfile?.streamType
         // 导航独立流的类型可能和主音频不同（例如语音档落在 101 上就是 101/100 各一条），
         // 拆链要按各自类型分别 TEARDOWN，漏掉的那条只能等车机自己超时回收。
@@ -2834,6 +2844,8 @@ object SessionController {
         navAudioSender?.stop()
         navAudioSender = null
         activeNavAudioProfile = null
+        navigationDucking?.close()
+        navigationDucking = null
         // 麦克风上行跟着音频流一起收：车机那边流一停就不会再推，留着端口空转没意义。
         // stop() 里会落 wav 并打一行 `MIC: 结论——…`，所以必须在会话日志收尾之前调。
         micUplink?.stop()
@@ -2910,6 +2922,7 @@ object SessionController {
         navigation: Boolean,
         newMediaIntent: Boolean = false,
     ) {
+        applyNavigationDucking(navigation)
         if (ProtocolRegistry.hasConsumer(Capability.PLAYBACK_INTENT)) {
             ProtocolRegistry.route(
                 ProtocolEvent.PlaybackIntent(
@@ -2923,6 +2936,20 @@ object SessionController {
             return
         }
         applyPlaybackIntent(media, navigation, newMediaIntent)
+    }
+
+    /**
+     * 导航播报压低：TTS 边沿的**汇聚点**（9240/9241 两条路都经 onSourceAudioPlayback）。
+     * 放在路由之前，协议门面装配与否都生效。只在 101 导航流真在跑时发——否则
+     * 给一条不存在的流发 duck 只会把音乐压低却没有导航补偿。
+     */
+    private fun applyNavigationDucking(navigation: Boolean) {
+        val ducking = navigationDucking ?: return
+        if (navigation) {
+            ducking.begin()
+        } else {
+            ducking.end()
+        }
     }
 
     /** 播放意图的唯一实现：门面委托与未装配路径都落在这里。 */
@@ -4454,6 +4481,14 @@ object SessionController {
         }
         navAudioSender = nav
         activeNavAudioProfile = profile
+        // 导航流建好后才启用压低：车机只有看到 101 上有独立流 + duckAudio 才把它当导航音轨。
+        // 捕获 client 快照，会话切换后旧状态机的命令不会打到新连接。
+        navigationDucking?.close()
+        navigationDucking =
+            NavigationDucking(
+                send = { duck -> currentClient === client && client.postNavigationDucking(duck) },
+                log = ::appendLog,
+            )
         appendLog(
             "AUDIO: ✓ 导航播报已独立成流 t${profile.streamType}/$audioType —— ${profile.label} " +
                 "dataPort=${info.dataPort} controlPort=${info.controlPort}；" +

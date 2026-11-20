@@ -2316,6 +2316,37 @@ class AirPlayClient(
     }
 
     /**
+     * 导航播报压低 / 恢复（Apple CarPlay 规范 §23.3.7.1/.2）。
+     *
+     * 必须走**控制通道**的 POST /command：写在事件通道上奥迪 MIB3 根本不读
+     * （与 [postControlIap] 同一条铁律）。**同步发送**——调用方必须先切到自己的
+     * 后台线程（NavigationDucking 的 worker），绝不能在 9241 收帧线程上调用。
+     *
+     * @return true = 车机回 200；false = 明确拒绝或通道不可用。
+     */
+    fun postNavigationDucking(duck: Boolean): Boolean {
+        val type = if (duck) "duckAudio" else "unduckAudio"
+        val params = linkedMapOf<String, Any?>("durationMs" to 500L)
+        if (duck) params["volume"] = -20.0
+        val body = BinaryPlist.encode(linkedMapOf("type" to type, "params" to params))
+        return try {
+            val (statusLine, _) =
+                request(
+                    "POST",
+                    "/command",
+                    body,
+                    timeoutMillis = 1_000,
+                    contentType = "application/x-apple-binary-plist",
+                )
+            log("AIRPLAY: NAV-PROMPT $type [$statusLine]")
+            statusLine.contains("200")
+        } catch (error: IOException) {
+            log("AIRPLAY: NAV-PROMPT $type 失败 - ${error.message}")
+            false
+        }
+    }
+
+    /**
      * 控制通道 iAPSendMessage 出站（MIB3）：手机侧 iAP2 链路帧**必须**走 RTSP 控制
      * 连接上的 POST /command——写在事件通道上时 MIB3 根本不读（DiPlay 宽容，奥迪
      * 不宽容；AADisplay Frida 结论）。串行执行器：不阻塞链路节拍线程，与
