@@ -1493,7 +1493,13 @@ object SessionController {
                 appendLog("RESOURCE: 车机接管/静音借用主音频（$transfer）——暂停本机媒体播放")
                 // 媒体流待发的 PCM 一并丢掉：静音后不再漏出一截音乐
                 audioSender?.clearPcm()
-                CarLifeHijack.pauseMediaFromCar("车机接管/静音借用主音频")
+                // 只有临时借用（静音键/原车通话）才给门禁开「超时自恢复」出口：车机常在
+                // 100ms 内就把主音频还回来却漏发归还通知，永久拦会让再播一直无声。
+                // 永久接管（切原车 FM）保持真让出——否则 PCM 会与车机原生音源双声。
+                CarLifeHijack.pauseMediaFromCar(
+                    "车机接管/静音借用主音频",
+                    autoRelease = transfer == AirPlayResourceState.CarAudioTransfer.BORROWED_CONSTRAINED,
+                )
             }
 
             CarPlayAudioIntent.MediaCommand.RESUME -> {

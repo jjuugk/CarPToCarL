@@ -611,13 +611,18 @@ object CarLifeHijack {
      * `HU_PAUSE_MEDIA (0x1800E)`（幂等暂停，非翻转键），保证未授予通知使用权时也能真正停住音乐。
      *
      * @return 调用前源侧确实处于播放态时返回 true（供上层记录「是否由本次车机静音暂停」）。
+     * @param autoRelease true = 临时借用（BORROWED_CONSTRAINED）：超时且主音频归还后自动放行 PCM；
+     *   永久接管（TAKEN_PERMANENTLY）保持 false，真让出、不自动放行，避免与车机原声双声。
      */
-    fun pauseMediaFromCar(reason: String): Boolean {
+    fun pauseMediaFromCar(
+        reason: String,
+        autoRelease: Boolean = false,
+    ): Boolean {
         val wasPlaying: Boolean
         synchronized(audioPlaybackLock) {
             wasPlaying = (knownMediaPlaying() ?: mediaPlayback.playing) || mediaAudioActive
             mediaPlayback.onCarPause()
-            audioSink?.setPlaybackPaused(true, indefinite = true)
+            audioSink?.setPlaybackPaused(true, indefinite = true, autoRelease = autoRelease)
             audioSink?.clearPendingPcm()
             updateAudioPlayback(media = false)
         }

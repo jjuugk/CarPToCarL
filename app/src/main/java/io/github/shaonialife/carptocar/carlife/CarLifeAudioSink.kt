@@ -38,6 +38,18 @@ internal class CarLifeAudioSink(
      * 发送端本身不知道这件事——混音器删掉之后，它只需要「谁给的 PCM 就发出去」。
      */
     private val isNavigation: Boolean = false,
+    /**
+     * 注入时钟，供单测推进「自动放行」窗口；生产用 [android.os.SystemClock.uptimeMillis]。
+     */
+    private val nowMs: () -> Long = { android.os.SystemClock.uptimeMillis() },
+    /**
+     * 本轮车机侧暂停是否允许「超时自恢复」：仅 BORROWED_CONSTRAINED（临时借用）为 true，
+     * TAKEN_PERMANENTLY（切到原车 FM，永久接管）必须为 false——否则放行 PCM 会与车机
+     * 原生音源双声。默认读资源层当前是否持有主音频；单测可注入。
+     */
+    private val carAudioAcquired: () -> Boolean = {
+        io.github.shaonialife.carptocar.SessionController.currentClient?.phoneOwnsAudio == true
+    },
 ) {
     /** CarLife 引擎宣告的源采样率（CarlifeMusicInit；<=0 表示尚未宣告，按 48k 处理）。 */
     @Volatile
@@ -110,6 +122,19 @@ internal class CarLifeAudioSink(
     @Volatile
     private var pauseIndefinite = false
 
+    /**
+     * 本次车机侧暂停是否允许「超时自恢复」（只有 BORROWED_CONSTRAINED 临时借用为 true）。
+     *
+     * 2026-11-20 修：车机静音键/原车通话借用主音频后，85ms 就把主音频还了回来
+     * （`AUDIO-INTENT acquired=true 主音频=手机`），但**没有**发 `UNBORROWED_TO_PHONE`，
+     * [resumeMediaFromCar] 那条解除路径永远等不到 → [pauseIndefinite] 永久为 true →
+     * 引擎 PCM 被永久丢弃，表现为「暂停后再播一直没声」。这里给临时借用开一个
+     * 自恢复出口：超过 [CAR_BORROW_RELEASE_MS] 且资源层确认已重新持有主音频时自动放行。
+     * 永久接管（切原车 FM）保持 indefinite 语义不变，绝不自动放行，避免双声。
+     */
+    @Volatile
+    private var pauseAutoRelease = false
+
     /** 「超时放行」只记一次，避免每秒刷屏。 */
     private var pauseWindowExpiredLogged = false
 
@@ -118,15 +143,19 @@ internal class CarLifeAudioSink(
      *
      * @param indefinite true = 车机侧暂停，一直拦到它主动还回来；false = 引擎/应用侧暂停，
      *   只拦 [PAUSE_DROP_WINDOW_MS]，之后自动放行（宁可重复播放几秒，也不要永久没声音）。
+     * @param autoRelease true = 这是「临时借用」导致的 indefinite 暂停，超时且主音频归还后
+     *   允许自恢复；对 TAKEN_PERMANENTLY 必须为 false。只在 [indefinite] 为 true 时有意义。
      */
     fun setPlaybackPaused(
         paused: Boolean,
         indefinite: Boolean = false,
+        autoRelease: Boolean = false,
     ) {
         val changed = playbackPaused != paused
         if (changed && paused && dropWhenPaused) clearPendingPcm()
         playbackPaused = paused
         pauseIndefinite = paused && indefinite
+        pauseAutoRelease = paused && indefinite && autoRelease
         if (!paused) {
             pausedSince = 0L
             pauseWindowExpiredLogged = false
@@ -134,10 +163,12 @@ internal class CarLifeAudioSink(
             return
         }
         if (changed || pausedSince == 0L) {
-            pausedSince = android.os.SystemClock.uptimeMillis()
+            pausedSince = nowMs()
             pauseWindowExpiredLogged = false
             val suffix =
-                if (pauseIndefinite) {
+                if (pauseAutoRelease) {
+                    "车机侧临时借用，${CAR_BORROW_RELEASE_MS / 1000} 秒后主音频归还即自动恢复"
+                } else if (pauseIndefinite) {
                     "车机侧暂停，等它归还音频后才恢复"
                 } else {
                     "${PAUSE_DROP_WINDOW_MS / 1000} 秒窗口，之后到达的 PCM 即放行"
@@ -146,10 +177,31 @@ internal class CarLifeAudioSink(
         }
     }
 
-    /** 当前这包 PCM 是否该按「暂停残留」丢掉（车机侧暂停永久拦，其余只在窗口内）。 */
-    private fun shouldDropPaused(now: Long): Boolean {
+    /**
+     * 当前这包 PCM 是否该按「暂停残留」丢掉。
+     *
+     * 车机侧永久暂停默认无限拦；仅当本次暂停被标记为「临时借用」（[pauseAutoRelease]）时，
+     * 超时且资源层确认主音频已归还才自动解除——给一个永远不来的归还通知留自恢复出口。
+     */
+    internal fun shouldDropPaused(now: Long): Boolean {
         if (!playbackPaused) return false
-        if (pauseIndefinite) return true
+        if (pauseIndefinite) {
+            if (pauseAutoRelease) {
+                val since = pausedSince
+                if (since > 0L && now - since >= CAR_BORROW_RELEASE_MS && carAudioAcquired()) {
+                    playbackPaused = false
+                    pauseIndefinite = false
+                    pauseAutoRelease = false
+                    pausedSince = 0L
+                    log(
+                        "CARLIFE: 车机临时借用超时且主音频已归还——自动解除暂停门禁，恢复放行 PCM" +
+                            "（此前一直在丢弃，若此时有声即为自恢复生效）",
+                    )
+                    return false
+                }
+            }
+            return true
+        }
         val since = pausedSince
         if (since == 0L) return true
         if (now - since < PAUSE_DROP_WINDOW_MS) return true
@@ -195,7 +247,7 @@ internal class CarLifeAudioSink(
             return
         }
         // 音乐会话暂停后的一小段窗口内：丢弃引擎仍在推的残留 PCM（避免重复播放）
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = nowMs()
         if (dropWhenPaused && shouldDropPaused(now)) {
             countDroppedWhenPaused(
                 if (pauseIndefinite) "车机侧暂停（无限期，等它归还音频）" else "引擎侧暂停（15 秒窗口内）",
@@ -260,6 +312,7 @@ internal class CarLifeAudioSink(
         lastDropReason = ""
         pauseWindowExpiredLogged = false
         pauseIndefinite = false
+        pauseAutoRelease = false
         pausedSince = 0L
         // 必须一起复位：只清 pausedSince 而留着 playbackPaused = true，会让
         // shouldDropPaused() 命中「since == 0 → 丢弃」那条早返回——永久丢包，
@@ -334,6 +387,13 @@ internal class CarLifeAudioSink(
          * 又不会因为「手机里常驻一条暂停的音乐会话」把导航播报/提示音长期吃掉。
          */
         const val PAUSE_DROP_WINDOW_MS = 15_000L
+
+        /**
+         * 车机「临时借用」自恢复窗口（2 秒）：超过它且资源层确认主音频已归还即可自动解除暂停。
+         * 2 秒足够覆盖「静音键 → 85ms 就还回来」的实测场景，又不会短到在车机还在借用时
+         * 就把 PCM 放出去（那样会与车机原生音源双声）。
+         */
+        const val CAR_BORROW_RELEASE_MS = 2_000L
 
         /** 电平统计的「非零」门限（约 -66dBFS，低于它的样本算静音底噪）。 */
         const val SILENCE_FLOOR = 16
