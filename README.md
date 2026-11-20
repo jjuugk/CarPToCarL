@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk)**
-> —— 主线固定直链（当前 1.2.73，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk)**
+> —— 主线固定直链（当前 1.2.74，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.73，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.73.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.74，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.74.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.73`（正式版；过滤保活会话被引擎读回的假歌名「车机音频直通 / CarPToCarL」，不再污染车机歌名/歌词基线；同时修复语音键：65574 里语音/麦克风模块的 0 不再回置 1。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.74`（正式版；修复「先有声→车机暂停→再播无声」：车机临时借用主音频漏发归还通知导致暂停门禁永久丢 PCM，现改为 2 秒后主音频归还即自动放行；导航播报改发 duckAudio/unduckAudio 走车机 Navigation 音轨。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,38 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.74 —— 2026-11-20（车机临时借用超时自恢复 + 导航 duck 指令，正式版）
+
+本版两处改动，**均未实车验证**。
+
+**一、修复「先有声 → 车机暂停 → 再播一直无声」**
+
+1.2.72 实车日志（BMW 27479 / OPPO）铁证：车机静音键或原车通话借用主音频
+（`BORROWED_CONSTRAINED`）后，**85ms 就把主音频还了回来**（`AUDIO-INTENT acquired=true
+主音频=手机`），却漏发 `UNBORROWED_TO_PHONE`。App 侧 `CarLifeMediaPlayback.onCarPause()`
+把间接暂停门禁设成 indefinite，唯一的解除路径 `resumeMediaFromCar()` 永远等不到那个归还通知，
+于是引擎后续推的 PCM 被永久丢弃——表现为「放一会自动暂停，再播就没声音」，
+日志里连续两分钟每 10 秒 1880KB 全部丢弃。
+
+修法：给 indefinite 门禁开一个**超时自恢复出口**——只有 `BORROWED_CONSTRAINED`（临时借用）
+才置 `autoRelease`；超过 2 秒且资源层确认 `phoneOwnsAudio == true`（主音频已归还）时自动清门禁、
+恢复放行 PCM，日志打 `CARLIFE: 车机临时借用超时且主音频已归还——自动解除暂停门禁`。
+`TAKEN_PERMANENTLY`（切到原车 FM，永久接管）保持真让出、绝不自动放行，否则会与车机原生
+音源双声。sink 注入时钟与 acquired 谓词便于纯 JVM 单测，新增 5 例覆盖窗口内拦 / 未归还仍拦 /
+超时+归还放行 / 永久接管不放行 / 引擎侧 15 秒窗口。
+
+**二、导航播报改发 duckAudio / unduckAudio**
+
+以前导航提示音靠降低本机媒体音量做 duck；这台 MGU-50-J 车机上 `SET_PARAMETER volume`
+返回 456、音量查询 501，duck 根本不生效。改为在 101 导航流建好后，走 **RTSP 控制连接**
+向车机发 `POST /command duckAudio`（`durationMs=500, volume=-20.0`），播报结束延迟 300ms
+发 `unduckAudio`（吞掉连续播报的短空档）；连续播报用 generation+ticket 取消旧恢复任务，
+duck 应答丢失仍发 unduck，防永久压低。让车机自己按 Navigation 音轨处理 duck，
+而不是我们压本机音量。新增 4 例单测。
+
+上车验收：再播有声、日志出现 `自动解除暂停门禁`；切原车 FM 不双声；导航播报时看
+`AIRPLAY: NAV-PROMPT duckAudio [RTSP/1.0 200 OK]` / `unduckAudio`。
 
 ### 1.2.73 —— 2026-11-20（假歌名过滤 + 语音键模块状态，正式版）
 
