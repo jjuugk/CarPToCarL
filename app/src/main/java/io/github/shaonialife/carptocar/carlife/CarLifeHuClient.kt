@@ -922,7 +922,7 @@ class CarLifeHuClient(
                     if (vr != null && before[CarLifeProtocol.Module.VR] != vr.second) {
                         log(
                             if (vr.second == 0) {
-                                "CARLIFE: 语音模块=0——引擎当前没有语音会话（发了 0x21 却一直看到这行，说明 0x68008 被判无效）"
+                                "CARLIFE: 语音模块=0——引擎当前没有语音会话（连接初期也会出现；若刚发过 0x21 仍未翻 1，才说明硬键被引擎判无效）"
                             } else {
                                 "CARLIFE: 语音模块=${vr.second}——引擎已进入语音态（0x68008 0x21 生效）"
                             },
@@ -935,10 +935,14 @@ class CarLifeHuClient(
                         onVoiceSession(voiceNow)
                     }
                 }
-                if (modules.any { it.second == 0 }) {
+                // module 4（语音）/ 6（麦克风）上报 0 是「当前没有语音会话 / 用手机麦」的
+                // 真实状态，不能再回 98344 把它强行置 1——那等于压着引擎的语音态。
+                // 对齐 AuDiCar CarLifeVoiceProtocol.modulesToEnable()，其余模块不变。
+                val toEnable = CarLifeProtocol.modulesToEnable(modules)
+                if (toEnable.isNotEmpty()) {
                     send(
                         CarLifeProtocol.HU_MODULE_CONTROL,
-                        CarLifeProtocol.moduleControl(modules.map { it.first }),
+                        CarLifeProtocol.moduleControl(toEnable),
                     )
                 }
             }

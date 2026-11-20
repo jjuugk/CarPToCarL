@@ -458,6 +458,26 @@ internal object CarLifeProtocol {
         return out
     }
 
+    /**
+     * 从 65574 模块状态里挑出要回 98344 置 1 的模块。
+     *
+     * module 4（语音）/ 6（麦克风）上报 **0 是有意义的当前状态**——「引擎此刻没有
+     * 语音会话」「麦克风走手机侧」，不是「请求开启」。旧代码把全部模块（含这两个的
+     * 0）无条件回置 1：我们发了 `0x68008 0x21`，引擎报 VR=0，我们立刻回一条把它
+     * 置 1，等于压着引擎的语音态不放。这是「硬键已送达但语音模块始终=0」的一个
+     * 可操作解释。
+     *
+     * 对齐 AuDiCar `CarLifeVoiceProtocol.modulesToEnable()`（1.0.47）的这一条：
+     * 语音桥启用时 module 4/6 的 0 排除。本次只搬这一处，**其余模块的 0 照旧回置 1**，
+     * 不改 main 既有行为；1 的模块原本也在回包里，这里保持原样。
+     *
+     * 注意不要把规则扩大成「只回 status==0 的模块」——那会改变所有模块的既有报文。
+     */
+    fun modulesToEnable(modules: List<Pair<Int, Int>>): List<Int> =
+        modules
+            .filterNot { (id, status) -> status == 0 && (id == Module.VR || id == Module.MIC) }
+            .map { it.first }
+
     /** 车机硬键：`CarlifeCarHardKeyCode{ keycode = 1 }`（键值见 [HardKey]）。 */
     fun carHardKeyCode(keycode: Int): ByteArray = pbVarint(1, keycode)
 
