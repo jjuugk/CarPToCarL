@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk)**
-> —— 主线固定直链（当前 1.2.72，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk)**
+> —— 主线固定直链（当前 1.2.73，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.72，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.72.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.73，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.73.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.72`（正式版；媒体采样率改为**跟随车机**（44.1k 就协商 44.1k、48k 就协商 48k），宣告值落盘、冷启动第一次连接也跟随；未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.73`（正式版；过滤保活会话被引擎读回的假歌名「车机音频直通 / CarPToCarL」，不再污染车机歌名/歌词基线；同时修复语音键：65574 里语音/麦克风模块的 0 不再回置 1。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.73.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.73/CarPToCarL-1.2.73.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,39 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.73 —— 2026-11-20（假歌名过滤 + 语音键模块状态，正式版）
+
+本版两处改动，**均未实车验证**。
+
+**一、过滤保活会话的假歌名**
+
+前台服务为防国产 ROM 冻结，维持一条 `MediaSession(this, "CarPToCarL")`，元数据写死歌名
+「车机音频直通」、歌手「CarPToCarL」。这条会话会被 CarLife 引擎当成当前媒体源读回来，
+经 `onMediaInfo` 进入我们的媒体信息管线——1.2.72 实车日志铁证：
+
+```
+14:12:07.128  CARLIFE: 媒体信息 song=车机音频直通 artist=CarPToCarL art=3377B
+14:12:07.129  EVENT: CarLife 歌名「车机音频直通」→ 补推 iAP2 0x5001 NowPlayingUpdate
+```
+
+后果：车机歌名/歌词基线被假歌名顶掉（`latestSongMediaInfo` 一度是它，`NowPlayingSourcePolicy`
+再也判不出「MediaSession 与 CarLife 是否同一首歌」），时间戳也被污染成「引擎还在推送」的假象。
+
+`MediaListenerService` / `MediaSessionFallback` 虽已按包名过滤 MediaSession 列表，但拦不住
+引擎回调这条路（读回来的是普通 `CarLifeMediaInfo`，没有包名）。新增
+`carlife/KeepAliveMediaFilter.kt`，在 `CarLifeHijack.onMediaInfo` 最前端挡一次，一处覆盖全部下游。
+判据是**歌名 + 歌手双条件**（大小写不敏感、去首尾空格），不会误伤真实歌曲。新增 6 例单测。
+
+**二、语音键：module 4/6 的 0 不再回置 1**
+
+收到 65574 模块状态后，旧代码把所有模块（含语音 4 / 麦克风 6 的 0）无条件回 98344 置 1；
+引擎上报「语音=0」，我们立刻回一条把它置 1，等于压着引擎的语音态不放。参考 AuDiCar
+`modulesToEnable()` 的实证改为：module 4/6 状态为 0 时排除、不回置 1，**其余模块报文逐字不变**。
+同时修正 `语音模块=0` 的误导日志文案（连接初期也会出现，不能单独当「硬键被拒」证据）。
+
+上车验收：按语音键后看 `CARLIFE: 语音模块=` 是否翻 1；歌名看车机标题栏是否还出现
+「车机音频直通」。
 
 ### 1.2.72 —— 2026-11-20（媒体采样率跟随车机，正式版）
 

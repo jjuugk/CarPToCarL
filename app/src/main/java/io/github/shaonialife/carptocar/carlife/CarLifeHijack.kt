@@ -1520,6 +1520,13 @@ object CarLifeHijack {
 
     /** 收到 CarLife 媒体信息（歌名/歌手/封面，或逐行歌词）：记录并广播，供 iAP2 0x5001 转发。 */
     private fun onMediaInfo(info: CarLifeMediaInfo) {
+        // 前台服务保活用的假 MediaSession（歌名「车机音频直通」/ 歌手 CarPToCarL）会被
+        // 引擎读回来当媒体源，污染歌名/歌词基线与时间戳。在管线最前端挡掉，一处覆盖全部下游。
+        // 判据是歌名+歌手双条件，不会误伤真实歌曲（见 KeepAliveMediaFilter）。
+        if (KeepAliveMediaFilter.isKeepAliveInfo(info)) {
+            logSink?.invoke("CARLIFE: 丢弃保活会话的假媒体信息（song=${info.song} artist=${info.artist}）")
+            return
+        }
         // 歌词行不覆盖「真实歌名」基线：它是判断「MediaSession 与 CarLife 是否同一首歌」
         // 的唯一凭据（见 NowPlayingSourcePolicy），被歌词顶掉就再也判不出来了。
         if (!LyricLines.isLyricLine(info)) latestSongMediaInfo = info
