@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk)**
-> —— 主线固定直链（当前 1.2.71，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk)**
+> —— 主线固定直链（当前 1.2.72，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.71，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.71.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.72，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.72.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.71`（正式版；协议模块化重构 + 删掉混音器与定拍泵（媒体 PCM 直通）+ 导航改投 `101/default` 单声道；均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.71.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.71/CarPToCarL-1.2.71.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.72`（正式版；媒体采样率改为**跟随车机**（44.1k 就协商 44.1k、48k 就协商 48k），宣告值落盘、冷启动第一次连接也跟随；未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.72.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.72/CarPToCarL-1.2.72.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,35 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.72 —— 2026-11-20（媒体采样率跟随车机，正式版）
+
+本版只改一件事：媒体音频的采样率从**写死 48k 优先**改成**跟随车机**。车机给 44.1k 就协商
+44.1k、给 48k 就协商 48k，不再让 44.1k 音乐源被强制重采样到 48k。**未实车验证**。
+
+**一、「自动」档改名「跟随车机」**
+
+- 仍是三档（跟随车机 / 48 kHz / 44.1 kHz），向后兼容；
+- 排序用的优先率 = 引擎最近一次宣告的媒体采样率（CarLife `MUSIC_PKG_INIT` field1，
+  即车机 `MEDIA_SAMPLE_RATE` 协商出来的实际输出率）；从未收到宣告时退回 48k，保持旧行为；
+- 车机只声明一档时本来就跟随，真正变化在**两档都声明**的场景（奥迪 `100/media = 0x8800`
+  同时含 44.1k 与 48k）——以前固定先试 48k，现在按宣告值决定；
+- `reorderCandidates()` 改成伴生纯函数、显式接收 `preferRate`，排序职责收敛到候选生成处，
+  `SessionController` 不再二次重排。
+
+**二、宣告采样率落盘**
+
+建流（SETUP）发生在音乐开播之前，本次会话的格式宣告还没到，只能靠历史值。第一版只在内存里
+记，App 进程一重启就丢；本版写入 `settings` 库的 `announced_media_rate_hz`：内存优先，冷启动
+从库回填，`CarLifeHijack.onAudioFormat` 只记媒体通道（TTS 不记）。引擎自己的 `is48k` 本来就是
+持久化偏好，这边对齐后跨重启永久跟随。
+
+**三、验证方式与边界**
+
+先播一次音乐让引擎宣告采样率，断开重连，日志里应出现
+`AUDIO: 采样率=跟随车机（引擎最近宣告 44100Hz）——优先 44100Hz 档`，紧接着的
+`AUDIO: 音频档位候选=[…]` 第一条应是 44100Hz 的档。全新安装且从未播过音乐时仍按 48k 优先，
+这是预期行为。911 例单测 0 失败（其中 5 例为跟随车机新增）。
 
 ### 1.2.71 —— 2026-11-19（协议模块化重构 + 音频链路只剩一条路，正式版）
 
