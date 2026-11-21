@@ -2137,15 +2137,22 @@ object SessionController {
      * 2~4 分钟的连/断循环——守卫在工作，但用户看着像「蓝牙坏了」，所以日志里
      * 每次重断都写一行，便于事后区分「守卫在干活」与「真的在抖」。
      *
-     * 退出条件（任一命中）：用户断开、iAP2 会话建立（[BtSessionGate.sessionActive]）、
-     * 已经开始推流、或盯满 [AudioProfileGuardPolicy.MAX_MILLIS]。
+     * 退出条件（任一命中）：用户断开、**本轮 RFCOMM 已连入**、iAP2 bring-up、
+     * CarPlay 端点拿到、已经开始推流、或盯满 [AudioProfileGuardPolicy.MAX_MILLIS]。
+     *
+     * 2026-11-21 收紧：原先用 `iap2Ready`（完整 bring-up）作退出条件，别克卡在
+     * `0x4300` ACK 时它就一直不来——08:17 那轮连踢 6 次、跨 90 秒，而踢 HFP 会带
+     * ACL 一起断。改为「车机一连入 `…caff` 就停」（bmw134 的收敛结论），并用
+     * 本轮连入计数区分上一轮残留；RFCOMM 后另留 1 次上限兜竞态。
      *
      * 2026-11-19 收紧：会话一旦激活就**连一轮都不跑**（以前是先起线程、下一拍才发
      * 现该停，这中间仍可能把刚连上的 HFP/A2DP 掐一次），断开动作前还会二次确认，
      * 收工时把「因为哪个条件停的」写进日志——见 [AudioGuardGate]。
      */
     private fun startAudioProfileGuard() {
-        guardStopReason()?.let { reason ->
+        // 快照必须在起线程前取：否则上一轮残留的 RFCOMM 会被误判成本轮连入。
+        val connectCountAtStart = BtSessionGate.controlConnectCount
+        guardStopReason(connectCountAtStart)?.let { reason ->
             appendLog(
                 "BT-GUARD: $reason——会话已激活，" +
                     "本轮不再盯音频配置文件（不主动断开 HFP/A2DP）",
@@ -2158,6 +2165,7 @@ object SessionController {
             try {
                 if (ctx == null) return@Thread
                 val appCtx = ctx.applicationContext
+                val controlConnected = { BtSessionGate.controlConnectCount > connectCountAtStart }
                 val drops =
                     BtProfiles.guardAudioProfiles(
                         appCtx,
@@ -2165,9 +2173,10 @@ object SessionController {
                             BtSessionGate.activePeerAddress
                                 ?: TargetDevicePrefs.get(appCtx)?.address
                         },
-                        shouldStop = { guardStopReason() != null },
+                        shouldStop = { guardStopReason(connectCountAtStart) != null },
                         onEvent = { line -> appendLog(line) },
-                        stopLabel = { guardStopReason() ?: "会话状态已变化" },
+                        stopLabel = { guardStopReason(connectCountAtStart) ?: "会话状态已变化" },
+                        controlConnected = controlConnected,
                     )
                 appendLog("BT-GUARD: 守卫线程结束（共断开 $drops 次）")
             } catch (error: Throwable) {
@@ -2182,14 +2191,19 @@ object SessionController {
     }
 
     /**
-     * 音频配置守卫该不该收工、因为哪个条件（`null` = 继续盯）。判定在 [AudioGuardGate]。
+     * 守卫收工原因。
+     *
+     * [connectCountAtStart] = 本轮守卫启动时 RFCOMM 连入计数；之后计数变大才说明是
+     * **本轮**车机连进来了，不能用上一轮残留的连接状态误判（那会让新一轮守卫根本不启动）。
      */
-    private fun guardStopReason(): String? =
+    private fun guardStopReason(connectCountAtStart: Long = -1): String? =
         AudioGuardGate.stopReason(
             sessionWanted = sessionWanted,
             iap2Ready = BtSessionGate.iap2Ready,
             sessionActive = BtSessionGate.sessionActive,
             streaming = isStreaming(),
+            controlConnected =
+                connectCountAtStart >= 0 && BtSessionGate.controlConnectCount > connectCountAtStart,
         )
 
     /**

@@ -15,6 +15,7 @@ import io.github.shaonialife.carptocar.transport.Iap2LinkChannel
 import io.github.shaonialife.carptocar.transport.StreamDuplexStream
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -1010,6 +1011,18 @@ object BtSessionGate {
     @Volatile
     private var controlOwner: Iap2LinkChannel? = null
 
+    /**
+     * RFCOMM 控制通道成功连入的累计次数（每次 [claimControl] +1）。
+     *
+     * 音频配置守卫用它区分「**本轮**车机连进来了」和「上一轮残留的已连接状态」：
+     * 守卫启动时记下当前值，之后一旦变大就立即收工——bmw134 的收敛结论是
+     * 「车机一连入 `…cafecafe` 守卫就没有存在意义」，我们此前等的是更晚的
+     * `iap2Ready`（完整 bring-up），卡在 `0x4300` ACK 时就会白踢几十秒。
+     */
+    private val controlConnectCounter = AtomicLong(0)
+
+    val controlConnectCount: Long get() = controlConnectCounter.get()
+
     /** 入站与出站共享同一车机控制上下文，后建立的通道接管所有权并返回旧通道供调用方退役。 */
     @Synchronized
     fun claimControl(
@@ -1017,6 +1030,7 @@ object BtSessionGate {
         inbound: Boolean,
     ): Iap2LinkChannel? {
         val previous = controlOwner
+        controlConnectCounter.incrementAndGet()
         iap2Ready = false
         inboundActive = inbound
         controlOwner = channel

@@ -139,6 +139,8 @@ object BtProfiles {
         shouldStop: () -> Boolean,
         onEvent: (String) -> Unit,
         stopLabel: () -> String = { "会话已激活" },
+        /** 本轮 RFCOMM 是否已连入；连入即收工，不再踢 HFP/A2DP。 */
+        controlConnected: () -> Boolean = { false },
     ): Int {
         val started = SystemClock.uptimeMillis()
         var drops = 0
@@ -150,6 +152,13 @@ object BtProfiles {
         while (true) {
             if (shouldStop()) {
                 onEvent("BT-GUARD: ${stopLabel()} → 立即收工（本次共断开 $drops 次）")
+                return drops
+            }
+            // 车机已经连进 iAP2 服务：守卫的使命到此为止。我们以前等的是更晚的
+            // iap2Ready，卡在 0x4300 ACK 时会一直踢 HFP（08:17 那轮 90 秒踢 6 次），
+            // 而踢 HFP 会带 ACL 一起断，只会让控制链路更不稳。
+            if (controlConnected()) {
+                onEvent("BT-GUARD: RFCOMM 已连入 → 立即收工（本次共断开 $drops 次）")
                 return drops
             }
             val elapsed = SystemClock.uptimeMillis() - started
@@ -173,13 +182,15 @@ object BtProfiles {
                 idlePolls = 0
                 val before = connectedNames(context, address)
                 if (before.isNotEmpty()) {
-                    // 二次确认：查状态本身就要几十~几百毫秒，这段时间里会话可能刚好
-                    // 起来。会话既已激活就别再动它——保持现有连接，让声音留在它该在
-                    // 的地方，别在推流中途把车机的音频路径掐断再让它自己拉回来。
-                    if (shouldStop()) {
+                    // 二次确认（并再查一次 RFCOMM）：这几步本身要几十~几百毫秒，
+                    // 车机可能刚好在这期间连进来。连接既已建立就别再动它——
+                    // 保持现有配置文件，别在控制链路刚起来时把车机的音频路径掐断。
+                    val connectedNow = controlConnected()
+                    if (shouldStop() || connectedNow) {
                         onEvent(
-                            "BT-GUARD: ${stopLabel()} → 取消本次断开" +
-                                "（${before.joinToString("/")} 保持在线），收工（本次共断开 $drops 次）",
+                            "BT-GUARD: ${if (connectedNow) "RFCOMM 已连入" else stopLabel()} → " +
+                                "取消本次断开（${before.joinToString("/")} 保持在线），" +
+                                "收工（本次共断开 $drops 次）",
                         )
                         return drops
                     }
@@ -190,6 +201,12 @@ object BtProfiles {
                             "BT-GUARD: 车机把 ${dropped.joinToString("/")} 拉回来了 → " +
                                 "再次断开（第 $drops 次）",
                         )
+                        // 硬上限：RFCOMM 连入后最多再踢 1 次，防「查询→断开」竞态里
+                        // 守卫追着刚建好的控制链路继续踢（bmw134 的 ACL 抖动）。
+                        if (controlConnected() && drops >= AudioProfileGuardPolicy.MAX_DROPS_AFTER_RFCOMM) {
+                            onEvent("BT-GUARD: RFCOMM 已连入且已断开 $drops 次 → 提前收工")
+                            return drops
+                        }
                     }
                 }
             }
@@ -317,6 +334,9 @@ object BtProfiles {
 object AudioProfileGuardPolicy {
     const val POLL_MILLIS = 1_500L
     const val MAX_MILLIS = 300_000L
+
+    /** RFCOMM 连入后最多再踢 1 次（竞态兜底；正常路径一连入就收工）。 */
+    const val MAX_DROPS_AFTER_RFCOMM = 1
 
     /** 守卫是否还该继续盯：从开始计时起，未到上限就一直盯。 */
     fun shouldKeepGuarding(

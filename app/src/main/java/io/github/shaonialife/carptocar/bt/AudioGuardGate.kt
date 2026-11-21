@@ -10,6 +10,7 @@ package io.github.shaonialife.carptocar.bt
  * 而实际排障时这两者的区别很关键：
  *
  * - 「用户断开」停止 = 正常收场；
+ * - 「RFCOMM 已连入」停止 = 车机已经接受控制链路，继续踢只会造成 ACL 抖动；
  * - 「iAP2 bring-up / 端点拿到 / 已在推流」停止 = 车机已经认可我们了，守卫不该再动蓝牙。
  *
  * 如果后续日志里仍然出现会话已激活后的 HFP/A2DP 连断，只有一个可能：又有一轮
@@ -27,9 +28,15 @@ object AudioGuardGate {
         iap2Ready: Boolean,
         sessionActive: Boolean,
         streaming: Boolean,
+        /** 本轮 RFCOMM 已连入（守卫启动后的新连接，而非上一轮残留）。 */
+        controlConnected: Boolean = false,
     ): String? =
         when {
             !sessionWanted -> "用户已断开"
+            // bmw134 的收敛结论：车机一连入 iAP2 服务，守卫就没有存在意义了。
+            // 必须排在 iap2Ready 前面——完整 bring-up 可能卡在 0x4300 ACK 几十秒，
+            // 这期间继续踢 HFP 只会带着 ACL 一起断（08:17 那轮连踢 6 次）。
+            controlConnected -> "RFCOMM 已连入"
             iap2Ready -> "iAP2 已 bring-up"
             sessionActive -> "CarPlay 端点已拿到"
             streaming -> "已在推流"

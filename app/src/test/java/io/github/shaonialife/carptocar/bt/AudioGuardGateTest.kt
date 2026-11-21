@@ -78,4 +78,44 @@ class AudioGuardGateTest {
             ),
         )
     }
+
+    @Test
+    fun stopsAsSoonAsRfcommConnectsBeforeFullBringUp() {
+        // 别克 08:17 那轮：RFCOMM 0.4s 就连上，但 iap2Ready 卡在 0x4300 ACK 一直不来，
+        // 旧守卫因此连踢 HFP 6 次跨 90 秒。车机一连入就该停手。
+        assertEquals(
+            "RFCOMM 已连入",
+            AudioGuardGate.stopReason(
+                sessionWanted = true,
+                iap2Ready = false,
+                sessionActive = false,
+                streaming = false,
+                controlConnected = true,
+            ),
+        )
+    }
+
+    @Test
+    fun rfcommStopWinsOverLaterFlagsButNotOverUserDisconnect() {
+        assertEquals(
+            "RFCOMM 已连入",
+            AudioGuardGate.stopReason(
+                sessionWanted = true,
+                iap2Ready = true,
+                sessionActive = true,
+                streaming = true,
+                controlConnected = true,
+            ),
+        )
+        assertEquals(
+            "用户已断开",
+            AudioGuardGate.stopReason(
+                sessionWanted = false,
+                iap2Ready = true,
+                sessionActive = true,
+                streaming = true,
+                controlConnected = true,
+            ),
+        )
+    }
 }
