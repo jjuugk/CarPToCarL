@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk)**
-> —— 主线固定直链（当前 1.2.78，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk)**
+> —— 主线固定直链（当前 1.2.79，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.78，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.78.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.79，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.79.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.78`（正式版；**方向盘语音键改发 `0x10066` 语音控制**——`0x68008 keycode=0x21` 在 CarLife+ 8.8.5 上写出成功但引擎不处理，实车日志里 8.5 秒零反应、25 分钟等不到 `语音=1`；**悬浮窗权限纳入连接体检**（12 项 → 13 项）——缺它 MagicOS 会静默拦掉后台 `startActivity`，「车机靠近了手机毫无反应」正是这个坑，现可在「一键获取」里直达该设置页。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.79`（正式版；**蓝牙反复断开问题——新增日志监控**：建链期反复踢 HFP/A2DP 疑似会把部分手机的整机蓝牙栈带重启，本版加入 `BT-STATE` / `BT-PROFILE` 三类日志，与 `BT-GUARD` / `BT-C` 同一毫秒时钟对齐，用来一锤定音「断配置 vs 蓝牙重启」的因果链；**纯观测，不改变任何连接行为**。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,22 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.79 —— 2026-11-21（蓝牙问题日志监控，正式版）
+
+**本版不含功能改动，只为定位「蓝牙为什么一直反复断开」加观测日志。** 纯记录，不改变任何连接行为。
+
+背景：无线 CarPlay 建链期，我们会反复断开车机的 HFP/A2DP——因为部分车机（奥迪 MIB3、宝马 NBT EVO）只要这两个配置文件在线就不开放 iAP2 窗口。断开是协议要求，但真车机固件能保证不把配置文件拉回来、断一次即可；第三方车机蓝牙栈会自己拉回，于是形成「拉回 → 踢掉 → 再拉回」的循环。进一步怀疑：**在部分手机上，这种高频断开会把整机蓝牙栈踢崩**（`com.android.bluetooth` 重启 / 适配器 TURNING_OFF），连带我们自己的 iAP2 RFCOMM 一起断，会话失效后又触发下一轮重连——表现为「越断越停不下来」。
+
+本版新增三类日志，全部写进 `main_debug.log`，与已有的 `BT-GUARD` / `BT-C` 动作日志**共用同一把毫秒时钟**，可直接按时间戳对齐因果链：
+
+- `BT-STATE: 适配器 ON(12) → TURNING_OFF(13)`：新增 `BluetoothStateReceiver`，在 `SenderApp` 动态注册，记录蓝牙适配器状态翻转。这是「手机蓝牙是否真的重启」的直接证据；
+- `BT-PROFILE: profile 服务断开（…）——蓝牙栈重启信号`：`onServiceDisconnected` 原本静默清代理缓存，现在节流 3 秒记一行，作为间接信号；
+- `BT-PROFILE: 请求断开 … · 适配器态=…`：断开动作发生时记下适配器当前状态；配置级断开超时升级为设备级 `disconnect()` 时单独记一行（这一步是「断 HFP 却把整机蓝牙带崩」的最大嫌疑点）。
+
+**判读标准**：若断开动作后紧跟 `BT-STATE` 的 TURNING_OFF / TURNING_ON 与服务断开 → 假设成立，下一步降踢的频率或去掉设备级兜底；若只有 `BT-GUARD: 车机把 … 拉回来了` 而始终没有 `BT-STATE` 翻转 → 排除手机整机重启，问题回到车机侧的拉锯循环。需要在**问题手机**上抓日志，最好与一台正常手机对照。
+
+单测 967 例 0 失败（含新增 2 例状态名格式化测试）。**本版未实车验证。**
 
 ### 1.2.78 —— 2026-11-21（语音键换通路 + 悬浮窗进体检，正式版）
 
