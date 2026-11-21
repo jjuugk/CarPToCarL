@@ -27,9 +27,19 @@ object DisplayPrefs {
     const val MOVE_THROTTLE_DEFAULT = 0
     const val MOVE_THROTTLE_MAX = 48
 
+    /**
+     * 触摸域自适应的默认值：**关**。
+     *
+     * 绝大多数车机上报域 = 显示域，原样透传才对（二次缩放见 v0.2.15/v0.2.17 的教训）。
+     * 只有「上报域明显比画面大（点右侧总落到右边缘）」的个别车机才需要打开，
+     * 判定与换算见 `input/TouchDomainMapping.kt`。
+     */
+    const val ADAPTIVE_TOUCH_DEFAULT = false
+
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
     private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
+    private const val KEY_ADAPTIVE_TOUCH = "adaptive_touch_domain"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
     private const val KEY_LAST_CAR_FROM_CAR = "last_car_from_car"
@@ -147,6 +157,27 @@ object DisplayPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_MOVE_THROTTLE, ms.coerceIn(0, MOVE_THROTTLE_MAX))
+            .apply()
+    }
+
+    /**
+     * 触摸域自适应（默认关）：上报坐标域大于画面时，按观测到的最大坐标线性缩到画面尺寸。
+     *
+     * 只影响触摸坐标，不改分辨率、不改码流。换算见 `input/TouchDomainMapping.kt`。
+     */
+    fun adaptiveTouchDomain(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ADAPTIVE_TOUCH, ADAPTIVE_TOUCH_DEFAULT)
+
+    fun setAdaptiveTouchDomain(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ADAPTIVE_TOUCH, enabled)
             .apply()
     }
 }

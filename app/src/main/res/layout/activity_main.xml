@@ -1326,6 +1326,48 @@
                     android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
                     android:textColor="@color/m3_on_var"
                     android:textSize="12sp" />
+
+                <!-- 触摸域自适应（默认关）：上报坐标域比画面大时按观测上限线性映射 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="触摸域自适应"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/adaptiveTouchNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="当车机上报的触摸坐标比画面大（点右侧总落到右边缘、拖拽幅度对不上）时打开：按实测的最大坐标把上报域缩到画面尺寸。默认关闭，只影响触摸，不改分辨率。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchAdaptiveTouch"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- ==================== 日志（默认折叠） ==================== -->

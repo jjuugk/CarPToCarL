@@ -2018,6 +2018,23 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
+
+        // 触摸域自适应（默认关）：上报坐标域比画面大时按观测上限线性映射。
+        // 即时生效——直接改 CarLifeHijack 的开关字段，不必重连；持久化走 DisplayPrefs。
+        val adaptiveTouchSwitch = findViewById<SwitchCompat>(R.id.switchAdaptiveTouch)
+        adaptiveTouchSwitch.isChecked = DisplayPrefs.adaptiveTouchDomain(ctx)
+        CarLifeHijack.adaptiveTouchDomain = adaptiveTouchSwitch.isChecked
+        adaptiveTouchSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setAdaptiveTouchDomain(ctx, checked)
+            CarLifeHijack.adaptiveTouchDomain = checked
+            snack(
+                if (checked) {
+                    "触摸域自适应已开启——下一笔触摸起按实测上报域换算（日志见「触控 ↓」行）"
+                } else {
+                    "触摸域自适应已关闭——坐标恢复原样透传"
+                },
+            )
+        }
     }
 
     private fun updateAudioTag() {
