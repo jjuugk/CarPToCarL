@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk)**
-> —— 主线固定直链（当前 1.2.75，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**
+> —— 主线固定直链（当前 1.2.76，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.75，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.75.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.76，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.76.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.75`（正式版；新增「触摸域自适应」开关（设置→显示，默认关），专治车机 HID 上报坐标域大于画面导致的触摸漂移——开启后按实测上报上限把坐标缩到视图，域按手势锁定，换分辨率自动作废。默认关时不改变任何既有行为。未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.76`（正式版；新增**车机占屏时保留视频流**实验开关（设置→显示，默认关）——车机借屏放转向/倒车影像时不再拆流，归还后补关键帧并重武装触摸；蓝牙守卫改为 **RFCOMM 一连入即收工**，不再卡在完整 iAP2 bring-up 上连踢 HFP 几十次；`changeModes`/`requestUI` 全量原文进日志。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,50 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.76 —— 2026-11-21（占屏保留流开关 + 资源诊断 + 蓝牙守卫收敛，正式版）
+
+本版含 1.2.75 之后的 4 个提交。以下三项**均未实车验证**。
+
+**一、车机占屏时保留视频流（实验开关，默认关）**
+
+2026-11-21 别克 6369 日志：关掉转向后在车机上点 CarPlay，车机还屏 143ms 又夺回，
+之后连续 9 轮「抢到 → 100~172ms 被夺 → 重申请」，每轮都白做一次
+`TEARDOWN → SETUP → RECORD`，一帧留不住，界面永久等待。而同源的 link_plus
+（别克可用）与 carvex 都**不拆流**：归属变了只改状态，画面回来补关键帧。
+
+- 设置 →「显示」最下方新增 **车机占屏时保留视频流**，键 `keep_screen_stream_on_take`，默认 `false`，切换即时生效。
+- 打开后车机占屏只置 `softHold`：**不 TEARDOWN、不停编码器、不 detach 采集**；
+  归还时沿用现有 `VideoSender`，补关键帧 + 重发 `hidSetInputMode`（车机会复位 HID 输入模式，不重发则触摸静默失效）。
+- 同时尊重借用：`requestUI` 到来时若车机仍借着屏（`borrowers` 非空）不再 `overrideBorrow` 硬抢，
+  等它自己发 `transferType=4` 结束借用。
+- 关闭即完全回到旧行为。日志：`MODE: 车机占屏策略=…`、`MODE: 车机占用主屏——保留视频流（实验开关…）`、
+  `RESOURCE: 主屏归还——沿用现有视频流（实验开关），补关键帧 + 重武装 HID（N 个设备）`。
+
+**二、资源仲裁报文一次抓全**
+
+- `changeModes` 原有日志只打 `reasonStr` 键名，别克实测 14/14 全是空串，靠它判断抢屏原因这条路断了。
+  现在每轮多打一行**完整原文**：`params` 逐层摊平，含 `resources[]` 的 `transferType`/`borrowID`/约束、
+  `appStates[]` 和未知键；`/info.modes` 初始快照、`requestUI` 参数同样留原文。
+- `describe()` 借用信息带身份（`借用 phoneCall@解借1000`）。
+- 新增让屏/起流计时：`本轮第 N 次让屏 · 这次送流活了 Xms` / `车机占屏 Xms` / 被抢时 `本次送流 N 帧`。
+
+**三、蓝牙守卫不再长跑**
+
+- 旧守卫等 `iap2Ready`（完整 bring-up）才收工。别克 08:17 那轮 RFCOMM 0.4s 就连上，
+  但控制会话卡在 `0x4300` ACK，`iap2Ready` 一直不来，守卫**连踢 HFP 6 次、跨 90 秒**；
+  踢 HFP 会带 ACL 一起断，只会加剧抖动。
+- 现改为 **RFCOMM 一连入即收工**（bmw134 的收敛结论），用 `controlConnectCount` 区分本轮新连入与
+  上一轮残留，另留「连入后最多再踢 1 次」兜竞态。日志：
+  `BT-GUARD: RFCOMM 已连入 → 立即收工（本次共断开 N 次）`。
+
+**四、验证要点**
+
+1. 打开新开关后打转向再关掉：期望画面几秒内自行恢复，`MODE: 停止屏幕流` 与 `StopHID`/`DETECT 重启` 那一串消失。
+2. `BT-GUARD: …再次断开（第 N 次）` 的 N 应始终 ≤1；出现第 2 次即是bug。
+3. 对照 `changeModes 原文=` 里的 `borrowID`，确认转向影像到底用哪个借用身份。
+
+正式包 14,139,945 B，sha256 `c177d107289e052295744628f811e6ce3a60d418841ae0df1cc0e139d8721d58`；950 例单测 0 失败（versionCode 10276）。
 
 ### 1.2.75 —— 2026-11-21（触摸域自适应开关，正式版）
 
