@@ -2137,6 +2137,12 @@ object SessionController {
     /** 音频配置守卫是否在跑（一轮 connect 只拉一条线程）。 */
     private val audioGuardRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /** P1 主动取主音频每轮只排一次；随会话退役复位。 */
+    private val proactiveAudioScheduled = AtomicBoolean(false)
+
+    /** 连上后主动取一次主音频的延迟（ms）：等首帧出屏、控制会话就绪后再动，别让车机看门狗盯空屏。 */
+    private const val PROACTIVE_AUDIO_DELAY_MS = 1_500L
+
     /**
      * 音频配置守卫：会话期间**持续**断开目标车机的 HFP/A2DP（2026-11-08 按宝马 fork 移植）。
      *
@@ -2853,6 +2859,7 @@ object SessionController {
     private fun retireSessionResources() {
         val retired = currentClient
         currentClient = null
+        proactiveAudioScheduled.set(false)
         resourceStreams?.close()
         resourceStreams = null
         retired?.cancelled = true
@@ -4677,6 +4684,34 @@ object SessionController {
     private fun onRecordedAll() {
         audioSender?.onRecorded()
         navAudioSender?.onRecorded()
+        maybeScheduleProactiveAudio(currentClient)
+    }
+
+    /**
+     * P1（开关 `proactive_audio_on_link`，默认关）：会话建好后主动取一次主音频。
+     *
+     * 宝马 MGU-50-J 的脾气是「没有音频会话就不交屏」：视频和 ACK 都正常，车机停在
+     * 自己的主页，只有用户放首歌才切进 CarPlay。开关打开后，1.5 秒后（首帧已出、
+     * 控制会话已就绪）若无音频流且主音频不在手机手里，就置一次播放意图并走既有
+     * `modesChanged → SETUP → RECORD`。**未实车验证的通用化能力**——不按车机指纹
+     * 判定，由用户在设置里按车型自行开启。
+     */
+    private fun maybeScheduleProactiveAudio(client: AirPlayClient?) {
+        if (client == null || !DisplayPrefs.proactiveAudioOnLink(appContext ?: return)) return
+        if (!proactiveAudioScheduled.compareAndSet(false, true)) return
+        Thread({
+            try {
+                Thread.sleep(PROACTIVE_AUDIO_DELAY_MS)
+            } catch (_: InterruptedException) {
+                return@Thread
+            }
+            if (currentClient !== client || client.cancelled || connectCancelled) return@Thread
+            if (audioSender?.isRunning == true) return@Thread
+            if (client.phoneOwnsAudio) return@Thread
+            appendLog("AUDIO: 主动申请主音频（实验开关开）——无播放意图也取一次，专治「视频在送但车机不交屏」")
+            audioIntent.setPlayback(media = true, navigation = false, newMediaIntent = true)
+            resourceStreams?.reconcile()
+        }, "proactive-audio").apply { isDaemon = true }.start()
     }
 
     // ---- 音频自愈（2026-11-21）----
@@ -6754,6 +6789,19 @@ object SessionController {
                                                     AirPlayResourceState.paramsText(command["params"]) +
                                                     " · 当前 ${client.resourceDescription}",
                                             )
+                                            // 宝马 MGU-50-J：车机点 CarPlay 图标时发 requestUI，但此时主屏
+                                            // 本来就在手机手里、视频也在推——applyScreen 会直接 return，
+                                            // 车机等的是「一次新的画面激活」，我们却什么都没给它。
+                                            // 强制关键帧 + 复述归属即可（幂等）；刻意不重发 RECORD，
+                                            // 这台车对重复 RECORD 过敏（补发后 1.79~2.03s 拆链）。
+                                            if (client.phoneOwnsScreen && videoSender?.isRunning == true) {
+                                                val forced = videoSender?.requestKeyFrame() == true
+                                                client.republishModes()
+                                                appendLog(
+                                                    "RESOURCE: requestUI 时主屏已在本机——已强制关键帧并复述资源归属" +
+                                                        "（forced=$forced，不重发 RECORD）",
+                                                )
+                                            }
                                             resourceStreams?.requestScreen(fromRequestUi = true)
                                         }
 

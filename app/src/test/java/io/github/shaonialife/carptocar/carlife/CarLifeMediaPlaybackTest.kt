@@ -183,9 +183,10 @@ class CarLifeMediaPlaybackTest {
         playback.onCarResume()
         assertFalse(playback.pauseHeldByCar)
 
-        // 音乐焦点被车机切走（切到 FM 收音机）→ 同样只能等焦点回来。
+        // 引擎放开音乐焦点（切歌必然发生）不是车机接管：走 15 秒窗口自恢复，
+        // 不能把 PCM 门禁挂成无限期——否则用户在手机上切歌后就永久静音。
         playback.onActivity(CarLifeMediaActivity.FOCUS_RELEASED)
-        assertTrue(playback.pauseHeldByCar)
+        assertFalse(playback.pauseHeldByCar)
         playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
         assertFalse(playback.pauseHeldByCar)
 
@@ -393,5 +394,21 @@ class CarLifeMediaPlaybackTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `focus release uses timed window while real car takeover stays indefinite`() {
+        val playback = CarLifeMediaPlayback()
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+
+        // 切歌：引擎放焦点，不是车机抢音源 —— 15 秒窗口会自己放行。
+        playback.onActivity(CarLifeMediaActivity.FOCUS_RELEASED)
+        assertFalse("FOCUS_RELEASED 不能挂成无限期门禁", playback.pauseHeldByCar)
+
+        // 真正的车机接管（资源层 transfer / 静音键）仍必须等它还回来。
+        playback.onCarPause()
+        assertTrue("onCarPause 仍是无限期门禁", playback.pauseHeldByCar)
     }
 }

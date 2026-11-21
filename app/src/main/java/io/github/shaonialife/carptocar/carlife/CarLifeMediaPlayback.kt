@@ -86,8 +86,9 @@ internal class CarLifeMediaPlayback {
                 // focused=true 时把 eligible 锁成 false，后面这串 INIT+PCM 一次都授权不了，
                 // 于是 mediaPlayback.canForwardPcm 永久为 false、引擎的 PCM 被全部丢弃
                 // ——车机侧表现就是「放着放着突然没声音，之后再也不响」。
-                // 车机侧接管/焦点释放走的是 onCarPause / FOCUS_RELEASED（pausedByCar=true），
-                // 那种仍要等车机还回来，不受这里影响。
+                // 车机侧真正接管走 onCarPause（资源层 transfer / 静音键），那种仍要等它还回来，
+                // 不受这里影响。FOCUS_RELEASED 只是引擎放开了音乐焦点（切歌必然发生），
+                // 语义上不等于「车机拿走了」：按 15 秒窗口常规自恢复，别把 PCM 门禁挂成无限期。
                 if (focused == true && !pausedByCar) {
                     sourcePaused = false
                     eligible = true
@@ -132,7 +133,11 @@ internal class CarLifeMediaPlayback {
 
             CarLifeMediaActivity.FOCUS_RELEASED -> {
                 sourcePaused = true
-                pausedByCar = true
+                // 切歌必然伴随一次 FOCUS_RELEASED。以前这里置 pausedByCar=true，
+                // sink 门禁 indefinite → 只能等车机按播放键才解除；用户在手机上切歌时
+                // 车机根本没参与，于是「切歌后永久静音」。改为只标记 sourcePaused，
+                // 门禁按 15 秒窗口自动放行；真正的车机接管仍走 onCarPause()。
+                pausedByCar = false
                 if (focused != false) {
                     eligible = true
                     pcmAfterInit = false

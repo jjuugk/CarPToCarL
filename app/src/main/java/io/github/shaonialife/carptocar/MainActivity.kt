@@ -1902,6 +1902,19 @@ class MainActivity : AppCompatActivity() {
                 },
             )
         }
+        // 连上后主动取一次主音频（实验，默认关；按车型自行开启，不做车机指纹判定）。
+        val proactiveAudioSwitch = findViewById<SwitchCompat>(R.id.switchProactiveAudio)
+        proactiveAudioSwitch.isChecked = DisplayPrefs.proactiveAudioOnLink(ctx)
+        proactiveAudioSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setProactiveAudioOnLink(ctx, checked)
+            snack(
+                if (checked) {
+                    "已开启「连上后主动取主音频」——下次连接 1.5 秒后自动取一次（日志见「主动申请主音频」）"
+                } else {
+                    "已关闭——恢复等播放意图再申请主音频"
+                },
+            )
+        }
         // 「立即重启一次」：不用下车按键也能验证这套动作通不通（同一段代码）。
         findViewById<TextView>(R.id.btnRestartAudio).setOnClickListener {
             if (!SessionController.isStreaming()) {
