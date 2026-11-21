@@ -539,6 +539,46 @@ class Iap2SenderSession(
          */
         internal fun breaksOn16BChallenge(identityLower: String): Boolean =
             MFI_BREAKS_ON_16B_MARKERS.all { identityLower.contains(it) }
+
+        // ---- 诊断版：MFi 封装变体扫描（标准三档全失败后的兜底探测）----
+
+        /** 单个诊断变体的收帧窗口（真 iPhone 应答在 100ms 级，1.2s 足够且不过度拖长会话）。 */
+        const val DIAG_VARIANT_WINDOW_MS = 1_200L
+
+        /**
+         * 按变体把 challenge 字节封装成 `0xaa02` 报文体（纯函数，便于单测）。
+         * 全部基于 20B 挑战（EntryEVO 的 16B 会断链，扫描阶段不碰）。
+         */
+        internal fun buildDiagChallenge(variant: DiagChallengeVariant, challenge: ByteArray): ByteArray =
+            when (variant) {
+                DiagChallengeVariant.PARAM0_STD -> Iap2Csm.param(0, challenge)
+                DiagChallengeVariant.RAW -> challenge
+                DiagChallengeVariant.PARAM1 -> Iap2Csm.param(1, challenge)
+                DiagChallengeVariant.PARAM0_ZERO -> Iap2Csm.param(0, ByteArray(challenge.size))
+                DiagChallengeVariant.PARAM0_8B -> Iap2Csm.param(0, challenge.copyOf(8))
+            }
+
+        /** 字节数组转十六进制摘要（诊断日志用；超长截断并标注实际长度）。 */
+        internal fun hexOf(bytes: ByteArray, limit: Int = 64): String {
+            val shown = if (bytes.size > limit) bytes.copyOf(limit) else bytes
+            return shown.joinToString(" ") { "%02x".format(it) } +
+                if (bytes.size > limit) " …(${bytes.size}B)" else ""
+        }
+    }
+
+    /**
+     * 诊断版要逐一试探的 `0xaa02` 挑战封装变体。
+     *
+     * 标准 `param(0, challenge)`（[MFI_ATTEMPTS] 三档）由主流程先试，全失败后才进扫描。
+     * 这里覆盖「车机可能认的其它封装」：裸发、param id≠0、全零 nonce、更短挑战。
+     * 定义在类级别（非 companion 内），便于单测以 Iap2SenderSession.DiagChallengeVariant 引用。
+     */
+    internal enum class DiagChallengeVariant(val label: String) {
+        PARAM0_STD("param0/std"),
+        RAW("raw"),
+        PARAM1("param1"),
+        PARAM0_ZERO("param0/zero-nonce"),
+        PARAM0_8B("param0/8B"),
     }
 
     /** 从 0x1D01 提取接收端身份文本（name/model/manufacturer 小写拼接）——MFi 挑战长度选择用。 */
@@ -1177,7 +1217,8 @@ class Iap2SenderSession(
             }
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                    "(${Iap2MessageIds.nameOf(frame.messageId)}) keep-alive bytes=${frame.body.size}",
+                    "(${Iap2MessageIds.nameOf(frame.messageId)}) keep-alive bytes=${frame.body.size}" +
+                    " body=${hexOf(frame.body)}",
             )
         }
         log("SESSION 保活结束（链路断开）")
@@ -1846,19 +1887,19 @@ class Iap2SenderSession(
                 }
                 when (frame.messageId) {
                     Iap2MessageIds.MFI_RESPONSE -> {
-                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）")
+                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
                         gotResponse = true
                     }
 
                     Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
-                        log("iap2 rx=0xaa04 挑战 ${size}B 被拒")
+                        log("iap2 rx=0xaa04 挑战 ${size}B 被拒 body=${hexOf(frame.body)}")
                         gotFailure = true
                     }
 
                     else ->
                         log(
                             "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                                "(${Iap2MessageIds.nameOf(frame.messageId)})",
+                                "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
                         )
                 }
                 if (gotResponse || gotFailure) break
@@ -1882,9 +1923,71 @@ class Iap2SenderSession(
             if (position < order.size - 1) {
                 log("iap2 MFi ${size}B 无应答，改用 ${order[position + 1]}B 重试")
             } else {
-                log("iap2 MFi 挑战全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
+                log("iap2 MFi 标准三档全部无应答——进入【诊断变体扫描】，逐一试探其它封装并记录车机全部应答")
             }
         }
+        // 诊断版：标准三档全失败后，自动扫描其它封装变体。
+        // 每个变体把「发出的 body」和「车机回的每一项（含未知 ID 的完整 body）」都打进日志，
+        // 用于定位车机到底认哪种 challenge 格式。不改动成功/失败判定语义（扫描后仍照常发 0xaa05）。
+        runDiagnosticChallengeSweep(receiverKey)
+        log("iap2 MFi 诊断扫描结束——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
+    }
+
+    /**
+     * 诊断版：标准 `0xaa02` 三档全失败后，逐一试探其它封装变体。
+     *
+     * 目的不是「蒙对」，而是**采集证据**：车机对本车 Unknown 报文（如 0x7301）一直被旧代码
+     * 只记 ID 丢 body。这里把每个变体的 tx body 和车机回的每一帧 body 原样打进 main_debug.log，
+     * 一次实车就能看清车机到底认哪种 challenge 封装、拒绝时回什么。任一变体收到 0xaa03 立即
+     * 记录成功并返回。链路断开即停（不制造额外断链）。
+     */
+    private fun runDiagnosticChallengeSweep(receiverKey: String) {
+        log("iap2 DIAG ═══ MFi 封装诊断扫描开始（5 种变体，每种窗口 ${DIAG_VARIANT_WINDOW_MS}ms）═══")
+        for (variant in DiagChallengeVariant.values()) {
+            if (!channel.isAlive) {
+                log("iap2 DIAG 链路已断，停止扫描")
+                return
+            }
+            val challenge = ByteArray(20).also(random::nextBytes)
+            val body = buildDiagChallenge(variant, challenge)
+            send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, body)
+            log("iap2 DIAG tx=0xaa02 variant=${variant.label} body=${hexOf(body)}")
+            val end = System.nanoTime() + DIAG_VARIANT_WINDOW_MS * 1_000_000L
+            var anyRx = false
+            var gotSignature = false
+            while (true) {
+                val remain = (end - System.nanoTime()) / 1_000_000L
+                if (remain <= 0) break
+                val frame = recvFrame(remain)
+                if (frame == null) {
+                    if (!channel.isAlive) break
+                    continue
+                }
+                anyRx = true
+                log(
+                    "iap2 DIAG rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                        "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
+                )
+                if (frame.messageId == Iap2MessageIds.MFI_RESPONSE) {
+                    log("iap2 DIAG ★ 变体 ${variant.label} 触发 0xaa03 签名！body=${hexOf(frame.body)}")
+                    MfiLengthMemory.recordSuccess(context, receiverKey, 20)
+                    gotSignature = true
+                    break
+                }
+                if (frame.messageId == Iap2MessageIds.MFI_AUTHENTICATION_FAILED) {
+                    log("iap2 DIAG 变体 ${variant.label} 收到 0xaa04 拒绝 body=${hexOf(frame.body)}")
+                    break
+                }
+            }
+            if (!anyRx && channel.isAlive) {
+                log("iap2 DIAG 变体 ${variant.label} 静默（窗口内零应答）")
+            }
+            if (gotSignature) {
+                log("iap2 DIAG ═══ 命中变体 ${variant.label}，提前结束扫描 ═══")
+                return
+            }
+        }
+        log("iap2 DIAG ═══ 扫描完毕，无变体触发 0xaa03 ═══")
     }
 
     @Synchronized
@@ -2045,7 +2148,8 @@ class Iap2SenderSession(
             if (answerSubscription(frame)) continue
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                    "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
+                    "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费" +
+                    " body=${hexOf(frame.body)}",
             )
             pendingFrames += frame
             if (pendingFrames.size > maxPendingFrames) {
