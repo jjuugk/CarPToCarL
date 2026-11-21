@@ -521,6 +521,24 @@ class Iap2SenderSession(
 
         /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
         private val LEGACY_RECEIVER_MARKERS = listOf("audi", "delphi", "mib", "harman", "porsche")
+
+        /**
+         * BMW EntryEVO（阿尔派代工，如 BMW 51953 / Entry Evo / ALPINE Electronics）身份特征。
+         *
+         * 2026-11-21 实车日志：该平台的 0xaa02 挑战 **16B 会直接断链**（32/20B 静默但链路存活）。
+         * 断链后外层在死链路上发 0xaa05 → 整轮会话失败，车机卡在「正在建立连接」。
+         * 因此冷启动时即从基线剔除 16B（不依赖持久化记忆，避免重装/清记忆后第一轮又踩坑）。
+         * 两个标记按 AND 命中，避免误伤同样含 alpine 的其它车机。
+         */
+        private val MFI_BREAKS_ON_16B_MARKERS = listOf("entry evo", "alpine")
+        private const val MFI_BREAKS_ON_16B_LENGTH = 16
+
+        /**
+         * 身份文本是否属于「16B 挑战会断链」的 BMW EntryEVO/ALPINE 平台。
+         * 全部标记按 AND 命中（纯函数，便于单测）。传入的是 [identityText] 的小写结果。
+         */
+        internal fun breaksOn16BChallenge(identityLower: String): Boolean =
+            MFI_BREAKS_ON_16B_MARKERS.all { identityLower.contains(it) }
     }
 
     /** 从 0x1D01 提取接收端身份文本（name/model/manufacturer 小写拼接）——MFi 挑战长度选择用。 */
@@ -1765,11 +1783,25 @@ class Iap2SenderSession(
         prefer20First: Boolean = false,
         receiverKey: String,
     ) {
-        val baselineLengths =
+        val baseLengths =
             if (prefer20First) {
                 listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
             } else {
                 MFI_ATTEMPTS.map { it.first }
+            }
+        // BMW EntryEVO：冷启动即从基线剔除「一试就断链」的 16B，不必等记忆积累。
+        val breaksOn16B = breaksOn16BChallenge(receiverKey)
+        val baselineLengths =
+            if (breaksOn16B) {
+                val filtered = baseLengths.filter { it != MFI_BREAKS_ON_16B_LENGTH }
+                log(
+                    "iap2 MFi 识别为 BMW EntryEVO/ALPINE（$receiverKey）——" +
+                        "冷启动剔除 ${MFI_BREAKS_ON_16B_LENGTH}B（实车该长度直接断链），" +
+                        "仅试 ${filtered.joinToString("/")}B",
+                )
+                filtered
+            } else {
+                baseLengths
             }
         val windowOf = MFI_ATTEMPTS.associate { it.first to it.second }
         val memory = MfiLengthMemory.load(context, receiverKey)
@@ -1803,9 +1835,12 @@ class Iap2SenderSession(
                     if (!channel.isAlive) {
                         // 挑战期间被对端断开 = **强证据**，走硬拒绝：即使该长度曾被记成
                         // 「成功」也要推翻（迟到应答的归属歧义，见 MfiLengthMemory.recordHardRejected）。
-                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机被拒档位（硬拒绝，可推翻旧的成功记忆）")
+                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机断链档位（硬拒绝，可推翻旧的成功记忆并从基线剔除）")
                         MfiLengthMemory.recordHardRejected(context, receiverKey, size)
-                        return
+                        // 链路已死，绝不能返回让外层在死链路上发 0xaa05——那会抛
+                        // 「发送 0xaa05 时关闭」的误导性错误、掩盖真正的断链根因。
+                        // 断链由接收端自然重连流程接管（BT 监听仍在跑）。
+                        throw IOException("iAP2 链路在 MFi 挑战 ${size}B 期间被对端断开（该长度已记入断链档位）")
                     }
                     continue
                 }

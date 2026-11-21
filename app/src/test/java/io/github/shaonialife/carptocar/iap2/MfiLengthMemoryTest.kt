@@ -86,10 +86,34 @@ class MfiLengthMemoryTest {
         MfiLengthMemory.recordHardRejected(null, identity, 20)
         val next = MfiLengthMemory.load(null, identity)
         assertEquals(null, next.succeeded)
-        assertTrue(20 in next.rejected)
+        // 断链要记进独立的 hardRejected，而不是普通 rejected（后者仅表示 0xAA04 拒绝字）
+        assertTrue(20 in next.hardRejected)
+        assertFalse(20 in next.rejected)
         assertFalse(20 in next.silent)
-        // 摘掉之后 20B 不再排第一：真车基线 [20,32,16] → 先试 32
-        assertEquals(listOf(32, 16, 20), MfiLengthMemory.orderAttempts(baselineCar, next))
+        // 关键：断链档位在有其它可用档位时被真正剔除——真车基线 [20,32,16] → [32,16]，
+        // 20B 不再参与尝试（BMW EntryEVO 16B 断链实测的通用化修复）。
+        assertEquals(listOf(32, 16), MfiLengthMemory.orderAttempts(baselineCar, next))
+    }
+
+    /**
+     * BMW EntryEVO 场景（2026-11-21 实车）：16B 断链、20/32B 静默。
+     * 断链档位必须被剔除，且即便它曾被记为 succeeded 也要推翻。
+     */
+    @Test
+    fun hardRejectedLengthIsExcludedWhileAlternativesExist() {
+        val entry =
+            MfiLengthMemory.Entry(silent = setOf(20, 32), hardRejected = setOf(16))
+        // 车机身份序 prefer20First=false → 基线 [32,20,16]；剔除 16B 后仅剩 32/20B
+        val order = MfiLengthMemory.orderAttempts(listOf(32, 20, 16), entry)
+        assertEquals(listOf(32, 20), order)
+        assertFalse(16 in order)
+    }
+
+    /** 兜底保护：若所有档位都断链过（换固件/同身份不同车），照常全试，避免永久卡死。 */
+    @Test
+    fun allHardRejectedFallsBackToTryingEverything() {
+        val entry = MfiLengthMemory.Entry(hardRejected = setOf(20, 32, 16))
+        assertEquals(baselineCar, MfiLengthMemory.orderAttempts(baselineCar, entry))
     }
 
     /**
@@ -115,5 +139,11 @@ class MfiLengthMemoryTest {
         assertTrue(text.contains("成功=32B"))
         assertTrue(text.contains("静默=20B"))
         assertTrue(text.contains("被拒=16B"))
+        val withHard =
+            MfiLengthMemory.describe(
+                MfiLengthMemory.Entry(rejected = setOf(20), hardRejected = setOf(16)),
+            )
+        assertTrue(withHard.contains("被拒=20B"))
+        assertTrue(withHard.contains("断链=16B"))
     }
 }
