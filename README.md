@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk)**
-> —— 主线固定直链（当前 1.2.77，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk)**
+> —— 主线固定直链（当前 1.2.78，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.77，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.77.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.78，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.78.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.77`（正式版；修 2026-11-21 实车「音频突然没声音、必须重启」——`UDP 发送失败 - Message too long` 单次失败不再当场拆掉整条音频通路，改为重开数据口补发同一包；新增**音频自愈看门狗**：音频流建成过又停了且引擎仍在推 PCM 时自动整条重建（退避 1~5 分钟、上限 5 次）；手动「重启音频」在发送端已停时不再假装成功，升级为整条流补建；失败现场打印包长与各接口 MTU。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.78`（正式版；**方向盘语音键改发 `0x10066` 语音控制**——`0x68008 keycode=0x21` 在 CarLife+ 8.8.5 上写出成功但引擎不处理，实车日志里 8.5 秒零反应、25 分钟等不到 `语音=1`；**悬浮窗权限纳入连接体检**（12 项 → 13 项）——缺它 MagicOS 会静默拦掉后台 `startActivity`，「车机靠近了手机毫无反应」正是这个坑，现可在「一键获取」里直达该设置页。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.78.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.78/CarPToCarL-1.2.78.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,51 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.78 —— 2026-11-21（语音键换通路 + 悬浮窗进体检，正式版）
+
+修 2026-11-21 20:37 实车（奥迪 MIB3 / 荣耀 Magic7 Pro / 1.2.77）报的两件事：
+**「方向盘语音键唤不起小度」** 与 **「车机靠近了手机毫无反应（不静默启动）」**。
+本版**未实车验证**。
+
+#### 一、语音键：`0x68008 0x21` → `0x10066`
+
+`0x68008 keycode=0x21 (VR_START)` 这条通路在 CarLife+ 8.8.5 上是**死的**：
+
+- 20:36:45.712 发出去，之后 **8.5 秒**引擎毫无反应；20:36:54.290 才报 `语音=1`，
+  而它前 231 ms 正好有一次界面点击（`EVENT: 触摸 #0(36,486)↓`），引擎是被点的，不是被硬键叫起来的；
+- 11-20 另一台车的日志里，21:38:22 发 `0x21`，之后 **25 分钟**一次 `语音=1` 都没有；
+- 同一通路的媒体硬键（`0x10` / `0x0F`）在 11-16 已被证实「写出成功、无 `0x10035` 回执」。
+
+改为官方语音控制消息 `MSG_CMD_HU_VOICE_CONTROL (0x10066)`，载荷
+`CarlifeVoiceControlRequest{command, opt}`（dex 实证两字段均 `required int32`）：
+首次尝试 `command=1`、`opt=2`，两个值抽成
+`CarLifeProtocol.VoiceControl.START_COMMAND / START_OPT`——实车无效只改这两个常量。
+
+`VR_STOP`（长按 PTT 松手收尾）**仍走 `0x68008 0x22`**：`0x10066` 的「停」语义没有任何实证，
+而未起识别时的 `VR_STOP` 是无害空操作。日志改成可对账的两行：
+
+```
+EVENT: 车机语音键（requestSiri 按下）→ CarLife 0x10066 语音控制（起识别）
+CARLIFE: 语音控制 0x10066 command=1 opt=2 已送达（等引擎「语音=1」确认）
+```
+
+**判据是引擎自己回的 `引擎模块状态 … 语音=1`**，`已送达` 只代表 socket 写成功。
+
+#### 二、悬浮窗权限纳入连接体检（12 项 → 13 项）
+
+同一份日志 20:34:50.784 写着「未授予『显示在其他应用上层』」，而体检 12 项**全绿**、
+界面上一个字都没提。Android 10+ 后台 `startActivity` 的通用豁免就是它，缺了 MagicOS
+**静默拦掉**（不抛异常、界面不出现）——这正是「车机蓝牙都连上了，手机还停在桌面」。
+
+- 新增 `Requirement.OVERLAY`（`Settings.canDrawOverlays`），严重度 **WARNING** 而非
+  BLOCKING：手动打开 App 照样能连，只是不会自动弹前台；
+- `PermissionRepair` 增 `Step.OVERLAY`：`ACTION_MANAGE_OVERLAY_PERMISSION` 带
+  `package:` 直达本应用，跳不过去退列表页、再退应用详情页；「一键获取」现在能真补上。
+
+顺带记一条 1.2.77 的实车反馈：20:19:47 车机 reset 那次出现 `PortUnreachableException`，
+新代码打出发包失败现场（`wlan0 mtu=1500`）后**重开数据口重发同一包**，全程没有 `Message too long`、
+音频也没被拆通路——发包容错按预期工作。
 
 ### 1.2.77 —— 2026-11-21（音频断流容错 + 自愈，正式版）
 
