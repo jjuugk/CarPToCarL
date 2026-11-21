@@ -20,7 +20,7 @@
 **最新正式版**（免编译，直接装）：
 
 > **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**
-> —— 主线固定直链（当前 1.2.76，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> —— 主线固定直链（当前 1.2.76，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
@@ -41,7 +41,7 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.76`（正式版；新增**车机占屏时保留视频流**实验开关（设置→显示，默认关）——车机借屏放转向/倒车影像时不再拆流，归还后补关键帧并重武装触摸；蓝牙守卫改为 **RFCOMM 一连入即收工**，不再卡在完整 iAP2 bring-up 上连踢 HFP 几十次；`changeModes`/`requestUI` 全量原文进日志。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 当前版本 | `1.2.76`（正式版；新增**车机占屏时保留视频流**实验开关（设置→显示，默认关）——车机借屏放转向/倒车影像时不再拆流，归还后补关键帧并重武装触摸；**车机不发 0x4301 时落盘复用上次成功建链的网络信息**，不再干等 90 秒；蓝牙守卫改为 **RFCOMM 一连入即收工**，不再卡在完整 iAP2 bring-up 上连踢 HFP 几十次；`changeModes`/`requestUI` 全量原文进日志。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
 | 下载   | **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
@@ -833,7 +833,7 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 
 ### 1.2.76 —— 2026-11-21（占屏保留流开关 + 资源诊断 + 蓝牙守卫收敛，正式版）
 
-本版含 1.2.75 之后的 4 个提交。以下三项**均未实车验证**。
+本版含 1.2.75 之后的 5 个功能提交。以下四项**均未实车验证**。
 
 **一、车机占屏时保留视频流（实验开关，默认关）**
 
@@ -858,7 +858,19 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 - `describe()` 借用信息带身份（`借用 phoneCall@解借1000`）。
 - 新增让屏/起流计时：`本轮第 N 次让屏 · 这次送流活了 Xms` / `车机占屏 Xms` / 被抢时 `本次送流 N 帧`。
 
-**三、蓝牙守卫不再长跑**
+**三、车机不发 0x4301 时复用上次网络信息**
+
+四次 0x4301 的 SSID/密码/信道/地址逐字节相同（BUICK_6369），但 `lastGoodEndpoint` 只在内存里，
+进程重启即丢，于是第二次连同一台车要干等 90 秒空端点窗口。
+
+- 新增 `net/NetworkMemory.kt`：按 SSID 把 SSID/密码/信道/安全类型/端口/地址/公钥落盘到
+  `shared_prefs/carplay_network.xml`，TTL 30 天、最多 5 条。
+- 首帧成功送达才记录（`startFirstFrameGate`），失败不写；空端点分支先复用上次记录直接建链，
+  若密码变了则清除该条并回退原流程（不会拿坏凭据反复撞墙）。
+- `CURRENT_WIFI_LABEL` 收敛到 `NetworkMemory` 单一定义。10 例单测。
+- **只在车机本轮没发 0x4301 时启用**；发了就用车机新数据。
+
+**四、蓝牙守卫不再长跑**
 
 - 旧守卫等 `iap2Ready`（完整 bring-up）才收工。别克 08:17 那轮 RFCOMM 0.4s 就连上，
   但控制会话卡在 `0x4300` ACK，`iap2Ready` 一直不来，守卫**连踢 HFP 6 次、跨 90 秒**；
@@ -867,13 +879,15 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
   上一轮残留，另留「连入后最多再踢 1 次」兜竞态。日志：
   `BT-GUARD: RFCOMM 已连入 → 立即收工（本次共断开 N 次）`。
 
-**四、验证要点**
+**五、验证要点**
 
 1. 打开新开关后打转向再关掉：期望画面几秒内自行恢复，`MODE: 停止屏幕流` 与 `StopHID`/`DETECT 重启` 那一串消失。
-2. `BT-GUARD: …再次断开（第 N 次）` 的 N 应始终 ≤1；出现第 2 次即是bug。
+2. `BT-GUARD: …再次断开（第 N 次）` 的 N 应始终 ≤1；出现第 2 次必是 bug。
 3. 对照 `changeModes 原文=` 里的 `borrowID`，确认转向影像到底用哪个借用身份。
+4. 同一台车第二次连接（车机未发 0x4301）应直接出现
+   `复用上次成功建链的网络信息：SSID=BUICK_6369…`，不再走 90 秒空端点等待。
 
-正式包 14,139,945 B，sha256 `c177d107289e052295744628f811e6ce3a60d418841ae0df1cc0e139d8721d58`；950 例单测 0 失败（versionCode 10276）。
+正式包 14,151,205 B，sha256 `3a174926e4480537832614b48dc92af6713c5b700da5b13ccb76b76d691e2526`；960 例单测 0 失败（versionCode 10276）。
 
 ### 1.2.75 —— 2026-11-21（触摸域自适应开关，正式版）
 
