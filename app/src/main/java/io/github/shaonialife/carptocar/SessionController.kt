@@ -85,6 +85,7 @@ import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.service.ProcFreeze
 import io.github.shaonialife.carptocar.session.AppStateReporter
 import io.github.shaonialife.carptocar.session.AsyncSessionStop
+import io.github.shaonialife.carptocar.session.CarNightMode
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.SessionAttemptGate
 import io.github.shaonialife.carptocar.ui.ScreenDimmer
@@ -6434,6 +6435,35 @@ object SessionController {
                                             "EVENT: 车机请求关键帧（forceKeyFrame）→ " +
                                                 if (forced) "已强制编码 I 帧" else "编码器未就绪，等周期 I 帧",
                                         )
+                                    }
+
+                                    "setNightMode" -> {
+                                        // 车机（配件侧）下发的昼夜状态。xcertplay/DiPlay 实测报文：
+                                        //   POST /command, plist { type=setNightMode,
+                                        //     params={ nightMode=<bool> } }
+                                        // 不回第二轮应答（事件通道的 /command 已经由
+                                        // AirPlayClient.respondEventRequest 回 200）。
+                                        val params = command["params"] as? Map<*, *>
+                                        val raw = params?.get("nightMode") ?: command["nightMode"]
+                                        val night = CarNightMode.parse(raw)
+                                        if (night == null) {
+                                            appendLog(
+                                                "EVENT: setNightMode 参数无法识别" +
+                                                    "（raw=$raw params=$params）",
+                                            )
+                                        } else {
+                                            CarNightMode.apply(night, "AirPlay /command")
+                                            // 送进手机 CarLife+ 引擎（0x18078 主题切换）：
+                                            // 走专用命令线程池，绝不在 iAP2 事件线程做本地 socket 写。
+                                            carLifeCommandSender.execute {
+                                                val sent = CarLifeHijack.sendThemeChange(night)
+                                                appendLog(
+                                                    "EVENT: 车机日夜模式 → ${if (night) "夜间" else "日间"}" +
+                                                        " → CarLife+ 引擎 0x18078 " +
+                                                        if (sent) "已送达" else "未送达（引擎未连接）",
+                                                )
+                                            }
+                                        }
                                     }
 
                                     // 车机请求资源仲裁。回的是**当前实际归属**，不是「手机接管」：

@@ -198,6 +198,25 @@ internal object CarLifeProtocol {
     const val HU_PAUSE_MEDIA = 98318 // 0x0001800E MSG_CMD_PAUSE_MEDIA（兼容旧版 MD 控制指令）
     const val HU_CAR_GPS = 98320 // 0x00018010
 
+    /**
+     * 互联昼夜/主题切换（HU → MD，控制通道）：`0x00018078` = 98424。
+     *
+     * 字节码铁证（CarLife+ 车机端 8.8.x 反编译 `La9/r4;->b(I)V`）：
+     * ```
+     * CarLifeMessage.obtain(channel=1, serviceType=0x18078, length=0)
+     *   .h(CarlifeThemeChangeProto.CarlifeThemeChange.newBuilder()
+     *        .setThemeModes(mode).build())
+     *   → Lh5/a;->v() 发往手机引擎
+     * ```
+     * 载荷是 protobuf `CarlifeThemeChange{ themeModes = 1 }`（field 1, varint），
+     * 取值来自 `La9/s4`：MODE_DAY=0 / MODE_NIGHT=1。
+     *
+     * 这是把日夜状态**送进手机 CarLife+ 引擎**的唯一正确出口：引擎在自己的进程里
+     * 决定地图/UI 配色。此前误用 `AUTONAVI_STANDARD_BROADCAST_SEND` 全局广播
+     * （KEY_TYPE=0x2740）只是车机 App 收的高德广播，手机引擎根本不认。
+     */
+    const val HU_THEME_CHANGE = 98424 // 0x00018078 MSG_CMD_THEME_CHANGE
+
     // ---- 车机硬键（0x68008，HU → MD，控制通道）----
     //
     // `CommonParams.MSG_TOUCH_CAR_HARD_KEY_CODE = 0x00068008`，
@@ -317,6 +336,16 @@ internal object CarLifeProtocol {
     }
 
     // ---- 载荷构造 ----
+
+    /** CarLife+ 车机端 `La9/s4` 主题枚举取值（0=日间 / 1=夜间）。 */
+    const val MODE_DAY = 0
+    const val MODE_NIGHT = 1
+
+    /**
+     * 昼夜/主题切换载荷：`CarlifeThemeChange{ themeModes = mode }`（field 1 varint）。
+     * [mode] 取 [MODE_DAY]/[MODE_NIGHT]，与车机端 `La9/s4` 枚举一致（0=日间, 1=夜间）。
+     */
+    fun themeChange(mode: Int): ByteArray = pbVarint(1, mode)
 
     /**
      * 协议版本 **3.0**，不是 4.0。
