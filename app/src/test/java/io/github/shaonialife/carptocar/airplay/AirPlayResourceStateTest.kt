@@ -371,4 +371,70 @@ class AirPlayResourceStateTest {
         // plist 里数值型字段偶尔被车机塞进这个键，不能因为类型不对就整条日志丢信息
         assertEquals("\"7\"", AirPlayResourceState.reasonText(mapOf<Any?, Any?>("reasonStr" to 7)))
     }
+
+    // ---- params 原文摊平 ----
+    // 别克 6369 的 reasonStr 恒为空串（2026-11-21 12:10 实测 14/14），定点解析等于把
+    // 「报文里还有什么」一次性丢掉。下面锁的是「一个字段都不许漏」。
+
+    @Test
+    fun `paramsText 把 resources 逐字段摊平`() {
+        val params =
+            mapOf<Any?, Any?>(
+                "reasonStr" to "",
+                "resources" to
+                    listOf(
+                        mapOf<Any?, Any?>(
+                            "resourceID" to 1,
+                            "transferType" to 3,
+                            "borrowID" to "phoneCall",
+                            "unborrowConstraint" to 1000,
+                        ),
+                    ),
+            )
+        assertEquals(
+            "{reasonStr=\"\", resources=[{resourceID=1, transferType=3, borrowID=\"phoneCall\", unborrowConstraint=1000}]}",
+            AirPlayResourceState.paramsText(params),
+        )
+    }
+
+    @Test
+    fun `paramsText 保留没见过的键与缺省`() {
+        assertEquals("{来路不明=7}", AirPlayResourceState.paramsText(mapOf<Any?, Any?>("来路不明" to 7)))
+        assertEquals("null", AirPlayResourceState.paramsText(null))
+    }
+
+    @Test
+    fun `paramsText 二进制按十六进制截断`() {
+        val text = AirPlayResourceState.paramsText(mapOf<Any?, Any?>("data" to ByteArray(30) { it.toByte() }))
+        assertTrue(text.startsWith("{data=hex(30B)=00 01 02"))
+        assertTrue(text.endsWith("…}"))
+    }
+
+    @Test
+    fun `paramsText 超长截断并注明原长`() {
+        val text = AirPlayResourceState.paramsText(mapOf<Any?, Any?>("k" to "x".repeat(400)), limit = 60)
+        assertTrue(text.endsWith("字)"))
+        assertTrue(text.length < 100)
+    }
+
+    @Test
+    fun `describe 带出借用者身份与解借约束`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.applyCarChange(
+            mapOf<Any?, Any?>(
+                "resources" to
+                    listOf(
+                        mapOf<Any?, Any?>(
+                            "resourceID" to 1,
+                            "transferType" to 3,
+                            "borrowID" to "phoneCall",
+                            "unborrowConstraint" to 1000,
+                        ),
+                    ),
+            ),
+        )
+        // 只写「借用 1 个」看不出是谁借的——车机借屏的动机全在 borrowID 里
+        assertTrue(state.describe(), state.describe().contains("借用 phoneCall@解借1000"))
+    }
 }

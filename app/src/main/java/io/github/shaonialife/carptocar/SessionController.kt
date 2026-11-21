@@ -4130,10 +4130,23 @@ object SessionController {
         onScreenPaused = {
             synchronized(sessionLifecycleLock) {
                 if (currentClient === client) {
+                    // 「这次给屏 → 被抢」之间我们到底送出去几帧、活了多久：车机抢屏若恒定落在
+                    // 首帧后 100~300ms，就是它一收到我们的帧就出问题，与用户操作无关。
+                    val frames = CarLifeHijack.framesDelivered - videoSessionFrameBase
+                    val aliveMs =
+                        if (screenResumedAtMs == 0L) {
+                            -1L
+                        } else {
+                            android.os.SystemClock.elapsedRealtime() - screenResumedAtMs
+                        }
                     CarLifeHijack.detach()
                     ScreenDimmer.setSessionActive(false)
                     phaseHint = "车机暂时持有主屏资源，等待显示请求或归还"
-                    appendLog("RESOURCE: 主屏暂由车机持有；保留控制会话，等待 requestUI 或资源归还")
+                    appendLog(
+                        "RESOURCE: 主屏暂由车机持有；保留控制会话，等待 requestUI 或资源归还" +
+                            " · 本次送流 $frames 帧" +
+                            if (aliveMs >= 0) " / 存活 ${aliveMs}ms" else "",
+                    )
                 }
             }
         },
@@ -4144,6 +4157,7 @@ object SessionController {
                 } else {
                     videoSender = sender
                     videoSessionFrameBase = CarLifeHijack.framesDelivered
+                    screenResumedAtMs = android.os.SystemClock.elapsedRealtime()
                     CarLifeHijack.attach(sender, ::appendLog)
                     ScreenDimmer.setSessionActive(true)
                     phaseHint = "主屏资源已归还，CarPlay 视频恢复"
@@ -6445,7 +6459,13 @@ object SessionController {
 
                                         "requestUI" -> {
                                             pendingScreenRequestFromCarUi.set(true)
-                                            appendLog("RESOURCE: 收到车机 requestUI，解除借用限制并申请取回主屏")
+                                            // 完整 params：车机「请把界面交回手机」时带的 url/其它字段
+                                            // 是它唯一一次主动示好的报文，换车排查全靠这行。
+                                            appendLog(
+                                                "RESOURCE: 收到车机 requestUI，解除借用限制并申请取回主屏 · params=" +
+                                                    AirPlayResourceState.paramsText(command["params"]) +
+                                                    " · 当前 ${client.resourceDescription}",
+                                            )
                                             resourceStreams?.requestScreen(fromRequestUi = true)
                                         }
 
@@ -7276,6 +7296,10 @@ object SessionController {
      */
     @Volatile
     private var videoSessionFrameBase = 0L
+
+    /** 本次主屏流重新挂载成功的时刻（`uptimeMillis`；0 = 还没挂过）。只用于日志里的存活时长。 */
+    @Volatile
+    private var screenResumedAtMs = 0L
 
     /** 最近一次向车机推送「没有 CarLife 画面」提示的时刻（`uptimeMillis`；0 = 没推过）。 */
     @Volatile

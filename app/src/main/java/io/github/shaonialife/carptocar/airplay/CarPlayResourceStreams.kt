@@ -24,6 +24,8 @@ internal class CarPlayResourceStreams(
     private val onAudioOwnership: (Boolean) -> Boolean,
     private val onFailure: (String) -> Unit,
     private val log: (String) -> Unit,
+    /** 单调时钟（只用于日志里的「存活多久 / 等了多久」，可注入便于单测）。 */
+    private val nowMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     private val worker =
         Executors.newSingleThreadExecutor { runnable ->
@@ -43,6 +45,13 @@ internal class CarPlayResourceStreams(
     private var screenRequested = initialSender == null
     private var screenRequestFromCarUi = false
 
+    // 诊断计数（只在工作线程上读写）：一轮会话里「让屏 → 等 → 起流 → 又被抢」到底循环了几次、
+    // 每次送流实际活了多久。没有这两个数就只能靠人工比对时间戳，且看不出「越抢越快」。
+    private var screenLosses = 0
+    private var screenResumes = 0
+    private var streamStartedAtMs = 0L
+    private var waitStartedAtMs = 0L
+
     /** 车机持有主屏、视频暂停中（控制会话仍在）。 */
     @Volatile
     var screenPaused = initialSender == null
@@ -53,7 +62,7 @@ internal class CarPlayResourceStreams(
         post {
             screenStarted = true
             screenStreaming = initialScreenAttached && sender?.isRunning == true
-            if (sender == null) onScreenPaused()
+            if (sender == null) onScreenPaused() else streamStartedAtMs = nowMs()
         }
 
     /** 建链阶段的音频处理完成后接管音频流；[initialAudioActive] = 音频已随 RECORD 激活。 */
@@ -121,7 +130,16 @@ internal class CarPlayResourceStreams(
     }
 
     private fun retireScreen(reason: String): Boolean {
-        log("MODE: 停止屏幕流（$reason）")
+        // 本轮流活了多久：车机「给屏→抢屏」的间隔就藏在这个数里。反复在 100~300ms
+        // 被杀说明是它一收到我们的帧就出事，而不是用户切走。
+        val aliveMs = if (streamStartedAtMs == 0L) -1L else nowMs() - streamStartedAtMs
+        streamStartedAtMs = 0L
+        waitStartedAtMs = nowMs()
+        screenLosses++
+        log(
+            "MODE: 停止屏幕流（$reason）· 本轮第 $screenLosses 次让屏" +
+                if (aliveMs >= 0) " · 这次送流活了 ${aliveMs}ms" else "",
+        )
         screenPaused = true
         screenStreaming = false
         onScreenPaused()
@@ -148,6 +166,14 @@ internal class CarPlayResourceStreams(
             retireScreen("屏幕恢复挂载被拒")
             return
         }
+        val waited = if (waitStartedAtMs == 0L) -1L else nowMs() - waitStartedAtMs
+        waitStartedAtMs = 0L
+        streamStartedAtMs = nowMs()
+        screenResumes++
+        log(
+            "MODE: 主屏恢复 · 第 $screenResumes 次起流" +
+                if (waited >= 0) " · 车机占屏 ${waited}ms" else "",
+        )
         screenStreaming = true
         screenPaused = false
     }

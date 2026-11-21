@@ -349,7 +349,14 @@ class AirPlayResourceState {
 
     private fun ownerName(resource: Resource): String {
         val base = if (resource.entity == ENTITY_PHONE) "手机" else "车机"
-        val borrow = if (resource.borrowers.isEmpty()) "" else "（借用 ${resource.borrowers.size} 个）"
+        // 借用者要带 **borrowID 与解借约束**：车机借屏/借音频时只在这里露身份
+        // （真车取值见过 `phoneCall`、倒车/PDC 一类），只说「借用 1 个」等于没说。
+        val borrow =
+            if (resource.borrowers.isEmpty()) {
+                ""
+            } else {
+                "（借用 " + resource.borrowers.joinToString("+") { "${it.first ?: "<无ID>"}@解借${it.second}" } + "）"
+            }
         val permanent = if (resource.permanentEntity == ENTITY_PHONE) "永久=手机" else "永久=车机"
         return "$base$borrow/$permanent"
     }
@@ -471,6 +478,35 @@ class AirPlayResourceState {
             val text = raw.toString()
             return if (text.isEmpty()) "(\"\")" else "\"$text\""
         }
+
+        /**
+         * 把 `changeModes` / `requestUI` / `/info.modes` 的 `params` **原样摊平**成一行文本。
+         *
+         * 为什么不用定点解析：`reasonStr` 在别克 6369 上恒为空串（2026-11-21 12:10 实测 14/14），
+         * 定点解析等于把「报文里还有什么」这件事一次性丢掉。这里把所有键（含没见过的新键）
+         * 全部打出来，嵌套的 map / list / data 也逐层展开——一次抓包就够定位，不用再补日志。
+         */
+        fun paramsText(
+            value: Any?,
+            limit: Int = 700,
+        ): String {
+            val text = dumpValue(value)
+            return if (text.length <= limit) text else text.take(limit) + "…(共 ${text.length} 字)"
+        }
+
+        private fun dumpValue(value: Any?): String =
+            when (value) {
+                null -> "null"
+                is Map<*, *> -> value.entries.joinToString(", ", "{", "}") { "${it.key}=${dumpValue(it.value)}" }
+                is List<*> -> value.joinToString(", ", "[", "]") { dumpValue(it) }
+                is ByteArray ->
+                    "hex(${value.size}B)=" +
+                        value.take(24).joinToString(" ") { "%02x".format(it) } +
+                        if (value.size > 24) "…" else ""
+                // 车机给的字符串原样带引号：空串（`""`）与缺字段（`null`）要能一眼分开
+                is String -> "\"" + value.take(120) + "\""
+                else -> value.toString().take(120)
+            }
 
         /** 约束 100 = 随时可拿；500 = 只让用户发起的申请；其余（如 1000）= 不让。 */
         private fun allows(
