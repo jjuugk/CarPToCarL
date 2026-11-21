@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**
-> —— 主线固定直链（当前 1.2.76，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk)**
+> —— 主线固定直链（当前 1.2.77，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.76，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.76.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.77，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.77.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.76`（正式版；新增**车机占屏时保留视频流**实验开关（设置→显示，默认关）——车机借屏放转向/倒车影像时不再拆流，归还后补关键帧并重武装触摸；**车机不发 0x4301 时落盘复用上次成功建链的网络信息**，不再干等 90 秒；蓝牙守卫改为 **RFCOMM 一连入即收工**，不再卡在完整 iAP2 bring-up 上连踢 HFP 几十次；`changeModes`/`requestUI` 全量原文进日志。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.76.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.76/CarPToCarL-1.2.76.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.77`（正式版；修 2026-11-21 实车「音频突然没声音、必须重启」——`UDP 发送失败 - Message too long` 单次失败不再当场拆掉整条音频通路，改为重开数据口补发同一包；新增**音频自愈看门狗**：音频流建成过又停了且引擎仍在推 PCM 时自动整条重建（退避 1~5 分钟、上限 5 次）；手动「重启音频」在发送端已停时不再假装成功，升级为整条流补建；失败现场打印包长与各接口 MTU。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.77.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.77/CarPToCarL-1.2.77.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,47 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.77 —— 2026-11-21（音频断流容错 + 自愈，正式版）
+
+修 2026-11-21 实车（奥迪 MIB3 / 荣耀 Magic7 Pro / 1.2.74）**「音频突然没声音，必须重启才有声音」**。
+本版**未实车验证**。
+
+日志证据：17:17:14、17:27:14、17:37:14 三次 `AUDIO: UDP 发送失败 - Message too long`
+（内核 `EMSGSIZE`），**间隔恰好 600 秒**，与各自音频流的起跑时间无关；同一秒视频照常送帧、
+`WIFI: 状态心跳` 无任何网络事件——链路是好的，只有音频这条 UDP 发不出去。
+
+**为什么断了回不来**：`AudioSender.sendPayload` 把单次 `IOException` 当致命错误，`dispatchPcm`
+随即 `stop()` 拆掉整条音频通路（关 socket、释放编码器、`running=false`、体检线程 interrupt），
+而**没有任何重建路径**。之后引擎每 10 秒推一次 PCM、每 10 秒被丢弃（`音频流已停…已丢弃`），
+车机只反复重协商主屏流 `type=110`，不会顺带把音频拉起来；手动「重启音频」被
+`restartPipeline` 开头的 `if (!running) return` 直接忽略。
+
+**为什么只有 PCM 直通中招**：音频包固定 1444 B（12 RTP + 1408 PCM + 16 tag + 8 nonce），
+加 IP/UDP 头 1472 B，距 1500 MTU 只剩 **28 字节**余量；AAC 一帧约 300 B，永远碰不到这条线。
+
+四项改动：
+
+- **发包容错**（`AudioSender.sendPayload`）：单次 `IOException` 不再致命。先打失败现场，
+  再 `reopenDataSocket()` 重开数据口补发**同一个 wire**（`seq` / `timestamp` 只推进一次，
+  时间轴不会重复或跳空）；连续 3 包（≈24 ms）全败才放弃数据口。`EMSGSIZE` 这类
+  「这一刻发不出去」的错误重开即恢复。
+- **音频自愈看门狗**（`SessionController.startAudioSelfHealWatchdog`，`ensure()` 里启动）：
+  判据三件事同时成立才动手——`audioSender != null && !isRunning`（建成过又停了；
+  `null` 表示本轮没勾声音，属用户意图，绝不自动重建）、`CarLifeHijack.audioDeadDrops`
+  仍在涨（引擎真在推 PCM，用户暂停就不涨）、`phoneOwnsAudio && !audioInCallMode`
+  （不抢车机借用的主音频）。动作走手动「重启一次」同一条补建路径，退避 1/2/3/4/5 分钟、
+  上限 5 次，音频跑起来即清零；**不恢复媒体播放**（用户可能自己暂停了）。
+- **手动重启不再假装**：`restartPipeline` / `restartAudioNow` 改返回 `Boolean`，发送端没在跑时
+  明确报 false 并升级为整条流补建，日志从误导人的「重启音频被忽略」改成
+  「发送端没在运行 → 按补建处理」。
+- **失败现场诊断**：`AUDIO: 发包失败现场 —— 目标 …，包长 1444B（含 IP/UDP 头 1472B），
+  本机接口 wlan0 mtu=1500 …，发送缓冲 256KB，错误=…`，一次打全，用来坐实/推翻 PMTU 假设。
+
+配套 `CarLifeHijack` 新增 `audioDeadDrops` / `audioDeadDropAtMillis` / `resetAudioDeadDrops()`
+作为自愈信号源（只在 `sender != null` 时计数，与「本轮没要声音」区分开）。
+
+单测 **961 例 0 失败**（新增 1 例：`restartPipeline` 在未运行时返回 false）。
 
 ### 1.2.76 —— 2026-11-21（占屏保留流开关 + 资源诊断 + 蓝牙守卫收敛，正式版）
 
