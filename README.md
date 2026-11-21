@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk)**
-> —— 主线固定直链（当前 1.2.74，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk)**
+> —— 主线固定直链（当前 1.2.75，14.1 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.74，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.74.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.75，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.75.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.74`（正式版；修复「先有声→车机暂停→再播无声」：车机临时借用主音频漏发归还通知导致暂停门禁永久丢 PCM，现改为 2 秒后主音频归还即自动放行；导航播报改发 duckAudio/unduckAudio 走车机 Navigation 音轨。均未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.74.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.74/CarPToCarL-1.2.74.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.75`（正式版；新增「触摸域自适应」开关（设置→显示，默认关），专治车机 HID 上报坐标域大于画面导致的触摸漂移——开启后按实测上报上限把坐标缩到视图，域按手势锁定，换分辨率自动作废。默认关时不改变任何既有行为。未实车验证。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.75.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.75/CarPToCarL-1.2.75.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,45 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.75 —— 2026-11-21（触摸域自适应开关，正式版）
+
+本版只加一个**默认关闭**的开关，不改变任何既有行为。**未实车验证**。
+
+**一、问题：分辨率设置对了，触摸还是漂**
+
+2026-11-21 实车日志（BUICK_6369 / 通用 Cinemo / 超宽画布 1972×520）铁证：
+车机画布协商完全正常（`DISPLAY: 车机 1972×520 → 流 1972×520`），但车机 HID
+上报的触摸点 X 到了 **2705**、Y 到了 **555**，都超出视图。旧逻辑
+`coerceIn(0, viewW-1)` 把这些点全钳到右/下边缘——日志里
+`触控 ↓ (2705,509)→(1971,509)`，于是「靠右的点击全落到屏幕上，横向一路飘」。
+`observedMaxX` 原本只用于每 200 条打一行诊断日志，**不参与映射**。
+
+**二、为什么不直接改默认行为**
+
+早先 v0.2.15 撤销过一版「二次缩放」：多数车机的上报域就等于 display 域，再缩一次
+反而错位；本项修复只对「上报域 > 视图域」的车机有意义。所以做成**开关**，
+由用户在现场判断。
+
+**三、实现**
+
+- 设置 →「显示」面板最下方新增 **触摸域自适应**，键 `adaptive_touch_domain`，默认 `false`，
+  切换即时生效（不必重连）。
+- 开启后按观测到的最大上报坐标把上报域线性缩到视图：`x*(viewW-1)/domain`，
+  边缘点正好落在最后一像素。
+- **域按手势锁定**：DOWN 时算一次，一笔拖拽内比例不变，避免中途跳变抖动。
+- **顺序调整**：先记原始观测值 → 新手势锁定域 → 再换算，所以第一下点右边缘就是准的。
+- 两条保护：观测上限 ≤ 视图 + 8px 视为正常（不映射）；观测上限 > 视图 × 4 视为坏帧（不映射）。
+- 换车/换分辨率时 `setViewSize` 尺寸变化即清空观测与锁定域。
+- 换算抽成 `input/TouchDomainMapping.kt` 纯函数，新增 7 例单测（关闭 / 余量边界 /
+  现场 1972:2705 与 520:555 / 坏值防御）。
+
+**四、用法与局限**
+
+上车先在设置里打开开关，然后**沿屏幕最右边缘点一下**把观测域校准到真实上限
+（日志打 `CARLIFE: 触摸域自适应——上报域 2705x555 → 视图 1972x520`），之后落点才准。
+局限：观测域取「点过的最远点」，从没点过右边缘时域偏小，可能把 2500 压到 1971 反而偏右；
+所以它只是兜底开关，不是普适自动校正。
 
 ### 1.2.74 —— 2026-11-20（车机临时借用超时自恢复 + 导航 duck 指令，正式版）
 
