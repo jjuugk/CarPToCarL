@@ -26,15 +26,26 @@ object MfiLengthMemory {
     data class Entry(
         val succeeded: Int? = null,
         val silent: Set<Int> = emptySet(),
+        /** 0xAA04 明确拒绝字：换档重试即可，仍作为兜底保留（沿用既有语义）。 */
         val rejected: Set<Int> = emptySet(),
+        /**
+         * 挑战期间**直接断链**的档位（强证据，区别于 [rejected] 的拒绝字）。
+         *
+         * 断链是灾难性的：链路一断，外层若在死链路上发 0xaa05 会让整轮会话失败
+         * （BMW EntryEVO 16B 实测，2026-11-21）。因此这类档位不能像 [rejected]
+         * 那样「排最后仍兜底试」——只要有其它可用档位就必须真正剔除。
+         */
+        val hardRejected: Set<Int> = emptySet(),
     ) {
-        val isEmpty: Boolean get() = succeeded == null && silent.isEmpty() && rejected.isEmpty()
+        val isEmpty: Boolean
+            get() = succeeded == null && silent.isEmpty() && rejected.isEmpty() && hardRejected.isEmpty()
     }
 
     private const val FILE = "mfi_length_memory"
     private const val KEY_OK = "ok_"
     private const val KEY_SILENT = "silent_"
     private const val KEY_REJECTED = "rejected_"
+    private const val KEY_HARD_REJECTED = "hard_rejected_"
 
     /** 车机身份 → 存储键。只用稳定字段，避免蓝牙名里的可变后缀影响命中。 */
     fun receiverKey(identityText: String): String =
@@ -60,6 +71,7 @@ object MfiLengthMemory {
             succeeded = ok,
             silent = readLengths(prefs.getString(KEY_SILENT + key, null)),
             rejected = readLengths(prefs.getString(KEY_REJECTED + key, null)),
+            hardRejected = readLengths(prefs.getString(KEY_HARD_REJECTED + key, null)),
         )
     }
 
@@ -69,8 +81,13 @@ object MfiLengthMemory {
         length: Int,
     ) {
         update(context, identityText) { entry ->
-            // 成功即证伪该档位的 silent/rejected 旧结论（固件升级后行为可能变）
-            Entry(succeeded = length, silent = entry.silent - length, rejected = entry.rejected - length)
+            // 成功即证伪该档位的 silent/rejected/hardRejected 旧结论（固件升级后行为可能变）
+            Entry(
+                succeeded = length,
+                silent = entry.silent - length,
+                rejected = entry.rejected - length,
+                hardRejected = entry.hardRejected - length,
+            )
         }
     }
 
@@ -116,10 +133,13 @@ object MfiLengthMemory {
         length: Int,
     ) {
         update(context, identityText) { entry ->
-            Entry(
+            // 与「0xAA04 拒绝字」分开记：断链是强证据，要能被 orderAttempts 真正剔除。
+            // 同时清掉该档位的旧 silent/rejected 归类，避免同一档位在两个集合里打架。
+            entry.copy(
                 succeeded = if (entry.succeeded == length) null else entry.succeeded,
                 silent = entry.silent - length,
-                rejected = entry.rejected + length,
+                rejected = entry.rejected - length,
+                hardRejected = entry.hardRejected + length,
             )
         }
     }
@@ -133,6 +153,7 @@ object MfiLengthMemory {
                 entry.succeeded?.let { add("成功=${it}B") }
                 if (entry.silent.isNotEmpty()) add("静默=${entry.silent.sorted().joinToString("/")}B")
                 if (entry.rejected.isNotEmpty()) add("被拒=${entry.rejected.sorted().joinToString("/")}B")
+                if (entry.hardRejected.isNotEmpty()) add("断链=${entry.hardRejected.sorted().joinToString("/")}B")
             }.joinToString("，")
         }
 
@@ -147,16 +168,32 @@ object MfiLengthMemory {
         baseline: List<Int>,
         entry: Entry,
     ): List<Int> {
-        // 「成功但又被硬拒绝」= 记忆自相矛盾（迟到应答误记），不能继续享受第一名：
-        // 降级为普通候选参与排序（排在被拒档之前，仍会试到）
-        val succeeded = entry.succeeded?.takeIf { it !in entry.rejected }
+        // 「成功但又被判死」= 记忆自相矛盾（迟到应答误记），不能继续享受第一名。
+        val succeeded =
+            entry.succeeded?.takeIf { it !in entry.rejected && it !in entry.hardRejected }
         val rest = baseline.filter { it != succeeded }
-        // 只有「还存在没被判死的档位」时才把 rejected 排到最后；
-        // 全部 rejected 说明与记忆矛盾（换固件/换车同一身份），照常全试。
-        val allRejected = rest.isNotEmpty() && rest.all { it in entry.rejected }
-        val rejected = if (allRejected) emptySet() else entry.rejected.filter { it in baseline }.toSet()
-        val silent = entry.silent.filter { it in rest && it !in rejected }.toSet()
-        val normal = rest.filter { it !in silent && it !in rejected }
+
+        // hardRejected（挑战期间直接断链）是强证据，与 0xAA04 拒绝字区别对待：
+        // 断链会让链路死亡、外层在死链上发 0xaa05 使整轮会话失败，所以只要还有
+        // 别的可用档位就**真正剔除**它，而不是像 rejected 那样排最后仍兜底试。
+        // 例外：若所有候选都断链过（换固件 / 同一身份的不同车），则退回兜底全试，
+        // 避免记忆与现状矛盾时永久卡死（沿用 rejected 的全部判死兜底思路）。
+        val hardInScope = entry.hardRejected.filter { it in baseline }.toSet()
+        val stillUsable = rest.filter { it !in hardInScope }
+        val hardRejected =
+            if (stillUsable.isEmpty() && rest.isNotEmpty()) emptySet() else hardInScope
+
+        // rejected（0xAA04 拒绝字）沿用原语义：排最后但仍兜底（已被 hardRejected 剔除的除外）。
+        val survivors = rest.filter { it !in hardRejected }
+        val allRejected = survivors.isNotEmpty() && survivors.all { it in entry.rejected }
+        val rejected =
+            if (allRejected) {
+                emptySet()
+            } else {
+                entry.rejected.filter { it in baseline && it !in hardRejected }.toSet()
+            }
+        val silent = entry.silent.filter { it in rest && it !in rejected && it !in hardRejected }.toSet()
+        val normal = rest.filter { it !in silent && it !in rejected && it !in hardRejected }
         val silentOrdered = rest.filter { it in silent }
         val rejectedOrdered = rest.filter { it in rejected }
         return (listOfNotNull(succeeded) + normal + silentOrdered + rejectedOrdered).distinct()
@@ -183,6 +220,7 @@ object MfiLengthMemory {
                 .remove(KEY_OK + key)
                 .remove(KEY_SILENT + key)
                 .remove(KEY_REJECTED + key)
+                .remove(KEY_HARD_REJECTED + key)
                 .apply()
         }
     }
@@ -210,6 +248,7 @@ object MfiLengthMemory {
                     if (next.succeeded != null) putInt(KEY_OK + key, next.succeeded) else remove(KEY_OK + key)
                     putString(KEY_SILENT + key, next.silent.sorted().joinToString(","))
                     putString(KEY_REJECTED + key, next.rejected.sorted().joinToString(","))
+                    putString(KEY_HARD_REJECTED + key, next.hardRejected.sorted().joinToString(","))
                 }.apply()
         }
     }

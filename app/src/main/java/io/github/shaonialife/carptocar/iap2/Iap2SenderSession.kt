@@ -519,8 +519,79 @@ class Iap2SenderSession(
         /** 挑战档位（长度, 首次试探窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
         private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
 
+        /**
+         * BMW EntryEVO 干净单档：挑战帧的有限重传次数。
+         *
+         * 耗尽只丢这一帧、不拆链、不塞窗口（[sendAwaitingWithBudget] 的 dropWhenExhausted 语义）。
+         * 诊断版用普通 [send]（无限重传到链路死）连发 6 个 challenge 包，车机窗口只有 5 帧，
+         * 全部占满（实车日志「未确认帧已占满车机接收窗口」「积压 9 帧」），后续
+         * 0xaa05/0x5702/0x4300 全堵在发送队列 —— 这才是「连 0x5702 都无应答」的真因。
+         */
+        const val MFI_CLEAN_RETRANSMIT_LIMIT = 1
+
+        /** EntryEVO 干净单档：等 0xaa03/0xaa04 的窗口（真 iPhone 应答在 100ms 级）。 */
+        const val MFI_CLEAN_RESPONSE_WINDOW_MS = 1_500L
+
         /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
         private val LEGACY_RECEIVER_MARKERS = listOf("audi", "delphi", "mib", "harman", "porsche")
+
+        /**
+         * BMW EntryEVO（阿尔派代工，如 BMW 51953 / Entry Evo / ALPINE Electronics）身份特征。
+         *
+         * 2026-11-21 实车日志：该平台的 0xaa02 挑战 **16B 会直接断链**（32/20B 静默但链路存活）。
+         * 断链后外层在死链路上发 0xaa05 → 整轮会话失败，车机卡在「正在建立连接」。
+         * 因此冷启动时即从基线剔除 16B（不依赖持久化记忆，避免重装/清记忆后第一轮又踩坑）。
+         * 两个标记按 AND 命中，避免误伤同样含 alpine 的其它车机。
+         */
+        private val MFI_BREAKS_ON_16B_MARKERS = listOf("entry evo", "alpine")
+        private const val MFI_BREAKS_ON_16B_LENGTH = 16
+
+        /**
+         * 身份文本是否属于「16B 挑战会断链」的 BMW EntryEVO/ALPINE 平台。
+         * 全部标记按 AND 命中（纯函数，便于单测）。传入的是 [identityText] 的小写结果。
+         */
+        internal fun breaksOn16BChallenge(identityLower: String): Boolean =
+            MFI_BREAKS_ON_16B_MARKERS.all { identityLower.contains(it) }
+
+        // ---- 诊断版：MFi 封装变体扫描（标准三档全失败后的兜底探测）----
+
+        /** 单个诊断变体的收帧窗口（真 iPhone 应答在 100ms 级，1.2s 足够且不过度拖长会话）。 */
+        const val DIAG_VARIANT_WINDOW_MS = 1_200L
+
+        /**
+         * 按变体把 challenge 字节封装成 `0xaa02` 报文体（纯函数，便于单测）。
+         * 全部基于 20B 挑战（EntryEVO 的 16B 会断链，扫描阶段不碰）。
+         */
+        internal fun buildDiagChallenge(variant: DiagChallengeVariant, challenge: ByteArray): ByteArray =
+            when (variant) {
+                DiagChallengeVariant.PARAM0_STD -> Iap2Csm.param(0, challenge)
+                DiagChallengeVariant.RAW -> challenge
+                DiagChallengeVariant.PARAM1 -> Iap2Csm.param(1, challenge)
+                DiagChallengeVariant.PARAM0_ZERO -> Iap2Csm.param(0, ByteArray(challenge.size))
+                DiagChallengeVariant.PARAM0_8B -> Iap2Csm.param(0, challenge.copyOf(8))
+            }
+
+        /** 字节数组转十六进制摘要（诊断日志用；超长截断并标注实际长度）。 */
+        internal fun hexOf(bytes: ByteArray, limit: Int = 64): String {
+            val shown = if (bytes.size > limit) bytes.copyOf(limit) else bytes
+            return shown.joinToString(" ") { "%02x".format(it) } +
+                if (bytes.size > limit) " …(${bytes.size}B)" else ""
+        }
+    }
+
+    /**
+     * 诊断版要逐一试探的 `0xaa02` 挑战封装变体。
+     *
+     * 标准 `param(0, challenge)`（[MFI_ATTEMPTS] 三档）由主流程先试，全失败后才进扫描。
+     * 这里覆盖「车机可能认的其它封装」：裸发、param id≠0、全零 nonce、更短挑战。
+     * 定义在类级别（非 companion 内），便于单测以 Iap2SenderSession.DiagChallengeVariant 引用。
+     */
+    internal enum class DiagChallengeVariant(val label: String) {
+        PARAM0_STD("param0/std"),
+        RAW("raw"),
+        PARAM1("param1"),
+        PARAM0_ZERO("param0/zero-nonce"),
+        PARAM0_8B("param0/8B"),
     }
 
     /** 从 0x1D01 提取接收端身份文本（name/model/manufacturer 小写拼接）——MFi 挑战长度选择用。 */
@@ -1159,7 +1230,8 @@ class Iap2SenderSession(
             }
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                    "(${Iap2MessageIds.nameOf(frame.messageId)}) keep-alive bytes=${frame.body.size}",
+                    "(${Iap2MessageIds.nameOf(frame.messageId)}) keep-alive bytes=${frame.body.size}" +
+                    " body=${hexOf(frame.body)}",
             )
         }
         log("SESSION 保活结束（链路断开）")
@@ -1765,12 +1837,20 @@ class Iap2SenderSession(
         prefer20First: Boolean = false,
         receiverKey: String,
     ) {
-        val baselineLengths =
+        val baseLengths =
             if (prefer20First) {
                 listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
             } else {
                 MFI_ATTEMPTS.map { it.first }
             }
+        // BMW EntryEVO：走「干净单档」——证书已证实是 RSA-1024，challenge 就是 20B。
+        // 不再三档轮转 + 变体轰炸（那会把车机 5 帧窗口塞满，堵死后续 0x5702/0x4300）。
+        val breaksOn16B = breaksOn16BChallenge(receiverKey)
+        if (breaksOn16B) {
+            runEntryEvoCleanChallenge(receiverKey)
+            return
+        }
+        val baselineLengths = baseLengths
         val windowOf = MFI_ATTEMPTS.associate { it.first to it.second }
         val memory = MfiLengthMemory.load(context, receiverKey)
         val order = MfiLengthMemory.orderAttempts(baselineLengths, memory)
@@ -1803,27 +1883,30 @@ class Iap2SenderSession(
                     if (!channel.isAlive) {
                         // 挑战期间被对端断开 = **强证据**，走硬拒绝：即使该长度曾被记成
                         // 「成功」也要推翻（迟到应答的归属歧义，见 MfiLengthMemory.recordHardRejected）。
-                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机被拒档位（硬拒绝，可推翻旧的成功记忆）")
+                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机断链档位（硬拒绝，可推翻旧的成功记忆并从基线剔除）")
                         MfiLengthMemory.recordHardRejected(context, receiverKey, size)
-                        return
+                        // 链路已死，绝不能返回让外层在死链路上发 0xaa05——那会抛
+                        // 「发送 0xaa05 时关闭」的误导性错误、掩盖真正的断链根因。
+                        // 断链由接收端自然重连流程接管（BT 监听仍在跑）。
+                        throw IOException("iAP2 链路在 MFi 挑战 ${size}B 期间被对端断开（该长度已记入断链档位）")
                     }
                     continue
                 }
                 when (frame.messageId) {
                     Iap2MessageIds.MFI_RESPONSE -> {
-                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）")
+                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
                         gotResponse = true
                     }
 
                     Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
-                        log("iap2 rx=0xaa04 挑战 ${size}B 被拒")
+                        log("iap2 rx=0xaa04 挑战 ${size}B 被拒 body=${hexOf(frame.body)}")
                         gotFailure = true
                     }
 
                     else ->
                         log(
                             "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                                "(${Iap2MessageIds.nameOf(frame.messageId)})",
+                                "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
                         )
                 }
                 if (gotResponse || gotFailure) break
@@ -1847,9 +1930,134 @@ class Iap2SenderSession(
             if (position < order.size - 1) {
                 log("iap2 MFi ${size}B 无应答，改用 ${order[position + 1]}B 重试")
             } else {
-                log("iap2 MFi 挑战全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
+                log("iap2 MFi 标准三档全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
             }
         }
+        // 注意：不再无条件进入变体扫描。诊断版曾在此连发 6 个 challenge 包，把车机 5 帧
+        // 接收窗口塞满，反而堵死后续 0x5702/0x4300（BMW EntryEVO 实车日志 L542/L595）。
+        // BMW EntryEVO 已在函数开头走 runEntryEvoCleanChallenge；其它车机保持原三档语义。
+    }
+
+    /**
+     * BMW EntryEVO 干净单档 MFi 挑战（避免诊断版的堆包塞窗）。
+     *
+     * 实车证据（2026-11-21 21:24 日志）：车机 0xaa01 回的是 **RSA-1024** Apple 配件证书
+     * （公钥 `02 81 81 00 a4 df...`，模数 128 字节），签名挑战按规范就是 **20B**；
+     * 16B 那次是被对端直接断链。所以这里只发一次 20B，并用有限重传（耗尽只丢帧不拆链），
+     * 让 0xaa05 / 0x5702 / 0x4300 拿到干净的发送窗口——那才是判定车机是否放行的关键。
+     *
+     * 收帧阶段把车机回的**每一帧 body 原样记录**（含未知 ID，如每秒一次的 0x0105），
+     * 便于这一轮就把「车机到底回没回 0xaa03 / 有没有其它握手」一次性看清。
+     */
+    private fun runEntryEvoCleanChallenge(receiverKey: String) {
+        log(
+            "iap2 MFi [EntryEVO 干净单档] 识别到 BMW EntryEVO/ALPINE（$receiverKey）——" +
+                "证书=RSA-1024，challenge=20B；单发一次、有限重传 $MFI_CLEAN_RETRANSMIT_LIMIT，" +
+                "不做变体扫描（避免塞满车机 5 帧窗口）",
+        )
+        val challenge = ByteArray(20).also(random::nextBytes)
+        // 有限重传 + 耗尽只丢帧不拆链：challenge 拿不到 0xaa03 也不该拆掉还活着的链路。
+        sendAwaitingWithBudget(
+            Iap2MessageIds.MFI_REQUEST_CHALLENGE,
+            Iap2Csm.param(0, challenge),
+            MFI_CLEAN_RETRANSMIT_LIMIT,
+        )
+        log("iap2 tx=0xaa02 challenge=20B（EntryEVO 干净单档）")
+
+        val end = System.nanoTime() + MFI_CLEAN_RESPONSE_WINDOW_MS * 1_000_000L
+        var gotResponse = false
+        while (true) {
+            val remain = (end - System.nanoTime()) / 1_000_000L
+            if (remain <= 0) break
+            val frame = recvFrame(remain)
+            if (frame == null) {
+                if (!channel.isAlive) {
+                    // 20B 若也断链，这是比 16B 更强的硬件级拒绝证据，如实抛出。
+                    throw IOException("iAP2 链路在 MFi 20B 干净单档挑战期间被对端断开")
+                }
+                continue
+            }
+            when (frame.messageId) {
+                Iap2MessageIds.MFI_RESPONSE -> {
+                    log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
+                    gotResponse = true
+                    MfiLengthMemory.recordSuccess(context, receiverKey, 20)
+                }
+                Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
+                    log("iap2 rx=0xaa04 挑战 20B 被拒 body=${hexOf(frame.body)}")
+                    MfiLengthMemory.recordRejected(context, receiverKey, 20)
+                }
+                else ->
+                    log(
+                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
+                    )
+            }
+            if (gotResponse) break
+        }
+        if (gotResponse) {
+            MfiLengthMemory.recordSuccess(context, receiverKey, 20)
+        } else {
+            MfiLengthMemory.recordSilent(context, receiverKey, 20)
+            log("iap2 MFi [EntryEVO 干净单档] 20B 窗口内无 0xaa03——跳过校验照常发 0xaa05，窗口未被堆包占用")
+        }
+    }
+
+    /**
+     * 诊断版：标准 `0xaa02` 三档全失败后，逐一试探其它封装变体。
+     *
+     * 目的不是「蒙对」，而是**采集证据**：车机对本车 Unknown 报文（如 0x7301）一直被旧代码
+     * 只记 ID 丢 body。这里把每个变体的 tx body 和车机回的每一帧 body 原样打进 main_debug.log，
+     * 一次实车就能看清车机到底认哪种 challenge 封装、拒绝时回什么。任一变体收到 0xaa03 立即
+     * 记录成功并返回。链路断开即停（不制造额外断链）。
+     */
+    private fun runDiagnosticChallengeSweep(receiverKey: String) {
+        log("iap2 DIAG ═══ MFi 封装诊断扫描开始（5 种变体，每种窗口 ${DIAG_VARIANT_WINDOW_MS}ms）═══")
+        for (variant in DiagChallengeVariant.values()) {
+            if (!channel.isAlive) {
+                log("iap2 DIAG 链路已断，停止扫描")
+                return
+            }
+            val challenge = ByteArray(20).also(random::nextBytes)
+            val body = buildDiagChallenge(variant, challenge)
+            send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, body)
+            log("iap2 DIAG tx=0xaa02 variant=${variant.label} body=${hexOf(body)}")
+            val end = System.nanoTime() + DIAG_VARIANT_WINDOW_MS * 1_000_000L
+            var anyRx = false
+            var gotSignature = false
+            while (true) {
+                val remain = (end - System.nanoTime()) / 1_000_000L
+                if (remain <= 0) break
+                val frame = recvFrame(remain)
+                if (frame == null) {
+                    if (!channel.isAlive) break
+                    continue
+                }
+                anyRx = true
+                log(
+                    "iap2 DIAG rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                        "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
+                )
+                if (frame.messageId == Iap2MessageIds.MFI_RESPONSE) {
+                    log("iap2 DIAG ★ 变体 ${variant.label} 触发 0xaa03 签名！body=${hexOf(frame.body)}")
+                    MfiLengthMemory.recordSuccess(context, receiverKey, 20)
+                    gotSignature = true
+                    break
+                }
+                if (frame.messageId == Iap2MessageIds.MFI_AUTHENTICATION_FAILED) {
+                    log("iap2 DIAG 变体 ${variant.label} 收到 0xaa04 拒绝 body=${hexOf(frame.body)}")
+                    break
+                }
+            }
+            if (!anyRx && channel.isAlive) {
+                log("iap2 DIAG 变体 ${variant.label} 静默（窗口内零应答）")
+            }
+            if (gotSignature) {
+                log("iap2 DIAG ═══ 命中变体 ${variant.label}，提前结束扫描 ═══")
+                return
+            }
+        }
+        log("iap2 DIAG ═══ 扫描完毕，无变体触发 0xaa03 ═══")
     }
 
     @Synchronized
@@ -2010,7 +2218,8 @@ class Iap2SenderSession(
             if (answerSubscription(frame)) continue
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                    "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
+                    "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费" +
+                    " body=${hexOf(frame.body)}",
             )
             pendingFrames += frame
             if (pendingFrames.size > maxPendingFrames) {
