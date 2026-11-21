@@ -110,6 +110,27 @@ class AudioSender(
         private const val SYNC_SEND_ATTEMPTS = 2
 
         /**
+         * 一包音频的最大尝试次数（首发 + 重开数据口后补发一次）。
+         *
+         * 2026-11-21 现场（奥迪 MIB3 + 荣耀 Magic7 Pro）：三次 `Message too long`
+         * （内核 `EMSGSIZE`）分别落在 17:17:14 / 17:27:14 / 17:37:14，**间隔恰好 600 秒**，
+         * 而那一刻 WiFi 心跳一条事件都没有、视频帧照发（写入 p95=2ms）。说明链路没断，
+         * 只是**这一刻内核认为这条路放不下这个包**（PCM 包 1444B，加 IP/UDP 头 1472B，
+         * 离 1500 MTU 只剩 28 字节）。这类一过性错误重开数据口就能继续，
+         * 旧实现却当场 `stop()` 把整条音频通路拆了。
+         */
+        private const val SEND_ATTEMPTS = 2
+
+        /**
+         * 连续多少次「所有尝试都失败」才放弃这条数据口。
+         *
+         * 单次失败一律按丢包处理（音频是实时流，丢一包无害）；连续 3 包（≈24ms）都发不出去
+         * 才是真的没了。放弃后交给 [io.github.shaonialife.carptocar.SessionController]
+         * 的音频自愈去重建整条流——那是唯一能恢复的路径。
+         */
+        private const val SEND_FAILURES_BEFORE_STOP = 3
+
+        /**
          * 是否是「车机 controlPort 没监听」引起的 ICMP 端口不可达。
          *
          * Android 抛的是 `SocketException: sendto failed: ECONNREFUSED (Connection refused)`，
@@ -244,6 +265,12 @@ class AudioSender(
     private var lastDropFullLogAt = 0L
     private var lastLogAt = 0L
     private var readFailures = 0
+
+    /**
+     * 连续「一整包的所有尝试都失败」的次数（[SEND_ATTEMPTS] 次全败才算 1）。
+     * 成功发出一包即清零——它衡量的是链路，不是单包运气。
+     */
+    private var sendFailures = 0
 
     override val isRunning: Boolean get() = running.get()
 
@@ -595,17 +622,24 @@ class AudioSender(
      *
      * 这条路径**不重建 RTSP 流**（那是 [io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams.restartAudio]
      * 干的事）。两者一起用：先重置这里，流真的坏了再拆建。
+     *
+     * @return 是否真的重置了。**false 表示这条发送端根本不在跑**（被 stop 了）——
+     *   此时「重置缓冲」无从谈起，调用方必须升级成「重建整条流」。
+     *   2026-11-21 现场：日志只留一行「重启音频被忽略」，用户按了按钮毫无作用，
+     *   看上去像按钮坏了，实际是这里放弃了、上层也没接手。
      */
     @Synchronized
-    fun restartPipeline(reason: String) {
+    fun restartPipeline(reason: String): Boolean {
         if (!running.get()) {
-            log("AUDIO: 重启音频被忽略——音频发送没在运行（$reason）")
-            return
+            log("AUDIO: 发送端没在运行，无法重置缓冲（$reason）——需重建整条音频流")
+            return false
         }
         resampler.reset()
         resampleInRate = 0
+        sendFailures = 0
         synchronized(pcmLock) { pcmLen = 0 }
         log("AUDIO: 已清空待发 PCM、重采样相位归零；RTP 时间轴保持连续——$reason")
+        return true
     }
 
     /**
@@ -1124,35 +1158,121 @@ class AudioSender(
     @Synchronized
     private fun sendPayload(payload: ByteArray): Boolean {
         val wire = sealPacket(payload, sequence, timestamp, nonceCounter, markerPending)
+        // 游标先推进：重试时重发**同一个 wire**（同 seq / 同 ts），绝不能各算一次——
+        // 时间轴重复或跳空都会被车机判成丢包/重复而更久不出声。
         markerPending = false
         sequence = (sequence + 1) and 0xFFFF
         timestamp += samplesPerPacket
         nonceCounter++
-        val client = socket ?: return false
-        return try {
-            // 非阻塞：缓冲满时 send 返回 0，绝不卡住调用线程。丢这一包（晚到无意义），
-            // RTP 序号/时间戳上面已经推进过——保持时间轴单调，车机按 seq gap 识别丢包。
-            val written = client.write(ByteBuffer.wrap(wire))
-            if (written <= 0) {
-                packetsDroppedFull++
-                val now = System.nanoTime()
-                if (lastDropFullLogAt == 0L || now - lastDropFullLogAt >= DROP_FULL_LOG_GAP_NANOS) {
-                    lastDropFullLogAt = now
-                    log(
-                        "AUDIO: 数据口缓冲满——已主动丢 $packetsDroppedFull 包" +
-                            "（车机暂停/拥塞时不消费；非阻塞不卡发送线程，恢复后自动续发）",
-                    )
+
+        var lastError: Exception? = null
+        for (attempt in 1..SEND_ATTEMPTS) {
+            val client = socket ?: return false
+            try {
+                // 非阻塞：缓冲满时 send 返回 0，绝不卡住调用线程。丢这一包（晚到无意义），
+                // RTP 序号/时间戳上面已经推进过——保持时间轴单调，车机按 seq gap 识别丢包。
+                val written = client.write(ByteBuffer.wrap(wire))
+                if (written <= 0) {
+                    packetsDroppedFull++
+                    val now = System.nanoTime()
+                    if (lastDropFullLogAt == 0L || now - lastDropFullLogAt >= DROP_FULL_LOG_GAP_NANOS) {
+                        lastDropFullLogAt = now
+                        log(
+                            "AUDIO: 数据口缓冲满——已主动丢 $packetsDroppedFull 包" +
+                                "（车机暂停/拥塞时不消费；非阻塞不卡发送线程，恢复后自动续发）",
+                        )
+                    }
+                    resetSendFailures()
+                    return true // 不是链路断，别 stop——丢包是预期行为
                 }
-                true // 不是链路断，别 stop——丢包是预期行为
-            } else {
                 packetsSent++
                 bytesSent += wire.size
-                true
+                resetSendFailures()
+                return true
+            } catch (error: IOException) {
+                lastError = error
+                if (attempt < SEND_ATTEMPTS) {
+                    // 一过性错误（EMSGSIZE / ENETUNREACH / 网络切换瞬间）：先把现场打全，
+                    // 再重开数据口补发同一包。UDP 无状态，重开是零成本的。
+                    logSendFailure(error, wire.size)
+                    if (reopenDataSocket()) {
+                        log("AUDIO: 已重开数据口并重发同一包（首发失败：${error.message}）")
+                    } else {
+                        log("AUDIO: 重开数据口失败——这条音频通路已不可用")
+                        return false
+                    }
+                }
             }
-        } catch (error: IOException) {
-            log("AUDIO: UDP 发送失败 - ${error.message}")
+        }
+
+        // 所有尝试都失败：单次按丢包处理，连续多次才认链路真的断了。
+        sendFailures++
+        if (sendFailures < SEND_FAILURES_BEFORE_STOP) {
+            log(
+                "AUDIO: 第 $sendFailures/${SEND_FAILURES_BEFORE_STOP} 次整包发送失败" +
+                    "（${lastError?.message}）——按丢包处理，继续推流",
+            )
+            return true
+        }
+        log("AUDIO: 连续 $sendFailures 次整包发送失败，放弃这条数据口（交给上层重建音频流）")
+        return false
+    }
+
+    /** 成功发出一包（或预期内的缓冲满丢包）即清零连续失败计数。 */
+    private fun resetSendFailures() {
+        if (sendFailures == 0) return
+        log("AUDIO: 发包恢复（连续失败 $sendFailures 次后发出）")
+        sendFailures = 0
+    }
+
+    /**
+     * 重开数据口（同一目标、同一密钥，只换 socket）。
+     *
+     * 为什么要重开：`EMSGSIZE` / `ENETUNREACH` 这类错误由内核在 send 时按**当时的**路由与
+     * MTU 判定，连接式 UDP 还会把上一条 ICMP 的错误延后一拍上报；重开一个 socket 等于
+     * 重新解析路由、清掉挂起的错误，通常立刻就通了。RTP 时间轴与 seq 全在字段上，
+     * 与 socket 无关，所以换 socket 不会让车机看到断点。
+     */
+    private fun reopenDataSocket(): Boolean =
+        try {
+            runCatching { socket?.close() }
+            socket = openDataSocket()
+            true
+        } catch (error: Exception) {
+            socket = null
+            log("AUDIO: 重开数据口异常 - ${error.message}")
             false
         }
+
+    /**
+     * 发包失败的现场诊断（**只在失败时打**，正常零噪声）。
+     *
+     * 2026-11-21 的两份现场里，`Message too long` 那一刻 WiFi 心跳一条事件都没有、
+     * 视频帧照发——「网络断没断」这个问题日志回答不了，只能靠猜 PMTU。这里把当时
+     * 能读到的路况一次打全，下次直接看数字：
+     *  - 包长与 IP/UDP 头（判断离 MTU 还有多少余量）；
+     *  - 各本机接口的 MTU（`wlan0` 被压到 1400 就是答案）；
+     *  - 数据口当时的发送缓冲（系统回收过缓冲也会让大包发不出去）。
+     */
+    private fun logSendFailure(
+        error: Exception,
+        wireSize: Int,
+    ) {
+        val interfaces =
+            runCatching {
+                java.net.NetworkInterface
+                    .getNetworkInterfaces()
+                    ?.toList()
+                    .orEmpty()
+                    .filter { it.isUp && !it.isLoopback }
+                    .mapNotNull { nic -> nic.mtu.takeIf { it > 0 }?.let { "${nic.name} mtu=$it" } }
+            }.getOrDefault(emptyList())
+        val socketBuffer = runCatching { socket?.socket()?.sendBufferSize ?: 0 }.getOrDefault(0)
+        log(
+            "AUDIO: 发包失败现场 —— 目标 $host:$dataPort，包长 ${wireSize}B" +
+                "（含 IP/UDP 头 ${wireSize + 28}B），本机接口 ${interfaces.joinToString("、").ifEmpty { "读不到" }}，" +
+                "发送缓冲 ${socketBuffer / 1024}KB，错误=${error.javaClass.simpleName}: ${error.message}",
+        )
     }
 
     /** 用平台解码器把首帧解回 PCM，记录峰值（后台线程，不阻塞推流）。 */

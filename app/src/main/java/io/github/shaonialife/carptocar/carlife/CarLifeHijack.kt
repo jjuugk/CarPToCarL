@@ -497,6 +497,33 @@ object CarLifeHijack {
     private var audioDroppedBytes = 0L
     private var lastAudioDropLog = 0L
 
+    /**
+     * 「引擎还在推 PCM，但这条音频通道**已经建成又停了**」的累计次数与最近时刻。
+     *
+     * 与上面 [audioDroppedBytes] 的区别是**成因**：这里是「本来有流、被 stop 掉了」
+     * （发包失败、拆链收尾没建回来），而不是「本次连接没要声音」。前者是可自愈的故障，
+     * 后者是用户的意图——两者混在一起自动重建就变成瞎折腾。
+     *
+     * 2026-11-21 现场：`Message too long` 之后音频流被 stop，此后 10 分钟里引擎每 10 秒
+     * 推一次 PCM、每 10 秒丢一次，日志喊了 60 遍「音频流已停」却没有任何人接手，
+     * 用户只能手动重启。这个计数器就是给 [io.github.shaonialife.carptocar.SessionController]
+     * 的音频自愈看门狗用的信号源。
+     */
+    @Volatile
+    var audioDeadDrops: Int = 0
+        private set
+
+    /** 最近一次「音频流已停但仍收到 PCM」的 uptimeMillis；0 = 从来没有过。 */
+    @Volatile
+    var audioDeadDropAtMillis: Long = 0L
+        private set
+
+    /** 自愈重建成功后清零（否则看门狗会拿着旧计数马上又触发一次）。 */
+    fun resetAudioDeadDrops() {
+        audioDeadDrops = 0
+        audioDeadDropAtMillis = 0L
+    }
+
     /** 最近一个 GOP 缓存（从关键帧起），供会话建立瞬间「补历史帧」。 */
     private val gop = ArrayDeque<Pair<ByteArray, Boolean>>()
     private var gopBytes = 0
@@ -1547,8 +1574,15 @@ object CarLifeHijack {
                     io.github.shaonialife.carptocar.SessionController.audioSender
                 }
             if (sender?.isRunning == true) return
-            audioDroppedBytes += size
             val now = android.os.SystemClock.uptimeMillis()
+            // 「流建成过、现在停了」（发包失败被 stop / 收尾没建回来）——这才是可自愈的故障，
+            // 计数交给 SessionController 的音频自愈看门狗。sender == null 是「本轮没要声音」，
+            // 属于用户意图，不计数。
+            if (sender != null) {
+                audioDeadDrops++
+                audioDeadDropAtMillis = now
+            }
+            audioDroppedBytes += size
             if (now - lastAudioDropLog >= AUDIO_DROP_LOG_MS) {
                 lastAudioDropLog = now
                 // 文案要点：这里只说明「没有可用的 AirPlay 音频流」，**不是**「用户没勾声音」。

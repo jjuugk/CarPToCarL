@@ -485,6 +485,9 @@ object SessionController {
         installAppStateBridge()
         installProtocolModules()
         startMediaWatchdog()
+        // 音频自愈：音频流被 stop 掉（发包失败/收尾没建回来）后自动重建，
+        // 不必等用户手动「重启一次」或整轮重连（2026-11-21 实车：断一次就永久没声音）
+        startAudioSelfHealWatchdog()
         // 监听器没被系统绑上时的兜底（荣耀常态）：自己枚举会话，
         // 媒体键直投不再依赖「服务是否被绑上」。
         MediaSessionFallback.start(context.applicationContext, ::appendLog)
@@ -4596,16 +4599,29 @@ object SessionController {
         audioRestartWorker.execute { restartAudioNow(reason) }
     }
 
-    private fun restartAudioNow(reason: String) {
+    /**
+     * 真正干活的重启（[requestAudioRestart] 与音频自愈共用）。
+     *
+     * @param resumePlayback 顺带恢复媒体播放。用户手动触发时为 true（三连击的语义就是
+     *   「我要声音回来」）；**自动自愈必须为 false**——用户可能自己按了暂停，
+     *   自动恢复播放属于「把用户没要的东西塞回去」。
+     * @return 是否「已经处理」（重建成功，或已挂起等车机归还主音频）；
+     *   false = 这条音频流没建起来，调用方（自愈看门狗）据此决定退避重试。
+     */
+    private fun restartAudioNow(
+        reason: String,
+        resumePlayback: Boolean = true,
+    ): Boolean {
         val client = currentClient
         if (client == null || client.cancelled || !client.controlSessionAlive) {
             appendLog("AUDIO: 重启音频（$reason）被忽略——当前没有在线的 CarPlay 会话")
             uiHintSink?.invoke("没有在线会话，无法重启音频")
-            return
+            return false
         }
-        audioSender?.restartPipeline(reason)
+        val sender = audioSender
+        val pipelineReset = audioSender?.restartPipeline(reason) ?: false
         navAudioSender?.restartPipeline(reason)
-        if (MediaSessionsState.nowPlaying?.playing != true) {
+        if (resumePlayback && MediaSessionsState.nowPlaying?.playing != true) {
             // 三连击的语义就是「我要声音回来」，所以这里无条件恢复一次播放；
             // 用户若本来就想暂停，自己再按一次暂停即可（比「重建完依然静音」可接受）。
             CarLifeHijack.resumeMediaFromCar("重启音频后恢复播放（$reason）")
@@ -4614,11 +4630,10 @@ object SessionController {
             pendingAudioRebuild = reason
             appendLog("AUDIO: 车机当前持有/借用主音频——先不抢，等它归还后再重建音频流（$reason）")
             uiHintSink?.invoke("音频已重置，等车机归还主音频后自动重建")
-            return
+            return true
         }
         pendingAudioRebuild = null
-        val sender = audioSender
-        if (sender != null && sender.isRunning) {
+        if (pipelineReset && sender != null && sender.isRunning) {
             val rebuilt = rebuildAudioChannel(reason)
             appendLog(
                 if (rebuilt) {
@@ -4628,10 +4643,11 @@ object SessionController {
                 },
             )
             uiHintSink?.invoke(if (rebuilt) "音频已重启" else "音频已重置（流重建失败，旧流仍在推）")
-            return
+            return rebuilt
         }
-        // 流根本没在推（引擎退出后没恢复、上一轮拆流没建回来）：这不是「重建」而是「补建」，
-        // 走与「资源取得」完全相同的路径，顺带把 RECORD 补上。
+        // 流根本没在推（引擎退出后没恢复、上一轮拆流没建回来、发包失败被 stop）：
+        // 这不是「重建」而是「补建」，走与「资源取得」完全相同的路径，顺带把 RECORD 补上。
+        appendLog("AUDIO: 发送端没在运行（$reason）→ 按补建处理：整条音频流重建")
         val context = appContext?.applicationContext
         val secret = currentSharedSecret
         val started =
@@ -4645,6 +4661,7 @@ object SessionController {
             },
         )
         uiHintSink?.invoke(if (started) "音频已重启" else "音频重启失败，详见日志")
+        return started
     }
 
     /**
@@ -4657,6 +4674,143 @@ object SessionController {
     private fun onRecordedAll() {
         audioSender?.onRecorded()
         navAudioSender?.onRecorded()
+    }
+
+    // ---- 音频自愈（2026-11-21）----
+
+    /** 自愈看门狗是否已启动（幂等，跟随进程而不是会话）。 */
+    private var audioSelfHealStarted = false
+
+    /** 连续「引擎在推 PCM、音频流已停」多久才动手（防抖，别让一次拆链收尾就触发重建）。 */
+    private const val AUDIO_HEAL_DEAD_MS = 3_000L
+
+    /** 每一轮最多重建几次；再失败就只提示用户（继续硬试只会 SETUP 风暴）。 */
+    private const val AUDIO_HEAL_MAX_ATTEMPTS = 5
+
+    /** 自愈看门狗节拍。 */
+    private const val AUDIO_HEAL_TICK_MS = 5_000L
+
+    /** 本轮自愈已尝试次数 / 下一次允许尝试的时刻（uptimeMillis）。 */
+    private var audioHealAttempts = 0
+    private var audioHealNextAt = 0L
+    private var audioHealGaveUp = false
+
+    /** 上一拍看到的丢弃计数（判断「还在持续丢」而不是「丢过就完了」）。 */
+    private var audioHealLastDropSeen = 0
+
+    /** 连续丢弃的开始时刻；0 = 当前没有在丢。 */
+    private var audioDeadSinceAt = 0L
+
+    /**
+     * 音频自愈看门狗：**音频流被 stop 掉之后，只要引擎还在推 PCM，就自动重建。**
+     *
+     * ## 为什么必须有（2026-11-21 实车日志）
+     *
+     * 17:27:14 与 17:37:14 各一次 `Message too long`（内核 `EMSGSIZE`），`AudioSender`
+     * 当场 `stop()` 整条音频通路。此后 10 分钟里引擎照常每 10 秒推 PCM、每 10 秒被丢弃，
+     * 日志喊了 60 遍「音频流已停」——**没有任何人接手**：
+     * 视频流的反复重协商（`type=110` TEARDOWN/SETUP）不带音频；
+     * 界面「重启一次」按钮在 `restartPipeline` 里被 `!running` 直接挡掉；
+     * 真正能重建的 RTSP SETUP 那一刻又被车机 reset 的控制通道拒成 400。
+     * 结果就是「画面正常、歌名在滚、就是没声音，必须重连」。用户要的是一个能自己好起来的东西。
+     *
+     * ## 判据为什么是这三个一起
+     *
+     * 1. `audioSender != null && !isRunning`——**建成过又停了**。`sender == null` 是
+     *    「本轮没要声音」（用户没勾音频），那是意图不是故障，绝不能自动重建；
+     * 2. `CarLifeHijack.audioDeadDrops` 还在涨——引擎真的在推 PCM（不是用户按了暂停、
+     *    也不是还没开始播）；连续涨满 [AUDIO_HEAL_DEAD_MS] 才算数，避免和收尾路径抢；
+     * 3. `client.phoneOwnsAudio`——车机借走主音频时抢建会把它的借用栈重置，
+     *    它归还时反而找不到自己的借用（既有路径会在归还后补做）。
+     *
+     * ## 退避
+     *
+     * 1 分钟 → 2 → 3 → 4 → 5 分钟，5 次失败后只打一行「请重启 App 或让车机重连」。
+     * 音频流一旦真的跑起来（`isRunning`）账本立刻清零——包括车机重连后新会话自带的流。
+     *
+     * 自愈走的恢复动作与用户手动「重启一次」完全一致（[restartAudioNow] 的补建分支），
+     * 唯一区别是**不恢复媒体播放**：用户可能自己按了暂停，自动把播放塞回去属于越权。
+     */
+    private fun startAudioSelfHealWatchdog() {
+        if (audioSelfHealStarted) return
+        audioSelfHealStarted = true
+        Thread({
+            while (true) {
+                try {
+                    Thread.sleep(AUDIO_HEAL_TICK_MS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                runCatching { audioSelfHealTick() }
+                    .onFailure { appendLog("AUDIO: 音频自愈看门狗异常 - ${it.message}") }
+            }
+        }, "audio-self-heal").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun audioSelfHealTick() {
+        val sender = audioSender
+        // 音频在推 = 一切正常：账本清零（含「上一轮放弃」的标记，下次故障重新给机会）
+        if (sender != null && sender.isRunning) {
+            if (audioHealAttempts > 0 || audioHealGaveUp) {
+                appendLog("AUDIO: 音频流已恢复运行——自愈计账清零（此前尝试 $audioHealAttempts 次）")
+            }
+            audioHealAttempts = 0
+            audioHealGaveUp = false
+            audioHealNextAt = 0L
+            audioDeadSinceAt = 0L
+            audioHealLastDropSeen = 0
+            CarLifeHijack.resetAudioDeadDrops()
+            return
+        }
+        // 本轮还没建过音频流（没要声音 / 尚未协商出档位）：不折腾
+        if (sender == null) return
+        val client = currentClient
+        if (client == null || client.cancelled || !client.controlSessionAlive) return
+        // 通话中音频由 callWatcher 换档管理，别在这里抢
+        if (audioInCallMode) return
+
+        val now = android.os.SystemClock.uptimeMillis()
+        val drops = CarLifeHijack.audioDeadDrops
+        if (drops == audioHealLastDropSeen) {
+            // 这一拍没有任何新丢弃：引擎停了（用户暂停）或已经不在推 → 连续窗口断开
+            audioDeadSinceAt = 0L
+            return
+        }
+        audioHealLastDropSeen = drops
+        if (audioDeadSinceAt == 0L) audioDeadSinceAt = now
+        if (now - audioDeadSinceAt < AUDIO_HEAL_DEAD_MS) return
+        if (!client.phoneOwnsAudio) return
+        if (now < audioHealNextAt) return
+        if (audioHealAttempts >= AUDIO_HEAL_MAX_ATTEMPTS) {
+            if (!audioHealGaveUp) {
+                audioHealGaveUp = true
+                appendLog(
+                    "AUDIO: 音频自愈已放弃（连续 ${AUDIO_HEAL_MAX_ATTEMPTS} 次重建失败）——" +
+                        "请重启 App 或让车机重连后再试",
+                )
+            }
+            return
+        }
+
+        audioHealAttempts++
+        // 退避：第 1 次立刻试，之后 2/3/4/5 分钟（单位都是分钟）
+        audioHealNextAt = now + audioHealAttempts.coerceAtMost(5) * 60_000L
+        appendLog(
+            "AUDIO: 音频自愈（第 $audioHealAttempts/$AUDIO_HEAL_MAX_ATTEMPTS 次）——" +
+                "引擎仍在推 PCM，但音频流已停，自动重建整条流",
+        )
+        val healed = restartAudioNow("音频自愈（引擎在推 PCM 但音频流已停）", resumePlayback = false)
+        if (healed) {
+            audioDeadSinceAt = 0L
+            audioHealLastDropSeen = 0
+            CarLifeHijack.resetAudioDeadDrops()
+            appendLog("AUDIO: ✓ 音频自愈成功——声音应已恢复")
+        } else {
+            appendLog("AUDIO: 音频自愈本次没成功——${audioHealNextAt - now}ms 后再试")
+        }
     }
 
     /**

@@ -110,4 +110,12 @@ class AudioSenderTest {
             receiver.close()
         }
     }
+
+    @Test
+    fun restartPipelineReportsFalseWhenSenderIsNotRunning() {
+        // 2026-11-21 现场：发包失败 stop() 之后用户按「重启一次」，旧实现只打一行
+        // 「重启音频被忽略」就返回，上层以为已经处理过——按钮点了等于没点。
+        // 现在必须**明确报 false**，让调用方（SessionController）升级成整条流重建。
+        org.junit.Assert.assertFalse(sender().restartPipeline("单测：发送端没在运行"))
+    }
 }
