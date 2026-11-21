@@ -1068,7 +1068,8 @@ object SessionController {
      * 未装配直接调本地函数；两路共用同一份实现，不会重复下发。
      *
      * 日志里的「已送达 / 未送达」只在 [CarLifeHijack.sendVoiceKey] 返回 false 时才有信息量，
-     * 它表示「socket 写失败」，不是「引擎收到了」——这台车机的硬键本来就没有回执。
+     * 它表示「socket 写失败」，不是「引擎收到了」——语音控制（0x10066）同样没有回执，
+     * 唯一的凭据是引擎自己回的 `65574 … 语音=1`（见 [CarLifeProtocol.Module]）。
      */
     private fun dispatchVoiceHardKey(keycode: Int) {
         val ok =
@@ -1082,8 +1083,9 @@ object SessionController {
                 sendVoiceHardKey(keycode)
             }
         appendLog(
-            "CARLIFE: 车机语音键 0x%02X → 0x68008 ".format(keycode) +
-                if (ok) "已送达" else "未送达（CarLife 未接管）",
+            "CARLIFE: 车机语音键 0x%02X → ".format(keycode) +
+                (if (keycode == CarLifeProtocol.HardKey.VR_STOP) "0x68008" else "0x10066") +
+                if (ok) " 已送达" else " 未送达（CarLife 未接管）",
         )
     }
 

@@ -609,15 +609,23 @@ object CarLifeHijack {
     fun sendCarGps(fix: CarGpsFix): Boolean = client?.sendCarGps(fix) ?: false
 
     /**
-     * 车机语音键 → CarLife 硬键（0x68008）。
+     * 车机语音键 → CarLife 语音（1.2.78 起走 `0x10066`，不再走 `0x68008`）。
      *
-     * [keycode] 取 [CarLifeProtocol.HardKey.VR_START]（起识别）或
-     * [CarLifeProtocol.HardKey.VR_STOP]（长按松手时收尾）。CarLife+ 收到后用它
-     * **自己的麦克风**起语音识别，不需要我们回传车机麦克风，所以这里只是一条控制命令，
-     * 不牵扯音频通道。
+     * 起识别：[CarLifeProtocol.HU_VOICE_CONTROL]（`command=1 opt=2`）。
+     * 收尾（PTT 松手）：仍发 `0x68008 keycode=0x22 VR_STOP`——`0x10066` 的「停」语义
+     * 没有实证，而 `VR_STOP` 在引擎没起识别时是无害的空操作，宁可少猜一条。
+     *
+     * 两条都只写控制通道：CarLife+ 用**手机自己的麦克风**识别，不牵扯音频通道。
      */
     fun sendVoiceKey(keycode: Int = CarLifeProtocol.HardKey.VR_START): Boolean =
-        client?.sendHardKeyCode(keycode) ?: false
+        if (keycode == CarLifeProtocol.HardKey.VR_STOP) {
+            client?.sendHardKeyCode(CarLifeProtocol.HardKey.VR_STOP) ?: false
+        } else {
+            client?.sendVoiceControl(
+                CarLifeProtocol.VoiceControl.START_COMMAND,
+                CarLifeProtocol.VoiceControl.START_OPT,
+            ) ?: false
+        }
 
     /**
      * 车机媒体键 → CarLife 硬键（0x68008），供无通知监听授权或第三方播放器场景兜底。

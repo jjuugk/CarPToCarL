@@ -1342,8 +1342,8 @@ class MainActivity : AppCompatActivity() {
                         report.blockingMissing.joinToString("、") { it.requirement.title } + "）"
                 }
             // 「一键获取」只列出**真能自动引导**的项（[PermissionRepair]）：运行时权限弹框、
-            // 开蓝牙/开 WLAN、位置服务、通知使用权、忽略电池优化。本机蓝牙地址、目标车机
-            // 这些设置项不算权限，不放进按钮里冒充。
+            // 开蓝牙/开 WLAN、位置服务、通知使用权、显示在其他应用上层、忽略电池优化。
+            // 本机蓝牙地址、目标车机这些设置项不算权限，不放进按钮里冒充。
             val repairPlan = PermissionRepair.plan(this)
             val actions =
                 buildList {

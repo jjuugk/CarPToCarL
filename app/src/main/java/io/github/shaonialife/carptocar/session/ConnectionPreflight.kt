@@ -32,9 +32,9 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
  * [Severity.BLOCKING] / [Severity.WARNING] / [Severity.INFO] 三档——**只读体检绝不
  * 阻断连接**，缺项写清后果，由既有流程去引导，避免又多出几个自家弹窗。
  *
- * 12 项：蓝牙权限 / 蓝牙开关 / WLAN 权限 / WLAN 开关 / 本机地址 / 位置服务 /
- * 目标车机已配对 / 本机蓝牙名 / 通知权限 / 通知使用权（媒体会话）/ 电池优化 /
- * 后台存活未被限制。UI 与日志
+ * 13 项：蓝牙权限 / 蓝牙开关 / WLAN 权限 / WLAN 开关 / 本机地址 / 位置服务 /
+ * 目标车机已配对 / 本机蓝牙名 / 通知权限 / 通知使用权（媒体会话）/ 悬浮窗（后台弹界面）/
+ * 电池优化 / 后台存活未被限制。UI 与日志
  * 取的是同一份 [Report]（[Report.headline] 给界面一行摘要，[Report.describe] 给日志与
  * 详情弹窗），因此界面上看到的那句话，导出的日志里一定有完全相同的一份。
  *
@@ -74,6 +74,20 @@ object ConnectionPreflight {
         IDENTITY_NAME("本机蓝牙名", Severity.WARNING),
         NOTIFICATIONS("通知权限", Severity.INFO),
         NOTIFICATION_ACCESS("通知使用权（媒体会话）", Severity.INFO),
+
+        /**
+         * 「显示在其他应用上层」（悬浮窗）——**靠车机自动拉起的唯一命门**（2026-11-21 加）。
+         *
+         * Android 10+ 禁止后台 `startActivity`，唯一的通用豁免就是持有这条权限。
+         * 缺了它，MagicOS 上是**静默失败**：`startActivity` 不抛异常、界面就是不出现，
+         * 用户看到的是「车都连上了手机一点反应都没有」。
+         *
+         * 2026-11-21 20:34 那份日志正是这样：App 自己写了
+         * `APPROACH: 未授予「显示在其他应用上层」——系统可能拒绝后台打开界面`，
+         * 而体检 12 项全绿，界面上没有任何提示。降到 WARNING 而不是 BLOCKING：
+         * 手动打开 App 照样能连，缺它只影响「靠近后自动出现在前台」。
+         */
+        OVERLAY("「显示在其他应用上层」权限", Severity.WARNING),
         BATTERY_OPTIMIZATION("电池优化已忽略", Severity.INFO),
 
         /**
@@ -265,6 +279,11 @@ object ConnectionPreflight {
                     .contains(app.packageName)
             }.getOrDefault(false)
 
+        // 悬浮窗：后台 `startActivity` 的通用豁免（见 [Requirement.OVERLAY]）。
+        // 只读查询，不需要任何权限；读失败按「未允许」处理，与 `CarApproachReceiver` 的判据一致。
+        val overlayAllowed =
+            runCatching { android.provider.Settings.canDrawOverlays(app) }.getOrDefault(false)
+
         val checks =
             buildList {
                 add(
@@ -362,6 +381,19 @@ object ConnectionPreflight {
                             "未授权——车机音乐卡与 0x5001 NowPlaying 拿不到歌名（不影响连接与推流）。" +
                                 "这项**没有系统授权弹窗**（不是运行时权限），只能到「设置 → 通知使用权」" +
                                 "手动打开；本页「一键获取」会直接跳到那一项"
+                        },
+                    ),
+                )
+                add(
+                    Check(
+                        Requirement.OVERLAY,
+                        overlayAllowed,
+                        if (overlayAllowed) {
+                            "已允许——车机靠近时可在后台把 App 拉到前台"
+                        } else {
+                            "未允许——**车机靠近后 App 不会自己弹到前台**（系统静默拦住后台启动，" +
+                                "不报错、什么都不会发生），只能手动点开。请到「设置 → 应用 → 特殊访问权限 → " +
+                                "显示在其他应用上层」允许本应用；本页「一键获取」会直接跳那一页"
                         },
                     ),
                 )

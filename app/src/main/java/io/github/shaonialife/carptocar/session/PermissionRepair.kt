@@ -25,7 +25,7 @@ import io.github.shaonialife.carptocar.session.ConnectionPreflight.Requirement
  * 分工原则（不要混）：
  * - **能弹系统框的**（附近设备 / 通知 / 开蓝牙 / 忽略电池优化）→ 直接拉起，
  *   用户点一下就行；
- * - **只能跳设置页的**（WLAN 开关 / 位置服务 / 通知使用权）→ 打开对应页面并写清
+ * - **只能跳设置页的**（WLAN 开关 / 位置服务 / 通知使用权 / 显示在其他应用上层）→ 打开对应页面并写清
  *   点哪里；其中通知使用权是唯一「既没弹窗、又必须在列表里找应用」的一项，
  *   API 30+ 用 `EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME` 直接把本应用那条顶到眼前。
  *
@@ -59,6 +59,18 @@ object PermissionRepair {
         BATTERY("电池优化已忽略", "系统会问「是否允许应用始终在后台运行」，点「允许」"),
 
         /**
+         * 「显示在其他应用上层」（2026-11-21 加）。
+         *
+         * 这一项**有系统页面、没有运行时弹窗**：`Settings.ACTION_MANAGE_OVERLAY_PERMISSION`
+         * 能直接把本应用那一条顶到眼前。缺了它后台 `startActivity` 会被静默拒绝——
+         * 正是「车机靠近了手机毫无反应」的原因。
+         */
+        OVERLAY(
+            "「显示在其他应用上层」权限",
+            "请在打开的页面里允许本应用「显示在其他应用上层」，否则车机靠近时 App 不会自己弹到前台",
+        ),
+
+        /**
          * 后台存活（2026-11-17）：`isBackgroundRestricted` / standby bucket 被判定受限时。
          *
          * 这一项**没有系统弹窗**——厂商的「应用冻结 / 应用启动管理」是自家页面，
@@ -87,7 +99,7 @@ object PermissionRepair {
      * 体检里没通过的项 → 补齐顺序（纯函数，便于单测）。
      *
      * 顺序有讲究：先权限（不然连开关都读不到状态）→ 两个开关 → 位置 → 通知使用权 →
-     * 电池优化。**「本机蓝牙地址 / 蓝牙名 / 目标车机已配对」永远不在计划里**：
+     * 悬浮窗 → 电池优化。**「本机蓝牙地址 / 蓝牙名 / 目标车机已配对」永远不在计划里**：
      * 那三项是设置项不是权限，跳哪个页面都补不上，硬跳只会让用户白跑一趟。
      */
     internal fun stepsFor(missing: Set<Requirement>): List<Step> =
@@ -97,6 +109,7 @@ object PermissionRepair {
             if (Requirement.WIFI_ENABLED in missing) add(Step.WIFI_ON)
             if (Requirement.LOCATION_SERVICE in missing) add(Step.LOCATION)
             if (Requirement.NOTIFICATION_ACCESS in missing) add(Step.NOTIFICATION_ACCESS)
+            if (Requirement.OVERLAY in missing) add(Step.OVERLAY)
             if (Requirement.BATTERY_OPTIMIZATION in missing) add(Step.BATTERY)
             if (Requirement.BACKGROUND_SURVIVAL in missing) add(Step.BACKGROUND)
         }
@@ -182,6 +195,18 @@ object PermissionRepair {
                         Uri.parse("package:${context.packageName}"),
                     ),
                     Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                    appDetails(context),
+                )
+
+            // 悬浮窗：带 package 的 Action 会直接落到本应用那一条（Android 6+）；
+            // 个别 ROM 只认不带 data 的版本，退而求其次给列表页。
+            Step.OVERLAY ->
+                listOf(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}"),
+                    ),
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
                     appDetails(context),
                 )
 

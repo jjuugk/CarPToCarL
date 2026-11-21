@@ -52,6 +52,13 @@ package io.github.shaonialife.carptocar.carlife
  *
  * 全部下沉到 CarLife 控制通道的动作都由外部 `send` 回调决定在哪个线程执行
  * （SessionController 用 `carlife-cmd` 单线程），本类只做纯状态判定、不碰 socket。
+ *
+ * ## 2026-11-21 之后：起识别改走 `0x10066`
+ *
+ * 实车证据表明 `0x68008 KEYCODE_VR_START(0x21)` 在 CarLife+ 8.8.5 上**没有任何效果**
+ * （发出后引擎 8.5 秒到 25 分钟都不报 `语音=1`）。所以 `send(VR_START)` 的载荷虽然还是
+ * 这个键码语义，实际下发换成了 `MSG_CMD_HU_VOICE_CONTROL (0x10066)`——映射在
+ * [CarLifeHijack.sendVoiceKey]，本类不关心协议细节。`VR_STOP` 仍走 `0x68008`。
  */
 class VoiceKeyRouter(
     private val nowMillis: () -> Long = System::currentTimeMillis,
@@ -155,7 +162,9 @@ class VoiceKeyRouter(
         downSource = source
         startSent = true
         send(CarLifeProtocol.HardKey.VR_START)
-        log("EVENT: 车机语音键（$source 按下）→ CarLife 0x68008 keycode=0x21 VR_START")
+        // 1.2.78 起 VR_START 实际下发的是 `0x10066`（语音控制），不是 `0x68008 0x21`：
+        // 后者在 CarLife+ 8.8.5 上是死的，见 CarLifeProtocol.HU_VOICE_CONTROL 注释。
+        log("EVENT: 车机语音键（$source 按下）→ CarLife 0x10066 语音控制（起识别）")
     }
 
     private fun up(source: String) {

@@ -84,6 +84,20 @@ class PermissionRepairTest {
     }
 
     @Test
+    fun `只缺悬浮窗时只跳那一页并排在电池优化之前`() {
+        assertEquals(
+            listOf(Step.OVERLAY),
+            PermissionRepair.stepsFor(setOf(Requirement.OVERLAY)),
+        )
+        assertEquals(
+            listOf(Step.OVERLAY, Step.BATTERY),
+            PermissionRepair.stepsFor(
+                setOf(Requirement.BATTERY_OPTIMIZATION, Requirement.OVERLAY),
+            ),
+        )
+    }
+
+    @Test
     fun `设置项不进权限计划`() {
         val steps =
             PermissionRepair.stepsFor(

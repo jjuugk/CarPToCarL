@@ -1459,6 +1459,25 @@ class CarLifeHuClient(
         return ok
     }
 
+    /**
+     * 唤起 CarLife+ 语音（小度）：`MSG_CMD_HU_VOICE_CONTROL (0x10066)`。
+     *
+     * 与 [sendHardKeyCode] 的区别见 [CarLifeProtocol.HU_VOICE_CONTROL] 的注释：
+     * 硬键 `0x21` 这台车机（CarLife+ 8.8.5）**完全不处理**，语音控制是另一条消息。
+     *
+     * 判据仍然是引擎自己的 `65574`：真的起了识别才会报 `语音=1`。这里打 `已送达`
+     * 只代表 socket 写成功，**不代表引擎执行了**——日志里必须往下一行找 `语音=1`。
+     */
+    fun sendVoiceControl(command: Int, opt: Int): Boolean {
+        if (!running.get()) return false
+        val ok = send(CarLifeProtocol.HU_VOICE_CONTROL, CarLifeProtocol.voiceControlRequest(command, opt))
+        log(
+            "CARLIFE: 语音控制 0x10066 command=$command opt=$opt " +
+                (if (ok) "已送达（等引擎「语音=1」确认）" else "未送达——控制通道不可用"),
+        )
+        return ok
+    }
+
     /** 下发 `MSG_CMD_PAUSE_MEDIA (0x1800E)` 兼容暂停指令（配合硬键 `MEDIA_STOP` 兜底）。 */
     fun sendPauseMedia(): Boolean = if (running.get()) send(CarLifeProtocol.HU_PAUSE_MEDIA, ByteArray(0)) else false
 

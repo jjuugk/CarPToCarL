@@ -96,15 +96,16 @@ class ConnectionPreflightReportTest {
     }
 
     @Test
-    fun twelveItemsAreChecked() {
-        // 12 项（2026-11-17 加了「后台存活未被限制」）是「一眼看全」的上限：
-        // 再多就把摘要行压垮了。那一项补的是真空白——`BATTERY_OPTIMIZATION` 只查
-        // Doze 白名单，管不到厂商的应用冻结（实车日志里它全绿，进程照样被冻 10~25 秒）。
+    fun thirteenItemsAreChecked() {
+        // 13 项（2026-11-17 加「后台存活未被限制」，2026-11-21 加「显示在其他应用上层」）。
+        // 后加的那项补的是「车机靠近了手机毫无反应」——后台 startActivity 被静默拦掉，
+        // 而旧体检里它一个字都没有，日志里只有 CarApproachReceiver 自己写的一行。
         // 注意**不含投屏授权（MediaProjection）**——本版本画面走双屏虚拟屏、
         // 声音走 CarLife 引擎 PCM 直通，都不过 MediaProjection（2026-11-11 核对）。
-        assertEquals(12, Requirement.values().size)
+        assertEquals(13, Requirement.values().size)
         assertTrue(Requirement.values().any { it.name == "NOTIFICATION_ACCESS" })
         assertTrue(Requirement.values().any { it.name == "BACKGROUND_SURVIVAL" })
+        assertTrue(Requirement.values().any { it.name == "OVERLAY" })
         assertFalse(Requirement.values().any { it.name == "PROJECTION" })
     }
 

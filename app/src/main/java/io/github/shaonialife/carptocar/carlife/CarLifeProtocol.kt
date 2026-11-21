@@ -228,6 +228,37 @@ internal object CarLifeProtocol {
         const val VR_STOP = 0x22
     }
 
+    // ---- 车机语音控制（0x10066，HU → MD，控制通道）----
+    //
+    // `CommonParams.MSG_CMD_HU_VOICE_CONTROL = 0x00010066`（1.2.78 起替代 0x68008 唤小度）。
+    //
+    // 为什么换：`0x68008 KEYCODE_VR_START(0x21)` 在 CarLife+ 8.8.5 上**是死的**——
+    // 2026-11-21 实车日志 20:36:45 发出去，引擎 8.5 秒零反应；同一份日志里 11-20 那次
+    // 更长，发完按了 25 分钟都没等到 `语音=1`。硬键通路的媒体键（0x10/0x0F）也是
+    // 「写出成功、没有回执」（2026-11-16），说明这条通道整体不被引擎处理。
+    //
+    // 载荷是 `CarlifeVoiceControlRequestProto.CarlifeVoiceControlRequest`（dex 实证两字段）：
+    //   1 command int32（required）
+    //   2 opt     int32（required）
+    // 手机包里没有可对照的发送方（VM 引擎不回显 HU 指令），所以 command/opt 的具体取值
+    // **只能靠实车试**：[VoiceControl.START_COMMAND] / [VoiceControl.START_OPT] 就是
+    // 首次尝试的那组值，改这两个常量即可换组合，不必动发送代码。
+    const val HU_VOICE_CONTROL = 65638 // 0x00010066
+
+    object VoiceControl {
+        /** 首次尝试：command=1（唤醒）。 */
+        const val START_COMMAND = 1
+
+        /** 首次尝试：opt=2（取自 HU 侧常用组合；无效时优先改这里）。 */
+        const val START_OPT = 2
+    }
+
+    /** 车机语音控制：`CarlifeVoiceControlRequest{ command = 1, opt = 2 }`（两个字段都是 required）。 */
+    fun voiceControlRequest(
+        command: Int,
+        opt: Int,
+    ): ByteArray = pbVarint(1, command) + pbVarint(2, opt)
+
     const val HEARTBEAT = 131074
 
     /** CONNECT_TYPE：5 = Wi-Fi 局域网 */
