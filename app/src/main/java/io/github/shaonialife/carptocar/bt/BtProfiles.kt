@@ -1,12 +1,14 @@
 package io.github.shaonialife.carptocar.bt
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import io.github.shaonialife.carptocar.util.DebugFileLog
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -55,6 +57,15 @@ object BtProfiles {
     /** profile id → 已获取的代理（进程内复用；代理本身无会话状态）。 */
     private val proxies = HashMap<Int, BluetoothProfile>()
 
+    /**
+     * 蓝牙服务重启日志的节流时间戳（2026-11-21 诊断）。
+     *
+     * onServiceDisconnected 会在蓝牙栈重启时对每个 profile 都回调一次，不节流会一次刷 3 行；
+     * 这里按进程时间限流，保证「有一次重启」这件事可见，又不淹没断开动作的时间线。
+     */
+    @Volatile
+    private var lastServiceLostLogAt = 0L
+
     /** 该地址当前在线（已连接）的配置文件名称。 */
     fun connectedNames(
         context: Context,
@@ -99,6 +110,15 @@ object BtProfiles {
         val before = connectedNames(context, address)
         if (before.isEmpty()) return emptyList()
         val device = deviceHint ?: remoteDevice(context, address)
+        // 2026-11-21 诊断：记下断开动作发生时的蓝牙适配器状态 + 时间戳。判「断 HFP 会不会
+        // 把手机蓝牙栈踢重启」就靠这条和 BT-STATE 广播、onServiceDisconnected 三者对齐：
+        // 若断开后紧跟着 TURNING_OFF / service 断开，则假设成立。
+        adapterState(context)?.let { state ->
+            DebugFileLog.append(
+                context,
+                "BT-PROFILE: 请求断开 $before · 适配器态=${stateName(state)} · $address",
+            )
+        }
         for (id in profiles) {
             if (profileName(id) !in before) continue
             val proxy = proxy(context, id)
@@ -107,11 +127,33 @@ object BtProfiles {
         if (!awaitDisconnected(context, address, 1_500L) && device != null) {
             // 配置级断开未生效（个别 ROM 限流）：设备级断开兜底（@hide，同样只要求
             // BLUETOOTH_CONNECT）。车载/耳机当前连接的设备可能被一并断开，属预期。
+            // 这一步是「断 HFP 却把整机蓝牙带崩」的最大嫌疑点，单独记一行。
+            DebugFileLog.append(context, "BT-PROFILE: 配置级断开超时 → 升级为设备级 disconnect() 兜底")
             runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) }
             awaitDisconnected(context, address, 500L)
         }
         return before
     }
+
+    /** 蓝牙适配器当前状态；读不到返回 null（日志里缺一行无妨，不能因此中断断开动作）。 */
+    private fun adapterState(context: Context): Int? =
+        try {
+            (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+                ?.adapter
+                ?.state
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** 适配器状态值 → 可读名，纯函数。 */
+    internal fun stateName(state: Int): String =
+        when (state) {
+            BluetoothAdapter.STATE_OFF -> "OFF(10)"
+            BluetoothAdapter.STATE_TURNING_ON -> "TURNING_ON(11)"
+            BluetoothAdapter.STATE_ON -> "ON(12)"
+            BluetoothAdapter.STATE_TURNING_OFF -> "TURNING_OFF(13)"
+            else -> "UNKNOWN($state)"
+        }
 
     /**
      * 音频配置守卫：**建链期持续**把该设备的 HFP/A2DP 断开（2026-11-08 按宝马 fork 移植）。
@@ -282,6 +324,17 @@ object BtProfiles {
                         override fun onServiceDisconnected(id: Int) {
                             // 蓝牙服务重启后旧代理失效：清缓存，下次重新获取
                             synchronized(proxies) { proxies.remove(id) }
+                            // 2026-11-21 诊断：profile 代理被系统收回 = 蓝牙栈重了的直接信号
+                            // （通常伴随 com.android.bluetooth 进程重启）。节流后记一行，
+                            // 用来和断开动作的时间戳对齐。
+                            val now = SystemClock.uptimeMillis()
+                            if (now - lastServiceLostLogAt > 3_000L) {
+                                lastServiceLostLogAt = now
+                                DebugFileLog.append(
+                                    context.applicationContext,
+                                    "BT-PROFILE: profile 服务断开（${profileName(id)}）——蓝牙栈重启信号",
+                                )
+                            }
                             latch.countDown()
                         }
                     },

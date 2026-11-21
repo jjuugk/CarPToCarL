@@ -1,11 +1,13 @@
 package io.github.shaonialife.carptocar
 
 import android.app.Application
+import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
@@ -63,6 +65,13 @@ class SenderApp : Application() {
                 }
             },
             packageFilter,
+        )
+        // 蓝牙适配器状态观测（2026-11-21 诊断）：验证「断 HFP/A2DP 会不会把部分手机的
+        // 蓝牙栈带重启」。动态注册、随进程存活；只写文件日志，不改变任何连接行为。
+        // 判读时与 BT-PROFILE / BT-GUARD / BT-C 的时间戳对齐。
+        registerReceiver(
+            BluetoothStateReceiver(),
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
         )
     }
 
