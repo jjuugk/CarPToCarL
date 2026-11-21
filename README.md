@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk)**
-> —— 主线固定直链（当前 1.2.79，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk)**
+> —— 主线固定直链（当前 1.2.80，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.79，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.79.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.80，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.80.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.79`（正式版；**蓝牙反复断开问题——新增日志监控**：建链期反复踢 HFP/A2DP 疑似会把部分手机的整机蓝牙栈带重启，本版加入 `BT-STATE` / `BT-PROFILE` 三类日志，与 `BT-GUARD` / `BT-C` 同一毫秒时钟对齐，用来一锤定音「断配置 vs 蓝牙重启」的因果链；**纯观测，不改变任何连接行为**。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.79.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.79/CarPToCarL-1.2.79.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.80`（正式版；并入 BMW MGU-50-J 实车 fork 的 **P1/P2/P4**：新增「连上后主动取主音频」开关（默认关，按车型自行开启）、切歌不再永久静音、车机点 CarPlay 图标无响应时补关键帧 + 复述归属。不会重发 RECORD——该车对重复 RECORD 过敏。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,44 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.80 —— 2026-11-21（并入 MGU-50-J fork 的 P1/P2/P4，正式版）
+
+来源：资料库 PR《CarPToCarL-PR-宝马MGU50J修复说明》，基于 v1.2.77、一加 PLK110 +
+宝马 MGU-50-J（iDrive 7）实车验证。按用户决定合入 **1/2/4，P3（通话档退避）未合**
+（文档代码片段有明显语法错误，且作者自己标为推测性修复）。**本次三项均未在本仓车型上实车验证**。
+
+**一、P1 连上后主动取主音频（用户开关，默认关）**
+
+MGU-50-J 的脾气：视频在送、车机 ACK 正常，但「没有音频会话就不交屏」，停在自家主页；
+只有用户手动放首歌才切进 CarPlay。根因是死锁：手机等播放意图才申请主音频，车机等音频会话才交屏。
+
+- 设置面板新增 **「连上后主动取主音频」**，键 `proactive_audio_on_link`，默认 `false`，**按车型由用户自行开启，不做车机指纹判定**（部分车机确实需要这一步才出画面）。
+- 打开后 RECORD 完成 1.5 秒（首帧已出、控制会话已就绪），若没有音频流且主音频不在手机手里，置一次播放意图并走既有 `modesChanged → SETUP → RECORD`。
+- 每轮会话只排一次，退役复位。日志：`AUDIO: 主动申请主音频（实验开关开）`。
+- 关掉即完全恢复旧行为；下次连接生效。
+
+**二、P2 切歌后不再永久静音**
+
+切歌瞬间 CarLife 引擎必然发 `FOCUS_RELEASED`。旧实现把它当成「车机接管了音源」置 `pausedByCar=true`，
+PCM 门禁变成无限期，只能通过车机按播放键/`onCarResume` 解除——而用户在手机上切歌时车机根本没参与，
+于是切歌之后永久静音，只能断开重连。
+
+现在 `FOCUS_RELEASED` 只标记 `sourcePaused`，门禁按常规 15 秒窗口自恢复。**真正的车机接管仍走
+`onCarPause()`（资源层 transfer / 静音键），那条路径一字未改**。新增单测锁住这个边界。
+
+**三、P4 `requestUI` 时主屏已在本机就补一次激活**
+
+车机点 CarPlay 图标会发 `requestUI`，但此时主屏本来就在手机手里、视频也在推——`applyScreen()`
+命中「已持有 + 正在推流」直接 return，车机等的「一次新的画面激活」始终没来。
+
+现在强制关键帧 + 复述资源归属（`republishModes()`），**刻意不重发 RECORD**——MGU-50-J 对重复
+RECORD 过敏（补发后 1.79~2.03 秒拆链）。日志：`RESOURCE: requestUI 时主屏已在本机——已强制关键帧并复述资源归属`。
+
+**验证要点**：打开 P1 后不手动放歌能否进 CarPlay；连上后切歌是否一直有声；点车机 CarPlay 图标能否恢复。
+P1 关掉即为 A/B 基线。
+
+正式包 14,168,165 B，sha256 `702d83ee296e423c5848afd3ec75110247581f07411ce0589db38717233311c7`；968 例单测 0 失败（versionCode 10280）。
 
 ### 1.2.79 —— 2026-11-21（蓝牙问题日志监控，正式版）
 
