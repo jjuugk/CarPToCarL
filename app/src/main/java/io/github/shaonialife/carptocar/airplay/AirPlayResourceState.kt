@@ -457,6 +457,21 @@ class AirPlayResourceState {
         const val PRIORITY_BACKGROUND = 100
         const val PRIORITY_USER = 500
 
+        /**
+         * `changeModes.params.reasonStr` 的可读文本——车机唯一说明「为什么动资源」的人话字段。
+         *
+         * 真车取值见过 `screen native`（原生屏切换）、`PHONE`（来电/微信语音借走音频）。
+         * 此前日志只打 params 的**键名**（`reasonStr,resources`），于是「这次抢屏是倒车、
+         * 来电还是车机切回原生屏」事后无法回答——只能靠猜。
+         *
+         * 缺省与空串分开报：`(-)` = 车机压根没给这个字段，`("")` = 给了但为空。
+         */
+        fun reasonText(params: Map<*, *>?): String {
+            val raw = params?.get("reasonStr") ?: return "(-)"
+            val text = raw.toString()
+            return if (text.isEmpty()) "(\"\")" else "\"$text\""
+        }
+
         /** 约束 100 = 随时可拿；500 = 只让用户发起的申请；其余（如 1000）= 不让。 */
         private fun allows(
             priority: Int,

@@ -341,4 +341,34 @@ class AirPlayResourceStateTest {
         assertFalse(acquired)
         assertFalse(state.phoneOwnsAudio)
     }
+
+    // ---- changeModes.reasonStr 的可读形式 ----
+    // 车机只在 reasonStr 里说明「为什么动资源」。日志原来只打 params 的键名，
+    // 于是「这次抢屏是倒车、来电还是切回原生屏」事后无从判断。
+
+    @Test
+    fun `reasonStr 原样带引号输出`() {
+        assertEquals(
+            "\"screen native\"",
+            AirPlayResourceState.reasonText(
+                mapOf<Any?, Any?>("reasonStr" to "screen native", "resources" to emptyList<Any?>()),
+            ),
+        )
+        assertEquals("\"PHONE\"", AirPlayResourceState.reasonText(mapOf<Any?, Any?>("reasonStr" to "PHONE")))
+    }
+
+    @Test
+    fun `reasonStr 缺失与空串要能区分`() {
+        assertEquals("(-)", AirPlayResourceState.reasonText(null))
+        // 只有 resources、没有 reasonStr
+        assertEquals("(-)", AirPlayResourceState.reasonText(mapOf<Any?, Any?>("resources" to emptyList<Any?>())))
+        // 给了但是空串
+        assertEquals("(\"\")", AirPlayResourceState.reasonText(mapOf<Any?, Any?>("reasonStr" to "")))
+    }
+
+    @Test
+    fun `reasonStr 非字符串取值也照打`() {
+        // plist 里数值型字段偶尔被车机塞进这个键，不能因为类型不对就整条日志丢信息
+        assertEquals("\"7\"", AirPlayResourceState.reasonText(mapOf<Any?, Any?>("reasonStr" to 7)))
+    }
 }

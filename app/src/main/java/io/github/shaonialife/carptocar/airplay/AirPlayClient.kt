@@ -3849,8 +3849,16 @@ class AirPlayClient(
                             // changeModes 在事件应答里直接回仲裁后的归属（不另发一轮阻塞的 modesChanged）
                             val reply =
                                 if (command["type"] == "changeModes") {
-                                    audioTransfer = resourceState.applyCarChange(command["params"] as? Map<*, *>)
-                                    log("EVENT: changeModes ${resourceState.describe()}")
+                                    val changeParams = command["params"] as? Map<*, *>
+                                    audioTransfer = resourceState.applyCarChange(changeParams)
+                                    // reasonStr 必须打**值**：车机只在这个字段里说明「为什么
+                                    // 动资源」（`screen native` / `PHONE` …）。只打键名的日志
+                                    // 回答不了「这次抢屏究竟是倒车、来电还是切原生屏」。
+                                    log(
+                                        "EVENT: changeModes reasonStr=" +
+                                            AirPlayResourceState.reasonText(changeParams) +
+                                            " " + resourceState.describe(),
+                                    )
                                     BinaryPlist.encode(linkedMapOf("status" to 0L, "params" to resourceState.command()["params"]))
                                 } else {
                                     ByteArray(0)
