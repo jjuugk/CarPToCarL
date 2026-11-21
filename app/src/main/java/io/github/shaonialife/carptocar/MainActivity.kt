@@ -2035,6 +2035,23 @@ class MainActivity : AppCompatActivity() {
                 },
             )
         }
+        // 车机占屏时保留视频流（实验，默认关）：车机借屏放转向/倒车影像时不再拆流，
+        // 归还后补关键帧 + 重武装 HID 即可恢复。即时生效——直接改静态开关字段，不必重连。
+        val keepScreenSwitch = findViewById<SwitchCompat>(R.id.switchKeepScreenStream)
+        keepScreenSwitch.isChecked = DisplayPrefs.keepScreenStreamOnTake(ctx)
+        io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams.keepScreenStreamOnTake =
+            keepScreenSwitch.isChecked
+        keepScreenSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setKeepScreenStreamOnTake(ctx, checked)
+            io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams.keepScreenStreamOnTake = checked
+            snack(
+                if (checked) {
+                    "已开启「车机占屏保留视频流」——不再 TEARDOWN，归还后补关键帧恢复（下一轮起算）"
+                } else {
+                    "已关闭——恢复旧行为（让屏即 TEARDOWN，归还后整套重建）"
+                },
+            )
+        }
     }
 
     private fun updateAudioTag() {

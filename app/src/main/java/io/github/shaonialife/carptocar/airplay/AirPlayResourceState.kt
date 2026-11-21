@@ -79,6 +79,10 @@ class AirPlayResourceState {
 
         fun copy() = Resource(permanentEntity, takeConstraint, borrowers.toMutableList(), borrowConstraint, phoneBorrowing)
 
+        /** 车机是否还借着（实验开关据此决定不去抢）。 */
+        val hasBorrowers: Boolean
+            get() = borrowers.isNotEmpty()
+
         fun reset() {
             permanentEntity = ENTITY_PHONE
             takeConstraint = null
@@ -184,11 +188,24 @@ class AirPlayResourceState {
         }
     }
 
-    /** 申请主屏；[fromRequestUi] = 车机 `requestUI` 主动请回手机画面，可收回车机的临时借屏。 */
+    /**
+     * 申请主屏。
+     *
+     * @param fromRequestUi 车机 `requestUI` 主动请回手机画面，可收回车机的临时借屏
+     * @param respectBorrow 车机还借着屏就**不申请**（实验开关）：link_plus 的做法——
+     *   借用未结束时 requestUI 不改变归属，等车机自己发 `transferType=4` 结束借用
+     */
     fun acquireScreen(
         fromRequestUi: Boolean,
+        respectBorrow: Boolean = false,
         publish: (Map<String, Any?>) -> Boolean,
-    ): Boolean = claimAndPublish(RESOURCE_SCREEN, publish) { it.claim(PRIORITY_USER, overrideBorrow = fromRequestUi) }
+    ): Boolean =
+        claimAndPublish(RESOURCE_SCREEN, publish) { screen ->
+            when {
+                respectBorrow && screen.hasBorrowers -> false
+                else -> screen.claim(PRIORITY_USER, overrideBorrow = fromRequestUi)
+            }
+        }
 
     /**
      * 申请主音频：媒体按用户优先级永久取得；导航按后台优先级 [temporary] 借用，

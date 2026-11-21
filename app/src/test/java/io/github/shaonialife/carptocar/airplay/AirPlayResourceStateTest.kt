@@ -317,6 +317,38 @@ class AirPlayResourceStateTest {
     }
 
     @Test
+    fun `实验开关下借用未结束时 requestUI 也不抢屏，借用结束才恢复`() {
+        // 别克 6369：车机借屏放转向影像，我们在 requestUI 后立刻 overrideBorrow 抢回来，
+        // 它 100~170ms 内又判回去 —— 每轮都白付一次 SETUP/RECORD。
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.applyCarChange(resource(1, 3, "borrowID" to "turn", "unborrowConstraint" to 100))
+        // 旧行为：约束 100 允许强抢（这条差异就是实验开关要解决的问题）
+        val legacy = AirPlayResourceState()
+        legacy.initialize(null)
+        legacy.applyCarChange(resource(1, 3, "borrowID" to "turn", "unborrowConstraint" to 100))
+        assertTrue(legacy.acquireScreen(fromRequestUi = true) { true })
+        // 实验开关：借用未结束先不动，也不发报文
+        assertFalse(
+            state.acquireScreen(fromRequestUi = true, respectBorrow = true) {
+                throw AssertionError("车机还借着屏，不该发 modesChanged")
+            },
+        )
+        assertFalse(state.phoneOwnsScreen)
+        // 车机自己结束借用（transferType=4）后，永久归属回手机
+        state.applyCarChange(resource(1, 4, "borrowID" to "turn"))
+        assertTrue(state.phoneOwnsScreen)
+    }
+
+    @Test
+    fun `实验开关不影响无借用时的正常申请`() {
+        val state = AirPlayResourceState()
+        state.initialize(resource(1, 1, "takeConstraint" to 500))
+        assertTrue(state.acquireScreen(fromRequestUi = false, respectBorrow = true) { true })
+        assertTrue(state.phoneOwnsScreen)
+    }
+
+    @Test
     fun `申请主屏不会顺带抢走车机持有的主音频`() {
         val state = AirPlayResourceState()
         state.initialize(

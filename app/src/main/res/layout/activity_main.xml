@@ -1368,6 +1368,47 @@
                         android:thumb="@drawable/sw_thumb"
                         app:track="@drawable/sw_track" />
                 </LinearLayout>
+
+                <!-- 车机占屏时保留视频流（实验，默认关）：车机借屏放转向/倒车影像时不再拆流 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="车机占屏时保留视频流"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="车机借屏放转向/倒车影像后，旧行为是拆掉屏幕流、归还时整套重建，实测每轮 100~170ms 又被夺走。打开后占屏期间不断流，归还时补关键帧 + 重武装触摸立即恢复。实验项，默认关闭。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchKeepScreenStream"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- ==================== 日志（默认折叠） ==================== -->

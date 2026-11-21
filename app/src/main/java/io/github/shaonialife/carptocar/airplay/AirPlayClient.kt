@@ -1249,9 +1249,19 @@ class AirPlayClient(
     }
 
     // 手机侧申请与 appState 上报共用一把锁：两路 modesChanged 不交叉，车机看到的归属按序演进
-    fun acquireScreenResource(fromRequestUi: Boolean = false): Boolean =
+    /**
+     * 申请主屏。
+     *
+     * @param fromRequestUi 车机 `requestUI` 主动请回手机画面
+     * @param respectBorrow 车机还借着屏时**不去抢**（实验开关 `keepScreenStreamOnTake`）：
+     *   借用期间强抢只会被它在一个往返内判回去，白付一轮 SETUP/RECORD
+     */
+    fun acquireScreenResource(
+        fromRequestUi: Boolean = false,
+        respectBorrow: Boolean = false,
+    ): Boolean =
         synchronized(modesPublicationLock) {
-            resourceState.acquireScreen(fromRequestUi) { publishModes("申请主屏", it) }
+            resourceState.acquireScreen(fromRequestUi, respectBorrow) { publishModes("申请主屏", it) }
         }
 
     fun acquireAudioResource(

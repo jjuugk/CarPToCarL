@@ -4120,14 +4120,14 @@ object SessionController {
         setup: AirPlayClient.SetupInfo,
         initial: VideoSender?,
         factory: (AirPlayClient.ScreenStreamInfo) -> VideoSender,
-    ) = CarPlayResourceStreams(
+    ): CarPlayResourceStreams = CarPlayResourceStreams(
         client = client,
         sessionKey = secret,
         displayUuid = setup.displayUuid,
         audioIntent = audioIntent,
         initialSender = initial,
         createSender = factory,
-        onScreenPaused = {
+        onScreenPaused = { streamKept ->
             synchronized(sessionLifecycleLock) {
                 if (currentClient === client) {
                     // 「这次给屏 → 被抢」之间我们到底送出去几帧、活了多久：车机抢屏若恒定落在
@@ -4139,18 +4139,31 @@ object SessionController {
                         } else {
                             android.os.SystemClock.elapsedRealtime() - screenResumedAtMs
                         }
-                    CarLifeHijack.detach()
+                    // 实验开关：保留视频流时**不能 detach**——采集端一连断开，编码器就没帧可送，
+                    // 「不拆流」也就名存实亡。
+                    if (!streamKept) CarLifeHijack.detach()
                     ScreenDimmer.setSessionActive(false)
-                    phaseHint = "车机暂时持有主屏资源，等待显示请求或归还"
+                    phaseHint =
+                        if (streamKept) {
+                            "车机暂时持有主屏资源——视频流保留，归还后立即恢复"
+                        } else {
+                            "车机暂时持有主屏资源，等待显示请求或归还"
+                        }
                     appendLog(
-                        "RESOURCE: 主屏暂由车机持有；保留控制会话，等待 requestUI 或资源归还" +
-                            " · 本次送流 $frames 帧" +
-                            if (aliveMs >= 0) " / 存活 ${aliveMs}ms" else "",
+                        if (streamKept) {
+                            "RESOURCE: 主屏暂由车机持有；视频流保留（实验开关，未 TEARDOWN）" +
+                                " · 本次已送 $frames 帧" +
+                                if (aliveMs >= 0) " / 已存活 ${aliveMs}ms" else ""
+                        } else {
+                            "RESOURCE: 主屏暂由车机持有；保留控制会话，等待 requestUI 或资源归还" +
+                                " · 本次送流 $frames 帧" +
+                                if (aliveMs >= 0) " / 存活 ${aliveMs}ms" else ""
+                        },
                     )
                 }
             }
         },
-        onScreenResumed = { sender ->
+        onScreenResumed = { sender, soft ->
             synchronized(sessionLifecycleLock) {
                 if (currentClient !== client || client.cancelled || !client.phoneOwnsScreen) {
                     false
@@ -4158,10 +4171,23 @@ object SessionController {
                     videoSender = sender
                     videoSessionFrameBase = CarLifeHijack.framesDelivered
                     screenResumedAtMs = android.os.SystemClock.elapsedRealtime()
-                    CarLifeHijack.attach(sender, ::appendLog)
+                    if (soft) {
+                        // 沿用现有流：不重新 SETUP，但车机会把 HID 输入模式复位（触摸静默失效），
+                        // 所以必须重发 hidSetInputMode；画面靠补关键帧让解码器立刻出图。
+                        hidDeclaredUuids.forEach { uuid ->
+                            runCatching { client.sendHidSetInputMode(uuid, 0) }
+                        }
+                        sender.requestKeyFrame()
+                        appendLog(
+                            "RESOURCE: 主屏归还——沿用现有视频流（实验开关），补关键帧 + 重武装 HID" +
+                                "（${hidDeclaredUuids.size} 个设备）",
+                        )
+                    } else {
+                        CarLifeHijack.attach(sender, ::appendLog)
+                        appendLog("RESOURCE: 主屏归还，已重新 SETUP/RECORD 并恢复视频（音频所有权独立）")
+                    }
                     ScreenDimmer.setSessionActive(true)
                     phaseHint = "主屏资源已归还，CarPlay 视频恢复"
-                    appendLog("RESOURCE: 主屏归还，已重新 SETUP/RECORD 并恢复视频（音频所有权独立）")
                     startCarlifeWaitNotice()
                     startFirstFrameGate()
                     startScreenHandoverGate(client)
@@ -6773,6 +6799,18 @@ object SessionController {
                                         ).also { created = it }
                                     }
                                     val initialSender = screen?.let(makeSender)
+                                    // 会话起步时按落盘设置武装「车机占屏策略」：没有 Activity
+                                    // （开机自启、被冻结后自动恢复）也必须生效，所以读在这里而不是界面里。
+                                    CarPlayResourceStreams.keepScreenStreamOnTake =
+                                        DisplayPrefs.keepScreenStreamOnTake(context)
+                                    appendLog(
+                                        "MODE: 车机占屏策略=" +
+                                            if (CarPlayResourceStreams.keepScreenStreamOnTake) {
+                                                "保留视频流（实验开关开：不 TEARDOWN，归还后补关键帧）"
+                                            } else {
+                                                "常规（TEARDOWN 后重建）"
+                                            },
+                                    )
                                     synchronized(sessionLifecycleLock) {
                                         requireAttempt(attempt)
                                         videoSender = initialSender
