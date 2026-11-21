@@ -1482,6 +1482,25 @@ class CarLifeHuClient(
     fun sendPauseMedia(): Boolean = if (running.get()) send(CarLifeProtocol.HU_PAUSE_MEDIA, ByteArray(0)) else false
 
     /**
+     * 把 CarPlay 车机下发的昼夜状态送进手机 CarLife+ 引擎（0x18078）。
+     *
+     * 载荷 protobuf `CarlifeThemeChange{ themeModes }`：日间=0 / 夜间=1，
+     * 由引擎在自己的进程里切换导航/UI 配色。返回报文是否写出成功；
+     * 命令通道未握手时直接 false，调用方可据此判「引擎不在线」。
+     */
+    fun sendThemeChange(night: Boolean): Boolean {
+        if (!running.get()) return false
+        val mode = if (night) CarLifeProtocol.MODE_NIGHT else CarLifeProtocol.MODE_DAY
+        val ok = send(CarLifeProtocol.HU_THEME_CHANGE, CarLifeProtocol.themeChange(mode))
+        log(
+            "CARLIFE: 主题切换 0x18078 themeModes=$mode" +
+                "（${if (night) "夜间" else "日间"}）" +
+                if (ok) "" else " —— 命令通道不可用，未送达",
+        )
+        return ok
+    }
+
+    /**
      * 只重发 98311 编码初始化（**不碰** 98386）。
      *
      * 引擎收到 98311 会重建编码器并回 65544，我们的 65544 处理里会顺带补 98313

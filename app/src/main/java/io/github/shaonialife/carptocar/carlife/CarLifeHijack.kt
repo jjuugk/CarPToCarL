@@ -5,6 +5,7 @@ import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.input.TouchDomainMapping
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionsState
+import io.github.shaonialife.carptocar.session.CarNightMode
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoSink
 import java.net.InetSocketAddress
@@ -609,6 +610,14 @@ object CarLifeHijack {
     fun sendCarGps(fix: CarGpsFix): Boolean = client?.sendCarGps(fix) ?: false
 
     /**
+     * 把 CarPlay 车机的昼夜状态送进手机 CarLife+ 引擎（0x18078 主题切换）。
+     *
+     * 未接管 / 引擎未连上时返回 false。注意命令必须经调用方的 CarLife 命令线程池
+     * 投递（[SessionController] 里是 `carLifeCommandSender`），不能占 iAP2 收帧线程。
+     */
+    fun sendThemeChange(night: Boolean): Boolean = client?.sendThemeChange(night) ?: false
+
+    /**
      * 车机语音键 → CarLife 语音（1.2.78 起走 `0x10066`，不再走 `0x68008`）。
      *
      * 起识别：[CarLifeProtocol.HU_VOICE_CONTROL]（`command=1 opt=2`）。
@@ -1168,6 +1177,21 @@ object CarLifeHijack {
                 }
                 // 会话建立前缓存过 SPS：立刻用它校准触摸基准，别等下一帧关键帧。
                 spsPps?.let { hu.seedSps(it) }
+                // 车机日夜模式回放：CarPlay 会话（AirPlay/iAP2）先于本机 CarLife+ 引擎建链，
+                // 车机在会话刚建立时下发的 setNightMode 那一刻引擎还没连上、转发被丢弃
+                // （2026-11-21 实测：17.472 收到夜间，17.475 未送达，19.4 引擎才握手）。
+                // 引擎就绪后按已收权威状态补发一次，避免必须手动切一次主题才跟随车机。
+                // 必须在握手完成之后发（running=true 才有命令通道），且只在确实收到过
+                // 车机命令时补（hasValue），不用默认值误覆盖引擎当前主题。
+                if (CarNightMode.hasValue) {
+                    val replayNight = CarNightMode.isNight
+                    val replayOk = hu.sendThemeChange(replayNight)
+                    logSink?.invoke(
+                        "CARLIFE: 引擎就绪后回放车机日夜模式" +
+                            " ${if (replayNight) "夜间" else "日间"} → " +
+                            if (replayOk) "已送达" else "未送达",
+                    )
+                }
                 // CarPlay 会话仍在、CarLife 换了一轮（引擎掉线重连 / 用户重开「无线连接」）：
                 // 车机手里的 avcC 与参考帧都是上一轮的，必须让视频层重发 VideoConfig、
                 // 并等到新 IDR 再送帧，否则「CarPlay 不掉、CarLife 重连后永久没画面」
