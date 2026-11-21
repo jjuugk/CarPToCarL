@@ -66,6 +66,7 @@ import io.github.shaonialife.carptocar.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.carptocar.net.CarPlayServiceBrowser
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.HotspotHint
+import io.github.shaonialife.carptocar.net.NetworkMemory
 import io.github.shaonialife.carptocar.net.NetworkReusePolicy
 import io.github.shaonialife.carptocar.net.SilentJoinPolicy
 import io.github.shaonialife.carptocar.net.WifiCarPlayConnector
@@ -191,8 +192,10 @@ object SessionController {
      * `joinCarWifiSpecifier` 会一直失败）。配套开关是
      * `onCarPlayEndpoint(..., onCurrentWifi = true)`：告诉交接流程「网络已经绑好了，
      * 别再走加入热点那一段」。
+     *
+     * 值来自 [NetworkMemory]（那边用它判断「合成端点不能进复用记忆」），单一来源。
      */
-    private const val CURRENT_WIFI_LABEL = "(当前WiFi)"
+    private const val CURRENT_WIFI_LABEL = NetworkMemory.CURRENT_WIFI_LABEL
 
     /**
      * 等车机 ctrl 邀请的上限（事件驱动，收到即走）。
@@ -5462,6 +5465,24 @@ object SessionController {
     }
 
     /**
+     * 记住「这一轮真的出过画面」的端点，供车机下次不发 0x4301 时复用（[NetworkMemory]）。
+     *
+     * 只在**首帧到达后**调用：配对成功但没出画面的一轮（SETUP 500、重建协商失败等）
+     * 不应该写进记忆——那种端点多半正是坏的，记下来只会让下次复用照样失败。
+     */
+    private fun rememberNetworkEndpoint() {
+        val ctx = appContext ?: return
+        val endpoint = lastSessionTarget?.endpoint ?: return
+        if (!NetworkMemory.isCacheable(endpoint)) return
+        NetworkMemory.record(ctx, endpoint)
+        appendLog(
+            "NET: 已记住本轮网络信息（SSID=${endpoint.ssid}、" +
+                "${endpoint.ipAddresses.firstOrNull() ?: "(无地址)"}:${endpoint.airPlayPort}）" +
+                "——下次车机不发 0x4301 时可直接复用",
+        )
+    }
+
+    /**
      * 首帧门：SETUP 成功之后等首帧，超时**只报告不拆链**。
      *
      * 等的是「车机真的收到首帧」（`CarLifeHijack.framesDelivered` 相对本次会话起点有增长），
@@ -5481,8 +5502,7 @@ object SessionController {
      * 旧日志在「SETUP 成功」之后就断片了，到底是黑屏、还是 CarLife 没在投，
      * 事后完全无从判断（2026-11-01 日志 090105 就缺这一段）。
      */
-    private fun startFirstFrameGate() {
-        Bg.run("first-frame-gate") {
+    private fun startFirstFrameGate() {        Bg.run("first-frame-gate") {
             videoSessionEnded = false
             // 基准取 attach **之前**的累计送达数（videoSessionFrameBase）：缓存回放成功时
             // framesDelivered 在 attach 里已经涨过，若在这里重新取基准，会把「已经回放了画面」
@@ -5493,6 +5513,7 @@ object SessionController {
             while (android.os.SystemClock.uptimeMillis() < deadline) {
                 if (CarLifeHijack.framesDelivered > base) {
                     connectBudget.markStreaming()
+                    rememberNetworkEndpoint()
                     return@run
                 }
                 // 只在「会话被整体收掉」（retireSession 会把 videoSender 置空）或用户取消时退出；
@@ -5512,6 +5533,7 @@ object SessionController {
             }
             if (CarLifeHijack.framesDelivered > base) {
                 connectBudget.markStreaming()
+                rememberNetworkEndpoint()
                 return@run
             }
             // 超时仍没有任何帧送进车机通道。按「源侧最近是否真出过帧」区分两种失败
@@ -5652,7 +5674,7 @@ object SessionController {
 
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
-        endpoint: Iap2SenderSession.CarPlayEndpoint,
+        endpointIn: Iap2SenderSession.CarPlayEndpoint,
         source: String,
         /**
          * true = 这个端点是「手机已经挂在当前 WiFi 上、我们从这条网络里实际发现的服务」
@@ -5664,6 +5686,7 @@ object SessionController {
          */
         onCurrentWifi: Boolean = false,
     ) {
+        var endpoint = endpointIn
         val context = appContext ?: return
         if (currentClient?.controlSessionAlive == true && resourceStreams?.screenPaused == true) {
             appendLog(">>> [$source] 主屏暂让给车机，控制会话仍活跃——忽略冗余端点")
@@ -5676,6 +5699,29 @@ object SessionController {
         if (videoSender?.isRunning == true) {
             appendLog(">>> [$source] 会话推流中——忽略冗余端点（接收端周期重连的重复 0x4301）")
             return
+        }
+        // 车机没下发 0x4301（空端点）时，先尝试复用「它上次真出过画面时给的网络信息」。
+        //
+        // 依据：同一台车机的热点 SSID/密码/信道/端口是固定的——2026-11-21 别克 BUICK_6369
+        // 四次 0x4301 的无线组参数逐字节相同，而 08:17 那轮整轮零下发，只能干等 90 秒后拆链。
+        // 缺的那一环是持久化：内存快照 [lastGoodEndpoint] 进程一重启就归零，所以落一份盘
+        // （[NetworkMemory]）。只有真正出过首帧的端点才会被记录，见 [startFirstFrameGate]。
+        //
+        // 复用失败（入网失败 / 密码已变）会 [NetworkMemory.forget] 掉该条并回退到原来的
+        // 「等车机下发 0x4301」流程，绝不会反复拿坏凭据撞墙。
+        val originalEndpoint = endpoint
+        var reusedFrom: NetworkMemory.Entry? = null
+        if (endpoint.ssid.isEmpty() && !onCurrentWifi) {
+            val cached = NetworkMemory.pick(context)
+            if (cached != null) {
+                reusedFrom = cached
+                endpoint = cached.endpoint
+                appendLog(
+                    ">>> [$source] 车机未下发 0x4301——复用上次成功建链的网络信息：" +
+                        "SSID=${cached.endpoint.ssid}（${NetworkMemory.describeAge(cached.savedAtMillis)}成功过，" +
+                        "端点 ${cached.endpoint.ipAddresses.firstOrNull() ?: "(无地址)"}:${cached.endpoint.airPlayPort}）",
+                )
+            }
         }
         val attempt =
             synchronized(sessionLifecycleLock) {
@@ -5805,6 +5851,22 @@ object SessionController {
         val continueWithNetwork: (Boolean) -> Unit = proceed@{ bound ->
             if (!ownsAttempt(attempt)) return@proceed
             if (!bound) {
+                // 复用来的凭据入网失败：大概率车机换了热点密码（固件更新 / 恢复出厂）。
+                // 清掉这条记忆并回退到「等车机下发 0x4301」的原流程——不能反复拿坏凭据撞墙。
+                if (reusedFrom != null) {
+                    NetworkMemory.forget(context, reusedFrom.endpoint.ssid)
+                    appendLog(
+                        ">>> [$source] 复用上次网络信息失败（SSID=${reusedFrom.endpoint.ssid}，可能已改密码）" +
+                            "——已清除该条缓存，改为等车机下发 0x4301",
+                    )
+                    phaseHint = "等待车机下发连接信息（0x4301）…"
+                    synchronized(sessionLifecycleLock) {
+                        if (!ownsAttempt(attempt)) return@proceed
+                        releaseAttempt(attempt)
+                    }
+                    watchForPendingStartSession(originalEndpoint, source)
+                    return@proceed
+                }
                 phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
                 appendLog(">>> [$source] 手机当前不在该热点——请到 设置>WLAN 加入 \"${endpoint.ssid}\" 后断开重连")
                 // 这一轮到此为止（没有配对线程会接手），必须自己收尾，否则只有「本轮开始」。
