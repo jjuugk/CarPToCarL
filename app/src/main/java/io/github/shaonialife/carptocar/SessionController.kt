@@ -2,10 +2,12 @@ package io.github.shaonialife.carptocar
 
 import io.github.shaonialife.carptocar.link.SetupInfo
 import io.github.shaonialife.carptocar.link.ScreenStreamInfo
+import io.github.shaonialife.carptocar.launcher.settings.LinkEnginePrefs
 import io.github.shaonialife.carptocar.link.AirPlayLinkSession
 import io.github.shaonialife.carptocar.link.AudioStreamInfo
 import io.github.shaonialife.carptocar.link.ClientLinkSession
 import io.github.shaonialife.carptocar.link.ControlKeys
+import io.github.shaonialife.carptocar.link.ProtocolCoreSession
 import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
@@ -6177,8 +6179,30 @@ object SessionController {
                         }
                     }
 
-                    fun newClient() =
-                        AirPlayClient(
+                    fun newClient(): AirPlayLinkSession =
+                        (
+                            if (LinkEnginePrefs.useProtocolCore(context)) {
+                                ProtocolCoreSession(
+                                    initialEndpoint = effectiveEndpoint,
+                                    log = { line -> appendLog(line) },
+                                    context = context.applicationContext,
+                                    endpointRefresher = { current ->
+                                        requireAttempt(attempt)
+                                        enrichEndpointFromBrowser(current, source)
+                                    },
+                                    retryTick = { retryNumber ->
+                                        requireAttempt(attempt)
+                                        ctrlAdvertiser?.ensureForNetwork(
+                                            endpoint.ssid,
+                                            force = true,
+                                            network = wifiConnector?.currentNetwork,
+                                        )
+                                        appendLog("LINK: 协议核重试 #$retryNumber —— 已重新公告 ctrl")
+                                    },
+                                )
+                            } else {
+                                ClientLinkSession(
+                                    AirPlayClient(
                             effectiveEndpoint,
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
@@ -6216,6 +6240,9 @@ object SessionController {
                                         ),
                                 )
                             },
+                                    ),
+                                )
+                            }
                         ).also { created ->
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
@@ -6253,7 +6280,7 @@ object SessionController {
                             // 否则它认定这台手机永远不打电话，通话时不切音频通路。
                             created.callStateSource = { callStateOf() }
                             created.onCarAudioTransfer = { transfer ->
-                                handleCarAudioTransfer(ClientLinkSession(created), transfer)
+                                handleCarAudioTransfer(created, transfer)
                             }
                         }
                     var client =
@@ -6266,7 +6293,7 @@ object SessionController {
                             // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                             phaseHint = "AirPlay 配对中…"
                             connectBudget.enter(ConnectStage.PAIRING)
-                            ClientLinkSession(newClient()).also { currentClient = it }
+                            newClient().also { currentClient = it }
                         }
                     // 本机应用态上报（Speech/PhoneCall）：收发都在后台线程，这里只是起收敛线程。
                     // 初始归属那一轮（assertModes）会把当前状态一并带上，不会再单独发一遍。
@@ -6406,7 +6433,7 @@ object SessionController {
                             client.cancelled = true
                             client.close()
                             detachActiveBtSessions()
-                            client = ClientLinkSession(newClient())
+                            client = newClient()
                             currentClient = client
                         }
                         drainPendingEndpoint(client)

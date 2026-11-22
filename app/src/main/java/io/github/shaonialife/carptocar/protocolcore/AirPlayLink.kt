@@ -217,6 +217,25 @@ class AirPlayLink(
     /** flow connect 动作计数（低频 retryTick 钩子节拍）。 */
     private var flowConnectTick = 0
 
+    // ---------------- 给宿主（link.ProtocolCoreSession）的只读观察面 ----------------
+    //
+    // 这三个状态在类内本来是 private 字段；宿主需要它们做「会话是否还有救 / 能不能发命令 /
+    // 按哪台车记忆音频档」三类判定，所以开成只读属性。**只读**：写入仍只由本类内部
+    // 的会话机决定，宿主改不了。
+
+    /** 控制连接是否还活着（socket 未断且未取消）。 */
+    val controlAlive: Boolean get() = !cancelled && socket?.isClosed == false
+
+    /** 控制会话句柄是否已建立（能发 modes/命令）。 */
+    val controlReady: Boolean get() = controlSessionHandle != 0L
+
+    /** 已保存的对端身份标识（音频档位记忆的键）；无则空串。 */
+    val receiverIdentityText: String
+        get() = (storedReceiverIdentity ?: setupReceiverIdentity)?.identifier.orEmpty()
+
+    /** 重建控制连接（宿主在 SETUP 前发现连接已断时补建）。 */
+    fun reconnectControl(timeoutMillis: Int = 5_000): Boolean = ensureConnected(timeoutMillis)
+
     /**
      * 连接编排泵（**决策机 = Rust fw::airplay::flow**——固件骨架
      * `_apsession_ensureConnectedInternal` @0x22775f8a0 +
@@ -1718,15 +1737,25 @@ class AirPlayLink(
     fun setupPlanJson(
         displayUuid: String?,
         audio: AudioProfile?,
+        /**
+         * 是否把主屏流（type 110）一并放进计划。
+         *
+         * 第二条流（导航独立音频 / 通话音频）走**单独一次** SETUP：此时主屏已经建好，
+         * 计划里再带 110 就是给主屏重复 SETUP，车机会当成"换流"把已有数据口作废
+         * （视频直接黑屏）。只有屏幕流尚未建立时才传 true。
+         */
+        includeScreen: Boolean = true,
     ): String {
         val items = ArrayList<String>()
-        val uuid = displayUuid?.takeIf { it.isNotBlank() }
-        items +=
-            if (uuid == null) {
-                "{\"streamType\":110}"
-            } else {
-                "{\"streamType\":110,\"uuid\":\"$uuid\"}"
-            }
+        if (includeScreen) {
+            val uuid = displayUuid?.takeIf { it.isNotBlank() }
+            items +=
+                if (uuid == null) {
+                    "{\"streamType\":110}"
+                } else {
+                    "{\"streamType\":110,\"uuid\":\"$uuid\"}"
+                }
+        }
         if (audio != null) {
             items += "{\"streamType\":${audio.streamType}," +
                 "\"audioType\":\"${audio.audioType}\"," +
