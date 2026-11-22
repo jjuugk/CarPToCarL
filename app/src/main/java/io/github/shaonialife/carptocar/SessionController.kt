@@ -6182,6 +6182,9 @@ object SessionController {
                     fun newClient(): AirPlayLinkSession =
                         (
                             if (LinkEnginePrefs.useProtocolCore(context)) {
+                                // 这一行是 A/B 对照的唯一入口证据：日志里没有它就说明
+                                // 拿到的还是旧版本包（或开关没生效）。
+                                appendLog("LINK: 链路实现 = 协议核（Rust fw::airplay）")
                                 ProtocolCoreSession(
                                     initialEndpoint = effectiveEndpoint,
                                     log = { line -> appendLog(line) },
@@ -6201,6 +6204,7 @@ object SessionController {
                                     },
                                 )
                             } else {
+                                appendLog("LINK: 链路实现 = 自研（AirPlayClient）")
                                 ClientLinkSession(
                                     AirPlayClient(
                             effectiveEndpoint,
