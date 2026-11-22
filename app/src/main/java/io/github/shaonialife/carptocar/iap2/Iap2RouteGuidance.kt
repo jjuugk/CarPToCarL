@@ -64,6 +64,15 @@ object Iap2RouteGuidance {
     /** 无数据时给订阅的合法空体。 */
     val IDLE_BODY: ByteArray = ByteArray(0)
 
+    /**
+     * 车机是否**明确**不接受 iAP2 导航引导（0x1D01 可收清单无 0x52xx）。
+     *
+     * 这是「不发送」的唯一判据，三条发送路径共用：0x5200 订阅应答、主动推帧、心跳。
+     * 清单未到（null）返回 false —— 按未知放行，沿用「清单只能证明有、不能证明没有」；
+     * 只有清单真的到过且里面没有 0x52xx，才认定这台车机不支持并彻底停发。
+     */
+    fun blockedByDeclaration(): Boolean = AccessoryDeclaration.acceptsRouteGuidance() == false
+
     private const val APPLE_MANEUVER_DEPART = 0
     private const val APPLE_MANEUVER_ACTIVE = 2
     private const val STATE_ROUTE_READY = 3
@@ -142,6 +151,7 @@ object Iap2RouteGuidance {
      */
     fun nextFramesFor(link: Link): List<Pair<Int, ByteArray>> {
         synchronized(lock) {
+            if (blockedByDeclaration()) return emptyList()
             if (link !in subscribed) return emptyList()
             val bodies = current ?: return emptyList()
             val out = ArrayList<Pair<Int, ByteArray>>(3)
@@ -169,6 +179,7 @@ object Iap2RouteGuidance {
      */
     fun nextHeartbeatFor(link: Link): Pair<Int, ByteArray>? {
         synchronized(lock) {
+            if (blockedByDeclaration()) return null
             if (!routeActive || link !in subscribed) return null
             val bodies = current ?: return null
             lastUpdateSeq[link] = sequence

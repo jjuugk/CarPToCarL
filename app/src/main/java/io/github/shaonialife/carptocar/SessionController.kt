@@ -703,6 +703,15 @@ object SessionController {
                     "raw=${info.rawNextTurn} → ${CarLifeNaviGuide.label(info.nextTurn)}" +
                     "(${info.nextTurn}) · ${info.roadName} · " +
                     "${info.remainDistance}m / ${info.totalDistance}m"
+            // 车机可收清单明确无 0x52xx 时一律不发送：连订阅应答、主动帧、心跳都不发。
+            // 清单未到（null）仍按未知放行，与「清单只能证明有、不能证明没有」的长期判据一致。
+            if (Iap2RouteGuidance.blockedByDeclaration()) {
+                appendLog(
+                    "EVENT: CarLife 导航诱导 $detail → 车机可收清单无 0x52xx" +
+                        "（不支持 iAP2 导航引导）→ 明确不发送 0x5201/0x5202，也不启心跳",
+                )
+                return@addNaviNextTurnListener
+            }
             val effect =
                 if (ending) "同步补推 iAP2 0x5201 清除帧并停止心跳"
                 else "补推 iAP2 0x5201/0x5202 + 启动 10s 心跳"

@@ -2327,8 +2327,13 @@ class Iap2SenderSession(
             Iap2CapabilityReport.report(log, "iap2 0x1d01 ", "可收清单", receives, isReceiveList = true)
             if (AccessoryDeclaration.acceptsRouteGuidance() == true) {
                 log(
-                    "iap2 0x1d01 ★ 车机声明接受导航引导(0x52xx) → 收到 0x5200 订阅会回 " +
-                        "0x5201 空态保住控制通道；maneuver 数据源未接入，暂不主动推导航报文",
+                    "iap2 0x1d01 ★ 车机声明接受导航引导(0x52xx) → 0x5200 订阅回 0x5201" +
+                        "（CarLife 有诱导时为真载荷，否则空态），并按需补推 0x5202 + 心跳",
+                )
+            } else if (Iap2RouteGuidance.blockedByDeclaration()) {
+                log(
+                    "iap2 0x1d01 ★ 车机可收清单无导航引导(0x52xx)" +
+                        " → 明确不发送 0x5201/0x5202（含 0x5200 订阅应答与 10s 心跳）",
                 )
             }
             // 车机画像（信号收口点）：身份 + 双清单 + 组件声明 → era/wifiGen 一行判定，
