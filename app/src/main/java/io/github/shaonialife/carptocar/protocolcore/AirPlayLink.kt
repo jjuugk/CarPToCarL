@@ -214,6 +214,16 @@ class AirPlayLink(
     /** 连接序完成时由 [setupRound] 装配（flow done 动作的返回载荷）。 */
     private var pendingSetupInfo: SetupInfo? = null
 
+    /**
+     * 本轮会话是否已经发过 RECORD。
+     *
+     * `recorded` 事件一辈子只来一次：第一条 SetupPlan 等到它就算会话激活；之后的
+     * 追加流（导航/通话/第二条音频）**永远等不到**——若还按它收尾，会白等满超时
+     * 再返回 null，上层看到的就是「第二路音频建不起来」。
+     */
+    @Volatile
+    private var sessionRecorded = false
+
     /** flow connect 动作计数（低频 retryTick 钩子节拍）。 */
     private var flowConnectTick = 0
 
@@ -643,7 +653,10 @@ class AirPlayLink(
                         val pending = NativeBridge.nativeAirplayOnBytes(handle, ByteArray(0))
                         if (!pending.isNullOrEmpty()) {
                             runCatching { org.json.JSONObject(pending) }.getOrNull()?.let {
-                                if (it.optString("type") == "recorded") controlEventQueue.offer(it)
+                                if (it.optString("type") == "recorded") {
+                                    sessionRecorded = true
+                                    controlEventQueue.offer(it)
+                                }
                             }
                         }
                         continue
@@ -657,6 +670,7 @@ class AirPlayLink(
                     val json = runCatching { org.json.JSONObject(event) }.getOrNull()
                     val t = json?.optString("type")
                     if (json != null && (t == "streamSetup" || t == "recorded")) {
+                        if (t == "recorded") sessionRecorded = true
                         controlEventQueue.offer(json)
                     } else if (json != null && t == "sdpSetup") {
                         log(
@@ -867,6 +881,10 @@ class AirPlayLink(
         controlSessionHandle = 0L
         if (sessionPumpHandle == h) sessionPumpHandle = 0L
         if (h != 0L) NativeBridge.nativeAirplayDestroy(h)
+        // 会话句柄已销毁：RECORD 判定跟着归零，否则下一轮会把「上一轮发过 RECORD」
+        // 当成「本轮已激活」，首条计划直接走静默窗、可能漏掉真正的 RECORD。
+        sessionRecorded = false
+        pendingSetupInfo = null
     }
 
     /** fw: sendTeardownWithStreamDescArray——会话收尾通知。 */
@@ -1325,6 +1343,7 @@ class AirPlayLink(
                     // 无缓存 info：等 Rust 自动链补发的 Info 事件。
                 }
                 "recorded" -> {
+                    sessionRecorded = true
                     pendingSetupInfo = buildSetupInfo(controlJson)
                     if (pendingSetupInfo == null) {
                         log("AIRPLAY: recorded 但缺 controlSetup 事件")
@@ -1806,7 +1825,17 @@ class AirPlayLink(
         return NativeBridge.nativeAirplayAudioPhaseTs(h, sampleRate)
     }
 
-    /** 固件式 SetupPlan：control→info 已完成，modes 已发；本方法推进 流→RECORD。 */
+    /**
+     * 固件式 SetupPlan：control→info 已完成，modes 已发；本方法推进 流→RECORD。
+     *
+     * **收尾判据 = 计划里请求的流是否都到齐**，不是 `recorded`：
+     *  - 主屏 SETUP 之后车机只有 ~2s 看门狗等我们连数据口（2026-10-17 奥迪定谳：
+     *    迟到即 reset 控制通道）。等 RECORD 再返回就是把数据口连接推到看门狗之后；
+     *  - `recorded` 一辈子只来一次，追加流（第二路音频/导航）等它必然空转到超时。
+     *
+     * RECORD 由 Rust 在 plan 里自己排（`nativeAirplaySetupPlan(h, plan, 1)`），本方法
+     * 提前返回不会撤销它；`recorded` 若在返回之后到站，由会话泵置 [sessionRecorded]。
+     */
     @Synchronized
     fun runFirmwareSetupPlan(
         planJson: String,
@@ -1823,10 +1852,21 @@ class AirPlayLink(
         drainRustOutbound(h, sock.getOutputStream())
         NativeBridge.nativeAirplayMarkPlanModes(h)
         drainRustOutbound(h, sock.getOutputStream())
+        // 计划里请求了哪些流：到齐即收工。解析失败就退化成「等 recorded / 超时」。
+        val wanted =
+            runCatching {
+                val arr = org.json.JSONArray(planJson)
+                (0 until arr.length())
+                    .mapNotNull { arr.optJSONObject(it)?.optInt("streamType", 0) }
+                    .filter { it != 0 }
+                    .toSet()
+            }.getOrDefault(emptySet())
         val deadline = System.currentTimeMillis() + timeoutMs
         val streams = HashMap<Int, org.json.JSONObject>()
-        while (System.currentTimeMillis() < deadline) {
-            val ev = controlEventQueue.poll(deadline - System.currentTimeMillis(), java.util.concurrent.TimeUnit.MILLISECONDS) ?: break
+        while (true) {
+            val left = deadline - System.currentTimeMillis()
+            if (left <= 0) break
+            val ev = controlEventQueue.poll(left, java.util.concurrent.TimeUnit.MILLISECONDS) ?: break
             when (ev.optString("type")) {
                 "streamSetup" -> {
                     val t = ev.optInt("streamType")
@@ -1837,15 +1877,31 @@ class AirPlayLink(
                         // SETUP 前——车机对无隧道的媒体流可能拒绝，G3）
                         startTunnelDataPlane(ev)
                     }
+                    if (wanted.isNotEmpty() && streams.keys.containsAll(wanted)) {
+                        log("AIRPLAY: ✓ SetupPlan 流已到齐 ${streams.keys.sorted()}（不等 RECORD，先让宿主连数据口）")
+                        return PlanResult(streams, sessionRecorded)
+                    }
                 }
                 "recorded" -> {
-                    log("AIRPLAY: ✓ SetupPlan 完成（流+RECORD）")
-                    return PlanResult(streams, true)
+                    sessionRecorded = true
+                    if (wanted.isEmpty()) {
+                        log("AIRPLAY: ✓ SetupPlan 完成（流+RECORD）")
+                        return PlanResult(streams, true)
+                    }
+                    // 计划里有明确请求的流：继续等到齐，RECORD 只是先行事件。
+                    log("AIRPLAY: SetupPlan RECORD 已发，等剩余流 ${wanted - streams.keys}")
                 }
             }
         }
-        log("AIRPLAY: SetupPlan 超时/失败")
-        return null
+        if (streams.isEmpty()) {
+            log("AIRPLAY: SetupPlan 超时/失败（无 streamSetup 事件）")
+            return null
+        }
+        log(
+            "AIRPLAY: SetupPlan 收尾 —— 已收 ${streams.size} 条流（请求 ${wanted.ifEmpty { setOf("未声明") }}），" +
+                "本会话 RECORD=${if (sessionRecorded) "已发" else "未确认"}",
+        )
+        return PlanResult(streams, sessionRecorded)
     }
 
     /** 由 SetupPlan 的 streamSetup 事件构造屏流信息（不重复发 SETUP）。 */

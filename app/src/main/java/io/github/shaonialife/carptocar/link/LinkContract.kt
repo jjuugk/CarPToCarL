@@ -10,13 +10,12 @@ import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 
 /**
- * CarPlay 链路的**中立契约**：两种实现共用的协商产物 + 会话接口。
+ * CarPlay 链路的**中立契约**：协商产物 + 会话接口。
  *
- * 为什么要有这一层：工程里同时存在两套链路
- *  - [io.github.shaonialife.carptocar.airplay.AirPlayClient] —— 自研，4,700+ 行，
- *    报文构造/解析/加密全在 Kotlin，已在多台真车验证；
- *  - [io.github.shaonialife.carptocar.protocolcore.AirPlayLink] —— 协议核版，
- *    全部协议决策移交 Rust（`libcardeck_protocol.so`），Kotlin 只剩运输与动作执行。
+ * v2 的装配只有一种实现：[io.github.shaonialife.carptocar.link.ProtocolCoreSession]
+ * （协议决策全部移交 Rust `libcardeck_protocol.so`）。工程里还留着上一代实现
+ * [io.github.shaonialife.carptocar.airplay.AirPlayClient] —— 4,700+ 行纯 Kotlin、
+ * 已在多台真车验证过，但**没有任何运行路径会走到它**，只在协议核跑不通时作代码参照。
  *
  * 两者的协商产物**本来是同名嵌套类**（同一祖先各自演化），字段已经长得不一样：
  * `AirPlayClient.SetupInfo` 多 `displayFromCar`/`extendedFeatures`/`keepAliveLowPower`/
@@ -124,19 +123,23 @@ interface IapTunnel {
 }
 
 /**
- * CarPlay 会话接口：`SessionController` 面向它编程，具体实现由链路开关决定。
+ * CarPlay 会话接口：`SessionController` 面向它编程，v2 的实现只有
+ * [ProtocolCoreSession]（协议核）。
  *
- * 成员顺序按「连接 → 流 → 资源仲裁 → 事件通道」分组，与两套实现的内部结构对应。
+ * 为什么还留着接口而不是直接依赖实现类：这一层把「协议核心换掉」隔离在
+ * `link/` 包里，`SessionController` 的 100+ 个调用点不必知道链接是谁建的。
+ *
+ * 成员顺序按「连接 → 流 → 资源仲裁 → 事件通道」分组。
  * **加成员的门槛**：只有 `SessionController` 真的调用才加；纯内部方法留在实现类里。
  */
 interface AirPlayLinkSession {
     /**
      * 底层会话的稳定标识。
      *
-     * 适配器层层包装时，`SessionController` 的「这还是不是当前那一轮会话」判定必须看
-     * 底层对象而不是包装壳——[ClientLinkSession] 返回被包住的 `AirPlayClient`，
-     * 协议核实现返回自身。**不要**用包装壳的引用比较，那会在每次重新包装时都误判成
-     * 「换了一轮会话」，进而把活着的会话当成过期对象踢掉。
+     * `SessionController` 的「这还是不是当前那一轮会话」判定必须看这个值，而不是
+     * 接口引用本身：链路实现可以再被包装一层（早期自研链路就套过适配器），
+     * 每次重新包装都是新对象，但底层仍是同一轮会话。用壳比较会把活着的会话误判成
+     * 过期，直接把它踢掉。协议核实现返回自身。
      */
     val linkIdentity: Any
 

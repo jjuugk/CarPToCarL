@@ -11,8 +11,11 @@ import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.protocolcore.AirPlayLink
 
 /**
- * **协议核链路**：[AirPlayLinkSession] 的第二种实现，协议决策全部交给
+ * **协议核链路**：v2 里 [AirPlayLinkSession] 的**唯一实现**，协议决策全部交给
  * `libcardeck_protocol.so`（Rust `fw::airplay`），Kotlin 只剩运输与动作执行。
+ *
+ * v2 没有链路开关：`SessionController` 只构造本类。自研链路（`airplay/AirPlayClient`）
+ * 保留在源码树里作参照与单测载体，但没有任何运行路径能走到它。
  *
  * ## 与自研链路的形态差异（重要）
  *
@@ -41,6 +44,13 @@ class ProtocolCoreSession(
     context: Context? = null,
     endpointRefresher: ((Iap2SenderSession.CarPlayEndpoint) -> Iap2SenderSession.CarPlayEndpoint?)? = null,
     retryTick: ((attempt: Int) -> Unit)? = null,
+    /**
+     * 控制口连接失败回调（每轮 ensureConnected 全候选失败时一次）。
+     *
+     * 主控用它做「车机没起 AirPlay 服务」的叫醒：重发 0x4e0e+0x4300 并重公告 ctrl。
+     * 不限流——节流在宿主侧（3 次 / 10s），因为「该不该再叫一次」是策略不是链路细节。
+     */
+    onConnectFailed: ((failures: List<String>) -> Unit)? = null,
 ) : AirPlayLinkSession {
     private val link =
         AirPlayLink(
@@ -49,7 +59,7 @@ class ProtocolCoreSession(
             context = context,
             endpointRefresher = endpointRefresher,
             retryTick = retryTick,
-        )
+        ).also { it.onConnectFailed = onConnectFailed }
 
     // 资源归属由 Rust 侧维护，Kotlin 这份只用于「本端声明」与日志——两边不同步时
     // 以 Rust 为准（它才是真正发 modesChanged 的一方）。
@@ -315,12 +325,14 @@ class ProtocolCoreSession(
         onCommand: (Map<*, *>) -> Unit,
     ): Boolean {
         // 协议核要的是 Events 双钥（它自己派生），不是 shared secret；双钥来自 flow 的 Done 事件。
+        // 无配对（明文会话 / flow 未交付密钥）时传 null：AirPlayLink 按明文建通道
+        // （参考实现同样把 null 当 unencrypted）。**不能**因此跳过后面的通道——
+        // 触摸 hidSendReport、changeModes、keepAlive 全在事件通道上，跳过等于没有触摸。
         val keys = lastKeys
         if (keys == null) {
-            log("LINK: 事件通道需要 flow 产物（Events 双钥），当前尚未配对完成——跳过")
-            return false
+            logOnce("event-plaintext", "LINK: 事件通道无 Events 双钥（明文会话），按未加密连接")
         }
-        link.connectEventChannel(keys.eventsWriteKey, keys.eventsReadKey, setup, onCommand)
+        link.connectEventChannel(keys?.eventsWriteKey, keys?.eventsReadKey, setup, onCommand)
         return true
     }
 

@@ -2,15 +2,12 @@ package io.github.shaonialife.carptocar
 
 import io.github.shaonialife.carptocar.link.SetupInfo
 import io.github.shaonialife.carptocar.link.ScreenStreamInfo
-import io.github.shaonialife.carptocar.launcher.settings.LinkEnginePrefs
 import io.github.shaonialife.carptocar.link.AirPlayLinkSession
 import io.github.shaonialife.carptocar.link.AudioStreamInfo
-import io.github.shaonialife.carptocar.link.ClientLinkSession
 import io.github.shaonialife.carptocar.link.ControlKeys
 import io.github.shaonialife.carptocar.link.ProtocolCoreSession
 import android.content.Context
 import android.view.KeyEvent
-import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.AirPlayResourceState
 import io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent
 import io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams
@@ -1388,9 +1385,9 @@ object SessionController {
     /**
      * 这是不是「当前那一轮」的会话对象。
      *
-     * 比的是 [AirPlayLinkSession.linkIdentity]（底层对象），不是包装壳引用：链路实现可能被
-     * 包装（自研链路走 [ClientLinkSession]），每次重新包装都是新对象，但底层是同一轮会话。
-     * 用壳比较会把活着的会话误判成过期，直接把它踢掉。
+     * 比的是 [AirPlayLinkSession.linkIdentity]（底层对象），不是接口引用本身：链路实现
+     * 可以被再包装一层，每次重新包装都是新对象，但底层仍是同一轮会话。用壳比较会把
+     * 活着的会话误判成过期，直接把它踢掉。
      */
     private fun isCurrentLink(client: AirPlayLinkSession?): Boolean =
         client != null && currentClient?.linkIdentity === client.linkIdentity
@@ -6156,6 +6153,9 @@ object SessionController {
                     // 什么都没做，车机也就一直停在「等 IAP2 信息」里没起投影。
                     var wakeCount = 0
                     var lastWakeAt = 0L
+                    // 连续连接失败次数（仅用于叫醒日志的「第几次」）。协议核的
+                    // onConnectFailed 每轮都会回调，wakeCarPlayWindow 内部有 3 次 / 10s 节流。
+                    var connectRefusals = 0
                     val wakeCarPlayWindow: (Int) -> Unit = { refused ->
                         requireAttempt(attempt)
                         val now = android.os.SystemClock.uptimeMillis()
@@ -6179,74 +6179,50 @@ object SessionController {
                         }
                     }
 
+                    // v2：CarPlay 连接**只有协议核一种实现**，没有回退分支、没有开关。
+                    //
+                    // 自研链路（airplay/AirPlayClient）仍在源码树里，但它不参与装配——
+                    // 那是给「协议核在真车跑不通时」留的代码参照，不是运行路径。
+                    appendLog("LINK: 链路实现 = 协议核（Rust fw::airplay）")
                     fun newClient(): AirPlayLinkSession =
-                        (
-                            if (LinkEnginePrefs.useProtocolCore(context)) {
-                                // 这一行是 A/B 对照的唯一入口证据：日志里没有它就说明
-                                // 拿到的还是旧版本包（或开关没生效）。
-                                appendLog("LINK: 链路实现 = 协议核（Rust fw::airplay）")
-                                ProtocolCoreSession(
-                                    initialEndpoint = effectiveEndpoint,
-                                    log = { line -> appendLog(line) },
-                                    context = context.applicationContext,
-                                    endpointRefresher = { current ->
-                                        requireAttempt(attempt)
-                                        enrichEndpointFromBrowser(current, source)
-                                    },
-                                    retryTick = { retryNumber ->
-                                        requireAttempt(attempt)
-                                        ctrlAdvertiser?.ensureForNetwork(
-                                            endpoint.ssid,
-                                            force = true,
-                                            network = wifiConnector?.currentNetwork,
-                                        )
-                                        appendLog("LINK: 协议核重试 #$retryNumber —— 已重新公告 ctrl")
-                                    },
+                        ProtocolCoreSession(
+                            initialEndpoint = effectiveEndpoint,
+                            log = { line -> appendLog(line) },
+                            context = context.applicationContext,
+                            endpointRefresher = { current ->
+                                requireAttempt(attempt)
+                                enrichEndpointFromBrowser(current, source)
+                            },
+                            retryTick = { retryNumber ->
+                                requireAttempt(attempt)
+                                ctrlAdvertiser?.ensureForNetwork(
+                                    endpoint.ssid,
+                                    force = true,
+                                    network = wifiConnector?.currentNetwork,
                                 )
-                            } else {
-                                appendLog("LINK: 链路实现 = 自研（AirPlayClient）")
-                                ClientLinkSession(
-                                    AirPlayClient(
-                                        effectiveEndpoint,
-                                        log = { line -> appendLog(line) },
-                                        context = context.applicationContext,
-                                        onTransportClosed = { failed, reason ->
-                                            if (failed.cancelled) endClientSession(ClientLinkSession(failed), reason)
-                                        },
-                                        endpointRefresher = { current ->
-                                            requireAttempt(attempt)
-                                            enrichEndpointFromBrowser(current, source)
-                                        },
-                                        onPortRefused = wakeCarPlayWindow,
-                                        retryTick = { retryNumber ->
-                                            requireAttempt(attempt)
-                                            // 配对重试期间车机仍可能没探测到 ctrl（Bonjour 漏掉首次公告）：
-                                            // 周期性强制重播一次，并把 mDNS 现状写进日志——否则排查时
-                                            // 只看得到「端口未开」的重试刷屏，无法判断是车机没邀请还是
-                                            // 地址不对（2026-10-19 奥迪 0.1.7 日志就缺这两条信息）。
-                                            ctrlAdvertiser?.ensureForNetwork(
-                                                endpoint.ssid,
-                                                force = true,
-                                                network = wifiConnector?.currentNetwork,
-                                            )
-                                            val invites = ctrlAdvertiser?.inviteCount ?: 0
-                                            val found = endpointBrowser?.awaitEndpoint(0)
-                                            val stale = if (found == null) endpointBrowser?.lastKnownEndpoint() else null
-                                            appendLog(
-                                                "AIRPLAY: 重试 #$retryNumber —— 已重新公告 ctrl；" +
-                                                    "车机邀请=$invites 次，mDNS _airplay._tcp=" +
-                                                    (
-                                                        found?.let { "${it.host?.hostAddress}:${it.port}" }
-                                                            // 本轮没新结果但上轮有：写出来，否则「未发现」会盖掉
-                                                            // 「其实有旧地址可用」这个事实（宝马 iD8 第 2 轮起）。
-                                                            ?: stale?.let { "本轮无新结果，沿用上轮 ${it.host?.hostAddress}:${it.port}" }
-                                                            ?: "未发现"
-                                                    ),
-                                            )
-                                        },
-                                    ),
+                                val invites = ctrlAdvertiser?.inviteCount ?: 0
+                                val found = endpointBrowser?.awaitEndpoint(0)
+                                val stale = if (found == null) endpointBrowser?.lastKnownEndpoint() else null
+                                appendLog(
+                                    "LINK: 重试 #$retryNumber —— 已重新公告 ctrl；" +
+                                        "车机邀请=$invites 次，mDNS _airplay._tcp=" +
+                                        (
+                                            found?.let { "${it.host?.hostAddress}:${it.port}" }
+                                                ?: stale?.let {
+                                                    "本轮无新结果，沿用上轮 ${it.host?.hostAddress}:${it.port}"
+                                                }
+                                                ?: "未发现"
+                                        ),
                                 )
-                            }
+                            },
+                            onConnectFailed = { failures ->
+                                // 车机没起 AirPlay 服务时「叫醒」它：重发 0x4e0e+0x4300 并重公告 ctrl。
+                                // 协议核每轮 ensureConnected 失败都会回调这里，节流在 wakeCarPlayWindow 里。
+                                requireAttempt(attempt)
+                                connectRefusals++
+                                appendLog("AIRPLAY: 控制口连接失败（候选 ${failures.size} 个）")
+                                wakeCarPlayWindow(connectRefusals)
+                            },
                         ).also { created ->
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。

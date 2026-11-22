@@ -49,7 +49,6 @@ import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
 import io.github.shaonialife.carptocar.launcher.settings.DevModePrefs
-import io.github.shaonialife.carptocar.launcher.settings.LinkEnginePrefs
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
@@ -2711,25 +2710,6 @@ class MainActivity : AppCompatActivity() {
             row.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
             DevModePrefs.setEnabled(this, show)
             log("DEV: 测试台接收端已${if (show) "显示" else "隐藏"}（连点标题 $requiredTaps 次切换）")
-        }
-        // CarPlay 链路实现切换：长按开发者入口那一行。
-        //
-        // 为什么挂在这里而不是新加一个设置项：这个开关只用于「同一台车、同一天、只换链路」
-        // 的对照测试，属于诊断入口。新增一行 UI 要在 activity_main.xml 里补图标/文案/点击区，
-        // 而它一辈子只会被点几次——挂在已有的开发者入口上，成本几乎为零，也不会出现在
-        // 普通用户的设置面板里。
-        row.setOnLongClickListener {
-            val core = !LinkEnginePrefs.useProtocolCore(this)
-            LinkEnginePrefs.setEngine(
-                this,
-                if (core) LinkEnginePrefs.ENGINE_PROTOCOL_CORE else LinkEnginePrefs.ENGINE_SELF,
-            )
-            val text = if (core) "协议核（Rust）" else "自研"
-            log("DEV: CarPlay 链路实现 → $text（下一次连接生效；协议核链路需重新配对）")
-            android.widget.Toast
-                .makeText(this, "CarPlay 链路：$text（下次连接生效）", android.widget.Toast.LENGTH_LONG)
-                .show()
-            true
         }
     }
 
