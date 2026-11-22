@@ -201,6 +201,12 @@ class VirtualIap2Link(
     private var mfiEcdsa = false
 
     /**
+     * 从 0xAA01 证书识别出的首选挑战长度（协议核 OID 规则，见 [io.github.shaonialife.carptocar.iap2.MfiCertificateLength]）。
+     * null = 未识别 → 沿用原「ECDSA 基线 + 车机记忆 + 逐档试探」；非 null 也只插队首，失败照原顺序退。
+     */
+    private var mfiRecognizedLength: Int? = null
+
+    /**
      * iAP2 控制会话是否真正就绪：链路进入 NORMAL **且** MFi 挑战已应答完。
      *
      * 4580（AUDI 3810 / DELPHI MIB3）的 HMI 判定链（固件 `CDeviceDetection`
@@ -618,10 +624,14 @@ class VirtualIap2Link(
         val identity = mfiIdentity ?: return
         if (mfiOrder.isEmpty()) {
             mfiMemory = MfiLengthMemory.load(mfiContext, identity)
-            mfiOrder = MfiLengthMemory.orderAttempts(if (mfiEcdsa) TUNNEL_MFI_ECDSA_BASELINE else TUNNEL_MFI_BASELINE, mfiMemory)
+            val baseline = MfiLengthMemory.orderAttempts(if (mfiEcdsa) TUNNEL_MFI_ECDSA_BASELINE else TUNNEL_MFI_BASELINE, mfiMemory)
+            // 证书识别只插队首，原顺序完整保留为失败后的退路（失败时 checkMfiTimeoutLocked /
+            // 0xAA04 处理会照常推进 mfiPosition 到下一档，识别不会锁死本轮）。
+            mfiOrder = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.prefer(baseline, mfiRecognizedLength)
             log(
                 "IAPLINK: 隧道 MFi 证书公钥=${if (mfiEcdsa) "ECDSA-P256" else "RSA/其他"}，" +
-                    "车机记忆：${MfiLengthMemory.describe(mfiMemory)} → 本轮顺序 ${mfiOrder.joinToString("/")}B",
+                    "车机记忆：${MfiLengthMemory.describe(mfiMemory)} → 本轮顺序 ${mfiOrder.joinToString("/")}B" +
+                    if (mfiRecognizedLength != null) "（含证书识别首选）" else "",
             )
         }
         mfiPosition += 1
@@ -662,6 +672,7 @@ class VirtualIap2Link(
         mfiCurrentLength = 0
         mfiFinished = false
         mfiEcdsa = false
+        mfiRecognizedLength = null
         mib3AuthStage = 0
     }
 
@@ -832,6 +843,11 @@ class VirtualIap2Link(
                     }
                     // 长度按车机记忆（冷启动基线见 startNextMfiChallengeLocked）
                     mfiEcdsa = containsEcdsaPublicKeyOid(certificate)
+                    // 协议核逆向回灌：证书扩展区 Apple OID → 首选长度（失败后原顺序照试）
+                    mfiRecognizedLength = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.recognize(certificate)
+                    if (mfiRecognizedLength != null) {
+                        log("IAPLINK: 隧道 MFi 证书识别 → 首选 ${mfiRecognizedLength}B（协议核 OID 规则；失败自动回退试探）")
+                    }
                     startNextMfiChallengeLocked()
                 } else {
                     // DiPlay CARLINKIT 身份只接受精确 32B（长度不符直接断链）
@@ -1337,10 +1353,12 @@ class VirtualIap2Link(
          * 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。
          *
          * 档位数值 20/32/16 与协议核 `libcardeck_protocol.so` 一致（逆向 @0x22520 查表
-         * `[20,32,-1,16]`），但**选用机制不同**：协议核 `nativeMfiChallengeSizeForCertificate`
-         * (@0x9addc) 从 0xAA01 证书公钥 OID 直接识别长度（零试探）；我们这里是
-         * 「ECDSA OID → 32B 优先（见 TUNNEL_MFI_ECDSA_BASELINE）+ 逐档试探 + [MfiLengthMemory]
-         * 按车机记忆」，仍属尝试而非精确识别。本基线是实车迭代结果，保留不动（2026-11-22 逆向）。
+         * `[20,32,-1,16]`）。选用机制原先不同：协议核 `nativeMfiChallengeSizeForCertificate`
+         * (@0x9addc) 从 0xAA01 证书**扩展区**的 Apple OID（解析函数 @0xf8a58，不是公钥算法 OID）
+         * 直接识别长度，我们靠 ECDSA 公钥 OID 调优先级 + 逐档试探 + [MfiLengthMemory] 按车机记忆。
+         *
+         * 2026-11-22 已把协议核的证书识别回灌为 `MfiCertificateLength`：识别结果只插到尝试
+         * 顺序队首，失败后仍按本基线 + 车机记忆逐档退路。基线本身是实车迭代结果，保留不动。
          */
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
 
