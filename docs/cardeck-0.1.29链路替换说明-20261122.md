@@ -55,7 +55,12 @@
 - 编译：`assembleDebug` + `compileDebugKotlin` 通过。
 - 单测：**946 例 0 失败**（v2 为 968；差额来自归档 3 个只测自研 iAP2 的失效测试文件）。
 - 调试包：`app/build/outputs/apk/debug/app-debug.apk`，18,637,133 B，
-  sha256 `85db839fb055b2d4a91e00e06b948063616604506ca612bfb2454ae8a1f8f23a`。
+  sha256 `6f37d1a336b64fea5a4ecd2ca12df69f3b33db15c049495709e452e1851f01d8`
+  （含下述 DETECT 探针修正；修正前为 `85db839f…8a1f8f23a`）。
+- 补修遗留项：`ProtocolCoreProbe` 原来给 `nativeIap2IsDetectMarker` 传的是
+  `FF 55 00 00 00 00`，与逆向确认的魔数 `FF 55 02 00 EE 10` 不符，导致日志
+  `ABI=异常｜detectMarker=0`。已改为正确魔数，预期日志变为 `ABI=ok｜detectMarker=1`
+  （本机 adb 不可用，待真机确认）。
 - **未做真机/真车验证**：iAP2 全流程改由 Rust 驱动是根本性变更，需在实车上确认
   `iap2 flow endpoint` 事件能否到站、0x5703/0x4301 是否被 Rust 正确消化。
 

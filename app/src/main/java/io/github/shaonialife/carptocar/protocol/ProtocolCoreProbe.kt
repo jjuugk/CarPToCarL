@@ -33,10 +33,11 @@ object ProtocolCoreProbe {
             val candidates = NativeBridge.nativeNetaddrCandidates(arrayOf("192.168.1.5"))
             val scopeStripped = NativeBridge.nativeNetaddrStripScope("fe80::1%wlan0")
 
-            // ByteArray + Int -> Int：0xFF55 是 iAP2 链路 marker，应判 1
+            // ByteArray + Int -> Int：iAP2 DETECT marker 魔数 = FF 55 02 00 EE 10
+            // （逆向 nativeIap2IsDetectMarker @0x9ac38：小端常量 0x10ee000255ff）
             val marker =
                 NativeBridge.nativeIap2IsDetectMarker(
-                    byteArrayOf(0xFF.toByte(), 0x55, 0, 0, 0, 0),
+                    byteArrayOf(0xFF.toByte(), 0x55, 0x02, 0x00, 0xEE.toByte(), 0x10),
                     6,
                 )
 
