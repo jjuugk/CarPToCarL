@@ -1,5 +1,11 @@
 package io.github.shaonialife.carptocar
 
+import io.github.shaonialife.carptocar.link.SetupInfo
+import io.github.shaonialife.carptocar.link.ScreenStreamInfo
+import io.github.shaonialife.carptocar.link.AirPlayLinkSession
+import io.github.shaonialife.carptocar.link.AudioStreamInfo
+import io.github.shaonialife.carptocar.link.ClientLinkSession
+import io.github.shaonialife.carptocar.link.ControlKeys
 import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
@@ -7,7 +13,6 @@ import io.github.shaonialife.carptocar.airplay.AirPlayResourceState
 import io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent
 import io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams
 import io.github.shaonialife.carptocar.airplay.FreshAuthPolicy
-import io.github.shaonialife.carptocar.airplay.PairVerifyClient
 import io.github.shaonialife.carptocar.airplay.PairingGate
 import io.github.shaonialife.carptocar.airplay.PairingMemory
 import io.github.shaonialife.carptocar.airplay.PostRecordWatch
@@ -1376,7 +1381,17 @@ object SessionController {
     var micUplink: MicUplink? = null
 
     @Volatile
-    var currentClient: AirPlayClient? = null
+    var currentClient: AirPlayLinkSession? = null
+
+    /**
+     * 这是不是「当前那一轮」的会话对象。
+     *
+     * 比的是 [AirPlayLinkSession.linkIdentity]（底层对象），不是包装壳引用：链路实现可能被
+     * 包装（自研链路走 [ClientLinkSession]），每次重新包装都是新对象，但底层是同一轮会话。
+     * 用壳比较会把活着的会话误判成过期，直接把它踢掉。
+     */
+    private fun isCurrentLink(client: AirPlayLinkSession?): Boolean =
+        client != null && currentClient?.linkIdentity === client.linkIdentity
 
     /** 通话状态看门狗线程（音频会话期间每秒看一次 AudioManager.mode）。 */
     private var callWatcher: Thread? = null
@@ -1452,11 +1467,11 @@ object SessionController {
     @Synchronized
     private fun applyAudioOwnership(
         context: Context,
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         secret: ByteArray?,
         owned: Boolean,
     ): Boolean {
-        if (currentClient !== client || client.cancelled) return false
+        if (!isCurrentLink(client) || client.cancelled) return false
         if (owned) {
             if (audioSender?.isRunning == true) return true
             if (!startAudioChannel(context, client, secret, currentAudioHost)) return false
@@ -1493,10 +1508,10 @@ object SessionController {
     }
 
     private fun handleCarAudioTransfer(
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         transfer: AirPlayResourceState.CarAudioTransfer,
     ) {
-        if (currentClient !== client || client.cancelled) return
+        if (!isCurrentLink(client) || client.cancelled) return
         when (audioIntent.onCarAudioTransfer(transfer, MediaSessionsState.nowPlaying?.playing == true)) {
             CarPlayAudioIntent.MediaCommand.PAUSE -> {
                 appendLog("RESOURCE: 车机接管/静音借用主音频（$transfer）——暂停本机媒体播放")
@@ -1651,12 +1666,12 @@ object SessionController {
     }
 
     private fun endClientSession(
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         reason: String,
         attributeAudio: Boolean = false,
     ) {
         synchronized(sessionLifecycleLock) {
-            if (currentClient !== client) return
+            if (!isCurrentLink(client)) return
             val wasEstablished = client.wasSessionEstablished
             val settledAuthKey = authReceiverKey
             authReceiverKey = null
@@ -2075,7 +2090,7 @@ object SessionController {
      * 组合按「车机声明里最像语音的三档」排，第一组命中就停（不浪费车机的资源仲裁）。
      * 监听窗口 6 秒 × 最多 4 组，全程只跑一次、在后台线程，不影响推流。
      */
-    private fun runMicProbe(client: AirPlayClient) {
+    private fun runMicProbe(client: AirPlayLinkSession) {
         Thread(
             {
                 runCatching { Thread.sleep(MIC_PROBE_DELAY_MS) }
@@ -4145,11 +4160,11 @@ object SessionController {
     /** 资源归属变更仅启停对应媒体流，不关闭 AirPlay 控制会话。 */
     private fun createResourceStreams(
         context: Context,
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         secret: ByteArray?,
-        setup: AirPlayClient.SetupInfo,
+        setup: SetupInfo,
         initial: VideoSender?,
-        factory: (AirPlayClient.ScreenStreamInfo) -> VideoSender,
+        factory: (ScreenStreamInfo) -> VideoSender,
     ): CarPlayResourceStreams = CarPlayResourceStreams(
         client = client,
         sessionKey = secret,
@@ -4159,7 +4174,7 @@ object SessionController {
         createSender = factory,
         onScreenPaused = { streamKept ->
             synchronized(sessionLifecycleLock) {
-                if (currentClient === client) {
+                if (isCurrentLink(client)) {
                     // 「这次给屏 → 被抢」之间我们到底送出去几帧、活了多久：车机抢屏若恒定落在
                     // 首帧后 100~300ms，就是它一收到我们的帧就出问题，与用户操作无关。
                     val frames = CarLifeHijack.framesDelivered - videoSessionFrameBase
@@ -4195,7 +4210,7 @@ object SessionController {
         },
         onScreenResumed = { sender, soft ->
             synchronized(sessionLifecycleLock) {
-                if (currentClient !== client || client.cancelled || !client.phoneOwnsScreen) {
+                if (!isCurrentLink(client) || client.cancelled || !client.phoneOwnsScreen) {
                     false
                 } else {
                     videoSender = sender
@@ -4275,7 +4290,7 @@ object SessionController {
      * 「音频优先」与「RECORD 优先」两条路径都从这里进，保证等待逻辑只有一份。
      */
     private fun startAudioChannelAndLog(
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         sharedSecret: ByteArray?,
         host: String?,
         context: Context,
@@ -4305,7 +4320,7 @@ object SessionController {
      */
     fun startAudioChannel(
         context: Context,
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         sharedSecret: ByteArray?,
         host: String?,
     ): Boolean {
@@ -4378,7 +4393,7 @@ object SessionController {
             // 试完，不必等下一次连接。这一点对当前场景很关键：102/AAC-LC 与 100/PCM 是
             // 两条完全不同的通路，前者不被接受时应当立刻退到后者，而不是让用户白连一次。
             var chosen: AudioProfile? = null
-            var streamInfo: AirPlayClient.AudioStreamInfo? = null
+            var streamInfo: AudioStreamInfo? = null
             // 麦克风上行：端口必须**在 SETUP 之前**绑好——车机就是照这个端口往我们这边推麦，
             // 建流后再绑就没有声明的机会了。绑不上（极少）就退回纯下行，不影响现有功能。
             val uplink =
@@ -4498,7 +4513,7 @@ object SessionController {
      */
     @Synchronized
     private fun startNavAudioChannel(
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         sharedSecret: ByteArray?,
         host: String,
         context: Context,
@@ -4562,7 +4577,7 @@ object SessionController {
         navigationDucking?.close()
         navigationDucking =
             NavigationDucking(
-                send = { duck -> currentClient === client && client.postNavigationDucking(duck) },
+                send = { duck -> isCurrentLink(client) && client.postNavigationDucking(duck) },
                 log = ::appendLog,
             )
         appendLog(
@@ -4696,7 +4711,7 @@ object SessionController {
      * `modesChanged → SETUP → RECORD`。**未实车验证的通用化能力**——不按车机指纹
      * 判定，由用户在设置里按车型自行开启。
      */
-    private fun maybeScheduleProactiveAudio(client: AirPlayClient?) {
+    private fun maybeScheduleProactiveAudio(client: AirPlayLinkSession?) {
         if (client == null || !DisplayPrefs.proactiveAudioOnLink(appContext ?: return)) return
         if (!proactiveAudioScheduled.compareAndSet(false, true)) return
         Thread({
@@ -4705,7 +4720,7 @@ object SessionController {
             } catch (_: InterruptedException) {
                 return@Thread
             }
-            if (currentClient !== client || client.cancelled || connectCancelled) return@Thread
+            if (!isCurrentLink(client) || client.cancelled || connectCancelled) return@Thread
             if (audioSender?.isRunning == true) return@Thread
             if (client.phoneOwnsAudio) return@Thread
             appendLog("AUDIO: 主动申请主音频（实验开关开）——无播放意图也取一次，专治「视频在送但车机不交屏」")
@@ -5491,7 +5506,7 @@ object SessionController {
     }
 
     /** 把交接期间暂存的晚到端点并入新建的客户端（建 client 与收到 0x4301 的竞态窗口）。 */
-    private fun drainPendingEndpoint(client: AirPlayClient) {
+    private fun drainPendingEndpoint(client: AirPlayLinkSession) {
         val late = pendingEndpointUpdate ?: return
         pendingEndpointUpdate = null
         if (client.updateEndpoint(preferEndpoint(late, client.currentEndpoint), "交接期间晚到 0x4301")) {
@@ -5576,10 +5591,10 @@ object SessionController {
      * 重连一次并重试 SETUP，避免端口晚开 1~2 秒就整轮失败。
      */
     private fun runInitialSetup(
-        client: AirPlayClient,
+        client: AirPlayLinkSession,
         plainSession: Boolean,
         noPairing: Boolean,
-    ): AirPlayClient.SetupInfo? {
+    ): SetupInfo? {
         val first = client.runSetup()
         if (first != null || !plainSession) return first
         val deadline = android.os.SystemClock.uptimeMillis() + INITIAL_SETUP_WINDOW_MS
@@ -5810,7 +5825,7 @@ object SessionController {
      * `statsDictionary.rfps`，见 `AirPlayReceiverStats`）。两条一起看才能分清
      * 「帧根本没到车机」「到了但没解码」「解码了但 HMI 没交屏」。
      */
-    private fun startScreenHandoverGate(client: AirPlayClient) {
+    private fun startScreenHandoverGate(client: AirPlayLinkSession) {
         Bg.run("screen-handover-gate") {
             val frameBase = CarLifeHijack.framesDelivered
             val waitDeadline = android.os.SystemClock.uptimeMillis() + HANDOVER_FIRST_FRAME_WAIT_MS
@@ -6168,7 +6183,7 @@ object SessionController {
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
                             onTransportClosed = { failed, reason ->
-                                if (failed.cancelled) endClientSession(failed, reason)
+                                if (failed.cancelled) endClientSession(ClientLinkSession(failed), reason)
                             },
                             endpointRefresher = { current ->
                                 requireAttempt(attempt)
@@ -6238,7 +6253,7 @@ object SessionController {
                             // 否则它认定这台手机永远不打电话，通话时不切音频通路。
                             created.callStateSource = { callStateOf() }
                             created.onCarAudioTransfer = { transfer ->
-                                handleCarAudioTransfer(created, transfer)
+                                handleCarAudioTransfer(ClientLinkSession(created), transfer)
                             }
                         }
                     var client =
@@ -6251,7 +6266,7 @@ object SessionController {
                             // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                             phaseHint = "AirPlay 配对中…"
                             connectBudget.enter(ConnectStage.PAIRING)
-                            newClient().also { currentClient = it }
+                            ClientLinkSession(newClient()).also { currentClient = it }
                         }
                     // 本机应用态上报（Speech/PhoneCall）：收发都在后台线程，这里只是起收敛线程。
                     // 初始归属那一轮（assertModes）会把当前状态一并带上，不会再单独发一遍。
@@ -6327,7 +6342,7 @@ object SessionController {
                             "；依据：端点 features=" +
                             (client.currentEndpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知"),
                     )
-                    var keys: PairVerifyClient.ControlKeys? =
+                    var keys: ControlKeys? =
                         if (noPairing) {
                             if (pairingGate == PairingGate.SKIP_SETUP) {
                                 client.skipPairing(
@@ -6391,7 +6406,7 @@ object SessionController {
                             client.cancelled = true
                             client.close()
                             detachActiveBtSessions()
-                            client = newClient()
+                            client = ClientLinkSession(newClient())
                             currentClient = client
                         }
                         drainPendingEndpoint(client)
@@ -6525,7 +6540,7 @@ object SessionController {
                             val pendingScreenRequestFromCarUi = AtomicBoolean(false)
                             val eventChannelOk =
                                 client.connectEventChannel(sessionKey, setup) { command ->
-                                    if (!ownsAttempt(attempt) || currentClient !== client) return@connectEventChannel
+                                    if (!ownsAttempt(attempt) || !isCurrentLink(client)) return@connectEventChannel
                                 // 车机侧「有反应」计数：屏幕接管门（startScreenHandoverGate）用它
                                 // 区分「车机压根没把这条流当屏流」与「只是画面还没上屏」。
                                 command["type"]?.toString()?.let { type ->
@@ -7052,7 +7067,7 @@ object SessionController {
                                         } else {
                                             null
                                         }
-                                    val makeSender: (AirPlayClient.ScreenStreamInfo) -> VideoSender = { negotiatedScreen ->
+                                    val makeSender: (ScreenStreamInfo) -> VideoSender = { negotiatedScreen ->
                                         var created: VideoSender? = null
                                         VideoSender(
                                             host = host,
@@ -7097,7 +7112,7 @@ object SessionController {
                                             onEnded = {
                                                 Bg.run("video-session-ended") {
                                                     synchronized(sessionLifecycleLock) {
-                                                        if (currentClient === client &&
+                                                        if (isCurrentLink(client) &&
                                                             videoSender === created &&
                                                             resourceStreams?.screenPaused != true
                                                         ) {

@@ -1161,6 +1161,8 @@ class VideoSender(
                             aesStream?.applyKeystream(encrypted)
                             encrypted
                         }
+                        // 协议核链路：密封在 native 内完成，这里原样透传（再加密一次 = 对端解出乱码）。
+                        StreamFrameCipher.CoreSealed -> plain
                     }
                 frameCounter++
                 output.write(header)

@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.airplay
 
+import io.github.shaonialife.carptocar.link.AirPlayLinkSession
+import io.github.shaonialife.carptocar.link.ScreenStreamInfo
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.util.concurrent.Executors
 
@@ -14,12 +16,12 @@ import java.util.concurrent.Executors
  * 主音频同理：手机持有且有播放意图才起音频流，车机接管/静音借走时退役，归还后按播放意图恢复。
  */
 internal class CarPlayResourceStreams(
-    private val client: AirPlayClient,
+    private val client: AirPlayLinkSession,
     private val sessionKey: ByteArray?,
     private val displayUuid: String?,
     private val audioIntent: CarPlayAudioIntent,
     initialSender: VideoSender?,
-    private val createSender: (AirPlayClient.ScreenStreamInfo) -> VideoSender,
+    private val createSender: (ScreenStreamInfo) -> VideoSender,
     /** [streamKept] = true 表示实验开关生效、视频流被保留（调用方不要 detach 采集）。 */
     private val onScreenPaused: (Boolean) -> Unit,
     /** [soft] = true 表示沿用现有视频流（没有重新 SETUP），只需补关键帧与重武装 HID。 */

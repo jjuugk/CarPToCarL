@@ -45,7 +45,7 @@ class VirtualIap2Link(
     /** 控制通道 iAPSendMessage 出站（附带当前链路周期有效性谓词）。 */
     private val sendControlIap: (ByteArray, () -> Boolean) -> Unit,
     /** DiPlay type-130 隧道写入口（每次出站动态取用，可为 null）。 */
-    private val tunnelWriter: () -> AirPlayClient.IapTunnelClient?,
+    private val tunnelWriter: () -> io.github.shaonialife.carptocar.link.IapTunnel?,
     /** 节拍线程存活条件（宿主控制连接未关）。 */
     private val alive: () -> Boolean,
     /** MFi 长度记忆的持久化上下文；null = 进程内记忆（单测）。 */

@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.airplay
 
+import io.github.shaonialife.carptocar.link.ControlKeys
 import java.io.IOException
 
 /** TLV8 请求/应答传输抽象：真实实现走 RTSP POST，测试用 mock 接收端直连。 */
@@ -162,11 +163,6 @@ class PairVerifyClient(
     private val transport: TlvTransport,
     private val log: (String) -> Unit,
 ) {
-    class ControlKeys(
-        val phoneWriteKey: ByteArray,
-        val phoneReadKey: ByteArray,
-        val sharedSecret: ByteArray,
-    )
 
     fun run(receiverStaticPublicKey: ByteArray? = null): ControlKeys {
         // M1: 临时 X25519 公钥

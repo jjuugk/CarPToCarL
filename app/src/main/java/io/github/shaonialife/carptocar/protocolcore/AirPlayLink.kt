@@ -1,11 +1,16 @@
 package io.github.shaonialife.carptocar.protocolcore
 
+import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import io.github.shaonialife.carptocar.audio.AudioCodec
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.link.AudioStreamInfo
+import io.github.shaonialife.carptocar.link.ControlKeys
+import io.github.shaonialife.carptocar.link.ScreenStreamInfo
+import io.github.shaonialife.carptocar.link.SetupInfo
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.TcpLiveness
 import io.github.shaonialife.cardeck.protocol.NativeBridge
@@ -507,7 +512,14 @@ class AirPlayLink(
                     // M5.2：会话句柄存活跨连接序（fw: apsession 生命周期——
                     // 控制建立/流 SETUP/事件通道全走同一加密会话）
                     controlSessionHandle = handle
-                    lastKeys = ControlKeys(write, shared, eventsWrite, eventsRead)
+                    lastKeys =
+                        ControlKeys(
+                            phoneWriteKey = write,
+                            phoneReadKey = ByteArray(0),
+                            sharedSecret = shared,
+                            eventsWriteKey = eventsWrite,
+                            eventsReadKey = eventsRead,
+                        )
                     return "{\"op\":\"pairDone\"}"
                 }
                 "error" -> {
@@ -1379,35 +1391,8 @@ class AirPlayLink(
     }
 
     /** 会话级 SETUP 装配产物（controlSetup 端口域 + info displays——宿主数据面消费）。 */
-    class SetupInfo(
-        val eventPort: Int,
-        val timingPort: Int,
-        val keepAlivePort: Int?,
-        val enabledFeatures: List<String>,
-        /** 主显示屏参数（/info displays[0]，跟随接收端当前屏幕方向）。 */
-        val displayWidth: Int,
-        val displayHeight: Int,
-        val displayUuid: String?,
-        val maxFps: Int,
-        /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
-        val hidDeviceUuids: List<String> = emptyList(),
-        /**
-         * uuid → HID 描述符。媒体键（Consumer Control）的 Array 报告字节是 Usage 数组下标，
-         * 必须解析描述符才能得到正确映射（奥迪实测：按下「下一首」收 0x05=usages[5]=0xB5）。
-         */
-        val hidDescriptors: Map<String, ByteArray> = emptyMap(),
-        /**
-         * `/info.keepAliveSendStatsAsBody`：屏幕流 keepAlive 帧是否携带统计体
-         * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
-         */
-        val keepAliveSendStatsAsBody: Boolean = false,
-    )
 
     /** 屏幕流协商结果。 */
-    class ScreenStreamInfo(
-        val streamConnectionId: Long,
-        val dataPort: Int,
-    )
 
     private var sendIapCount = 0
 
@@ -1635,14 +1620,6 @@ class AirPlayLink(
     }
 
     /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
-    class AudioStreamInfo(
-        val streamConnectionId: Long,
-        val dataPort: Int,
-        val controlPort: Int,
-        val streamKey: ByteArray,
-        /** 协商出的采样率（Hz）：按车机声明选择，AudioSender 必须用同一值采集。 */
-        val sampleRate: Int = 48_000,
-    )
 
     companion object {
         /** NTP 纪元偏移（1900→1970，秒）——墙钟锚计算（fw: NTPClockSetEpoch
@@ -1853,7 +1830,12 @@ class AirPlayLink(
             ev.optString("streamConnectionID").toLongOrNull()
                 ?: (java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L)
         log("AIRPLAY: ✓ 主屏流已接受（SetupPlan）dataPort=$dataPort connId=$connectionId")
-        return ScreenStreamInfo(connectionId, dataPort)
+        return ScreenStreamInfo(
+            streamConnectionId = connectionId,
+            dataPort = dataPort,
+            // 协议核链路：帧密封在 native（nativeAirplayScreenSealFrame）内完成
+            cipher = StreamFrameCipher.CoreSealed,
+        )
     }
 
     /** 由 SetupPlan 的音频 streamSetup 事件构造预协商音频流。 */
@@ -2363,14 +2345,6 @@ class AirPlayLink(
  * 恒空数组，音频路径按 null 语义处理）。原 PairVerifyClient.ControlKeys，
  * M5.2 起 PairingClients.kt 全域移入 Rust（fw::airplay::session），类型随迁。
  */
-data class ControlKeys(
-    val phoneWriteKey: ByteArray,
-    val sharedSecret: ByteArray,
-    /** Events 双钥（fw: CreateEncryptionKeysForContext Events-Salt 族，Rust Done 交付）——
-     *  事件通道加密态直用，Kotlin 不再本地 HKDF（M5：事件通道加解密全 Rust）。 */
-    val eventsWriteKey: ByteArray = ByteArray(0),
-    val eventsReadKey: ByteArray = ByteArray(0),
-)
 
 /**
  * 配对库对端身份（fw: `_PairingSessionSavePeer` 入库内容——setup M6 的

@@ -14,6 +14,11 @@ import io.github.shaonialife.carptocar.iap2.Iap2LinkPacket
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.input.HidDescriptorSummary
+import io.github.shaonialife.carptocar.link.AirPlayLinkSession
+import io.github.shaonialife.carptocar.link.AudioStreamInfo
+import io.github.shaonialife.carptocar.link.ControlKeys
+import io.github.shaonialife.carptocar.link.ScreenStreamInfo
+import io.github.shaonialife.carptocar.link.SetupInfo
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.protocol.ProtocolAudit
 import io.github.shaonialife.carptocar.util.DeviceIdentity
@@ -243,7 +248,7 @@ class AirPlayClient(
      * 先按 pre-HomeKit 车机走 `et=NONE`，若 SETUP 被拒且此前没试过配对，
      * 就补做一次 pair-setup/pair-verify 再 SETUP。TXT features 判断错误时不至于直接失败。
      */
-    fun retryWithPairing(windowMillis: Long = 30_000): PairVerifyClient.ControlKeys? {
+    fun retryWithPairing(windowMillis: Long = 30_000): ControlKeys? {
         pairingUnsupported = false
         close()
         log("AIRPLAY: 明文 SETUP 未通过——尝试加密升级（补做 HomeKit 配对）")
@@ -351,7 +356,7 @@ class AirPlayClient(
         return true
     }
 
-    fun runPairing(windowMillis: Long = PAIRING_WINDOW_MILLIS): PairVerifyClient.ControlKeys? {
+    fun runPairing(windowMillis: Long = PAIRING_WINDOW_MILLIS): ControlKeys? {
         pairingInProgress = true
         try {
             return runPairingLoop(windowMillis)
@@ -360,7 +365,7 @@ class AirPlayClient(
         }
     }
 
-    private fun runPairingLoop(windowMillis: Long): PairVerifyClient.ControlKeys? {
+    private fun runPairingLoop(windowMillis: Long): ControlKeys? {
         val identity = loadOrCreateIdentity()
         log("AIRPLAY: 控制器身份 pairingId=${identity.pairingId}")
         // 车机 AirPlay 窗口是「用户点车机上的手机图标 / 收到 ctrl 邀请后才开」的
@@ -1804,67 +1809,7 @@ class AirPlayClient(
         }
     }
 
-    class SetupInfo(
-        val eventPort: Int,
-        val timingPort: Int,
-        val keepAlivePort: Int?,
-        val enabledFeatures: List<String>,
-        /** 主显示屏参数（/info displays[0]，跟随接收端当前屏幕方向）。 */
-        val displayWidth: Int,
-        val displayHeight: Int,
-        /**
-         * 宽高是否真的来自车机（/info displays[0]）。
-         *
-         * false = 车机没通告、按手机横屏兜底——此时「车机分辨率」无从谈起，
-         * UI 必须照实标注，不能把兜底值当成车机参数展示。
-         */
-        val displayFromCar: Boolean = false,
-        val displayUuid: String?,
-        /**
-         * 车机声明的解码帧率上限（`/info displays[0].maxFPS`）。
-         *
-         * **0 = 车机没声明**，不是「0fps」。目标帧率由 `video/StreamFps.kt` 判定：
-         * 有值跟随、0 按 60 声明。
-         */
-        val maxFps: Int,
-        /**
-         * 车机有没有声明「能承载方向盘媒体键」的 HID 设备（画像判据见
-         * [HidDescriptorSummary]）。false 表示这台车的媒体键只能走 iAP2
-         * `0x6800`/`0x6802`——车机不发 StartHID 就永远收不到。
-         */
-        val hasMediaKeyHid: Boolean = false,
-        /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
-        val hidDeviceUuids: List<String> = emptyList(),
-        /**
-         * uuid → HID 描述符。媒体键（Consumer Control）的 Array 报告字节是 Usage 数组下标，
-         * 必须解析描述符才能得到正确映射（奥迪实测：按下「下一首」收 0x05=usages[5]=0xB5）。
-         */
-        val hidDescriptors: Map<String, ByteArray> = emptyMap(),
-        /**
-         * `/info.keepAliveSendStatsAsBody`：屏幕流 keepAlive 帧是否携带统计体
-         * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
-         */
-        val keepAliveSendStatsAsBody: Boolean = false,
-        /**
-         * `/info.extendedFeatures` 扩展特性清单（AIS Table 23-33）。
-         *
-         * **null = 车机没声明这个键**（老固件/非无线），不是「什么都不支持」。
-         * 判定统一走 [CarCapabilityList.supportsExtended] 的三态。
-         */
-        val extendedFeatures: List<String>? = null,
-        /** 车机是否声明 `keepAliveLowPower`（23.3.2.7，无媒体流时只发 UDP 保活）。 */
-        val keepAliveLowPower: Boolean = false,
-        /** 车机蓝牙模块 MAC 清单（`bluetoothIDs`；`disableBluetooth` 的前置）。 */
-        val bluetoothIds: List<String> = emptyList(),
-    )
-
     /** 屏幕流协商结果。 */
-    class ScreenStreamInfo(
-        val streamConnectionId: Long,
-        val dataPort: Int,
-        /** 帧加密方式：ChaCha20（已配对）或 AES-128-CTR（未配对会话）。 */
-        val cipher: StreamFrameCipher,
-    )
 
     /**
      * iAP 隧道（type-130 DataStream，对照 DiPlay IapTunnel）：现代 CarPlay 的 iAP2
@@ -1879,13 +1824,13 @@ class AirPlayClient(
         private val readKey: ByteArray,
         private val logPrefix: String = "TUNNEL",
         private val writeKey: ByteArray = readKey,
-    ) {
+    ) : io.github.shaonialife.carptocar.link.IapTunnel {
         @Volatile
         var messageCount = 0
             private set
 
         /** 车机→手机 iAP2 消息回调（CSM 帧字节）。 */
-        var onIapMessage: ((Iap2Csm.Frame) -> Unit)? = null
+        override var onIapMessage: ((Iap2Csm.Frame) -> Unit)? = null
 
         private val parser =
             Iap2Csm
@@ -1907,7 +1852,7 @@ class AirPlayClient(
          * 密钥与读取方向同源（OUTPUT 标签 = 手机→接收端方向，2026-08 对照源码确认）。
          * 返回是否写出（socket 关闭/异常返回 false，调用方仅记录一次）。
          */
-        fun writeIapBytes(bytes: ByteArray): Boolean {
+        override fun writeIapBytes(bytes: ByteArray): Boolean {
             if (socket.isClosed || !socket.isConnected || bytes.isEmpty()) return false
             // **一帧一个传输单元**：链路引擎的输出缓冲里常常连着好几帧（SYN 标记 + 应答 +
             // 数据帧），合成一个包写出去会让按「一次传输一个 iAP2 包」解析的接收端错位，
@@ -2454,14 +2399,6 @@ class AirPlayClient(
             (bytes[1] == 0x5A.toByte() || bytes[1] == 0x55.toByte())
 
     /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
-    class AudioStreamInfo(
-        val streamConnectionId: Long,
-        val dataPort: Int,
-        val controlPort: Int,
-        val streamKey: ByteArray,
-        /** 协商出的采样率（Hz）：按车机声明选择，AudioSender 必须用同一值采集。 */
-        val sampleRate: Int = 48_000,
-    )
 
     /**
      * 端口解析：plist 端口是 u16，但部分固件按 2 字节有符号整数编码（>32767 读出为负），
