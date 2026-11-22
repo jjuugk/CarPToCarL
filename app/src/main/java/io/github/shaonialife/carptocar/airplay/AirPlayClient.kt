@@ -2325,6 +2325,11 @@ class AirPlayClient(
         obtainIapLink().pushRouteGuidance()
     }
 
+    /** 导航心跳：只刷 0x5201，防止 DiPlay 30s 陈旧超时误清 HUD。 */
+    fun pushRouteGuidanceHeartbeat() {
+        obtainIapLink().pushRouteGuidanceHeartbeat()
+    }
+
     /**
      * MIB3 布防：屏幕流 SETUP 成功后调用——主动经**控制通道** POST /command 发一次
      * DETECT，随后等车机 SYN（真机 Frida 时序，详见 [VirtualIap2Link.armMib3]）。

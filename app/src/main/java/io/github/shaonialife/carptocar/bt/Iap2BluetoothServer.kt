@@ -120,6 +120,11 @@ class Iap2BluetoothServer(
         senderSession?.pushRouteGuidance()
     }
 
+    /** 导航心跳：只刷 0x5201（转发给当前保活会话）。 */
+    fun pushRouteGuidanceHeartbeat() {
+        senderSession?.pushRouteGuidanceHeartbeat()
+    }
+
     /**
      * 车机 AirPlay 端口一直不开时，让 iAP2 会话重发一次 `0x4e0e + 0x4300` 叫醒它。
      *

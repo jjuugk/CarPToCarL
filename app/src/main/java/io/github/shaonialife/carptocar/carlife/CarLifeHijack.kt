@@ -332,6 +332,14 @@ object CarLifeHijack {
     var naviNextTurnCount: Int = 0
         private set
 
+    /**
+     * CarLife+ 引擎控制通道意外断开（非本进程主动停止）。
+     *
+     * 上层收到后同步补发 iAP2 0x5201 清除帧，避免 HUD 等 DiPlay 30s 陈旧兜底才消失。
+     */
+    @Volatile
+    var onNaviSourceDisconnected: (() -> Unit)? = null
+
     private val naviNextTurnListeners =
         java.util.concurrent.CopyOnWriteArrayList<(CarLifeNaviNextTurn) -> Unit>()
 
@@ -1170,6 +1178,18 @@ object CarLifeHijack {
                     onMediaInfo = { info -> onMediaInfo(info) },
                     onMediaProgress = { ms -> onMediaProgress(ms) },
                     onNaviNextTurn = { info -> onNaviNextTurn(info) },
+                    onEngineDisconnected = {
+                        // onEngineDisconnected 只在「非主动 stop」时触发，旧 socket 不会误报。
+                        logSink?.invoke("CARLIFE: 引擎控制通道断开——同步结束导航 HUD")
+                        val handler = onNaviSourceDisconnected
+                        if (handler == null) {
+                            // 2026-11-22 实装坑：回调被 retireSessionResources 置空后再无人重装，
+                            // 日志只留这行、上层没有 EVENT 行，clear 帧发不出去。留一条显式诊断。
+                            logSink?.invoke("CARLIFE! 引擎断开回调未装配（onNaviSourceDisconnected=null）——HUD 不会被同步清除")
+                        } else {
+                            runCatching { handler() }
+                        }
+                    },
                     requestedFps = requestedFps,
                     initialConnectType = connectType,
                     mediaSampleRate = AudioRatePreference.load(appContext).mediaSampleRateFeatureValue,

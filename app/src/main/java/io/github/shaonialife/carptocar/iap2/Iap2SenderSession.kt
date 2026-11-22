@@ -1633,6 +1633,14 @@ class Iap2SenderSession(
         }
     }
 
+    /** 导航心跳：只刷最近一帧 0x5201，避免 DiPlay 30s 陈旧超时清 HUD。 */
+    fun pushRouteGuidanceHeartbeat() {
+        if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+        val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.BT) ?: return
+        sendFireAndForget(frame.first, frame.second)
+        log("iap2 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+    }
+
     /**
      * 应答 0x5000 订阅（含重试）。
      *

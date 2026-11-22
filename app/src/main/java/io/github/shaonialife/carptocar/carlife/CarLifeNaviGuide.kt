@@ -10,7 +10,7 @@ package io.github.shaonialife.carptocar.carlife
  * ```
  * message CarlifeNaviNextTurnInfo {
  *   optional int32  action          = 1;  // 1=导航开始 2=诱导更新 3=导航结束
- *   optional int32  nextTurn        = 2;  // CarLife 转向枚举，见 [CAR_SELF]..[ENTER_TUNNEL]
+ *   optional int32  nextTurn        = 2;  // CarLife 原始转向码（raw），见 [rawToIcon]
  *   optional string roadName        = 3;  // 转向后道路名
  *   optional int32  totalDistance   = 4;  // 全程剩余（米）
  *   optional int32  remainDistance  = 5;  // 到下一转向距离（米）
@@ -20,12 +20,20 @@ package io.github.shaonialife.carptocar.carlife
  *
  * 参考 APK 里 `b8/g.smali` 把 `remainDistance` 同时塞进高德广播的
  * `SEG_REMAIN_DIS` 和 `ROUTE_REMAIN_DIS`，`roadName` 塞进 `NEXT_ROAD_NAME`，
- * `nextTurn` 经 `b8/a.smali` 的码表转成高德 `ICON`/`NEW_ICON`。这里保留全部原始
- * 字段，转换交给 [CarLifeNaviGuide] 的下游（iAP2 0x5201/0x5202）去做。
+ * `nextTurn` 经 `b8/a.smali` 的映射表（`b8/a.c`）转成枚举、再取枚举的 `.a` 字段
+ * 当高德 `ICON`/`NEW_ICON`。**这一步不能省**：protobuf 里的 raw 码与高德 ICON 是
+ * 两套完全不同的编码（raw 7=左转→ICON 2，raw 2=右前方→ICON 5）。
+ *
+ * 实装中曾把 raw 直接当 ICON 用：raw 7 被当成 `RIGHT_BACK=7` 发出 Apple 48，
+ * 车机再映射成右后方，而 CarLife 投屏明明是左转。现在 [parse] 里就完成
+ * raw→ICON 转换，[nextTurn] 字段存的是高德 ICON，[rawNextTurn] 保留原始码供追溯。
  */
 data class CarLifeNaviNextTurn(
     val action: Int = 0,
+    /** 高德 ICON 转向码（见 [CAR_SELF]..[ENTER_TUNNEL]），已由 raw 映射得到。 */
     val nextTurn: Int = 0,
+    /** protobuf field 2 的原始转向码，仅供日志/排查。 */
+    val rawNextTurn: Int = 0,
     val roadName: String = "",
     val totalDistance: Int = 0,
     val remainDistance: Int = 0,
@@ -38,7 +46,8 @@ object CarLifeNaviGuide {
     const val ACTION_UPDATE = 2
     const val ACTION_END = 3
 
-    // ---- CarLife nextTurn 枚举（b8/a.smali 静态构造的第三个参数，实证） ----
+    // ---- 高德 ICON 转向码（= b8/a.smali 枚举实例的 .a 字段值，实证） ----
+    // 注意：这些不是 protobuf nextTurn 的 raw 值！raw 经 rawToIcon() 映射后才是它们。
     const val CAR_SELF = 1
     const val LEFT_TURN = 2
     const val RIGHT_TURN = 3
@@ -57,6 +66,33 @@ object CarLifeNaviGuide {
     const val ENTER_TUNNEL = 16
 
     /**
+     * protobuf `nextTurn` raw 码 → 高德 ICON 码，等价于车机端 `b8/a.smali` 的
+     * `b8/a.c` 映射表 + 枚举 `.a` 字段取值。全部 74 项从 smali 的 `<clinit>`
+     * 逐条还原（含批量 put 展开），不是猜的。
+     *
+     * 关键实证：raw 7→LEFT_TURN(2)、raw 2→RIGHT_FRONT(5)、raw 24→ARRIVE_DEST(15)，
+     * 与实装中「CarLife 投屏左转(raw 7)」的现象吻合。未知码返回 0（NONE），
+     * 宁可不画箭头也不凭空猜一个方向。
+     */
+    fun rawToIcon(raw: Int): Int = when (raw) {
+        1, 13, 14, 15, 16, 17, 22, 32, 33, 34, 35, 36, 37, 38, 40, 42, 43, 44, 45, 46, 47, 48, 49 -> STRAIGHT
+        2, 12, 19, 21, 41, 55, 57, 58, 62 -> RIGHT_FRONT
+        3, 56, 63 -> RIGHT_TURN
+        4, 59 -> RIGHT_BACK
+        5, 64, 65, 66, 67, 68 -> U_TURN_LEFT
+        6, 52 -> LEFT_BACK
+        7, 50, 60 -> LEFT_TURN
+        8, 11, 18, 20, 39, 51, 53, 54, 61 -> LEFT_FRONT
+        9, 69, 70, 71, 72, 73, 74, 75, 76 -> ROUNDABOUT_ENTER
+        10 -> ROUNDABOUT_EXIT
+        23 -> CAR_SELF
+        24 -> ARRIVE_DEST
+        25, 26, 27, 28 -> ARRIVE_WAYPOINT
+        31 -> ARRIVE_TOLL
+        else -> 0
+    }
+
+    /**
      * 解析 `0x10030` 裸 protobuf 载荷。
      *
      * 与 [CarLifeProtocol.parseMediaProgress] 同样的铁律：解析函数**必须**自己吞掉
@@ -68,7 +104,7 @@ object CarLifeNaviGuide {
         if (payload.isEmpty()) return null
         try {
             var action = 0
-            var nextTurn = 0
+            var rawNextTurn = 0
             var roadName = ""
             var totalDistance = 0
             var remainDistance = 0
@@ -86,7 +122,8 @@ object CarLifeNaviGuide {
                         index += varintLen(payload, index)
                         when (field) {
                             1 -> action = value
-                            2 -> nextTurn = value
+                            // field 2 是 protobuf raw 码，先原样留着，出口统一过 rawToIcon()
+                            2 -> rawNextTurn = value
                             4 -> totalDistance = value
                             5 -> remainDistance = value
                         }
@@ -111,18 +148,27 @@ object CarLifeNaviGuide {
                     else -> break
                 }
             }
-            // action/nextTurn 至少有一个才认为是真诱导包；全零包在高德广播里
+            // action/rawNextTurn 至少有一个才认为是真诱导包；全零包在高德广播里
             // 会变成「无转向 + 0 米」，对车机有害无益。
-            if (action == 0 && nextTurn == 0 && roadName.isBlank()) return null
-            return CarLifeNaviNextTurn(action, nextTurn, roadName, totalDistance, remainDistance, turnIconData)
+            if (action == 0 && rawNextTurn == 0 && roadName.isBlank()) return null
+            return CarLifeNaviNextTurn(
+                action = action,
+                nextTurn = rawToIcon(rawNextTurn),
+                rawNextTurn = rawNextTurn,
+                roadName = roadName,
+                totalDistance = totalDistance,
+                remainDistance = remainDistance,
+                turnIconData = turnIconData,
+            )
         } catch (_: RuntimeException) {
             return null
         }
     }
 
     /**
-     * CarLife `nextTurn` → 高德 `NEW_ICON` 码表（`b8/a.smali` 的 put 映射）。
-     * 只用于日志对照；实际发给车机的是下面的 Apple iAP2 转向类型。
+     * 高德 ICON → `NEW_ICON` 码表。现在 [CarLifeNaviNextTurn.nextTurn] 已经是
+     * ICON，因此这里是恒等映射；保留它只是为了日志/旧调用点对照，实际发给车机的是
+     * 下面的 Apple iAP2 转向类型。
      */
     fun amapIcon(nextTurn: Int): Int = when (nextTurn) {
         LEFT_TURN -> 2

@@ -33,12 +33,22 @@ import java.util.EnumSet
  *
  * 实测关键证据：
  * - 直行的 0x5202 `[3] u8=11`，DiPlay 映射为 gaode 直行码 11；
- * - 左转的 0x5202 `[3] u8=1`，正是 CarLife `nextTurn=2` 的对应码；
+ * - 左转的 0x5202 `[3] u8=1`，对应 CarLife 高德 ICON 2（protobuf raw 7），
+ *   **不是** protobuf raw 值本身；转换在 [CarLifeNaviGuide.rawToIcon] 完成；
  * - 驾驶侧实测 `u8=2`（不是 0），把 0 发成左行会让箭头左右颠倒；
  * - 0x5201 的 0x0d 是 **4 字节** `00 00 00 02`，DiPlay 按 u16 读前两字节得 0，
  *   指向索引 0 的「从…出发」maneuver；车机据此显示当前诱导。
  *   我们同时把同一条诱导写在索引 0 和索引 2，兼容两种读法。
- * - 结束帧只有 0x01=0（空串形态 `00 05 00 01 00`）与 0x07=0，DiPlay 据此 clear。
+ *
+ * 结束策略（2026-11-22 二次修正）：CarLife 显式 `action=3` 或引擎控制通道意外断开时，
+ * 立即把最新快照换成 0x5201 state=0（`0x00=42`、`0x01=0`、`0x07=0`，不附 0x5202）
+ * 并同步扇出到所有已订阅链路，车机据此马上清 HUD。不能只停心跳等 DiPlay 的 30s
+ * 陈旧兜底——那样会多留一段 HUD 残影。只有「引擎静默但会话仍在」才靠心跳保活，
+ * 这两条路径互不重叠。
+ *
+ * 心跳策略：CarLife 引擎长时间不刷新诱导时，周期性重发最近一帧 0x5201（只发 update，
+ * 不重发 0x5202），把 DiPlay 的 `lastRouteUpdateNs` 一直往后推，避免 30s 陈旧超时
+ * 误判为「导航结束」。心跳由 SessionController 的 10s 节拍驱动，结束/断链即停。
  *
  * 分发是**按链路**的：车机可能在蓝牙链路上订阅但没在 WiFi 隧道订阅（或相反），
  * 单一全局「已订阅」标志会丢这个粒度。订阅状态在 0x5203 / 会话重建时清掉。
@@ -70,15 +80,34 @@ object Iap2RouteGuidance {
     private var current: Bodies? = null
     private var sequence = 0
 
+    /** 是否还在导航活跃期；只有它为 true 时才允许心跳刷新 DiPlay 的 30s 超时。 */
+    private var routeActive = false
+
     /**
      * 收到一条 CarLife 0x10030 后调用：编码并置为最新快照。
      * 真正发送由各链路在 [nextFramesFor] 里拉取，保证只发给已订阅的车机，
      * 也避免业务层绕过 iAP2 的发送闸门。
+     *
+     * `ACTION_END` 是显式结束：立刻换成 clear 快照并停活跃态；调用方紧接着
+     * 扇出 [nextFramesFor]，车机会同步收到 0x5201 state=0 并清 HUD。
      */
     fun publish(info: CarLifeNaviNextTurn) {
         val bodies = encode(info) ?: return
+        install(bodies, active = info.action != CarLifeNaviGuide.ACTION_END)
+    }
+
+    /**
+     * CarLife+ 引擎断开（非本进程主动停止）时调用：与 [CarLifeNaviGuide.ACTION_END]
+     * 同样处理，让车机立即结束 HUD 引导，不等 30s 陈旧兜底。
+     */
+    fun endRoute() {
+        install(clearBodies(), active = false)
+    }
+
+    private fun install(bodies: Bodies, active: Boolean) {
         synchronized(lock) {
             current = bodies
+            routeActive = active
             sequence++
         }
     }
@@ -128,6 +157,25 @@ object Iap2RouteGuidance {
         }
     }
 
+    /** 当前是否处于导航活跃期（心跳节拍据此决定是否继续跑）。 */
+    fun hasActiveRoute(): Boolean = synchronized(lock) { routeActive && current != null }
+
+    /**
+     * 心跳帧：只重发最近一版 0x5201，**不走序号去重**（同一版也要反复刷），
+     * 且不带 0x5202——DiPlay 只更新 `lastRouteUpdateNs`，不需要重画 maneuver。
+     *
+     * 发过之后把该链路的 update 序号标记为已发，避免紧接着的 200ms 常规拍
+     * 又重复推一帧完全相同的 0x5201。
+     */
+    fun nextHeartbeatFor(link: Link): Pair<Int, ByteArray>? {
+        synchronized(lock) {
+            if (!routeActive || link !in subscribed) return null
+            val bodies = current ?: return null
+            lastUpdateSeq[link] = sequence
+            return bodies.frames.firstOrNull()
+        }
+    }
+
     /** 会话重建时清掉「上一轮已订阅/已发送」快照。 */
     fun reset() {
         synchronized(lock) {
@@ -135,25 +183,27 @@ object Iap2RouteGuidance {
             lastUpdateSeq.clear()
             lastManeuverSeq.clear()
             current = null
+            routeActive = false
             sequence = 0
         }
     }
 
-    private fun encode(info: CarLifeNaviNextTurn): Bodies? {
-        val ended = info.action == CarLifeNaviGuide.ACTION_END
-        val state = when (info.action) {
-            CarLifeNaviGuide.ACTION_START -> STATE_ROUTE_READY
-            CarLifeNaviGuide.ACTION_END -> STATE_CLEARED
-            else -> STATE_GUIDING
-        }
-        val road = sanitizeRoad(info.roadName)
-
-        val update = if (ended) {
-            // 与真机结束帧一致：0x00=42、0x01=0、0x07=0（不发送 0x5202）
+    /** 与真机结束帧一致：只带 0x00=42、0x01=0、0x07=0，不附 0x5202。 */
+    private fun clearBodies(): Bodies {
+        val update =
             Iap2Csm.u16(0x00, 42) +
                 Iap2Csm.u8(0x01, STATE_CLEARED) +
                 Iap2Csm.u32(0x07, 0L)
-        } else {
+        return Bodies(listOf(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to update), update)
+    }
+
+    private fun encode(info: CarLifeNaviNextTurn): Bodies? {
+        if (info.action == CarLifeNaviGuide.ACTION_END) return clearBodies()
+        val state =
+            if (info.action == CarLifeNaviGuide.ACTION_START) STATE_ROUTE_READY else STATE_GUIDING
+        val road = sanitizeRoad(info.roadName)
+
+        val update =
             Iap2Csm.u16(0x00, 42) +
                 Iap2Csm.u8(0x01, state) +
                 Iap2Csm.string(0x03, "") +
@@ -164,9 +214,6 @@ object Iap2RouteGuidance {
                 Iap2Csm.u32(0x0d, APPLE_MANEUVER_ACTIVE.toLong()) +
                 Iap2Csm.string(0x13, SOURCE_APP) +
                 Iap2Csm.u8(0x14, 1)
-        }
-
-        if (ended) return Bodies(listOf(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to update), update)
 
         val type = CarLifeNaviGuide.appleManeuverType(info.nextTurn)
         // 真机 0x5202 的 field2 是 maneuvers 文字；用「<转向><道路>」这个形态，

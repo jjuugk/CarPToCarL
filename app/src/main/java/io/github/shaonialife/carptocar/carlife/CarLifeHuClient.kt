@@ -89,6 +89,13 @@ class CarLifeHuClient(
      */
     private val onNaviNextTurn: (info: CarLifeNaviNextTurn) -> Unit = {},
     /**
+     * 控制通道意外断开（EOF/reset，非我们主动 [stop]）。
+     *
+     * 上层据此同步补发 iAP2 0x5201 清除帧，让车机立刻结束 HUD 引导；
+     * 不再只停心跳等 DiPlay 的 30s 陈旧兜底（会留下额外 HUD 残留）。
+     */
+    private val onEngineDisconnected: () -> Unit = {},
+    /**
      * 引擎是否处于**语音会话**（`语音(4)` 模块从 0 变非 0，以及反向）。
      *
      * 这是「0x68008 `0x21` 到底有没有被引擎接住」的同一份证据，也是上层唯一能拿到的
@@ -830,7 +837,11 @@ class CarLifeHuClient(
         } catch (error: Exception) {
             if (running.get()) log("CARLIFE: 控制通道断开 - ${error.message}")
         } finally {
+            // 先判断再 stop()：主动 stop() 时 running 已 false，不能再回调上层清 HUD，
+            // 否则正常会话退役也会被当成「引擎断开」，把车机导航误清。
+            val unexpected = running.get()
             stop()
+            if (unexpected) runCatching { onEngineDisconnected() }
         }
     }
 
@@ -1046,8 +1057,9 @@ class CarLifeHuClient(
                 } else {
                     if (naviLog.allow("next-turn")) {
                         log(
-                            "CARLIFE: 导航诱导 action=${info.action} ${CarLifeNaviGuide.label(info.nextTurn)}" +
-                                " icon=${CarLifeNaviGuide.amapIcon(info.nextTurn)} road=${info.roadName}" +
+                            "CARLIFE: 导航诱导 action=${info.action}" +
+                                " raw=${info.rawNextTurn} → ${CarLifeNaviGuide.label(info.nextTurn)}" +
+                                " icon=${info.nextTurn} road=${info.roadName}" +
                                 " remain=${info.remainDistance}m total=${info.totalDistance}m（10 秒最多一行）",
                         )
                     }

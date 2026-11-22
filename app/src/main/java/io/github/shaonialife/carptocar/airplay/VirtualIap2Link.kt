@@ -378,6 +378,20 @@ class VirtualIap2Link(
         synchronized(lock) { maybePushRouteGuidanceLocked() }
     }
 
+    /**
+     * 导航心跳：只重发最近一帧 0x5201，刷新 DiPlay 的 30s 陈旧计时器。
+     * 与 [pushRouteGuidance] 分开，避免把同一版 0x5202 maneuver 反复刷给车机。
+     */
+    fun pushRouteGuidanceHeartbeat() {
+        synchronized(lock) {
+            if (!mib3Identified && !tunnelIdentified) return
+            if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+            val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.TUNNEL) ?: return
+            sendCsmLocked(frame.first, frame.second)
+            log("IAPLINK: 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+        }
+    }
+
     /** 把尚未发过的 0x5201/0x5202 帧推给已订阅链路；挂在 200ms 节拍上，不新增线程。 */
     private fun maybePushRouteGuidanceLocked() {
         if (!mib3Identified && !tunnelIdentified) return
