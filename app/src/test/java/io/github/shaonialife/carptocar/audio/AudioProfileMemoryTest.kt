@@ -112,4 +112,27 @@ class AudioProfileMemoryTest {
         assertTrue(AudioProfileMemory.load(null, id).disabled)
         assertTrue(AudioProfileMemory.order(hondaCandidates, AudioProfileMemory.load(null, id)).isEmpty())
     }
+
+    @Test
+    fun liveMedia48kBeatsRememberedCompatibility() {
+        val media48 = AudioProfile("media", 1L shl 15, 48_000, 250)
+        val compat48 = AudioProfile("compatibility", 1L shl 15, 48_000, 250)
+        val ordered = AudioProfileMemory.prioritizeMedia48k(listOf(compat48, media48), emptySet())
+        assertEquals(media48.key, ordered.first().key)
+        assertEquals(2, ordered.size)
+    }
+
+    @Test
+    fun rejectedMedia48kKeepsItsPlace() {
+        val media48 = AudioProfile("media", 1L shl 15, 48_000, 250)
+        val compat48 = AudioProfile("compatibility", 1L shl 15, 48_000, 250)
+        val original = listOf(compat48, media48)
+        assertEquals(original, AudioProfileMemory.prioritizeMedia48k(original, setOf(media48.key)))
+    }
+
+    @Test
+    fun media44kIsNotProtected() {
+        val original = listOf(hondaCandidates[1], hondaCandidates[0])
+        assertEquals(original, AudioProfileMemory.prioritizeMedia48k(original, emptySet()))
+    }
 }

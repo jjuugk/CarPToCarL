@@ -4365,6 +4365,14 @@ object SessionController {
                 appendLog("AUDIO: 直通模式——PCM 档优先，AAC 仅作兜底")
             }
             ordered = pcmFirst
+            val beforeMediaGuard = ordered
+            ordered = AudioProfileMemory.prioritizeMedia48k(ordered, entry.rejected)
+            if (ordered.firstOrNull()?.key != beforeMediaGuard.firstOrNull()?.key && ordered.isNotEmpty()) {
+                appendLog(
+                    "AUDIO: 选档加固——未被否掉的 t100/media PCM48k 已提到 compatibility 之前" +
+                        "（避免接收端把媒体流按 realtime 100ms 缓冲）",
+                )
+            }
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
                 return false

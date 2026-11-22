@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk)**
-> —— 主线固定直链（当前 1.2.80，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk)**
+> —— 主线固定直链（当前 1.2.81，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.80，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.80.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.81，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.81.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.80`（正式版；并入 BMW MGU-50-J 实车 fork 的 **P1/P2/P4**：新增「连上后主动取主音频」开关（默认关，按车型自行开启）、切歌不再永久静音、车机点 CarPlay 图标无响应时补关键帧 + 复述归属。不会重发 RECORD——该车对重复 RECORD 过敏。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.80.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.80/CarPToCarL-1.2.80.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.81`（正式版；选档加固：未被否掉的 `t100/media` 48k PCM 不会被旧记忆推到 compatibility 之后，避免接收端把媒体流按 realtime 100ms 缓冲；另含协议核逆向文档与 MFi 挑战长度证书识别修复。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,18 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.81 —— 2026-11-22（选档加固，正式版）
+
+基于 1.2.80，另含此前已本地提交、本版一并推送的协议核逆向文档与 MFi 挑战长度证书识别修复。
+
+**媒体选档加固**（`AudioProfileMemory.prioritizeMedia48k`，3 例单测）：
+
+- 只要车机声明了 `t100/media` 48k PCM 且这台车机**没有**把它记进「拆链」名单，就把它排到 compatibility/default 之前，哪怕旧记忆把 compatibility 记成 `working`。WinPlay 这类接收端把 `audioType != media` 一律判为 realtime、缓冲硬编码 100ms；本次 1.2.80 日志已经是 media + 250ms 且 `late=0`，所以加固**对本轮没有行为变化**，只堵住「旧记忆/排序把媒体流推到兼容档」这条退化路径。
+- 已被记忆否掉的 media 档、以及 Honda HFT 那种只有 44.1k media 的档位**不受保护**，避免把已知踩雷档硬推上去；SETUP 失败照旧按原顺序试下一档。
+- **未改**：歌词/歌名逻辑、发包 pacing、缓冲深度、RTP 补静音。WinPlay 诊断里剩余的 `missing/discontinuity`（约 12 个缺口/千包）不在本版修复范围，仍需按链路丢包方向排查。
+
+**验证**：979 例单测 0 失败；APK 14,172,721 B，sha256 `5997b072…c8488bae4e`。**未实车验证**。
 
 ### 1.2.80 —— 2026-11-21（并入 MGU-50-J fork 的 P1/P2/P4，正式版）
 

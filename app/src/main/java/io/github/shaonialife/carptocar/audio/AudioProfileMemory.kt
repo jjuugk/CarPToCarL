@@ -151,6 +151,30 @@ object AudioProfileMemory {
         }
 
     /**
+     * 媒体 48k PCM 保护（1.2.81）：未被这台车机否掉时，必须排在 compatibility/default 前面。
+     *
+     * WinPlay 这类接收端把 `audioType != media` 一律判成 realtime，缓冲硬编码 100ms；
+     * 一旦媒体流被旧记忆/开关推到 compatibility，就会 `late/missing/discontinuity` 齐涨。
+     * 只保护 48k PCM 媒体档：44.1k media（Honda HFT 实测踩雷）和 AAC 档保持既有顺序，
+     * 已被记忆否掉的 media 档也不翻案——那台车机确有拆链证据。
+     */
+    fun prioritizeMedia48k(
+        candidates: List<AudioProfile>,
+        rejected: Set<String>,
+    ): List<AudioProfile> {
+        val protectedOnes =
+            candidates.filter {
+                it.audioType.equals("media", ignoreCase = true) &&
+                    it.streamType == 100L &&
+                    it.codec == AudioCodec.PCM &&
+                    it.sampleRate == 48_000 &&
+                    it.key !in rejected
+            }
+        if (protectedOnes.isEmpty() || candidates.first() in protectedOnes) return candidates
+        return protectedOnes + candidates.filterNot { it in protectedOnes }
+    }
+
+    /**
      * 计算本轮的尝试顺序（纯函数，便于单测）。
      *
      * @param candidates 按「越靠前越推荐」排好的基线候选（来自车机 /info）。
