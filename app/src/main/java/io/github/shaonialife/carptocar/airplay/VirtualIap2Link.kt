@@ -1333,7 +1333,12 @@ class VirtualIap2Link(
          */
         const val NOW_PLAYING_POLL_MILLIS = 1_500L
 
-        /** 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。 */
+        /**
+         * 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。
+         * 协议核 `libcardeck_protocol.so` 逆向交叉验证档位一致：`nativeMfiChallengeSizeForCertificate`
+         * (@0x9addc) 按证书类型查表 @0x22520 = `[20, 32, -1, 16]`（-1 = 无效类型），
+         * 即三档 20/32/16，与本基线一致（2026-11-22 逆向）。
+         */
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
 
         /** ECDSA P-256 证书（AuthV3 芯片）冷启动 32B 优先。 */

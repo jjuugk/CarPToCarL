@@ -1233,6 +1233,12 @@ class Iap2LinkEngine(
         /** 会话描述符里的类型字段：0 = 控制会话（xcertplay/extractor/catplay 一致）。 */
         private const val CONTROL_KIND = 0
 
+        /**
+         * iAP2 DETECT/同步标记。协议核 `libcardeck_protocol.so` 逆向交叉验证一致：
+         * `nativeIap2IsDetectMarker`(@0x9ac38) 构造常量 `0x10ee_0002_55ff`，即小端
+         * `FF 55 02 00 EE 10`，且按 5B 前缀 / 6B 全串两种形态判定——与这里的 6 字节
+         * MARKER 及 [Iap2LinkPacket.splitFrames] 的形态识别吻合（2026-11-22 逆向）。
+         */
         val MARKER = byteArrayOf(0xFF.toByte(), 0x55, 0x02, 0x00, 0xEE.toByte(), 0x10)
         const val HEADER_BYTES = 9
         private const val SYNCHRONIZATION_VERSION = 1
