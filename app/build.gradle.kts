@@ -48,15 +48,25 @@ val keystoreProps =
 val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
 
 android {
+    // namespace 保持原包名：源码目录、R 类、BuildConfig 都挂在它下面，改它会牵动
+    // 全部 import。安装标识看的是 applicationId，两者可以不同。
     namespace = "io.github.shaonialife.carptocar"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.shaonialife.carptocar"
+        // v2 版（分支 feat/v2-protocol-core，基线 = main 的 1.2.80 纯净版）：
+        // applicationId 与主包不同，系统按两个独立应用对待，可同机共存。
+        // 只改这一处即可——Manifest 无 android:authorities、无 sharedUserId，
+        // 组件类名都在 namespace 下，随 applicationId 变为独立组件。
+        applicationId = "io.github.shaonialife.carptocarlv2"
         minSdk = 31
         targetSdk = 34
         versionCode = appVersionCode
         versionName = appVersionName
+
+        // Rust 协议核（libcardeck_protocol.so）只有 arm64-v8a 一份；显式声明，
+        // 避免构建出缺 so 的其它 ABI 变体后在设备上 UnsatisfiedLinkError。
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {

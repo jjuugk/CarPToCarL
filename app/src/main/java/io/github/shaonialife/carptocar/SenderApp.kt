@@ -11,6 +11,7 @@ import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
+import io.github.shaonialife.carptocar.protocol.ProtocolCoreProbe
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
@@ -40,6 +41,14 @@ class SenderApp : Application() {
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，
         // 原因见 SessionTrace 注释（报文量大会挤掉过程日志）。必须在业务起来之前 attach。
         SessionTrace.attach(this)
+        // Rust 协议核加载自检（v2）：只证明 so 能加载、能调用，不参与任何链路。
+        // 放后台线程——加载 + 一次 native 调用要给 10~30ms，不值得卡住主线程启动；
+        // 失败也只落日志，现有 Kotlin 实现照常工作。
+        val appContext = this
+        Thread(
+            { DebugFileLog.append(appContext, "RUST: ${ProtocolCoreProbe.run()}") },
+            "protocol-core-probe",
+        ).start()
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             Log.e(TAG, "未捕获异常（线程 ${thread.name}，已吞掉保进程）", throwable)

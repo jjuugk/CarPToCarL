@@ -3,7 +3,7 @@
     <!-- 应用名**不含** CarPlay：它既是 Apple 的商标，用「CarPlay」作产品名会构成
          商标性使用（且容易被误认为官方产品）。兼容关系写在副标题/README 里，
          那属于描述性引用。详见仓库根目录 DISCLAIMER.md 与 README「非官方声明」。 -->
-    <string name="app_name">CarPToCarL</string>
+    <string name="app_name">CarPToCarL v2</string>
     <string name="app_subtitle">非官方实验性 CarPlay 兼容发送端</string>
     <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
 </resources>
