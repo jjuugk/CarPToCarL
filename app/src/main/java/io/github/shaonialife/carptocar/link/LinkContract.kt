@@ -228,6 +228,20 @@ interface AirPlayLinkSession {
         displayUuid: String? = null,
     ): ScreenStreamInfo?
 
+    /**
+     * 把一条裸屏流帧交给链路实现密封（返回**128B 头 + 密文的整帧**）。
+     *
+     * 只有协议核链路需要它：Rust 会话内持有 ChaCha 密钥/计数与帧头时间戳，
+     * Kotlin 的 [ScreenStreamInfo.cipher] 因此是 [StreamFrameCipher.CoreSealed]，
+     * 发送端必须调这个方法而不是自己做 AEAD。其它实现返回 null（走本地加密）。
+     *
+     * [ptsNanos] = 帧 PTS（纳秒单调时钟）；接收端只用它做时序，不参与密钥派生。
+     */
+    fun sealScreenFrame(
+        payload: ByteArray,
+        ptsNanos: Long,
+    ): ByteArray? = null
+
     fun runAudioStream(
         sharedSecret: ByteArray,
         profile: AudioProfile,

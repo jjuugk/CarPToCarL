@@ -208,6 +208,25 @@ class ProtocolCoreSession(
         return info
     }
 
+    /**
+     * 屏流帧密封下沉到协议核。Rust 会话态里才有本轮的 ChaCha 流钥与帧计数，
+     * Kotlin 自己加密会与接收端计数错位 → WinPlay「视频帧认证失败」。
+     *
+     * 返回值是**整帧**（128B 头 + 密封载荷），调用方不得再拼头或二次加密。
+     * null = 会话封包态还没建好（未 SETUP / 被拒），此时必须跳帧。
+     */
+    override fun sealScreenFrame(
+        payload: ByteArray,
+        ptsNanos: Long,
+    ): ByteArray? {
+        val handle = link.sessionPumpHandle
+        if (handle == 0L) return null
+        // NTP-1900 墙钟锚；只用于 Rust 组装帧头时间戳，不参与 AEAD 密钥。
+        val epochNtpSecs = (System.currentTimeMillis() / 1000L + 2_208_988_800L).toInt()
+        return io.github.shaonialife.cardeck.protocol.NativeBridge
+            .nativeAirplayScreenSealFrame(handle, payload, ptsNanos, epochNtpSecs)
+    }
+
     override fun runAudioStream(
         sharedSecret: ByteArray,
         profile: AudioProfile,

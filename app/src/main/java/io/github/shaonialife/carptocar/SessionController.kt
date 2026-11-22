@@ -7128,6 +7128,11 @@ object SessionController {
                                                     }
                                                 }
                                             },
+                                            // 协议核链路：帧头/密钥/计数都在 Rust 会话态里，
+                                            // 必须经链路实现密封；本地 ChaCha 分支走不到这里。
+                                            frameSealer = { payload, ptsNanos ->
+                                                client.sealScreenFrame(payload, ptsNanos)
+                                            },
                                         ).also { created = it }
                                     }
                                     val initialSender = screen?.let(makeSender)

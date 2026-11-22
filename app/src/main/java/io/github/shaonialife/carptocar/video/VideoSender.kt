@@ -80,6 +80,14 @@ class VideoSender(
      */
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
     private val clockMillis: () -> Long = { defaultMonotonicMillis() },
+    /**
+     * 协议核链路的帧密封器：入参 = 裸帧（4B 长度前缀 NAL 序列）与 PTS，
+     * 返回 = Rust 产出的**整帧**（128B 头 + 密文）。只有 [StreamFrameCipher.CoreSealed]
+     * 会用到；自研链路留 null，走下面的本地 ChaCha/AES。
+     *
+     * 不传却拿到 CoreSealed 时必须**跳帧**——发明文会让车机判「视频帧认证失败」。
+     */
+    private val frameSealer: ((payload: ByteArray, ptsNanos: Long) -> ByteArray?)? = null,
 ) : VideoSink {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -145,6 +153,16 @@ class VideoSender(
     private val ended = AtomicBoolean(false)
     private val stoppedLocally = AtomicBoolean(false)
     private var frameCounter = 0L
+
+    /** 协议核密封失败只打首条 + 每 150 帧一条，避免把日志刷爆。 */
+    private var coreSealConsecutiveFailures = 0
+
+    private fun logCoreSealFailure(reason: String) {
+        coreSealConsecutiveFailures++
+        if (coreSealConsecutiveFailures == 1 || coreSealConsecutiveFailures % 150 == 0) {
+            log("VIDEO: ⚠ 跳过未密封帧（第 $coreSealConsecutiveFailures 帧）——$reason")
+        }
+    }
 
     /**
      * VideoConfig 是否已发出。
@@ -647,7 +665,14 @@ class VideoSender(
         lastIdleResendAt = now
         suppressFrameLog = true
         try {
-            if (sendFrameFromNals(nals, keyFrame = true, output = output, idleResend = true)) {
+            if (sendFrameFromNals(
+                    nals,
+                    keyFrame = true,
+                    output = output,
+                    idleResend = true,
+                    ptsNanos = System.nanoTime(),
+                )
+            ) {
                 idleResendCount++
                 if (idleResendCount == 1L || idleResendCount % 30L == 0L) {
                     log(
@@ -824,7 +849,7 @@ class VideoSender(
                 }
             }
             val writeStartMs = monotonicMillis()
-            sendFrameFromNals(nalUnits, keyFrame, output)
+            sendFrameFromNals(nalUnits, keyFrame, output, ptsNanos = System.nanoTime())
             val writtenAtMs = monotonicMillis()
             // 写入耗时本身就是背压指标：socket 写不动时会直接阻塞在这里，
             // 而这条调用链跑在 CarLife 的读线程上，一卡就是一整条视频通路在卡。
@@ -935,7 +960,13 @@ class VideoSender(
                         if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                             sendVideoConfig(buffer, bufferInfo.size, output)
                         } else if (bufferInfo.size > 0) {
-                            sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
+                            sendVideoFrame(
+                                buffer,
+                                bufferInfo.size,
+                                flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0,
+                                output,
+                                ptsNanos = bufferInfo.presentationTimeUs * 1000L,
+                            )
                         }
                         codec.releaseOutputBuffer(index, false)
                         maybeSendKeepAlive(output)
@@ -1103,10 +1134,11 @@ class VideoSender(
         size: Int,
         keyFrame: Boolean,
         output: java.io.OutputStream,
+        ptsNanos: Long,
     ) {
         val annexB = ByteArray(size)
         buffer.get(annexB)
-        sendFrameFromNals(splitAnnexB(annexB), keyFrame, output)
+        sendFrameFromNals(splitAnnexB(annexB), keyFrame, output, ptsNanos = ptsNanos)
     }
 
     /** 把一组 NAL 打包成 4B 长度前缀流，加密后作为视频帧发出。 */
@@ -1115,6 +1147,7 @@ class VideoSender(
         keyFrame: Boolean,
         output: java.io.OutputStream,
         idleResend: Boolean = false,
+        ptsNanos: Long = 0L,
     ): Boolean {
         if (!configSent) {
             log("VIDEO: 丢弃一帧（config 尚未发送）")
@@ -1147,27 +1180,52 @@ class VideoSender(
         try {
             synchronized(writeLock) {
                 if (!configSent || (idleResend && lastIdrNals !== nalUnits)) return false
-                val header =
-                    buildHeader(
-                        OP_FRAME,
-                        if (frameCipher is StreamFrameCipher.ChaCha) plain.size + TAG_SIZE else plain.size,
-                    )
-                val sealed =
-                    when (val cipher = frameCipher) {
-                        is StreamFrameCipher.ChaCha ->
-                            AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
-                        is StreamFrameCipher.AesCtr -> {
-                            val encrypted = plain.copyOf()
-                            aesStream?.applyKeystream(encrypted)
-                            encrypted
+                if (frameCipher is StreamFrameCipher.CoreSealed) {
+                    // 协议核链路：密钥、帧计数、128B 帧头全在 Rust 会话态里。
+                    // 这里把裸帧交出去，拿回的已是**整帧**；Kotlin 不得再拼头/加密，
+                    // 更不能像以前那样原样发明文（车机侧表现：视频帧认证失败 → 拆链）。
+                    val sealer = frameSealer
+                    val whole =
+                        if (sealer == null) {
+                            logCoreSealFailure("帧密封器缺失（协议核会话未注入）")
+                            return false
+                        } else {
+                            try {
+                                sealer(plain, if (ptsNanos > 0L) ptsNanos else System.nanoTime())
+                            } catch (error: Exception) {
+                                logCoreSealFailure("帧密封调用异常：${error.javaClass.simpleName}: ${error.message}")
+                                return false
+                            }
                         }
-                        // 协议核链路：密封在 native 内完成，这里原样透传（再加密一次 = 对端解出乱码）。
-                        StreamFrameCipher.CoreSealed -> plain
+                    if (whole == null || whole.size <= HEADER_LEN) {
+                        logCoreSealFailure("协议核返回空帧（会话封包态未就绪）")
+                        return false
                     }
-                frameCounter++
-                output.write(header)
-                output.write(sealed)
-                output.flush()
+                    coreSealConsecutiveFailures = 0
+                    output.write(whole)
+                    output.flush()
+                } else {
+                    val header =
+                        buildHeader(
+                            OP_FRAME,
+                            if (frameCipher is StreamFrameCipher.ChaCha) plain.size + TAG_SIZE else plain.size,
+                        )
+                    val sealed =
+                        when (val cipher = frameCipher) {
+                            is StreamFrameCipher.ChaCha ->
+                                AirPlayCrypto.chachaSeal(cipher.key, AirPlayCrypto.nonce64(frameCounter), plain, header)
+                            is StreamFrameCipher.AesCtr -> {
+                                val encrypted = plain.copyOf()
+                                aesStream?.applyKeystream(encrypted)
+                                encrypted
+                            }
+                            StreamFrameCipher.CoreSealed -> error("unreachable")
+                        }
+                    frameCounter++
+                    output.write(header)
+                    output.write(sealed)
+                    output.flush()
+                }
             }
         } finally {
             writeStartedAt = 0L
