@@ -7,6 +7,7 @@ import io.github.shaonialife.carptocar.airplay.PairingTrouble
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.airplay.AirPlayLink
 import io.github.shaonialife.carptocar.airplay.ControlKeys as FirmwareControlKeys
@@ -34,10 +35,12 @@ import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
  *  - 单流 TEARDOWN（Rust 只有整会话 teardown）→ 返回 false，不断开会话（断开更糟）
  *  - 通话/麦克风音频档候选 → 空表（上层会退回主音频档）
  *  - 麦克风探针 → 0
- *  - NowPlaying / CallState 推送、导航 ducking → 无动作
+ *  - NowPlaying 推送 → **已补**：用 [Iap2NowPlaying] 编码 0x5001，经控制通道
+ *    `iAPSendMessage` 发出（与自研链路同一条出口）；封面编号与歌词仍无（见 [pushNowPlaying]）
+ *  - CallState 推送、导航 ducking → 无动作
  *  - 事件通道 iAP 字节透传、iAP 隧道句柄 → 无（隧道由 flow 内部的 SetupPlan 自建）
  *
- * 这些落差**不影响"能不能连上、能不能出画面"**，只影响通话、媒体信息与导航闪避。
+ * 这些落差**不影响"能不能连上、能不能出画面"**，只影响通话、封面与导航闪避。
  * 定位是：先验证协议核在真车上能把会话连起来，再逐项补这些能力。
  */
 class ProtocolCoreSession(
@@ -81,6 +84,9 @@ class ProtocolCoreSession(
     private val activeStreams = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
 
     @Volatile private var screenStreamUp = false
+
+    /** 0x5001 首推只做一次：控制会话刚就绪时补一发，避免「订阅早于歌名」留下空态。 */
+    @Volatile private var nowPlayingPrimed = false
 
     /** 降级日志只打一次，避免每帧/每次调用刷屏。 */
     private val degradations = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -170,11 +176,14 @@ class ProtocolCoreSession(
     override fun awaitControlSession(timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (link.controlReady) return true
+            if (link.controlReady) {
+                primeNowPlayingOnce()
+                return true
+            }
             if (cancelled) return false
             Thread.sleep(50)
         }
-        return link.controlReady
+        return link.controlReady.also { if (it) primeNowPlayingOnce() }
     }
 
     override fun close() {
@@ -183,6 +192,7 @@ class ProtocolCoreSession(
         lastFirmwareSetup = null
         lastKeys = null
         screenStreamUp = false
+        nowPlayingPrimed = false
         activeStreams.clear()
     }
 
@@ -373,6 +383,9 @@ class ProtocolCoreSession(
         }
         val firmwareSetup = lastFirmwareSetup ?: setup.toFirmwareSetup()
         link.connectEventChannel(keys?.eventsWriteKey, keys?.eventsReadKey, firmwareSetup, onCommand)
+        // 明文会话不会走 awaitControlSession；事件通道建起来时控制会话早已 ready，
+        // 这里补一发当前曲目，避免音乐先于连接开始播时仪表一直空着。
+        primeNowPlayingOnce()
         return true
     }
 
@@ -418,7 +431,36 @@ class ProtocolCoreSession(
     override var callStateSource: (() -> Int)? = null
 
     override fun pushNowPlaying(quiet: Boolean) {
-        logOnce("now-playing", "LINK: 协议核链路暂无 NowPlaying 推送（0x5001），车机媒体信息不会更新")
+        val np = nowPlayingSource?.invoke() ?: return
+        if (!controlSessionReady) {
+            if (!quiet) {
+                logOnce("now-playing-no-control", "LINK: 控制会话未就绪，0x5001 本轮跳过")
+            }
+            return
+        }
+        // Rust 侧不向宿主交付 session 12 文件传输句柄；0x5001 里声明 artworkId
+        // 却发不出图会让车机一直等这一张，所以这里只发文字/状态/进度。
+        val safe = np.takeIf { it.artworkId == null } ?: np.copy(artworkId = null)
+        val frame = Iap2NowPlaying.encode(safe)
+        val ok = sendIap(frame)
+        if (!quiet) {
+            log(
+                "LINK: 0x5001 推送（歌名=${safe.title ?: "?"}" +
+                    " 歌手=${safe.artist ?: "?"} 状态=${safe.status}）" +
+                    " sendIap=$ok ${frame.size}B",
+            )
+        }
+    }
+
+    /** 控制会话刚就绪时补一发当前曲目；只做一次，后续交给宿主的变化/进度事件。 */
+    private fun primeNowPlayingOnce() {
+        if (nowPlayingPrimed || !controlSessionReady) return
+        nowPlayingPrimed = true
+        logOnce(
+            "now-playing-enabled",
+            "LINK: 协议核链路已接管 0x5001 推送（控制通道 iAPSendMessage；封面/歌词仍无）",
+        )
+        pushNowPlaying(quiet = true)
     }
 
     override fun pushCallState() {

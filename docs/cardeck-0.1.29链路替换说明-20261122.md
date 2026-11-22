@@ -49,14 +49,18 @@
 - `ControlKeys` 在适配层补 `phoneReadKey` 空数组（0.1.29 的 ControlKeys 少这一字段）。
 - `SetupInfo`/`ScreenStreamInfo`/`AudioStreamInfo` 在适配层做类型转换，屏流标 `CoreSealed`。
 - `nativeSessionSendMediaLibrary` 两版都只有声明、零调用；媒体库推送未接线（已知落差）。
+- **歌曲信息（歌名/歌手/专辑/播放状态/进度）已补**：`ProtocolCoreSession.pushNowPlaying()`
+  改用 `Iap2NowPlaying.encode()` 生成完整 `0x5001` CSM 帧，经 `sendIap()`
+  （控制通道 `iAPSendMessage`）发给车机；控制会话就绪时补推一次，之后跟随宿主的
+  内容变化 / 每秒进度事件。`artworkId` 强制去掉，避免声明了封面却发不出图。
 
 ## 验证
 
 - 编译：`assembleDebug` + `compileDebugKotlin` 通过。
 - 单测：**946 例 0 失败**（v2 为 968；差额来自归档 3 个只测自研 iAP2 的失效测试文件）。
 - 调试包：`app/build/outputs/apk/debug/app-debug.apk`，18,637,133 B，
-  sha256 `6f37d1a336b64fea5a4ecd2ca12df69f3b33db15c049495709e452e1851f01d8`
-  （含下述 DETECT 探针修正；修正前为 `85db839f…8a1f8f23a`）。
+  sha256 `1b331292ea4372e250d96867de9f69e16ad51e21fc6eb5e8312e91d8200d91ab`
+  （含下述 DETECT 探针修正与 0x5001 歌曲信息修复；前一版为 `6f37d1a3…f01d8`）。
 - 补修遗留项：`ProtocolCoreProbe` 原来给 `nativeIap2IsDetectMarker` 传的是
   `FF 55 00 00 00 00`，与逆向确认的魔数 `FF 55 02 00 EE 10` 不符，导致日志
   `ABI=异常｜detectMarker=0`。已改为正确魔数，预期日志变为 `ABI=ok｜detectMarker=1`
@@ -71,5 +75,9 @@
 
 ## 已知落差
 
-- 歌名/封面/歌词、通话/麦克风音频、导航 ducking 等能力本分支未补齐（与 v2 一致）。
+- **歌名/歌手/专辑/播放状态/进度已补**（走 `0x5001`，同自研链路出口）；**封面**仍未补：
+  协议核把 session 12 的 START/SUCCESS 应答吞在 Rust 内，Kotlin 只拿到 id+len 日志，
+  无法可靠驱动 `Iap2ArtworkTransfer`。**歌词**协议层无字段，只能沿用「歌词行写进 title」
+  的现有策略（CarLife 内置播放器有效，第三方播放器无数据源）。
+- 通话/麦克风音频、导航 ducking 等能力本分支未补齐（与 v2 一致）。
 - cardeck 0.1.29 的重放测试（BtLinkReplay / TunnelReplay 等）依赖 Shizuku fixture 与 Python 工具，**未移植**。
