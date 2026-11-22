@@ -1,7 +1,7 @@
 package io.github.shaonialife.carptocar.protocolcore
 
 import io.github.shaonialife.carptocar.input.HidNavigation
-import io.github.shaonialife.carptocar.protocol.NativeBridge
+import io.github.shaonialife.cardeck.protocol.NativeBridge
 
 /**
  * WiFi 隧道 iAP2 链路（原生会话薄层）——第二 iAP2 Endpoint 的宿主侧持有者。

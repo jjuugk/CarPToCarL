@@ -1,8 +1,19 @@
-package io.github.shaonialife.carptocar.protocol
+package io.github.shaonialife.cardeck.protocol
 
 /**
  * Rust 协议库（cardeck-protocol，iOS accessoryd/AirPlaySender 等单元的工具化转译）
  * 的原生桥。
+ *
+ * ## 包名 `io.github.shaonialife.cardeck.protocol` 是硬约束，不能改
+ *
+ * so 里的符号是**静态 JNI 绑定**，全名为
+ * `Java_io_github_shaonialife_cardeck_protocol_NativeBridge_<方法名>`
+ * （118 条，已从 `.so` 字符串表逐条核对）。JVM 按「声明类的全限定名 + 方法名」
+ * 查找 native 实现，包名一改就查不到，118 个 external fun 会全部
+ * `UnsatisfiedLinkError`——而且是运行时才炸，编译期毫无提示。
+ *
+ * 因此本项目虽然 applicationId / namespace 都是 `io.github.shaonialife.carptocar`，
+ * 这个类仍必须挂在这条外来路径下。它是全工程唯一的例外，不要为了「统一」挪走它。
  *
  * 已接入的固件原语（iOS accessoryd 转译，行为由 Rust 侧单测锁定）：
  * iAP2 校验和、DETECT marker 判定、0x1D01 参数名查表。这些是纯值函数，

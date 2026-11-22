@@ -8,7 +8,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.TcpLiveness
-import io.github.shaonialife.carptocar.protocol.NativeBridge
+import io.github.shaonialife.cardeck.protocol.NativeBridge
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 import java.io.IOException
 import java.net.Inet6Address

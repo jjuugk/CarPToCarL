@@ -1,6 +1,6 @@
 package io.github.shaonialife.carptocar.protocolcore
 
-import io.github.shaonialife.carptocar.protocol.NativeBridge
+import io.github.shaonialife.cardeck.protocol.NativeBridge
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 
