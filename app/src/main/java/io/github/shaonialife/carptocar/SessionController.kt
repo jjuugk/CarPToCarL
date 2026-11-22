@@ -6572,7 +6572,13 @@ object SessionController {
                                                 } ?: "车机没给描述符"
                                             appendLog(
                                                 "EVENT: HID 报告首次来自 uuid=$uuidKey → $profile" +
-                                                    "（报告 ${report?.size ?: 0}B）",
+                                                    "（报告 ${report?.size ?: 0}B）" +
+                                                    // 触摸偏移定位用：原始报文能证实 X/Y 取位与描述符是否一致。
+                                                    report
+                                                        ?.take(32)
+                                                        ?.joinToString(" ") { "%02x".format(it) }
+                                                        ?.let { " hex=$it" }
+                                                        .orEmpty(),
                                             )
                                         }
                                         // 车机媒体键（Consumer Control）走 hidSendReport 通路，

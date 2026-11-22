@@ -53,20 +53,45 @@
   改用 `Iap2NowPlaying.encode()` 生成完整 `0x5001` CSM 帧，经 `sendIap()`
   （控制通道 `iAPSendMessage`）发给车机；控制会话就绪时补推一次，之后跟随宿主的
   内容变化 / 每秒进度事件。`artworkId` 强制去掉，避免声明了封面却发不出图。
+- **画布/触摸几何字段补回**（触摸偏移排查）：0.1.29 原码的 `SetupInfo` 没有
+  `displayFromCar`，无 displays 时兜 1080×2320 竖屏、未声明 maxFPS 兜 30；宿主
+  Side 依赖这三项决定 98311 申请书、画布记忆和触摸映射域。已在移植版恢复：
+  `displayFromCar = 宽高有效`，兜底回 1280×720，`maxFps` 未声明保持 0，
+  并由 `ProtocolCoreSession` 双向转换传给主控。同时在每个 HID 设备的首条报告日志
+  追加原始 hex，便于下次从报文直接核对 X/Y 取位。
 
 ## 验证
 
 - 编译：`assembleDebug` + `compileDebugKotlin` 通过。
 - 单测：**946 例 0 失败**（v2 为 968；差额来自归档 3 个只测自研 iAP2 的失效测试文件）。
-- 调试包：`app/build/outputs/apk/debug/app-debug.apk`，18,637,133 B，
-  sha256 `1b331292ea4372e250d96867de9f69e16ad51e21fc6eb5e8312e91d8200d91ab`
-  （含下述 DETECT 探针修正与 0x5001 歌曲信息修复；前一版为 `6f37d1a3…f01d8`）。
+- 调试包：`app/build/outputs/apk/debug/app-debug.apk`，18,638,001 B，
+  sha256 `89afd48c3cccb1aa7e328385cea212cc0d814f3676f605d1de87ebadf818fcb2`
+  （含 DETECT 探针修正、0x5001 歌曲信息修复与画布/触摸几何修复；前一版为 `1b331292…d91ab`）。
 - 补修遗留项：`ProtocolCoreProbe` 原来给 `nativeIap2IsDetectMarker` 传的是
   `FF 55 00 00 00 00`，与逆向确认的魔数 `FF 55 02 00 EE 10` 不符，导致日志
   `ABI=异常｜detectMarker=0`。已改为正确魔数，预期日志变为 `ABI=ok｜detectMarker=1`
   （本机 adb 不可用，待真机确认）。
 - **未做真机/真车验证**：iAP2 全流程改由 Rust 驱动是根本性变更，需在实车上确认
   `iap2 flow endpoint` 事件能否到站、0x5703/0x4301 是否被 Rust 正确消化。
+
+## 触摸偏移排查（2026-11-22）
+
+- 现象：用户反馈「触摸有点偏移」。本机无 adb，拿不到该反馈对应的日志；能拿到的最新日志是
+  17:55 那版（v2 包），因此**不能把那次日志当成这次反馈的现场**。
+- 17:55 日志交叉核对：`/info` 与 HID 描述符都是 1280×720（X 逻辑上限 0x500、Y 0x2d0，
+  12B = 2 槽 × [tip][contact-id+padding][X u16LE][Y u16LE]），`DISPLAY:` 与
+  `CARLIFE: 触控 ↓ (x,y)→(x,y)` 也都在同一域内。就这份日志看，**没有比例错**，
+  不能凭它下「坐标缩放错」的结论。
+- 代码侧发现的确定缺口：0.1.29 `AirPlayLink.SetupInfo` 丢了宿主依赖的
+  `displayFromCar`，且兜底/帧率语义与原链路不同（见上）。这会让「车机没给 displays」
+  的车按错域设触摸映射，或把兜底画布当成车机画布写进 98311/画布记忆——足以造成
+  按比例偏移。已修复，但**是否就是用户反馈的那一次，仍需新日志确认**。
+- 下次上车请抓含以下三行的日志：
+  `AIRPLAY: ✓ 连接序完成 … display=W×H`、`DISPLAY: 车机 W×H → 流 …`、
+  `EVENT: HID 报告首次来自 uuid=2a2a2a2a … hex=…`。
+  判据：若 W×H 与车机实际画布不符 → 几何修复生效范围；若 hex 里 X/Y 字节与
+  `CARLIFE: 触控 ↓` 对不上 → 取位问题；若两者都对、落点仍偏 → 车机/CarLife 引擎侧
+  的画面容器偏移，再考虑开「触摸域自适应」兜底。
 
 ## 归档的失效测试
 

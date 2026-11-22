@@ -1380,15 +1380,26 @@ class AirPlayLink(
         if (hidUuids.isNotEmpty()) {
             log("AIRPLAY: hidDevices=" + hidUuids.joinToString(",") + "（武装 hidSetInputMode）")
         }
+        // 0.1.29 原码把无 displays 兜成 1080×2320（手机竖屏）、maxFPS 兜成 30，
+        // 且没有「画布是否来自车机」标记。宿主 Side 的 CarLife 画布/触摸映射依赖这三项，
+        // 缺了就会拿兜底域去对真实 HID 坐标——表现为触摸整体按比例偏移。
+        val displayW = display?.optLong("widthPixels")?.toInt()?.takeIf { it > 0 }
+        val displayH = display?.optLong("heightPixels")?.toInt()?.takeIf { it > 0 }
+        val fromCar = displayW != null && displayH != null
+        if (!fromCar) {
+            log("AIRPLAY: /info displays[0] 无有效宽高——画布回退 1280×720（触摸映射按兜底域）")
+        }
         return SetupInfo(
             eventPort = cj.optInt("eventPort"),
             timingPort = cj.optInt("timingPort"),
             keepAlivePort = cj.optInt("keepAlivePort").takeIf { it != 0 },
             enabledFeatures = enabledFeatures,
-            displayWidth = (display?.optLong("widthPixels") ?: 1080L).toInt(),
-            displayHeight = (display?.optLong("heightPixels") ?: 2320L).toInt(),
+            displayWidth = displayW ?: 1280,
+            displayHeight = displayH ?: 720,
+            displayFromCar = fromCar,
             displayUuid = display?.optString("uuid").orEmpty(),
-            maxFps = (display?.optLong("maxFPS") ?: 30L).toInt(),
+            // 0 = 车机没声明（由 video/StreamFps 判 60）；不能兜成 30 凭空造一个上限。
+            maxFps = display?.optLong("maxFPS")?.toInt() ?: 0,
             hidDeviceUuids = hidUuids,
             hidDescriptors = hidDescriptors,
             // R3 恢复接线（M5.2 起断链——/info 该键无人读；奥迪 3315 声明 true，
@@ -1408,6 +1419,8 @@ class AirPlayLink(
         val displayHeight: Int,
         val displayUuid: String?,
         val maxFps: Int,
+        /** 宽高是否真的来自车机；false = 兜底，宿主不得拿它申请 98311 或写画布记忆。 */
+        val displayFromCar: Boolean = false,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
         val hidDeviceUuids: List<String> = emptyList(),
         /**
