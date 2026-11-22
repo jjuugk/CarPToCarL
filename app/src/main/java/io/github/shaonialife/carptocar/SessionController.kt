@@ -32,6 +32,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
+import io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide
 import io.github.shaonialife.carptocar.carlife.LyricLines
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
@@ -42,6 +43,7 @@ import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.iap2.NmeaAssembler
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
@@ -671,6 +673,25 @@ object SessionController {
         // 数据源 C：播放位置（引擎每秒一条 0x10036）。必须逐秒补推 0x5001，
         // 否则车机只在换歌那刻收到一次位置，进度条永远停在 0:00。真 iPhone 也按秒推。
         CarLifeHijack.addMediaProgressListener { pushNowPlayingPosition() }
+
+        // 数据源 D：CarLife+ 导航诱导（0x10030）。编码成 Apple iAP2 0x5201/0x5202
+        // 后推给车机；是否真发由 Iap2RouteGuidance 按「该链路已订阅 0x5200」决定。
+        CarLifeHijack.addNaviNextTurnListener { info ->
+            val detail =
+                "${CarLifeNaviGuide.actionLabel(info.action)} " +
+                    "${CarLifeNaviGuide.label(info.nextTurn)}(${info.nextTurn}) → " +
+                    "${info.roadName} · ${info.remainDistance}m / ${info.totalDistance}m"
+            appendLog("EVENT: CarLife 导航诱导 $detail → 补推 iAP2 0x5201/0x5202")
+            Iap2RouteGuidance.publish(info)
+            pushRouteGuidanceAll()
+        }
+    }
+
+    /** 把最新导航引导扇出到三条链路（与 [pushNowPlayingAll] 同样的分发形态）。 */
+    private fun pushRouteGuidanceAll() {
+        currentClient?.pushRouteGuidance()
+        bluetoothServer?.pushRouteGuidance()
+        bluetoothClient?.pushRouteGuidance()
     }
 
     /** 上次进度补推日志时刻（只影响日志，不影响发包）。 */
@@ -2631,6 +2652,8 @@ object SessionController {
         // 车机声明快照同样按轮清空：上一台车的「可收清单」绝不能拿来裁这一台
         // （清单是 MIB3 突发两条专用消息的裁剪判据，串轮次会误裁）。
         AccessoryDeclaration.reset()
+        // 导航订阅是链路级状态：上一轮车机的 0x5200 声明不能带到这一轮
+        Iap2RouteGuidance.reset()
         auditSummarizedCount = -1
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)

@@ -129,6 +129,15 @@ internal object CarLifeProtocol {
     const val MD_MEDIA_PROGRESS = 65590
 
     /**
+     * 手机端导航诱导信息（`MSG_CMD_NAVI_NEXT_TURN = 0x00010030`），MD→HU 控制通道。
+     *
+     * 载荷是 `CarlifeNaviNextTurnInfoProto.CarlifeNaviNextTurnInfo` 裸消息，
+     * 字段号与转向码表见 [CarLifeNaviGuide]；车机端参考实现是反编译目录里的
+     * `b8/g.smali`（过滤 0x10030 → 组装高德广播）与 `w9/d.smali`（命令号→解析器注册）。
+     */
+    const val MD_NAVI_NEXT_TURN = 65584
+
+    /**
      * 手机自发的状态广播，都是 0 字节、无需回应。
      *
      * 65563(0x1001B)/65560(0x10018) 在版本匹配前后就会到，属于引擎的常规状态上报。

@@ -313,6 +313,43 @@ object CarLifeHijack {
         mediaInfoListeners.remove(listener)
     }
 
+    /**
+     * 最近一条 CarLife 导航诱导（0x10030，转向/路名/距离）。
+     *
+     * 与媒体信息一样做成「状态 + 监听器」：状态供 iAP2 侧在收到 0x5200 订阅时
+     * 立即补一帧，监听器供上层在每条诱导到达时主动推 0x5201/0x5202。
+     */
+    @Volatile
+    var latestNaviNextTurn: CarLifeNaviNextTurn? = null
+        private set
+
+    @Volatile
+    var latestNaviNextTurnAtMs: Long = 0L
+        private set
+
+    /** 累计收到的诱导条数（含开始/结束），仅供日志与诊断。 */
+    @Volatile
+    var naviNextTurnCount: Int = 0
+        private set
+
+    private val naviNextTurnListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(CarLifeNaviNextTurn) -> Unit>()
+
+    fun addNaviNextTurnListener(listener: (CarLifeNaviNextTurn) -> Unit) {
+        naviNextTurnListeners.add(listener)
+    }
+
+    fun removeNaviNextTurnListener(listener: (CarLifeNaviNextTurn) -> Unit) {
+        naviNextTurnListeners.remove(listener)
+    }
+
+    private fun onNaviNextTurn(info: CarLifeNaviNextTurn) {
+        latestNaviNextTurn = info
+        latestNaviNextTurnAtMs = android.os.SystemClock.elapsedRealtime()
+        naviNextTurnCount++
+        naviNextTurnListeners.forEach { runCatching { it(info) } }
+    }
+
     private var worker: Thread? = null
 
     /**
@@ -1132,6 +1169,7 @@ object CarLifeHijack {
                     },
                     onMediaInfo = { info -> onMediaInfo(info) },
                     onMediaProgress = { ms -> onMediaProgress(ms) },
+                    onNaviNextTurn = { info -> onNaviNextTurn(info) },
                     requestedFps = requestedFps,
                     initialConnectType = connectType,
                     mediaSampleRate = AudioRatePreference.load(appContext).mediaSampleRateFeatureValue,

@@ -2318,6 +2318,14 @@ class AirPlayClient(
     }
 
     /**
+     * CarLife 导航诱导到达时主动补推 iAP2 0x5201/0x5202（见 [VirtualIap2Link.pushRouteGuidance]）。
+     * 是否真发由链路侧按「车机已订阅 0x5200」判断，这里只负责转发。
+     */
+    fun pushRouteGuidance() {
+        obtainIapLink().pushRouteGuidance()
+    }
+
+    /**
      * MIB3 布防：屏幕流 SETUP 成功后调用——主动经**控制通道** POST /command 发一次
      * DETECT，随后等车机 SYN（真机 Frida 时序，详见 [VirtualIap2Link.armMib3]）。
      * 明文会话（pre-HomeKit 老车机）没有 WiFi 隧道语义，跳过。
