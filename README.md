@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk)**
-> —— 主线固定直链（当前 1.2.81，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk)**
+> —— 主线固定直链（当前 1.2.82，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.81，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.81.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.82，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.82.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.81`（正式版；选档加固：未被否掉的 `t100/media` 48k PCM 不会被旧记忆推到 compatibility 之后，避免接收端把媒体流按 realtime 100ms 缓冲；另含协议核逆向文档与 MFi 挑战长度证书识别修复。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.81.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.81/CarPToCarL-1.2.81.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.82`（正式版；并入 PR #39：CarLife 导航诱导 `0x10030` → iAP2 `0x5201/0x5202` 转发，**当前仅按小米 HUD 链路实现**；车机 `0x1D01` 清单明确无 `0x52xx` 时一律不发送。含 1.2.81 选档加固。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,24 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.82 —— 2026-11-22（导航引导转发 iAP2，正式版）
+
+并入 PR #39（Ayu0K）：把 CarLife 侧的导航诱导 `0x10030 MD_NAVI_NEXT_TURN` 转成 iAP2 `0x5201/0x5202` 发给车机，含 HUD 清除帧与 10s 心跳。
+
+**适用范围（重要）**：
+
+- 当前实现是 **小米 HUD 链路**：数据源按小米环境里 CarLife 给出的 `0x10030` 报文布局解析。
+- **其他手机还需要从系统通知中取出导航引导信息**再喂进来；本版**没有**做这个通知采集，也**没有实际获取过**这类数据，因此不能认为在其他品牌手机上可用。
+- 车机端也有限制：`0x1D01` 可收清单明确不含 `0x52xx`（如奥迪 MIB3 3801 / SW3874）时**明确不发送**——订阅应答、主动帧、心跳一律不发，并打日志说明原因。清单未到仍按未知放行；车机声明支持但有没有 HUD 渲染是另一回事。
+
+**改了什么**：
+
+- 统一闸门 `Iap2RouteGuidance.blockedByDeclaration()`，三条发送路径（源头、订阅应答、出口产帧）都受它管；`0x1D01` 解析处和 `SessionController` 各有明确「不发送」日志。
+- 3 例闸门回归单测；全量 992 例 0 失败。
+- 含 1.2.81 的媒体 48k 选档加固。歌词/歌名逻辑未动。
+
+**未验证**：小米以外的手机通知采集、其他车机 HUD 出箭头，均未实车验证。
 
 ### 1.2.81 —— 2026-11-22（选档加固，正式版）
 
