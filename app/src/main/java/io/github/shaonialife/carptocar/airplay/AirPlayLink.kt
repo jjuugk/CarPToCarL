@@ -1,16 +1,11 @@
-package io.github.shaonialife.carptocar.protocolcore
+package io.github.shaonialife.carptocar.airplay
 
-import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import io.github.shaonialife.carptocar.audio.AudioCodec
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
-import io.github.shaonialife.carptocar.link.AudioStreamInfo
-import io.github.shaonialife.carptocar.link.ControlKeys
-import io.github.shaonialife.carptocar.link.ScreenStreamInfo
-import io.github.shaonialife.carptocar.link.SetupInfo
 import io.github.shaonialife.carptocar.net.EndpointHosts
 import io.github.shaonialife.carptocar.net.TcpLiveness
 import io.github.shaonialife.cardeck.protocol.NativeBridge
@@ -167,6 +162,26 @@ class AirPlayLink(
     @Volatile
     var cancelled: Boolean = false
 
+    // ---- v2 适配层观察面（职责仍在 Rust，只读） ----
+
+    /** 控制连接是否还活着。 */
+    val controlAlive: Boolean get() = !cancelled && socket?.isClosed == false
+
+    /** 控制会话句柄是否已建立（能发 modes/命令）。 */
+    val controlReady: Boolean get() = controlSessionHandle != 0L
+
+    /** 已保存的对端身份标识（音频档位记忆键）。 */
+    val receiverIdentityText: String
+        get() = (storedReceiverIdentity ?: setupReceiverIdentity)?.identifier.orEmpty()
+
+    /** 端点变化时重连控制口（v2 契约）。 */
+    fun reconnectControl(timeoutMillis: Int = 5_000): Boolean = ensureConnected(timeoutMillis)
+
+    /** 本会话 RECORD 是否已确认（由 SetupPlan / 会话泵置位）。 */
+    @Volatile
+    var sessionRecorded: Boolean = false
+
+
     /** G2 实验：SDP 序的本端 control 端口（仅 cardeck.sdp=1 时分配）。 */
     private var sdpLocalPorts: SdpLocalPorts? = null
 
@@ -214,37 +229,8 @@ class AirPlayLink(
     /** 连接序完成时由 [setupRound] 装配（flow done 动作的返回载荷）。 */
     private var pendingSetupInfo: SetupInfo? = null
 
-    /**
-     * 本轮会话是否已经发过 RECORD。
-     *
-     * `recorded` 事件一辈子只来一次：第一条 SetupPlan 等到它就算会话激活；之后的
-     * 追加流（导航/通话/第二条音频）**永远等不到**——若还按它收尾，会白等满超时
-     * 再返回 null，上层看到的就是「第二路音频建不起来」。
-     */
-    @Volatile
-    private var sessionRecorded = false
-
     /** flow connect 动作计数（低频 retryTick 钩子节拍）。 */
     private var flowConnectTick = 0
-
-    // ---------------- 给宿主（link.ProtocolCoreSession）的只读观察面 ----------------
-    //
-    // 这三个状态在类内本来是 private 字段；宿主需要它们做「会话是否还有救 / 能不能发命令 /
-    // 按哪台车记忆音频档」三类判定，所以开成只读属性。**只读**：写入仍只由本类内部
-    // 的会话机决定，宿主改不了。
-
-    /** 控制连接是否还活着（socket 未断且未取消）。 */
-    val controlAlive: Boolean get() = !cancelled && socket?.isClosed == false
-
-    /** 控制会话句柄是否已建立（能发 modes/命令）。 */
-    val controlReady: Boolean get() = controlSessionHandle != 0L
-
-    /** 已保存的对端身份标识（音频档位记忆的键）；无则空串。 */
-    val receiverIdentityText: String
-        get() = (storedReceiverIdentity ?: setupReceiverIdentity)?.identifier.orEmpty()
-
-    /** 重建控制连接（宿主在 SETUP 前发现连接已断时补建）。 */
-    fun reconnectControl(timeoutMillis: Int = 5_000): Boolean = ensureConnected(timeoutMillis)
 
     /**
      * 连接编排泵（**决策机 = Rust fw::airplay::flow**——固件骨架
@@ -541,14 +527,7 @@ class AirPlayLink(
                     // M5.2：会话句柄存活跨连接序（fw: apsession 生命周期——
                     // 控制建立/流 SETUP/事件通道全走同一加密会话）
                     controlSessionHandle = handle
-                    lastKeys =
-                        ControlKeys(
-                            phoneWriteKey = write,
-                            phoneReadKey = ByteArray(0),
-                            sharedSecret = shared,
-                            eventsWriteKey = eventsWrite,
-                            eventsReadKey = eventsRead,
-                        )
+                    lastKeys = ControlKeys(write, shared, eventsWrite, eventsRead)
                     return "{\"op\":\"pairDone\"}"
                 }
                 "error" -> {
@@ -653,10 +632,7 @@ class AirPlayLink(
                         val pending = NativeBridge.nativeAirplayOnBytes(handle, ByteArray(0))
                         if (!pending.isNullOrEmpty()) {
                             runCatching { org.json.JSONObject(pending) }.getOrNull()?.let {
-                                if (it.optString("type") == "recorded") {
-                                    sessionRecorded = true
-                                    controlEventQueue.offer(it)
-                                }
+                                if (it.optString("type") == "recorded") controlEventQueue.offer(it)
                             }
                         }
                         continue
@@ -670,7 +646,6 @@ class AirPlayLink(
                     val json = runCatching { org.json.JSONObject(event) }.getOrNull()
                     val t = json?.optString("type")
                     if (json != null && (t == "streamSetup" || t == "recorded")) {
-                        if (t == "recorded") sessionRecorded = true
                         controlEventQueue.offer(json)
                     } else if (json != null && t == "sdpSetup") {
                         log(
@@ -881,10 +856,6 @@ class AirPlayLink(
         controlSessionHandle = 0L
         if (sessionPumpHandle == h) sessionPumpHandle = 0L
         if (h != 0L) NativeBridge.nativeAirplayDestroy(h)
-        // 会话句柄已销毁：RECORD 判定跟着归零，否则下一轮会把「上一轮发过 RECORD」
-        // 当成「本轮已激活」，首条计划直接走静默窗、可能漏掉真正的 RECORD。
-        sessionRecorded = false
-        pendingSetupInfo = null
     }
 
     /** fw: sendTeardownWithStreamDescArray——会话收尾通知。 */
@@ -1111,16 +1082,14 @@ class AirPlayLink(
     fun oemReturn(): Boolean = modesScreen(true)
 
     /**
-     * /info 的 OEM 图标域（DiPlay 实测 {label "BYD", PNG 192², visible:true}）。
-     *
-     * 参考实现里这段会写进自渲染桌面的「返回车机」块。v2 起画面源改为 CarLife——
-     * 车机显示的是 CarLife 投屏内容，本端桌面不再上车机，因此这里没有消费方，
-     * 留空实现。保留方法只为不动两处调用点（[handleInfo] 与 setup 路径），
-     * 将来若恢复自渲染，接入位置就在这里。
+     * /info 的 OEM 图标域 → 车机桌面「返回车机」块
+     * （DiPlay 实测 {label "BYD", PNG 192², visible:true}；fw: copyOEMIcons
+     * @0x2277f32c0 属性域）。不可见/无标签 → 清块。
      */
     @Suppress("UNUSED_PARAMETER")
     private fun publishOemBlock(json: org.json.JSONObject) {
-        // no-op：见方法注释
+        // 本分支屏幕源走 CarLife，不上车机自绘桌面；OEM 图标无落点。
+        // 与 cardeck 0.1.29 之前的 protocolcore/AirPlayLink 同款处理，避免依赖 cardeck 的 VirtualLauncher。
     }
 
     /**
@@ -1429,8 +1398,35 @@ class AirPlayLink(
     }
 
     /** 会话级 SETUP 装配产物（controlSetup 端口域 + info displays——宿主数据面消费）。 */
+    class SetupInfo(
+        val eventPort: Int,
+        val timingPort: Int,
+        val keepAlivePort: Int?,
+        val enabledFeatures: List<String>,
+        /** 主显示屏参数（/info displays[0]，跟随接收端当前屏幕方向）。 */
+        val displayWidth: Int,
+        val displayHeight: Int,
+        val displayUuid: String?,
+        val maxFps: Int,
+        /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
+        val hidDeviceUuids: List<String> = emptyList(),
+        /**
+         * uuid → HID 描述符。媒体键（Consumer Control）的 Array 报告字节是 Usage 数组下标，
+         * 必须解析描述符才能得到正确映射（奥迪实测：按下「下一首」收 0x05=usages[5]=0xB5）。
+         */
+        val hidDescriptors: Map<String, ByteArray> = emptyMap(),
+        /**
+         * `/info.keepAliveSendStatsAsBody`：屏幕流 keepAlive 帧是否携带统计体
+         * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
+         */
+        val keepAliveSendStatsAsBody: Boolean = false,
+    )
 
     /** 屏幕流协商结果。 */
+    class ScreenStreamInfo(
+        val streamConnectionId: Long,
+        val dataPort: Int,
+    )
 
     private var sendIapCount = 0
 
@@ -1658,6 +1654,14 @@ class AirPlayLink(
     }
 
     /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
+    class AudioStreamInfo(
+        val streamConnectionId: Long,
+        val dataPort: Int,
+        val controlPort: Int,
+        val streamKey: ByteArray,
+        /** 协商出的采样率（Hz）：按车机声明选择，AudioSender 必须用同一值采集。 */
+        val sampleRate: Int = 48_000,
+    )
 
     companion object {
         /** NTP 纪元偏移（1900→1970，秒）——墙钟锚计算（fw: NTPClockSetEpoch
@@ -1756,18 +1760,11 @@ class AirPlayLink(
     fun setupPlanJson(
         displayUuid: String?,
         audio: AudioProfile?,
-        /**
-         * 是否把主屏流（type 110）一并放进计划。
-         *
-         * 第二条流（导航独立音频 / 通话音频）走**单独一次** SETUP：此时主屏已经建好，
-         * 计划里再带 110 就是给主屏重复 SETUP，车机会当成"换流"把已有数据口作废
-         * （视频直接黑屏）。只有屏幕流尚未建立时才传 true。
-         */
         includeScreen: Boolean = true,
     ): String {
         val items = ArrayList<String>()
+        val uuid = displayUuid?.takeIf { it.isNotBlank() }
         if (includeScreen) {
-            val uuid = displayUuid?.takeIf { it.isNotBlank() }
             items +=
                 if (uuid == null) {
                     "{\"streamType\":110}"
@@ -1825,17 +1822,7 @@ class AirPlayLink(
         return NativeBridge.nativeAirplayAudioPhaseTs(h, sampleRate)
     }
 
-    /**
-     * 固件式 SetupPlan：control→info 已完成，modes 已发；本方法推进 流→RECORD。
-     *
-     * **收尾判据 = 计划里请求的流是否都到齐**，不是 `recorded`：
-     *  - 主屏 SETUP 之后车机只有 ~2s 看门狗等我们连数据口（2026-10-17 奥迪定谳：
-     *    迟到即 reset 控制通道）。等 RECORD 再返回就是把数据口连接推到看门狗之后；
-     *  - `recorded` 一辈子只来一次，追加流（第二路音频/导航）等它必然空转到超时。
-     *
-     * RECORD 由 Rust 在 plan 里自己排（`nativeAirplaySetupPlan(h, plan, 1)`），本方法
-     * 提前返回不会撤销它；`recorded` 若在返回之后到站，由会话泵置 [sessionRecorded]。
-     */
+    /** 固件式 SetupPlan：control→info 已完成，modes 已发；本方法推进 流→RECORD。 */
     @Synchronized
     fun runFirmwareSetupPlan(
         planJson: String,
@@ -1915,12 +1902,7 @@ class AirPlayLink(
             ev.optString("streamConnectionID").toLongOrNull()
                 ?: (java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L)
         log("AIRPLAY: ✓ 主屏流已接受（SetupPlan）dataPort=$dataPort connId=$connectionId")
-        return ScreenStreamInfo(
-            streamConnectionId = connectionId,
-            dataPort = dataPort,
-            // 协议核链路：帧密封在 native（nativeAirplayScreenSealFrame）内完成
-            cipher = StreamFrameCipher.CoreSealed,
-        )
+        return ScreenStreamInfo(connectionId, dataPort)
     }
 
     /** 由 SetupPlan 的音频 streamSetup 事件构造预协商音频流。 */
@@ -2430,6 +2412,14 @@ class AirPlayLink(
  * 恒空数组，音频路径按 null 语义处理）。原 PairVerifyClient.ControlKeys，
  * M5.2 起 PairingClients.kt 全域移入 Rust（fw::airplay::session），类型随迁。
  */
+data class ControlKeys(
+    val phoneWriteKey: ByteArray,
+    val sharedSecret: ByteArray,
+    /** Events 双钥（fw: CreateEncryptionKeysForContext Events-Salt 族，Rust Done 交付）——
+     *  事件通道加密态直用，Kotlin 不再本地 HKDF（M5：事件通道加解密全 Rust）。 */
+    val eventsWriteKey: ByteArray = ByteArray(0),
+    val eventsReadKey: ByteArray = ByteArray(0),
+)
 
 /**
  * 配对库对端身份（fw: `_PairingSessionSavePeer` 入库内容——setup M6 的
@@ -2438,13 +2428,6 @@ class AirPlayLink(
  */
 data class ReceiverIdentity(
     val identifier: String,
-    val publicKey: ByteArray,
-)
-
-/** 控制器长期身份（ed25519 seed + 配对 ID；原 PairingClients.kt，M5.2 类型随迁）。 */
-data class ControllerIdentity(
-    val pairingId: String,
-    val privateKey: ByteArray,
     val publicKey: ByteArray,
 )
 

@@ -8,7 +8,9 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
-import io.github.shaonialife.carptocar.protocolcore.AirPlayLink
+import io.github.shaonialife.carptocar.airplay.AirPlayLink
+import io.github.shaonialife.carptocar.airplay.ControlKeys as FirmwareControlKeys
+import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
 
 /**
  * **协议核链路**：v2 里 [AirPlayLinkSession] 的**唯一实现**，协议决策全部交给
@@ -71,6 +73,8 @@ class ProtocolCoreSession(
 
     /** flow 的产物缓存：分步调用靠它回放。 */
     @Volatile private var lastSetup: SetupInfo? = null
+    /** cardeck 0.1.29 的原生 SetupInfo（事件通道仍按它取 eventPort）。 */
+    @Volatile private var lastFirmwareSetup: AirPlayLink.SetupInfo? = null
 
     @Volatile private var lastKeys: ControlKeys? = null
 
@@ -176,6 +180,7 @@ class ProtocolCoreSession(
     override fun close() {
         link.close()
         lastSetup = null
+        lastFirmwareSetup = null
         lastKeys = null
         screenStreamUp = false
         activeStreams.clear()
@@ -202,7 +207,14 @@ class ProtocolCoreSession(
         val plan = link.setupPlanJson(displayUuid = displayUuid, audio = null, includeScreen = true)
         val result = link.runFirmwareSetupPlan(plan) ?: return null
         val event = result.streams[STREAM_TYPE_SCREEN] ?: return null
-        val info = link.screenStreamInfoFromEvent(event) ?: return null
+        val firmwareInfo = link.screenStreamInfoFromEvent(event) ?: return null
+        // 密封下沉到 Rust：契约侧标 CoreSealed，发送端据此走 sealScreenFrame 整帧写出。
+        val info =
+            ScreenStreamInfo(
+                streamConnectionId = firmwareInfo.streamConnectionId,
+                dataPort = firmwareInfo.dataPort,
+                cipher = StreamFrameCipher.CoreSealed,
+            )
         screenStreamUp = true
         activeStreams.add(STREAM_TYPE_SCREEN.toLong())
         return info
@@ -247,7 +259,15 @@ class ProtocolCoreSession(
             )
         val result = link.runFirmwareSetupPlan(plan, setupTimeoutMillis.toLong()) ?: return null
         val event = result.streams[profile.streamType.toInt()] ?: return null
-        val info = link.audioStreamInfoFromEvent(event, profile) ?: return null
+        val firmwareInfo = link.audioStreamInfoFromEvent(event, profile) ?: return null
+        val info =
+            AudioStreamInfo(
+                streamConnectionId = firmwareInfo.streamConnectionId,
+                dataPort = firmwareInfo.dataPort,
+                controlPort = firmwareInfo.controlPort,
+                streamKey = firmwareInfo.streamKey,
+                sampleRate = firmwareInfo.sampleRate,
+            )
         activeStreams.add(profile.streamType)
         return info
     }
@@ -351,7 +371,8 @@ class ProtocolCoreSession(
         if (keys == null) {
             logOnce("event-plaintext", "LINK: 事件通道无 Events 双钥（明文会话），按未加密连接")
         }
-        link.connectEventChannel(keys?.eventsWriteKey, keys?.eventsReadKey, setup, onCommand)
+        val firmwareSetup = lastFirmwareSetup ?: setup.toFirmwareSetup()
+        link.connectEventChannel(keys?.eventsWriteKey, keys?.eventsReadKey, firmwareSetup, onCommand)
         return true
     }
 
@@ -467,22 +488,66 @@ class ProtocolCoreSession(
     /** 跑一次整链 flow（connect → pairing → setup → RECORD），缓存产物供分步调用回放。 */
     private fun runFlow(windowMillis: Long): ControlKeys? {
         attempted = true
-        val setup = link.runFlow(windowMillis, noPairingHint)
-        val keys = link.lastKeys
-        lastSetup = setup
-        lastKeys = keys
-        if (setup != null) {
+        val firmwareSetup = link.runFlow(windowMillis, noPairingHint)
+        val firmwareKeys = link.lastKeys
+        lastFirmwareSetup = firmwareSetup
+        lastSetup = firmwareSetup?.toContract()
+        // cardeck 0.1.29 的 ControlKeys 少一个 phoneReadKey（自研链路双向加密遗留），
+        // 在适配层补空数组，其余密钥原样透传。
+        lastKeys =
+            firmwareKeys?.let {
+                ControlKeys(
+                    phoneWriteKey = it.phoneWriteKey,
+                    phoneReadKey = ByteArray(0),
+                    sharedSecret = it.sharedSecret,
+                    eventsWriteKey = it.eventsWriteKey,
+                    eventsReadKey = it.eventsReadKey,
+                )
+            }
+        if (firmwareSetup != null) {
             everEstablished = true
             log(
                 "LINK: 协议核连接序完成——SETUP 产物已缓存" +
-                    "（eventPort=${setup.eventPort} display=${setup.displayWidth}x${setup.displayHeight}）",
+                    "（eventPort=${firmwareSetup.eventPort} display=${firmwareSetup.displayWidth}x${firmwareSetup.displayHeight}）",
             )
         } else {
             log("LINK: 协议核连接序未完成（窗口 ${windowMillis}ms）")
         }
-        return keys
+        return lastKeys
     }
 
+
+    /** cardeck 0.1.29 的嵌套 SetupInfo → 契约层类型（字段按同名透传，缺失项取安全默认）。 */
+    private fun AirPlayLink.SetupInfo.toContract(): SetupInfo =
+        SetupInfo(
+            eventPort = eventPort,
+            timingPort = timingPort,
+            keepAlivePort = keepAlivePort,
+            enabledFeatures = enabledFeatures,
+            displayWidth = displayWidth,
+            displayHeight = displayHeight,
+            displayUuid = displayUuid,
+            maxFps = maxFps,
+            hidDeviceUuids = hidDeviceUuids,
+            hidDescriptors = hidDescriptors,
+            keepAliveSendStatsAsBody = keepAliveSendStatsAsBody,
+        )
+
+    /** 契约层 SetupInfo → 固件 SetupInfo（connectEventChannel 的入参形态）。 */
+    private fun SetupInfo.toFirmwareSetup(): AirPlayLink.SetupInfo =
+        AirPlayLink.SetupInfo(
+            eventPort = eventPort,
+            timingPort = timingPort,
+            keepAlivePort = keepAlivePort,
+            enabledFeatures = enabledFeatures,
+            displayWidth = displayWidth,
+            displayHeight = displayHeight,
+            displayUuid = displayUuid,
+            maxFps = maxFps,
+            hidDeviceUuids = hidDeviceUuids,
+            hidDescriptors = hidDescriptors,
+            keepAliveSendStatsAsBody = keepAliveSendStatsAsBody,
+        )
     private fun logOnce(
         key: String,
         message: String,

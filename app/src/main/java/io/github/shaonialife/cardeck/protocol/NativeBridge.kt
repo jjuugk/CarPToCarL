@@ -36,9 +36,13 @@ object NativeBridge {
                 System.loadLibrary("cardeck_protocol")
                 true
             } catch (t: Throwable) {
-                io.github.shaonialife.carptocar.SessionController.appendLog(
-                    "RUST: ⚠ cardeck_protocol 加载失败：$t",
-                )
+                // JVM 单测里 android.util.Log 未 mock，日志本身不能让加载失败路径二次抛异常
+                // （BtSessionGateTest 等只构造通道、不加载 so）。
+                runCatching {
+                    io.github.shaonialife.carptocar.SessionController.appendLog(
+                        "RUST: ⚠ cardeck_protocol 加载失败：$t",
+                    )
+                }
                 false
             }
         return loaded

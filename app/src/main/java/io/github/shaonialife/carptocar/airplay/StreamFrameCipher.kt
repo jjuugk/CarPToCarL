@@ -28,7 +28,7 @@ sealed class StreamFrameCipher {
     /**
      * 加密**由协议核在 native 内完成**（`nativeAirplayScreenSealFrame`）。
      *
-     * 只有 `protocolcore/AirPlayLink` 这条链路会给出该变体：数据面把 Annex-B 裸帧交给
+     * 只有 `airplay/AirPlayLink` 这条链路会给出该变体：数据面把 Annex-B 裸帧交给
      * 协议核，密文与帧头都由 Rust 产出。Kotlin 侧的内嵌发送器拿到它时**不得再加密**
      * （再加密一次 = 对端解出乱码），只能原样透传或直交协议核。
      *

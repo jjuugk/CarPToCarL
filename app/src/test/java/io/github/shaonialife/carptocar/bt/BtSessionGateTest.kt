@@ -100,5 +100,6 @@ class BtSessionGateTest {
             },
             name = name,
             log = {},
+            nativeSession = false,
         )
 }
