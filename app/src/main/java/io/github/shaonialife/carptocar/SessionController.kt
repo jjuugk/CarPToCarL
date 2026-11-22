@@ -6207,43 +6207,43 @@ object SessionController {
                                 appendLog("LINK: 链路实现 = 自研（AirPlayClient）")
                                 ClientLinkSession(
                                     AirPlayClient(
-                            effectiveEndpoint,
-                            log = { line -> appendLog(line) },
-                            context = context.applicationContext,
-                            onTransportClosed = { failed, reason ->
-                                if (failed.cancelled) endClientSession(ClientLinkSession(failed), reason)
-                            },
-                            endpointRefresher = { current ->
-                                requireAttempt(attempt)
-                                enrichEndpointFromBrowser(current, source)
-                            },
-                            onPortRefused = wakeCarPlayWindow,
-                            retryTick = { retryNumber ->
-                                requireAttempt(attempt)
-                                // 配对重试期间车机仍可能没探测到 ctrl（Bonjour 漏掉首次公告）：
-                                // 周期性强制重播一次，并把 mDNS 现状写进日志——否则排查时
-                                // 只看得到「端口未开」的重试刷屏，无法判断是车机没邀请还是
-                                // 地址不对（2026-10-19 奥迪 0.1.7 日志就缺这两条信息）。
-                                ctrlAdvertiser?.ensureForNetwork(
-                                    endpoint.ssid,
-                                    force = true,
-                                    network = wifiConnector?.currentNetwork,
-                                )
-                                val invites = ctrlAdvertiser?.inviteCount ?: 0
-                                val found = endpointBrowser?.awaitEndpoint(0)
-                                val stale = if (found == null) endpointBrowser?.lastKnownEndpoint() else null
-                                appendLog(
-                                    "AIRPLAY: 重试 #$retryNumber —— 已重新公告 ctrl；" +
-                                        "车机邀请=$invites 次，mDNS _airplay._tcp=" +
-                                        (
-                                            found?.let { "${it.host?.hostAddress}:${it.port}" }
-                                                // 本轮没新结果但上轮有：写出来，否则「未发现」会盖掉
-                                                // 「其实有旧地址可用」这个事实（宝马 iD8 第 2 轮起）。
-                                                ?: stale?.let { "本轮无新结果，沿用上轮 ${it.host?.hostAddress}:${it.port}" }
-                                                ?: "未发现"
-                                        ),
-                                )
-                            },
+                                        effectiveEndpoint,
+                                        log = { line -> appendLog(line) },
+                                        context = context.applicationContext,
+                                        onTransportClosed = { failed, reason ->
+                                            if (failed.cancelled) endClientSession(ClientLinkSession(failed), reason)
+                                        },
+                                        endpointRefresher = { current ->
+                                            requireAttempt(attempt)
+                                            enrichEndpointFromBrowser(current, source)
+                                        },
+                                        onPortRefused = wakeCarPlayWindow,
+                                        retryTick = { retryNumber ->
+                                            requireAttempt(attempt)
+                                            // 配对重试期间车机仍可能没探测到 ctrl（Bonjour 漏掉首次公告）：
+                                            // 周期性强制重播一次，并把 mDNS 现状写进日志——否则排查时
+                                            // 只看得到「端口未开」的重试刷屏，无法判断是车机没邀请还是
+                                            // 地址不对（2026-10-19 奥迪 0.1.7 日志就缺这两条信息）。
+                                            ctrlAdvertiser?.ensureForNetwork(
+                                                endpoint.ssid,
+                                                force = true,
+                                                network = wifiConnector?.currentNetwork,
+                                            )
+                                            val invites = ctrlAdvertiser?.inviteCount ?: 0
+                                            val found = endpointBrowser?.awaitEndpoint(0)
+                                            val stale = if (found == null) endpointBrowser?.lastKnownEndpoint() else null
+                                            appendLog(
+                                                "AIRPLAY: 重试 #$retryNumber —— 已重新公告 ctrl；" +
+                                                    "车机邀请=$invites 次，mDNS _airplay._tcp=" +
+                                                    (
+                                                        found?.let { "${it.host?.hostAddress}:${it.port}" }
+                                                            // 本轮没新结果但上轮有：写出来，否则「未发现」会盖掉
+                                                            // 「其实有旧地址可用」这个事实（宝马 iD8 第 2 轮起）。
+                                                            ?: stale?.let { "本轮无新结果，沿用上轮 ${it.host?.hostAddress}:${it.port}" }
+                                                            ?: "未发现"
+                                                    ),
+                                            )
+                                        },
                                     ),
                                 )
                             }
