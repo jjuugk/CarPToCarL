@@ -1100,7 +1100,7 @@ class Iap2SenderSession(
      *
      * `0x5200` 特判：车机可收清单里**明确没有** 0x52xx 时不回 `0x5201`，
      * 避免给不接受导航数据的车机塞越权消息；清单未到（null）则照回空态。
-     * 没有 maneuver 数据源，所以只回空体——不编造导航报文。
+     * 有 CarLife 诱导数据时回真载荷，没有时仍回空体保住控制通道。
      *
      * @return true = 本帧已作为订阅处理，调用方不必再暂存/记 keep-alive
      */
@@ -1112,11 +1112,16 @@ class Iap2SenderSession(
             log("iap2 0x5200 订阅但车机可收清单未声明导航引导——不回 0x5201（按声明裁剪）")
             return true
         }
-        val body = Iap2SubscriptionReplies.idleBodyFor(replyId) ?: return false
+        val body =
+            if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
+                Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.BT)
+            } else {
+                Iap2SubscriptionReplies.idleBodyFor(replyId) ?: return false
+            }
         send(replyId, body)
         val detail =
             if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
-                "空态；无 maneuver 数据源，暂不主动推导航报文"
+                if (body.isEmpty()) "空态；CarLife 尚无导航诱导数据" else "${body.size}B，CarLife 导航引导已就绪"
             } else if (replyId == Iap2SubscriptionReplies.CALL_STATE_UPDATE) {
                 "空态；蓝牙链路无通话状态源，隧道侧订阅会给真实值"
             } else {
@@ -1166,6 +1171,11 @@ class Iap2SenderSession(
             }
             // 车机在蓝牙链路上订阅通讯/通话/列表/导航引导：就地回状态，别让它白等 10s
             if (answerSubscription(frame)) continue
+            if (frame.messageId == Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES) {
+                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.BT)
+                log("iap2 0x5203 车机停止导航引导订阅")
+                continue
+            }
             if (frame.messageId == lastLoggedId) {
                 repeatCount++
                 if (repeatCount % 100 != 0) continue
@@ -1623,6 +1633,31 @@ class Iap2SenderSession(
     fun pushNowPlaying() {
         val np = nowPlayingProvider?.invoke() ?: return
         sendNowPlaying(np, "补推")
+    }
+
+    /**
+     * CarLife 导航诱导到达时主动推 0x5201/0x5202。
+     *
+     * 只有车机在**这条蓝牙链路**上发过 0x5200 时才发；`sendFireAndForget` 内部
+     * 已过 `AccessoryDeclaration.noteSend` 闸门并做线程同步，这里不重复加锁。
+     */
+    fun pushRouteGuidance() {
+        if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+        for ((messageId, body) in Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.BT)) {
+            sendFireAndForget(messageId, body)
+            log(
+                "iap2 主动推 0x${messageId.toString(16).padStart(4, '0')}" +
+                    "（${body.size}B，CarLife 导航引导）",
+            )
+        }
+    }
+
+    /** 导航心跳：只刷最近一帧 0x5201，避免 DiPlay 30s 陈旧超时清 HUD。 */
+    fun pushRouteGuidanceHeartbeat() {
+        if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+        val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.BT) ?: return
+        sendFireAndForget(frame.first, frame.second)
+        log("iap2 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
     }
 
     /**

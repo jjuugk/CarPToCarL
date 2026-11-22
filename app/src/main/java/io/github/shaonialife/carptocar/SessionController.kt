@@ -32,6 +32,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
+import io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide
 import io.github.shaonialife.carptocar.carlife.LyricLines
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
@@ -42,6 +43,7 @@ import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
 import io.github.shaonialife.carptocar.iap2.NmeaAssembler
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
@@ -104,6 +106,8 @@ import io.github.shaonialife.carptocar.video.VideoSender
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.Timer
+import java.util.TimerTask
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -179,6 +183,13 @@ object SessionController {
      * 之后才把 AirPlay 起起来」的情况（车机侧启动常常晚于蓝牙握手几十秒）。
      */
     private const val PROBE_INTERVAL_MS = 30_000L
+
+    /**
+     * CarLife 导航引导心跳周期。DiPlay `BydHudRouteState.STALE_ROUTE_NS` 是 30s，
+     * 取 10s 留 3 倍余量：即使某一拍被主线程卡顿/链路忙吞掉，也还有下一拍兜住，
+     * 不会在 CarLife 引擎静默期把 HUD 引导误判成「导航结束」清空。
+     */
+    private const val ROUTE_GUIDANCE_HEARTBEAT_MS = 10_000L
 
     /** 一次探测等 `_airplay._tcp` 的时长；局域网内 Bonjour 应答通常 <500ms。 */
     private const val PROBE_TIMEOUT_MS = 8_000L
@@ -471,6 +482,14 @@ object SessionController {
 
     init {
         CarLifeHijack.onSourceAudioPlayback = ::onSourceAudioPlayback
+        // 引擎断开 → 同步清 HUD 的回调必须**进程级常驻**：
+        // 以前它挂在 installNowPlayingBridge() 里，那里有 nowPlayingBridgeInstalled
+        // 幂等锁（只在 ensure() 跑一次），而 retireSessionResources() 每轮配对起步
+        // 都会把回调置 null，结果本轮引擎真断开时上层根本收不到事件（2026-11-22
+        // 实装日志：只有 CarLifeHijack 的「控制通道断开」，没有 SessionController
+        // 的 EVENT 行，clear 帧没发、10s 心跳还在跑）。这里改成 init 里注册一次，
+        // retire 不再摘；跨轮误触发由回调内的 isSessionRunning()/活跃导航守卫挡住。
+        CarLifeHijack.onNaviSourceDisconnected = ::onCarLifeNavSourceDisconnected
     }
 
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
@@ -671,6 +690,109 @@ object SessionController {
         // 数据源 C：播放位置（引擎每秒一条 0x10036）。必须逐秒补推 0x5001，
         // 否则车机只在换歌那刻收到一次位置，进度条永远停在 0:00。真 iPhone 也按秒推。
         CarLifeHijack.addMediaProgressListener { pushNowPlayingPosition() }
+
+        // 数据源 D：CarLife+ 导航诱导（0x10030）。编码成 Apple iAP2 0x5201/0x5202
+        // 后推给车机；是否真发由 Iap2RouteGuidance 按「该链路已订阅 0x5200」决定。
+        CarLifeHijack.addNaviNextTurnListener { info ->
+            // 监听器是进程级常驻的；会话退役后 CarLife 引擎可能还在推诱导，
+            // 这时不能重新激活 iAP2 心跳，否则断链后还有一个 10s 空转节拍。
+            if (!isSessionRunning()) return@addNaviNextTurnListener
+            val ending = info.action == CarLifeNaviGuide.ACTION_END
+            val detail =
+                "${CarLifeNaviGuide.actionLabel(info.action)} " +
+                    "raw=${info.rawNextTurn} → ${CarLifeNaviGuide.label(info.nextTurn)}" +
+                    "(${info.nextTurn}) · ${info.roadName} · " +
+                    "${info.remainDistance}m / ${info.totalDistance}m"
+            val effect =
+                if (ending) "同步补推 iAP2 0x5201 清除帧并停止心跳"
+                else "补推 iAP2 0x5201/0x5202 + 启动 10s 心跳"
+            appendLog("EVENT: CarLife 导航诱导 $detail → $effect")
+            Iap2RouteGuidance.publish(info)
+            // 显式结束帧也要当场扇出；不能只停心跳等 DiPlay 30s 兜底清 HUD。
+            pushRouteGuidanceAll()
+            refreshRouteGuidanceHeartbeat()
+        }
+        // 数据源 E（引擎断开）在 init 里进程级注册，见 onCarLifeNavSourceDisconnected。
+    }
+
+    /**
+     * CarLife+ 引擎控制通道意外断开（非本进程主动停止，例如手机上强杀引擎进程）。
+     * 手机端来不及下发 action=3，如果不主动补一帧 clear，车机会一直保留 HUD 引导，
+     * 10s 心跳还会继续刷新 DiPlay 的 30s 超时——这是 2026-11-22 实装复现的现象。
+     *
+     * 这道守卫替代原先「retire 时把回调置 null」的做法：回调本身进程级常驻，
+     * 但只有本轮会话还在、且确实发过 CarLife 诱导时才动 iAP2 状态，
+     * 防止旧 socket 晚到的断开把新一轮（比如 Apple Maps）的 HUD 清掉。
+     */
+    private fun onCarLifeNavSourceDisconnected() {
+        if (!isSessionRunning() || !Iap2RouteGuidance.hasActiveRoute()) {
+            appendLog("EVENT: CarLife+ 引擎断开，但本轮无活跃导航/会话，忽略 clear")
+            return
+        }
+        appendLog("EVENT: CarLife+ 引擎断开 → 同步补推 iAP2 0x5201 清除帧并停止心跳")
+        Iap2RouteGuidance.endRoute()
+        // clear 帧推进了 sequence，这里立刻扇出到所有已订阅链路（含 WiFi 隧道）。
+        pushRouteGuidanceAll()
+        stopRouteGuidanceHeartbeat()
+    }
+
+    /** 把最新导航引导扇出到三条链路（与 [pushNowPlayingAll] 同样的分发形态）。 */
+    private fun pushRouteGuidanceAll() {
+        currentClient?.pushRouteGuidance()
+        bluetoothServer?.pushRouteGuidance()
+        bluetoothClient?.pushRouteGuidance()
+    }
+
+    /**
+     * 导航心跳节拍。用守护线程 Timer 而不是主线程 Handler：
+     * SessionController 是 object，不能在 <clinit> 里碰 `Looper.getMainLooper()`，
+     * 否则纯 JVM 单测加载这个类会直接 `Looper not mocked`（2026-11-22 实测）。
+     * 真正发送仍由各链路在自己的锁内完成，不会和 200ms 常规拍抢发送锁。
+     */
+    private val routeGuidanceHeartbeatTimer = Timer("carlife-nav-heartbeat", true)
+
+    @Volatile
+    private var routeGuidanceHeartbeatTask: TimerTask? = null
+
+    /** 新诱导重排 10s 计时；结束/断链撤掉待执行节拍。 */
+    @Synchronized
+    private fun refreshRouteGuidanceHeartbeat() {
+        stopRouteGuidanceHeartbeatLocked()
+        if (!Iap2RouteGuidance.hasActiveRoute()) return
+        val task =
+            object : TimerTask() {
+                override fun run() {
+                    try {
+                        if (!Iap2RouteGuidance.hasActiveRoute()) {
+                            appendLog("IAPLINK: 导航引导心跳已停止（导航结束或会话退役）")
+                            stopRouteGuidanceHeartbeat()
+                            return
+                        }
+                        currentClient?.pushRouteGuidanceHeartbeat()
+                        bluetoothServer?.pushRouteGuidanceHeartbeat()
+                        bluetoothClient?.pushRouteGuidanceHeartbeat()
+                    } catch (t: Throwable) {
+                        appendLog("IAPLINK: 导航引导心跳异常，停止本轮心跳：${t.javaClass.simpleName} ${t.message ?: ""}")
+                        stopRouteGuidanceHeartbeat()
+                    }
+                }
+            }
+        routeGuidanceHeartbeatTask = task
+        routeGuidanceHeartbeatTimer.schedule(
+            task,
+            ROUTE_GUIDANCE_HEARTBEAT_MS,
+            ROUTE_GUIDANCE_HEARTBEAT_MS,
+        )
+    }
+
+    @Synchronized
+    private fun stopRouteGuidanceHeartbeat() {
+        stopRouteGuidanceHeartbeatLocked()
+    }
+
+    private fun stopRouteGuidanceHeartbeatLocked() {
+        routeGuidanceHeartbeatTask?.cancel()
+        routeGuidanceHeartbeatTask = null
     }
 
     /** 上次进度补推日志时刻（只影响日志，不影响发包）。 */
@@ -2631,6 +2753,9 @@ object SessionController {
         // 车机声明快照同样按轮清空：上一台车的「可收清单」绝不能拿来裁这一台
         // （清单是 MIB3 突发两条专用消息的裁剪判据，串轮次会误裁）。
         AccessoryDeclaration.reset()
+        // 导航订阅是链路级状态：上一轮车机的 0x5200 声明不能带到这一轮
+        Iap2RouteGuidance.reset()
+        stopRouteGuidanceHeartbeat()
         auditSummarizedCount = -1
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
@@ -2870,6 +2995,13 @@ object SessionController {
         CarLifeHijack.detach()
         // 回调属于上一轮会话（捕获了旧的 appendLog 语境），退役时一并摘掉。
         CarLifeHijack.onActualStreamSize = null
+        // 注意：onNaviSourceDisconnected 不再在这里置 null。它在 init 里进程级注册，
+        // 且每轮配对起步都会 retire——一旦置空就再没人重装，引擎断开事件会永久丢失。
+        // 跨轮误触发改由 onCarLifeNavSourceDisconnected 内部的活跃态守卫拦截。
+        // 导航引导心跳/订阅状态同样按轮清理：留着会在断开后继续打 10s 空转节拍，
+        // 新一轮车机若重新订阅 0x5200 还会收到上一轮的旧诱导快照。
+        stopRouteGuidanceHeartbeat()
+        Iap2RouteGuidance.reset()
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）

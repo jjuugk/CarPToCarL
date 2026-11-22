@@ -83,6 +83,19 @@ class CarLifeHuClient(
     /** 收到媒体播放进度（0x10036，ms，约每秒一条）。 */
     private val onMediaProgress: (progressMs: Int) -> Unit = {},
     /**
+     * 收到手机端导航诱导信息（0x10030 / `CarlifeNaviNextTurnInfo`）。
+     *
+     * 导航开始/结束/每条诱导都会走这里。解析函数自己吞异常，畸形包不会拆链。
+     */
+    private val onNaviNextTurn: (info: CarLifeNaviNextTurn) -> Unit = {},
+    /**
+     * 控制通道意外断开（EOF/reset，非我们主动 [stop]）。
+     *
+     * 上层据此同步补发 iAP2 0x5201 清除帧，让车机立刻结束 HUD 引导；
+     * 不再只停心跳等 DiPlay 的 30s 陈旧兜底（会留下额外 HUD 残留）。
+     */
+    private val onEngineDisconnected: () -> Unit = {},
+    /**
      * 引擎是否处于**语音会话**（`语音(4)` 模块从 0 变非 0，以及反向）。
      *
      * 这是「0x68008 `0x21` 到底有没有被引擎接住」的同一份证据，也是上层唯一能拿到的
@@ -218,6 +231,8 @@ class CarLifeHuClient(
      */
     private val progressLog = LogThrottle(10_000L)
     private val emptyMediaLog = LogThrottle(5_000L)
+    /** 导航诱导每秒多拍，日志限流 10 秒一行；回调本身不受限流影响。 */
+    private val naviLog = LogThrottle(10_000L)
 
     /** 命令帧写锁：心跳线程、握手线程与视频看门狗会并发下发，必须串行写同一条 socket。 */
     private val writeLock = Any()
@@ -822,7 +837,11 @@ class CarLifeHuClient(
         } catch (error: Exception) {
             if (running.get()) log("CARLIFE: 控制通道断开 - ${error.message}")
         } finally {
+            // 先判断再 stop()：主动 stop() 时 running 已 false，不能再回调上层清 HUD，
+            // 否则正常会话退役也会被当成「引擎断开」，把车机导航误清。
+            val unexpected = running.get()
             stop()
+            if (unexpected) runCatching { onEngineDisconnected() }
         }
     }
 
@@ -1023,6 +1042,28 @@ class CarLifeHuClient(
                     if (progressLog.allow("media-progress")) {
                         log("CARLIFE: 媒体进度 ${progress}ms（同类提示 10 秒最多一行）")
                     }
+                }
+            }
+
+            CarLifeProtocol.MD_NAVI_NEXT_TURN -> {
+                // 手机导航诱导（转向/路名/距离）。只在第一条与解析失败时限流打日志：
+                // 诱导每秒多拍，逐条刷会把 0x10035 歌名和握手日志全挤掉。
+                val info = CarLifeNaviGuide.parse(payload)
+                if (info == null) {
+                    if (naviLog.allow("next-turn-parse")) {
+                        val head = payload.take(32).joinToString(" ") { "%02x".format(it) }
+                        log("CARLIFE: 导航诱导解析失败（${payload.size}B）head=$head（10 秒最多一行）")
+                    }
+                } else {
+                    if (naviLog.allow("next-turn")) {
+                        log(
+                            "CARLIFE: 导航诱导 action=${info.action}" +
+                                " raw=${info.rawNextTurn} → ${CarLifeNaviGuide.label(info.nextTurn)}" +
+                                " icon=${info.nextTurn} road=${info.roadName}" +
+                                " remain=${info.remainDistance}m total=${info.totalDistance}m（10 秒最多一行）",
+                        )
+                    }
+                    onNaviNextTurn(info)
                 }
             }
 

@@ -10,6 +10,7 @@ import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance
 import io.github.shaonialife.carptocar.iap2.Iap2SubscriptionReplies
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
@@ -374,6 +375,41 @@ class VirtualIap2Link(
     }
 
     /**
+     * 外部（CarLife 0x10030 到达时）主动推导航引导。
+     *
+     * 不在这里判断订阅：判断放在 [Iap2RouteGuidance.nextFramesFor]，它对每条链路
+     * 各自记账，避免业务层用「当前客户端是否存在」误判成车机已订阅。
+     */
+    fun pushRouteGuidance() {
+        synchronized(lock) { maybePushRouteGuidanceLocked() }
+    }
+
+    /**
+     * 导航心跳：只重发最近一帧 0x5201，刷新 DiPlay 的 30s 陈旧计时器。
+     * 与 [pushRouteGuidance] 分开，避免把同一版 0x5202 maneuver 反复刷给车机。
+     */
+    fun pushRouteGuidanceHeartbeat() {
+        synchronized(lock) {
+            if (!mib3Identified && !tunnelIdentified) return
+            if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+            val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.TUNNEL) ?: return
+            sendCsmLocked(frame.first, frame.second)
+            log("IAPLINK: 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+        }
+    }
+
+    /** 把尚未发过的 0x5201/0x5202 帧推给已订阅链路；挂在 200ms 节拍上，不新增线程。 */
+    private fun maybePushRouteGuidanceLocked() {
+        if (!mib3Identified && !tunnelIdentified) return
+        if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
+        val frames = Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.TUNNEL)
+        for ((messageId, body) in frames) {
+            sendCsmLocked(messageId, body)
+            log("IAPLINK: 主动推 0x${messageId.toString(16)}（${body.size}B，CarLife 导航引导）")
+        }
+    }
+
+    /**
      * 通话状态变化时主动补推 0x4155。
      *
      * 调用时机有讲究（[SessionController.switchAudioScene] 负责顺序）：**先把 telephony
@@ -445,6 +481,8 @@ class VirtualIap2Link(
             nowPlayingSubscribed = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
+            // 导航订阅是链路级状态：对端重发 DETECT 后必须重收 0x5200 才再推
+            Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL)
             lastHidUsages = emptySet()
             hidDescriptor = null
             peerDetectCount = 0
@@ -564,6 +602,8 @@ class VirtualIap2Link(
         checkArtworkTimeoutLocked()
         // 订阅后的歌名补推要赶在同一次 flush 出去，否则要白等下一拍
         maybePollNowPlayingLocked()
+        // 导航引导是事件驱动的，挂在节拍上只为兜底：订阅先于诱导时的 0x5202 补发
+        maybePushRouteGuidanceLocked()
         flushOutputLocked()
     }
 
@@ -885,19 +925,28 @@ class VirtualIap2Link(
             }
 
             // 车机点名要 CarPlay 导航引导数据（MIB3 4398/CL3B 投仪表/HUD 的入口）。
-            // 没有 maneuver 数据源，所以只回 0x5201 空态保住控制通道，不编造报文体；
-            // 车机可收清单里明确没有 0x52xx 时不回，避免越权。
+            // 车机可收清单里明确没有 0x52xx 时不回，避免越权；有数据时回真载荷，
+            // 没数据时仍回空体保住控制通道（见 Iap2RouteGuidance）。
             Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES -> {
                 if (AccessoryDeclaration.acceptsRouteGuidance() == false) {
                     log("IAPLINK: 0x5200 订阅但可收清单未声明导航引导 → 不回 0x5201（按声明裁剪）")
                     return
                 }
-                val body = Iap2SubscriptionReplies.idleBodyFor(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE)
-                if (body != null) sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
-                log("IAPLINK: 0x5200 → 0x5201（空态；无 maneuver 数据源，暂不主动推导航报文）")
+                val body = Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL)
+                sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
+                log(
+                    if (body.isEmpty()) {
+                        "IAPLINK: 0x5200 → 0x5201（空态；CarLife 尚无导航诱导数据）"
+                    } else {
+                        "IAPLINK: 0x5200 → 0x5201（${body.size}B，CarLife 导航引导已就绪）"
+                    },
+                )
+                // 订阅应答只能带 0x5201；0x5202 详情由下面同一拍的推帧逻辑补上
+                maybePushRouteGuidanceLocked()
             }
 
             Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES -> {
+                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL)
                 log("IAPLINK: 0x5203 车机停止导航引导订阅")
             }
 
