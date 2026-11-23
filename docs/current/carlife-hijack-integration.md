@@ -2,7 +2,7 @@
 
 > 目标：**开启开关后，自动把手机原生 CarLife 的画面/声音劫持下来，经 CarDeck 现有
 > AirPlay 通道投到车机**，车机触摸反向注入 CarLife。
-> 协议已在 2026-10-23 用 PC 冒充车机实测跑通（见 `docs/carlife-hijack-findings.md`
+> 协议已在 2026-10-23 用 PC 冒充车机实测跑通（见 `docs/archive/carlife-hijack-findings.md`
 > 第七节，含真实车机界面截图与码流验证）。
 
 ## 一、架构

@@ -231,7 +231,7 @@ AirPlay 侧建流失败的样子（`libairplay`）：
 > 前者是 **AirPlay `/info` 能力位**（手机据此送 viewArea 内容描述），后者是 **CarLife 帧头**。
 > 两者不同协议、不同数据通路。本机 195 个 ELF 里没有 CarLife 协议栈，所以固件并不能证明
 > 「4580 会读 CarLife 头 40/44 当视口」；该偏移目前只有 AMCar 1.0.11 补丁一条旁证。
-> 详见 `docs/videoconfig-canvas-contract.md` 末节的可行性复核。
+> 详见 `docs/current/videoconfig-canvas-contract.md` 末节的可行性复核。
 >
 > 固件能确定的是：HMI 的显示矩形写死为 `carPlayDeviceG35Layout` 1412×654 @(128,66)，
 > 且 `directDecoding=true` / `timestamps=false`；码流比例与之不符时会走渲染层的

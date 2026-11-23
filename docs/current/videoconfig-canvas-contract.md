@@ -60,7 +60,7 @@ VIDEO: ⚠ 声明的画布 1412x654 与码流 1280x720 不一致 …      ← �
 
 ## 2026-11-04 追加：4580 固件给出的旁证
 
-`docs/mib3-carplay-display-contract.md` 里从车机固件抽出的事实支持这个判断：
+`docs/archive/mib3-carplay-display-contract.md` 里从车机固件抽出的事实支持这个判断：
 
 - 车机 HMI 把 CarPlay 固定在 `carPlayDeviceG35Layout` = **1412×654**（偏移 128,66，
   物理屏 1540×720），画面落在 esogfx `Displayable_External_Smarthphone`(93)，走 OMX 解码。

@@ -143,7 +143,7 @@ git log --oneline abd1cf9..HEAD -- app/src/main/java/io/github/shaonialife/carpt
 
 **版本**：1.0.12（10012），208 用例全绿，`dist/CarPToCarL-1.0.12-audio-safe.apk`。
 
-**若复测仍无声**，按 `docs/audio-call-issues.md` 的三行日志判读，不要再猜代码：
+**若复测仍无声**，按 `docs/archive/audio-call-issues.md` 的三行日志判读，不要再猜代码：
 
 1. `AIRPLAY: ✓ 音频流协商成功 … dataPort=…` —— 没有则音频 SETUP 被拒（换档位问题）；
 2. `AUDIO: 首帧` 与 `CARLIFE: 媒体 音频格式宣告` —— 没有则 CarLife 引擎没推 PCM（导航播报不一定能唤醒引擎）；

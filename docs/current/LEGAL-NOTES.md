@@ -65,7 +65,7 @@
 - **来源清晰**：本项目的协议层、密码学封装、蓝牙链路与工程骨架参考了
   [CarDeck](https://github.com/shaonialife/cardeck)（MIT，版权归其作者）。该项目由第三方
   独立开发，**与本项目非同作者**；按其 MIT 许可，版权与许可声明已保留在
-  [NOTICE](../NOTICE) 第 0 节，不附加其它义务。
+  [NOTICE](../../NOTICE) 第 0 节，不附加其它义务。
 - 反编译产物、厂商 SDK、抓包原始文件全部不在版本库内
   （`.tools/`、`carlife-ref/`、`*.dex`、`*.jks` 均在 `.gitignore`）；
 - 真实热点密码只存在于运行时内存，日志里一律 `psk=***`；
@@ -75,7 +75,7 @@
 - **历史提交已重写**（2026-10-25，首次推送到 GitHub 之前用 `filter-branch` 跑同一份脱敏脚本），
   旧提交里的原始车机名 / MAC 不会随 `git log` 一起公开；
 - 依赖全部是 Apache-2.0 / MIT 系（AndroidX、Kotlin、BouncyCastle），无 GPL 传染；
-  第三方声明见 [NOTICE](../NOTICE)，并已随二进制打进 APK 的 `assets/NOTICE.txt`。
+  第三方声明见 [NOTICE](../../NOTICE)，并已随二进制打进 APK 的 `assets/NOTICE.txt`。
 
 仍需注意：
 
@@ -99,7 +99,7 @@
 
 ## 7. 相关文件
 
-- [LICENSE](../LICENSE)：MIT + 授权范围说明（不授予第三方协议/专利权利）
-- [NOTICE](../NOTICE)：参考项目（CarDeck）、第三方组件、商标、构建期依赖
-- [DISCLAIMER.md](../DISCLAIMER.md)：使用风险与驾驶安全
+- [LICENSE](../../LICENSE)：MIT + 授权范围说明（不授予第三方协议/专利权利）
+- [NOTICE](../../NOTICE)：参考项目（CarDeck）、第三方组件、商标、构建期依赖
+- [DISCLAIMER.md](../../DISCLAIMER.md)：使用风险与驾驶安全
 - [CarDeck](https://github.com/shaonialife/cardeck)：本项目的参考实现（MIT，独立项目，非同作者）

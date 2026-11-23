@@ -4,7 +4,7 @@
 > 目标是照着它能把整条链路做出来：蓝牙 iAP2 引导 → WiFi 切换 → AirPlay RTSP 会话 →  
 > H.264 屏幕流 + 音频流 → HID 触摸/按键回传。
 >
-> **与 `docs/PROTOCOL-NOTES.md` 的关系**：那份笔记写的是**发送端（iPhone 角色）**，  
+> **与 `docs/current/PROTOCOL-NOTES.md` 的关系**：那份笔记写的是**发送端（iPhone 角色）**，  
 > 是本项目实际在跑的方向；本文是它的镜像，接收端要做的动作正好是那份文档里「车机做的事」。  
 > 两份文档合起来才是完整协议。
 >
@@ -21,7 +21,7 @@
 | 协议栈全部软件实现                | ✅ 可行             | 本文 + 第 11 节的开源实现足以覆盖                                                                                |
 | 真 iPhone 能连上并出画面         | ⚠️ 取决于 MFi 身份    | iPhone 会**验证车机的 MFi 证书链**（0xAA00 段）。没有 Apple 签发的车机证书，只能连「跳过校验」的实现；商业盒子/开源方案的通行做法是用从量产 dongle 里提取的证书 |
 | FairPlay 解密（`/fp-setup`） | ⚠️ 需 FairPlay 密钥 | Apple 专利保护，公开实现只有握手中继/降级路径                                                                          |
-| 量产                       | ❌ 需 MFi 授权       | 见 `docs/LEGAL-NOTES.md`；MFi 会员免费，但认证芯片与审核是硬门槛                                                       |
+| 量产                       | ❌ 需 MFi 授权       | 见 `docs/current/LEGAL-NOTES.md`；MFi 会员免费，但认证芯片与审核是硬门槛                                                       |
 
 **一句话**：协议本身没有秘密（本文可以写到字节级），**卡点只有 MFi 证书 + FairPlay 密钥**这两把钥匙。
 
@@ -163,7 +163,7 @@ B. 车机被动（iPhone 是发起方，常见）
    车机 → NORMAL（收到 SYN|ACK 后 iPhone 会立刻发 0x1D00，不等 ACK）
 ```
 
-**三条血泪规则**（本项目实车定谳，见 `docs/PROTOCOL-NOTES.md` §9h）：
+**三条血泪规则**（本项目实车定谳，见 `docs/current/PROTOCOL-NOTES.md` §9h）：
 
 |   |   |
 | - | - |
@@ -1012,7 +1012,7 @@ byte3-4: Y u16 LE（≤ 屏高）
 | 密钥派生 | 同上 `cipher/{chacha,aes}.rs` |
 | 配对（SRP / X25519） | 同上 `pairing/{pairing_helper_rx,pairing_helper_tx}.rs` + `core/catplay_hap` |
 | 命令字典 | 同上 `msg/commands/command_types.rs` |
-| 本项目发送端协议笔记（实车证据） | `docs/PROTOCOL-NOTES.md`（626 行） |
+| 本项目发送端协议笔记（实车证据） | `docs/current/PROTOCOL-NOTES.md`（626 行） |
 | 本项目接收端实现参考 | 外部 `xcertplay` / `DiPlay`（Kotlin，GPL-3.0）、`PlayPort`（JVM） |
 | 非官方 AirPlay 规范 | `https://openairplay.github.io/airplay-spec/`（RTSP 16 个端点、RTP、配对） |
 
@@ -1338,5 +1338,5 @@ PROTO 审计（会话退役）：共 2 项（1 警告 / 1 提示）→ WIFI_GEN_
 
 ---
 
-_本文与 `docs/PROTOCOL-NOTES.md`（发送端视角）互补；协议事实以实车字节级日志为准，
+_本文与 `docs/current/PROTOCOL-NOTES.md`（发送端视角）互补；协议事实以实车字节级日志为准，
 公开源码与 Apple 规格档案仅作为交叉印证。_

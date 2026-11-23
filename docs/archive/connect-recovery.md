@@ -91,7 +91,7 @@ release()   // unregisterNetworkCallback + bindProcessToNetwork(null)
   会话重建仍要等对端拆链或用户重连。要不要做自动重建，取决于实车抖动频率。
 - **通话声音不上车机**：车机 telephony 档不含 AAC-LC/PCM 立体声位，协议层上限。
 - **会话 40~80 秒被对端关闭**：需抓断链前原始字节才能定性（见
-  `docs/audio-channel-watchdog.md` 的抓包口子）。
+  `docs/current/audio-channel-watchdog.md` 的抓包口子）。
 
 ## 七、自查修补（1.2.11 之后，版本号未变）
 

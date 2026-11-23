@@ -55,8 +55,8 @@
 反复把音频配置文件踢下去，直到 iAP2 会话建立或用户断开。
 
 - 日志：`BT-PROFILE: 连接前「<车型>」的蓝牙配置文件状态=…`（建链前的快照，失败时先看它）
-- 相关文档：[car-approach-autostart.md](car-approach-autostart.md)（靠近自动启动）、
-  [citroen-r4-sdp-no-service.md](citroen-r4-sdp-no-service.md)（SDP 无服务）
+- 相关文档：[car-approach-autostart.md](../archive/car-approach-autostart.md)（靠近自动启动）、
+  [citroen-r4-sdp-no-service.md](../archive/citroen-r4-sdp-no-service.md)（SDP 无服务）
 
 ## 3. L2 网络与发现：怎么互相看见
 
@@ -191,7 +191,7 @@ Activity 只是「挂屏」。划掉界面再进来，连接不受影响——�
   车机是否真的往 `dataPort` 推流，仍需真车确认，判据是日志里的 `MIC: 结论——…`。
 - **输入**：`input/TouchRouter`、`input/CarInputClient`。触摸坐标要按车机画布与手机渲染尺寸换算，
   HID 按键走 `0x6802`/`0x6801`，方向盘语音键另有 AirPlay `requestSiri` 通路
-  （见 [carlife-voice-siri-20261104.md](carlife-voice-siri-20261104.md)）。
+  （见 [carlife-voice-siri-20261104.md](../archive/carlife-voice-siri-20261104.md)）。
 
 ## 8. 判据表：症状 → 层
 
@@ -221,6 +221,6 @@ Activity 只是「挂屏」。划掉界面再进来，连接不受影响——�
 
 相关文档：[PROTOCOL-NOTES.md](PROTOCOL-NOTES.md)（线格式）、
 [CARPLAY-WIRELESS-HEADUNIT-SPEC.md](CARPLAY-WIRELESS-HEADUNIT-SPEC.md)（消息目录附录）、
-[connect-recovery.md](connect-recovery.md)（断链恢复）、
-[carplay-mic-uplink-20261108.md](carplay-mic-uplink-20261108.md)（麦克风上行）、
-[stream-order-audio-first-20261109.md](stream-order-audio-first-20261109.md)（流顺序）。
+[connect-recovery.md](../archive/connect-recovery.md)（断链恢复）、
+[carplay-mic-uplink-20261108.md](../archive/carplay-mic-uplink-20261108.md)（麦克风上行）、
+[stream-order-audio-first-20261109.md](../archive/stream-order-audio-first-20261109.md)（流顺序）。

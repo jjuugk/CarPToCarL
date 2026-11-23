@@ -5,7 +5,7 @@
 
 现状（本轮之前）：方向盘语音键能触发 CarLife 语音（`0x68008` `VR_START/VR_STOP`），
 但 CarLife+ 收到 `0x21` 后**用手机自己的麦克风**录音——11-04 实测结论，见
-`docs/carlife-voice-gps-20261104.md` §一。
+`docs/archive/carlife-voice-gps-20261104.md` §一。
 
 整件事要过两道关，缺一不可：
 
@@ -29,7 +29,7 @@
 
 **位图只说明它愿意/有能力**，不代表收到 `input=true` 的 SETUP 就真的开始往我们端口推音频。
 旧代码 `microphoneCandidates()` 只把这些位图打进日志（`AIRPLAY: 麦克风上行候选=…`），
-从没真开过流——`docs/audio-call-issues.md` §四记着这条「有意没做」。
+从没真开过流——`docs/archive/audio-call-issues.md` §四记着这条「有意没做」。
 
 ## 二、为什么要单独做探针
 
@@ -118,7 +118,7 @@ CarLife 协议里 `9242` 是 VR 通道（`CarLifeProtocol.PORT_VR`），对应�
 1. **资源仲裁（最有价值）**：他们的关键观察是「`modesChanged` 里 audio 资源（resourceID 2）
    始终不被手机接管，屏幕资源 1 会被接管」——即**谁 take/borrow 了 audio 资源，谁才拿到声音**。
    我们是手机侧，对应的是「我们有没有 take 车机的 audio 资源」。这条正好对着我们一个老问题：
-   `docs/audio-call-issues.md` 里「通话档在车机上永远没声音」。下一步若再查通话档，
+   `docs/archive/audio-call-issues.md` 里「通话档在车机上永远没声音」。下一步若再查通话档，
    **先看 iAP2 的 modes/take/borrow 是否有 audio resource**，不要只盯音频流参数。
    他们的候选清单可以整条当检查表：`/feedback` 的 stream clock、`0xA100` VehicleStatus、
    `0x4E0B` device time、HID descriptor、modes take/borrow。

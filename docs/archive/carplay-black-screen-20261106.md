@@ -40,7 +40,7 @@
 16:44 那轮是全绿却全黑：配对成功 → 加密 → `modesChanged 200` → 主屏流 SETUP（uuid 来自
 `/info`）→ `RECORD` → MFi 隧道完成 → 车机开始订阅 `0x4154/0x4157/0x4170/0x5000/0x5200`，
 帧稳定 20fps / 1.8Mbps。**「声明 = SPS = 车机窗口 = 1412×654」今天就达成了，屏还是黑的。**
-`docs/videoconfig-canvas-contract.md` 里「让三者全等就能出画」的推断，到这次为止被证伪。
+`docs/current/videoconfig-canvas-contract.md` 里「让三者全等就能出画」的推断，到这次为止被证伪。
 
 ## 三、16:46 那轮（开关=开）不是有效测试：被自己的 bug 打死
 

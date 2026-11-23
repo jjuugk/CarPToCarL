@@ -1,6 +1,6 @@
 # CarLife 劫持验证方案（对齐 CARLIFE-GATEWAY-FEASIBILITY.md）
 
-> 前置文档：`docs/CARLIFE-GATEWAY-FEASIBILITY.md`（2026-10-08 完整调研，本文件是其  
+> 前置文档：`docs/archive/CARLIFE-GATEWAY-FEASIBILITY.md`（2026-10-08 完整调研，本文件是其  
 > 「回环 Go/No-Go 实验」的可执行细化）。路线修正：**首选单机回环监听，VpnService 仅作备选**。  
 > Shizuku 移除工作（任务 #2-#5）保持暂停待命。
 

@@ -1,10 +1,16 @@
 # CarPToCarL 项目文档指南（精简版）
 
-> 定位：**导航 + 现行结论摘要**。原始证据、日志时间线和逐版变更仍在 [README.md](../README.md) 与各专题文档；
-> 本文件只做收拢、标注状态、指出冲突。冲突时**以文档中最后一次更新为准**，不要照抄早期结论。
-> 核对基线：2026-11-19 · `main` @ `be02fdc` · v1.2.70（926 例单测 0 失败；协议重构已并入，四条控制面收口未逐项实车验证）。
+> 定位：**现行结论唯一真源索引**——导航、状态标签、排障决策表、冲突红线。
+> 逐版变更与当时的现场证据在根 [`CHANGELOG.md`](../../CHANGELOG.md)；
+> 历史排障取证在 [`../archive/`](../archive/README.md)（**只作取证，不是现状**）；
+> 本文件只收拢现行结论、标注状态、指出冲突。冲突时以 `docs/current/` 与源码为准，
+> **不要照抄早期结论**。
 >
-> 两个配套入口：[`README.md`](README.md)（docs 目录地图，按角色给阅读路径）、
+> 核对基线：2026-11-23 · 本地 `main` @ `9d4af13`（比 `origin/main` 的 v1.2.83 多 3 个未推送提交：
+> 删隐形屏、清残骸、MGU-81 会话重建三修）· 发布版 **v1.2.83**。
+> 下文部分数字截止 2026-11-19，涉及代码规模 / 单测数以源码实算为准。
+>
+> 两个配套入口：[`docs/README.md`](../README.md)（目录地图，按角色给阅读路径）、
 > [`PROJECT-STATUS.md`](PROJECT-STATUS.md)（项目体检报告：版本/代码/风险/未验证清单）。
 
 ---
@@ -80,11 +86,11 @@
 | 🧪 实验/待验 | 双指缩放（0x68001 复合动作）、车机 GPS 转发、歌词顶替 title、车机麦克风上行（**宝马 G38 实测会把车机打死，现按 `audioInputFormats` 门控**） |
 | ⛔ 已移除 | MIB3 车控三篇（EA / VIWI / 控制交接，1.2.29 后整体删除）、画面停摆分级干预（1.2.34 后看门狗只观测）、Shizuku、自动拉起 CarLife |
 
-**尚未实车验证的修复**（看版本历史时别当成已证实）：1.2.47 导航独立流、1.2.50 封面/窗口、1.2.52 静音、**1.2.70 非阻塞发包与采样率对齐**（日志证据充分，但听感未复测）。
+**尚未实车验证的修复**（看 `CHANGELOG.md` 时别当成已证实）：1.2.47 导航独立流、1.2.50 封面/窗口、1.2.52 静音、**1.2.70 非阻塞发包与采样率对齐**（日志证据充分，但听感未复测）。
 
 > **1.2.64 / 1.2.65 的修复已被整批回滚**（`ab7f7d5`…`c39ff97` 一组 Revert，1.2.66–1.2.68），
 > 当前代码里**不存在**：抗冻结四项、语音键三连击、RTP 交付对账 32 帧、bit37 直连、编码解耦一拍一包。
-> 只有经日志复核的两项（非阻塞发包、采样率对齐）在 1.2.70 重新落地。读版本历史时按此口径。
+> 只有经日志复核的两项（非阻塞发包、采样率对齐）在 1.2.70 重新落地。读 `CHANGELOG.md` 时按此口径。
 
 ---
 
@@ -96,11 +102,11 @@
 | 连上没画面 / 黑屏 | 7240 是否监听、CarLife 是否停在「正在连接」、**首帧 NAL 是否 IDR**、VideoConfig 声明是否跟画布；rfps>0 只证明认证后收帧 | `carplay-black-screen-20261106.md`、`carplay-no-projection-conditions.md`、`videoconfig-canvas-contract.md` |
 | 有画面没声音 | 音频 type 100/102 是否选对；9240/9241 两条通道；采样率 44.1k/48k 是否两端对齐 | `audio-channel-watchdog.md`、`audio-call-issues.md`、README 1.2.70 节 |
 | 播放一段时间一顿一顿 | 看「最长停拍」归因：park / 混音 / 发包；发包占主导 → 非阻塞 `DatagramChannel` 已修 | README 1.2.70、1.2.65 节 |
-| 只有 20fps / 拖不动 | 车联设置帧率 60（默认档就是 20）；分辨率必须「默认」；改完断开重连 | README 第三节 |
-| 触摸失灵 / 拖不动 / 点完卡死 | 命令 ID `0x68001`~`0x68008` 错位、坐标不要二次缩放、缺 UP 时补发、MOVE 本地不再节流 | README 第五节、`touch-multitouch.md` |
-| 连上一会自己断 | 视频 0 帧约 30s 车机拆会话；空闲重发最后 IDR；写 socket 必须同一把锁 | README 第五节 |
-| 车机反复重连 | 对端字节数是否比正常多一条消息净荷（历史真凶：0x5001 双重封包） | README 第五节 |
-| 车机没歌名歌词 | 通知使用权是否真的 rebound（荣耀需关开一次）；98386 `MEDIA_LYRIC_SUPPORT=1` | README 第五节、`iap2-lyric-lines.md` |
+| 只有 20fps / 拖不动 | 车联设置帧率 60（默认档就是 20）；分辨率必须「默认」；改完断开重连 | 根 `README.md` 快速上手 |
+| 触摸失灵 / 拖不动 / 点完卡死 | 命令 ID `0x68001`~`0x68008` 错位、坐标不要二次缩放、缺 UP 时补发、MOVE 本地不再节流 | `touch-multitouch.md`（现行） |
+| 连上一会自己断 | 视频 0 帧约 30s 车机拆会话；空闲重发最后 IDR；写 socket 必须同一把锁 | [`../archive/connect-hardening.md`](../archive/connect-hardening.md)（历史取证） |
+| 车机反复重连 | 对端字节数是否比正常多一条消息净荷（历史真凶：0x5001 双重封包） | [`../archive/connect-recovery.md`](../archive/connect-recovery.md)（历史取证） |
+| 车机没歌名歌词 | 通知使用权是否真的 rebound（荣耀需关开一次）；98386 `MEDIA_LYRIC_SUPPORT=1` | [`../archive/iap2-lyric-lines.md`](../archive/iap2-lyric-lines.md)（历史取证） |
 | 方向盘语音键没反应 | 走事件通道 `requestSiri`（`siriAction` 1/2/3），不是 HID 0xCF；看 65574 模块状态是否=1 | `carlife-voice-siri-20261104.md` |
 | 冻结 / 掉网 | 心跳间隔 ≥4000ms 判冻结并重建；断链时刻附近有无 `WIFI:` 行——没有就排除 wlan0 | `process-freeze-recovery.md`、`wifi-link-watchdog.md` |
 
@@ -133,97 +139,41 @@
 
 ---
 
-## 6. 文档索引（docs/ 现行 43 篇 + 归档 5 篇）
+## 6. 文档索引（现行真源 14 篇 + 历史归档 38 篇）
 
-> 6.1 是跨主题精选的阅读顺序；6.2–6.7 按主题完整列出，少量重复项用「见…」交叉引用。
-> 已整体失效或外部存档的 5 篇移入 [`archive/`](archive/README.md)，仍在下方标出路径以便对照旧链接。
+> 定现行行为**只读 `current/`**。历史排障按 [`../archive/README.md`](../archive/README.md) 的分组取证，
+> 引用前先核对 §7 冲突红线。图例：✅ 实车验证 · 🧩 已实现 · 📐 规范 / 调研 · ⚠️ 含更正 / 待验证。
 
-图例：✅ 实车验证 · 🧩 已实现 · 📐 规范/调研 · 🗄 外部存档（勿当现状） · ⛔ 已废弃（仅历史） · ⚠️ 含自我更正/待验证
-
-### 6.1 优先读（先定层、再查细节）
+### 6.1 现行规范 / 架构（`docs/current/`，唯一真源）
 
 | 文档 | 状态 | 一句话 / 关键判据 |
 |---|---|---|
-| `carplay-connection-layers-20261109.md` | 🧩 | L1–L5 全局架构 + 症状→层判据表；0x4301 可晚 2′35″ |
-| `PROTOCOL-MODULES.md` | 🧩 | 协议模块化重构：分层图/能力矩阵/时序图、四条控制面收口、`VideoSink`/`AudioSink` 契约、接第三种协议五步、已知缺口 |
-| `PROTOCOL-NOTES.md` | ✅ | 发送端协议全集；以 §9c-1/2/3（11-10/11）最新修正为准：modes 状态机、0x4300 等确认、新协议严格模式 |
-| `carplay-black-screen-20261106.md` | ✅ | 证伪「声明=SPS=窗口即出画」；屏幕接管门 12s / rfps 探针 |
-| `bmw-fork-port-20261108.md` | ✅ | SDP 常驻、1.5s 音频守卫、首帧不补 RECORD（3b 又删控制就绪补发）；影响所有车型 |
-| `connect-recovery.md` | 🧩 | 入网互斥、3s/10s/30s 退避、ctrl 即时响应、半握手双条件定性 |
-| `carlife-hijack-integration.md` | 🧩 | 劫持架构/开关/回退；7240 不通 1.5s 回退；三项待装机验证 |
+| `PROJECT-GUIDE.md` | 🧩 | 本文件：导航、状态标签、排障决策、冲突红线、构建发版速查 |
+| `PROJECT-STATUS.md` | 🧩 | 体检报告：版本 / 代码 / 能力 / 风险 / 未验证清单（部分数字截止 11-19） |
+| `PROTOCOL-NOTES.md` | ✅ | 发送端协议全集；以 §9c-1/2/3 最新修正为准：modes 状态机、0x4300 等确认 |
+| `PROTOCOL-MODULES.md` | 🧩 | 协议聚合层：能力路由、`VideoSink`/`AudioSink` 契约、接第三种协议五步 |
+| `CARPLAY-WIRELESS-HEADUNIT-SPEC.md` | 📐 | 接收端视角的无线 CarPlay 规范；附录 E 改正两处表格 |
+| `协议核完全逆向-20261122.md` · `协议核解包分析-20261122.md` | 🧩 | v2 协议核链路与静态 JNI 绑定（改包名即全废） |
+| `carplay-connection-layers-20261109.md` | 🧩 | L1–L5 全局架构 + 症状→层判据 |
+| `audio-channel-watchdog.md` | 🧩 | 看门狗三重设限；路径 A 真死重连、路径 B 静音退避、TTS 只走 A |
 | `videoconfig-canvas-contract.md` | ⚠️ | 11-08 定案默认 raw；视口只是头部元数据，不改码流与节奏 |
+| `touch-multitouch.md` | 🧩 | 双指走 0x68001 复合动作；收尾顺序 POINTER_UP→ACTION_UP |
+| `carlife-hijack-integration.md` | 🧩 | 劫持架构 / 开关 / 回退；7240 不通 1.5s 回退 |
+| `WIRED-CARPLAY-FEASIBILITY.md` | 📐 | 有线路线否决结论（现行：只走无线） |
 | `LEGAL-NOTES.md` | 📐 | 收费风险、商业化三件套、脱敏与守卫脚本 |
 
-### 6.2 协议与规范
+### 6.2 历史排障归档（`docs/archive/`，38 篇）
 
-| 文档 | 状态 | 一句话 / 关键判据 |
-|---|---|---|
-| `CARPLAY-WIRELESS-HEADUNIT-SPEC.md` | 📐 | 接收端规范（1342 行）；✅逐字节确证/⚠️有支持/❓待抓包；附录 E 改正两处表格 |
-| `carplay-manual-crosscheck-20261107.md` | ⚠️ | 手册对照：采纳 1（初始序号随机）、不采纳 9；CRC-16 不改 |
-| `wireless-diplay-comparison.md` | 📐 | DiPlay 对照：缺 Wi-Fi Direct；0x5200 只 ACK，不发导航箭头 |
-| `ocarplay-crosscheck-20261108.md` | 📐 | 接收端对照：FreshAuthPolicy、coded/visible/declared 三值诊断；只收 SPS 66/77/88 |
-| `cadillac-ct5-carplay-apk-analysis.md` | 📐 | CT5 反编译：三档报文体、双向+方向回退、按声明裁剪 |
-| `cardeck-0.1.28-port.md` | ⚠️ | 四项移植；11-10 更正：0x4E0D 改回「未声明不发」，ACK≠业务认账 |
-| [`archive/connect-protocol-and-models.md`](archive/connect-protocol-and-models.md) | 🗄 | 外部存档（AuDiCar 1.0.51），9 台奥迪机型；文档自述勿当现状引用 |
-| `WIRED-CARPLAY-FEASIBILITY.md` | 📐 | 有线路线否决：四道 Android 门，唯一现实解是 USB gadget 硬件 |
-| `changes-20261104.md` | 🧩 | 1.2.18→1.2.20 改动总账；编码尺寸五补丁、4580 重连三改 |
+按组列在 [`../archive/README.md`](../archive/README.md)：
 
-### 6.3 CarLife 劫持 / 输入 / 媒体
+- **A 已失效功能 / 外部存档（5 篇）**：MIB3 EA / VIWI / 车控三连篇、画面停摆分级干预、外部 AuDiCar 存档。
+- **B 历史排障 / 复盘（22 篇）**：带日期的诊断与自我更正，如 `carplay-black-screen-20261106.md`、
+  `carlife-voice-siri-20261104.md`、`audio-call-issues.md`、`connect-recovery.md` 等。
+- **C 调研 / 可行性 / 对照 / 变更总账（11 篇）**：如 `CARLIFE-GATEWAY-FEASIBILITY.md`、
+  `wireless-diplay-comparison.md`、`changes-20261104.md` 等。
 
-| 文档 | 状态 | 一句话 / 关键判据 |
-|---|---|---|
-| `CARLIFE-GATEWAY-FEASIBILITY.md` | 📐 | 网关可行性；7 端口、8 阶段握手；高德走闭源 ICCOA Carlink |
-| `carlife-wireless-verification.md` | 📐 | 单机回环三组实验，立项判定四项全部未勾选 |
-| `carlife-hijack-findings.md` | ✅ | 以第七节为准：PC 假车机拿到原生画面；协议版本必须发 **3.0** |
-| `carlife-notice-frame.md` | 🧩 | 未劫持时推单帧 H.264 提示；首帧判据改用 framesDelivered 差值 |
-| `carlife-voice-gps-20261104.md` | 🧩 | 语音键→0x68008；GPS→0x18010（25 字段、900ms 节流）；修 protobuf tag≥16 |
-| `carlife-voice-siri-20261104.md` | ⚠️ | 11-09 更正：按键确实到了，断点在引擎；请求走 `requestSiri`，65574 判据 |
-| `iap2-lyric-lines.md` | ⚠️ | iAP2 无歌词字段，逐行顶替 title；实车日志显示从没送到 |
-| `touch-multitouch.md` | 🧩 | 双指改走 0x68001 复合动作；收尾顺序 POINTER_UP→ACTION_UP |
-
-### 6.4 连接与容错
-
-| 文档 | 状态 | 一句话 / 关键判据 |
-|---|---|---|
-| `connect-hardening.md` | 🧩 | 失败码 0x02/04/05 终止、身份只看 pk 签名；阶段预算 5min/60s/120s/30s/20s |
-| `car-approach-autostart.md` | ✅ | 靠近自动启/收摊；1.2.2 实车：必须拉到前台；90s 抑制 + 10min 窗 |
-| `process-freeze-recovery.md` | 🧩 | 心跳 ≥4000ms 判冻结；1.5s 复核 + 3/6/12/24s 四轮重建 |
-| `wifi-link-watchdog.md` | 🧩 | 断链时刻附近无 `WIFI:` 行即可排除 wlan0；同步包 ECONNREFUSED 不是断链 |
-| `bmw-fork-port-20261108.md` | ✅ | 见优先读（3b 补发已删；奥迪 4580 回退风险已知情接受） |
-| `gm-cinemo-4301-deadlock.md` | ⚠️ | 互等死锁：空端点保活 + 晚到 0x4301 热更新；核心假设窗口从未走完 |
-| `gm-4300-dual-identifier-20261107.md` | ⚠️ | §6 实测推翻 §2：三档报文体全 ACK 无回应，**别再试第四种**；SSID 兜底另修 |
-| `buick-e2lb-availability-silence.md` | ✅ | 0x4300 后零 ACK；催问重传是拆链元凶；视频实测 20fps 封顶 |
-| `citroen-r4-sdp-no-service.md` | ✅ | SDP 无 iAP2 → 180ms 失败；1.0.8 修闸门与错误文案 |
-| `changes-20261104.md` | 🧩 | 见协议类（改动总账） |
-
-### 6.5 音频 / 视频 / 画面契约
-
-| 文档 | 状态 | 一句话 / 关键判据 |
-|---|---|---|
-| `audio-call-issues.md` | ✅ | 多轮自我更正：同步包重试、通话后 2.5s 重建音频流、TTS 9241 被整条丢弃 |
-| `audio-channel-watchdog.md` | 🧩 | 路径 A 真死即重连；路径 B 静音 20s+3 次退避；TTS 只走 A |
-| `wechat-notify-audio-stall-20261109.md` | ✅ | 提示音 0x30003→311ms 0x30002；静音阈值 300→0ms；同步包 298 发 293 拒 |
-| `stream-order-audio-first-20261109.md` | ✅ | RECORD 优先（奥迪）/ 音频优先（JYBOX）各有适用范围，按型号记忆 |
-| `carplay-mic-uplink-20261108.md` | ⚠️ | 方案两次推翻；最后结论：按本档 `audioInputFormats` 判据，media 档塞端口会打死车机 |
-| `carplay-no-projection-conditions.md` | 📐 | 4580 固件五道门（Coding/FEC→USB→激活→StartSession→屏幕接管）；静态逆向 |
-| [`archive/video-stall-recovery-20261108.md`](archive/video-stall-recovery-20261108.md) | ⛔ | 干预部分 1.2.34 全删；仅「最后一帧距今」判据仍有效 |
-| `videoconfig-canvas-contract.md` | ⚠️ | 见优先读 |
-
-### 6.6 车厂固件 / 黑屏 / 已废弃线
-
-| 文档 | 状态 | 一句话 / 关键判据 |
-|---|---|---|
-| `id7-blackscreen-diagnosis.md` | ⚠️ | 首帧 NAL 类型决定存活（纯 P 全断）；两次自我更正 |
-| `mib3-carplay-display-contract.md` | 📐 | 4580 固件：窗口写死 1412×654@(128,66)；badFramesThreshold=4；timestamps=false |
-| `mib3-firmware-3874.md` | 📐 | 重传 30→取双方较小值；显式 AVC Baseline + level；单指限制是车机侧 |
-| `mib3-firmware-c8-4580.md` | 📐 | EA 经 VIWI 桥接；0xEA00 催问一次；pair-setup 有防爆破 |
-| [`archive/audi-mib3-ea-tunnel-20261104.md`](archive/audi-mib3-ea-tunnel-20261104.md) | ⛔ | 1.2.29 后 EA 会话整体移除；0xEA04/0xEA03 顺序错致 115 号包不 ACK |
-| [`archive/mib3-viwi-control.md`](archive/mib3-viwi-control.md) | ⛔ | 同上；车控端点取证，五项推断从未验证 |
-| [`archive/mib3-control-handover.md`](archive/mib3-control-handover.md) | ⛔ | 同上；安全红线：只在车停稳时试写 |
-
-### 6.7 合规
-
-`LEGAL-NOTES.md`（📐）：见优先读。根 `DISCLAIMER.md` 与应用内首次启动免责声明同源。
+**使用规则**：归档文档只用于还原「当时为什么这么判」、查旧链接与旧日志口径；
+其中任何结论与 `current/` 或源码冲突时，一律以 `current/` + 源码为准，按 §7 判定。
 
 ---
 
@@ -236,8 +186,9 @@
 5. **麦克风上行两次推翻** —— 独立 input 探针作废；media 档塞 dataPort 会打死宝马 G38。
 6. **MIB3 EA 三连篇已废弃** —— 固件分析篇里 EA 相关描述按历史处理。
 7. **停摆分级干预已移除** —— 看门狗只观测，不再重建编码器/会话。
-8. **外部存档勿当现状** —— [`archive/connect-protocol-and-models.md`](archive/connect-protocol-and-models.md) 基于另一项目 1.0.51。
-9. **1.2.64 / 1.2.65 的修复已回滚** —— 版本历史里的抗冻结、三连击、交付对账、bit37 直连、编码解耦均不在当前代码，仅 1.2.70 重新落地了非阻塞发包与采样率两项。
+8. **外部存档勿当现状** —— [`archive/connect-protocol-and-models.md`](../archive/connect-protocol-and-models.md) 基于另一项目 1.0.51。
+9. **1.2.64 / 1.2.65 的修复已回滚** —— [`CHANGELOG.md`](../../CHANGELOG.md) 里这两版的抗冻结、三连击、交付对账、bit37 直连、编码解耦均不在当前代码，仅 1.2.70 重新落地了非阻塞发包与采样率两项。
+10. **`docs/archive/` 只作取证** —— 旧结论不得直接照抄进新修改；判断现状只读 `docs/current/` 与源码，归档里的自我更正章节优先于原文结论。
 
 **合规红线**：不卖 APK/订阅，只收赞助或技术支持；仓库不含反编译产物、厂商 SDK、抓包二进制、私钥和真实车机名；提交前 `scripts/check-no-vendor-artifacts.sh` 守卫。
 
@@ -253,16 +204,17 @@
 
 - `pre-commit` 自动跑 Spotless/ktlint + `lintDebug`；**别随手 `spotlessApply`**（HEAD 本身不满足当前 ktlint，会重排 50+ 文件）。
 - 版本号唯一来源：`app/build.gradle.kts` 顶部 `appVersionName`；**禁止连续两个 4**（`1.2.44` 构建立刻失败）。
-- 发版同步 README **六处**：下载行版本/体积 → 本版固定包文件名与链接 → 签名覆盖范围 → 项目简介「当前版本」→ 版本历史新条目 →（`bieke` 另有后缀规则）。固定 tag 直链，**不用 `releases/latest`**。
+- 发版同步四处：README 下载行 / 固定包文件名与链接 / 签名覆盖版本 → 根 [`CHANGELOG.md`](../../CHANGELOG.md) 新条目 → `app/build.gradle.kts` 的 `appVersionName` →（`bieke` 另有后缀规则）。固定 tag 直链，**不用 `releases/latest`**；版本流水只写 `CHANGELOG.md`，不再回填 README。
 - 协作约定：**改完只本地提交**；用户说「推送/发版」才推、才建 Release；只动指定分支，未说「合并」不并到 `bieke`。PR 常为 draft 且无 CI，合并后必须本地重编译再发版。
 
 ---
 
 ## 9. 文档维护约定
 
-- 新诊断文档命名 `主题-YYYYMMDD.md`；文首写明**一句话结论 + 状态（实证/假设/已废弃）**。
-- 结论被推翻时**在原文追加更正章节并注明日期**，不要删历史；本指南同步改状态标签。
-- 功能被整体移除、结论被实车推翻且无复用价值、或来自其它项目时，`git mv` 到 [`archive/`](archive/README.md)，
-  并同步三处：本指南索引与状态、根 `README.md` 链接、`archive/README.md` 原因表。
+- **分区**：只有 [`current/`](.)（现行规范 / 架构，唯一真源）与 [`archive/`](../archive/README.md)（历史排障取证）。
+  新诊断文档命名 `主题-YYYYMMDD.md`，文首写明**一句话结论 + 状态**，写完直接 `git mv` 进 `archive/`；
+  只有定义了现行规范 / 架构的文档才进 `current/`。
+- 结论被推翻时**在原文追加更正章节并注明日期**，不要删历史；本指南同步改状态标签与 §7 冲突红线。
+- 归档时同步三处：本指南 §6 索引与状态、根 [`README.md`](../../README.md) 链接、[`archive/README.md`](../archive/README.md) 原因表。
 - 引用文档时链接到具体文件，不复制大段日志；参数/门限写清数值和来源（实测/固件/推断）。
-- 本指南随发版核对一次：版本基线、状态标签、未验证清单；项目级状态变化同步到 [`PROJECT-STATUS.md`](PROJECT-STATUS.md)。
+- 本指南随发版核对一次：版本基线、状态标签、未验证清单；项目级状态变化同步到 [`PROJECT-STATUS.md`](PROJECT-STATUS.md)；逐版变化写入根 [`CHANGELOG.md`](../../CHANGELOG.md)。
