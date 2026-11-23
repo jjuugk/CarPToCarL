@@ -469,4 +469,50 @@ class AirPlayResourceStateTest {
         // 只写「借用 1 个」看不出是谁借的——车机借屏的动机全在 borrowID 里
         assertTrue(state.describe(), state.describe().contains("借用 phoneCall@解借1000"))
     }
+
+
+    // ---- RECORD 后立刻到达的 Restoring LUM（宝马 MGU-81「无限重启」）----
+
+    @Test
+    fun `Restoring LUM 识别只认恢复上次界面，不把倒车或来电算进去`() {
+        assertTrue(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "Restoring LUM")))
+        assertTrue(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "restoring lum")))
+        assertTrue(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "RESTORING LUM (last user mode)")))
+        assertFalse(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "screen native")))
+        assertFalse(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "PHONE")))
+        assertFalse(AirPlayResourceState.isInitialRestoreReason(mapOf("reasonStr" to "")))
+        assertFalse(AirPlayResourceState.isInitialRestoreReason(null))
+    }
+
+    @Test
+    fun `初始接管豁免只保住主屏，音频接管照常生效且只豁免一次`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        val initial =
+            mapOf<Any?, Any?>(
+                "reasonStr" to "Restoring LUM",
+                "resources" to
+                    listOf(
+                        mapOf<Any?, Any?>("resourceID" to 1, "transferType" to 1),
+                        mapOf<Any?, Any?>("resourceID" to 2, "transferType" to 1),
+                    ),
+            )
+        state.applyCarChange(initial, ignoreInitialScreenTakeover = true)
+        assertTrue("初始接管不该把屏拆掉", state.phoneOwnsScreen)
+        assertFalse("音频接管与该事件无关，照常生效", state.phoneOwnsAudio)
+        assertTrue(state.didIgnoreInitialScreenTakeover)
+
+        // 之后车机真要拿屏（倒车影像），仍按正常仲裁让出
+        state.applyCarChange(resource(1, 1), ignoreInitialScreenTakeover = false)
+        assertFalse("真正的让屏不能被豁免吞掉", state.phoneOwnsScreen)
+    }
+
+    @Test
+    fun `没有 Restoring LUM 标记时初始接管豁免不生效`() {
+        val state = AirPlayResourceState()
+        state.initialize(null)
+        state.applyCarChange(resource(1, 1), ignoreInitialScreenTakeover = true)
+        assertFalse("普通 changeModes 仍应让出主屏", state.phoneOwnsScreen)
+        assertFalse(state.didIgnoreInitialScreenTakeover)
+    }
 }

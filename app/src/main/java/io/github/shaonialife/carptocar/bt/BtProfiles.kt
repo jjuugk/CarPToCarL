@@ -187,8 +187,12 @@ object BtProfiles {
         val started = SystemClock.uptimeMillis()
         var drops = 0
         var idlePolls = 0
+        // 断开一次之后不再按固定轮询追踢：车机把 HFP/A2DP 拉回来的间隔比 POLL 还短时，
+        // 「连上→被断→ACL 掉→RFCOMM 建链失败→再拉回」会锁死成死循环（MGU-81 一轮 13 次）。
+        var sleepMillis = AudioProfileGuardPolicy.POLL_MILLIS
         onEvent(
             "BT-GUARD: 开始盯音频配置文件（每 ${AudioProfileGuardPolicy.POLL_MILLIS}ms 一次，" +
+                "最多断开 ${AudioProfileGuardPolicy.MAX_DROPS} 次且逐次退避，" +
                 "上限 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s，iAP2 会话建立即收工）",
         )
         while (true) {
@@ -204,10 +208,12 @@ object BtProfiles {
                 return drops
             }
             val elapsed = SystemClock.uptimeMillis() - started
-            if (!AudioProfileGuardPolicy.shouldKeepGuarding(elapsed)) {
+            if (!AudioProfileGuardPolicy.shouldKeepGuarding(elapsed, drops)) {
                 onEvent(
-                    "BT-GUARD: 已盯满 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s，" +
-                        "停止（断开 $drops 次）——仍未建立 iAP2 会话",
+                    "BT-GUARD: " +
+                        (if (drops >= AudioProfileGuardPolicy.MAX_DROPS) "已断开 $drops 次达到上限，不再追踢" else
+                            "已盯满 ${AudioProfileGuardPolicy.MAX_MILLIS / 1000}s") +
+                        " → 收工（本次共断开 $drops 次）——把蓝牙控制权交回车机",
                 )
                 return drops
             }
@@ -249,11 +255,21 @@ object BtProfiles {
                             onEvent("BT-GUARD: RFCOMM 已连入且已断开 $drops 次 → 提前收工")
                             return drops
                         }
+                        if (drops >= AudioProfileGuardPolicy.MAX_DROPS) {
+                            onEvent(
+                                "BT-GUARD: 连续断开 $drops 次仍没等到 iAP2/RFCOMM → 停止追踢" +
+                                    "（再踢只会把 ACL 一起打掉，车机永远建不成控制链路）",
+                            )
+                            return drops
+                        }
+                        sleepMillis = AudioProfileGuardPolicy.sleepAfterDrop(drops)
                     }
                 }
             }
             try {
-                Thread.sleep(AudioProfileGuardPolicy.POLL_MILLIS)
+                Thread.sleep(sleepMillis)
+                // 只在「刚断开」的那一轮退避；没动手的轮次回到常规轮询，别把窗口整个拖长
+                sleepMillis = AudioProfileGuardPolicy.POLL_MILLIS
             } catch (_: InterruptedException) {
                 onEvent("BT-GUARD: 线程被中断 → 收工（本次共断开 $drops 次）")
                 return drops
@@ -383,17 +399,43 @@ object BtProfiles {
  * 上限 5 分钟：宝马 fork 实测的抖动窗口是 2~4 分钟，留 1 分钟余量。到点还在抖
  * 说明这条路走不通（车机根本不打算开 iAP2 窗口），继续断只会让用户看着蓝牙
  * 反复连断，不如停下来把控制权交回去。
+ *
+ * ## 2026-11-23 加次数上限与退避（MGU-81「无限重启」日志）
+ *
+ * 原实现唯一的上限是 5 分钟，中间可以毫无代价地踢几十次。MGU-81 那轮实测在
+ * RFCOMM 连入前踢了 13 次：车机每次把 HFP/A2DP 拉回来我们都立刻再断，ACL 只活
+ * 1~3 秒，控制链路根本建不起来，车机随后把整套 CarPlay 服务撤掉重开。现在
+ * 3 次封顶，且每次断开后按 3/6/12 秒退避——给车机一个能建链的安静窗口。
  */
 object AudioProfileGuardPolicy {
     const val POLL_MILLIS = 1_500L
     const val MAX_MILLIS = 300_000L
 
+    /** 一轮守卫主动断开 HFP/A2DP 的次数上限（MGU-81 实测 13 次，远超合理范围）。 */
+    const val MAX_DROPS = 3
+
     /** RFCOMM 连入后最多再踢 1 次（竞态兜底；正常路径一连入就收工）。 */
     const val MAX_DROPS_AFTER_RFCOMM = 1
 
-    /** 守卫是否还该继续盯：从开始计时起，未到上限就一直盯。 */
+    /** 第 n 次断开后的退避（毫秒）；超出数组长度沿用最后一档。 */
+    private val DROP_BACKOFF_MILLIS = longArrayOf(3_000L, 6_000L, 12_000L)
+
+    /** 守卫是否还该继续盯：从开始计时起，未到时间上限就一直盯。 */
     fun shouldKeepGuarding(
         elapsedMillis: Long,
         maxMillis: Long = MAX_MILLIS,
     ): Boolean = elapsedMillis < maxMillis
+
+    /** 时间 + 次数双上限：任一到点都收工。 */
+    fun shouldKeepGuarding(
+        elapsedMillis: Long,
+        drops: Int,
+        maxMillis: Long = MAX_MILLIS,
+        maxDrops: Int = MAX_DROPS,
+    ): Boolean = elapsedMillis < maxMillis && drops < maxDrops
+
+    /** 断开 [drops] 次后下一次轮询前要等多久；未断开过时用常规轮询间隔。 */
+    fun sleepAfterDrop(drops: Int): Long =
+        if (drops <= 0) POLL_MILLIS
+        else DROP_BACKOFF_MILLIS[(drops - 1).coerceAtMost(DROP_BACKOFF_MILLIS.lastIndex)]
 }

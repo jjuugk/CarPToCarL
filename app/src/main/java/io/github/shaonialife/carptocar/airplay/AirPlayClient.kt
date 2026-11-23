@@ -140,6 +140,12 @@ class AirPlayClient(
     /** 会话级 RECORD 预算：默认允许重复；[restrictSingleRecord] 打开后只放行第一次。 */
     private val recordBudget = RecordBudget()
 
+    /** 首次 RECORD 完成的时刻（uptimeMillis）；0 = 本轮还没 RECORD。 */
+    @Volatile private var recordedAtMs: Long = 0L
+
+    /** 「Restoring LUM」初始接管只豁免一次，之后真让屏照常处理。 */
+    @Volatile private var initialScreenTakeoverIgnored = false
+
     /**
      * 本接收端对「会话激活后再发一次 RECORD」过敏（宝马 iD6 / NBT Evo、JYBOX-80）。
      *
@@ -2536,6 +2542,13 @@ class AirPlayClient(
     }
 
     private companion object {
+        /**
+         * RECORD 后多长内的 `Restoring LUM` 算「初始接管」而不是用户让屏（毫秒）。
+         * 宝马 MGU-81 实测 1~15ms 到达；2 秒留足慢车机的事件通道延迟，又不会把
+         * 用户随后切倒车影像的动作误吞。
+         */
+        const val INITIAL_TAKE_GRACE_MS = 2_000L
+
         /** 主屏视频流类型（对照接收端 STREAM_TYPE_MAIN_SCREEN；100 是音频、130 是数据/iAP 隧道）。 */
         const val SCREEN_STREAM_TYPE = 110L
 
@@ -3716,6 +3729,7 @@ class AirPlayClient(
                 )
             // 报文确实发出去了（拿到应答，不论状态码）：记进预算，后续不再补发。
             recordBudget.noteSent()
+            if (recordedAtMs == 0L) recordedAtMs = SystemClock.uptimeMillis()
             val ok = statusLine.contains("200")
             log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
             ok
@@ -3901,13 +3915,22 @@ class AirPlayClient(
                             val reply =
                                 if (command["type"] == "changeModes") {
                                     val changeParams = command["params"] as? Map<*, *>
-                                    audioTransfer = resourceState.applyCarChange(changeParams)
+                                    val sinceRecord =
+                                        if (recordedAtMs == 0L) Long.MAX_VALUE
+                                        else SystemClock.uptimeMillis() - recordedAtMs
+                                    val initialRestore =
+                                        !initialScreenTakeoverIgnored &&
+                                            AirPlayResourceState.isInitialRestoreReason(changeParams) &&
+                                            sinceRecord in 0L..INITIAL_TAKE_GRACE_MS
+                                    if (initialRestore) initialScreenTakeoverIgnored = true
+                                    audioTransfer = resourceState.applyCarChange(changeParams, initialRestore)
                                     // 两行：①人读的状态（谁持有、借用者是谁）；②报文原文（含所有
                                     // 未知字段）。reasonStr 在别克 6369 上恒为空串，只能靠原文里
                                     // 的 borrowID / transferType / 约束值来判断车机在干什么。
                                     log(
                                         "EVENT: changeModes reasonStr=" +
                                             AirPlayResourceState.reasonText(changeParams) +
+                                            (if (initialRestore) " [初始接管豁免：RECORD 后 ${sinceRecord}ms，不拆屏流]" else "") +
                                             " " + resourceState.describe(),
                                     )
                                     log("EVENT: changeModes 原文=" + AirPlayResourceState.paramsText(changeParams))

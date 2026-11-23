@@ -119,6 +119,12 @@ class AirPlayResourceState {
 
     private val resources = linkedMapOf(RESOURCE_SCREEN to Resource(), RESOURCE_AUDIO to Resource())
 
+    /** 是否豁免过一次「RECORD 后立刻 Restoring LUM」的初始接管（诊断用）。 */
+    private var initialScreenTakeoverIgnored = false
+
+    /** 上面那个豁免是否发生过；只对当前会话有意义。 */
+    val didIgnoreInitialScreenTakeover: Boolean get() = synchronized(lock) { initialScreenTakeoverIgnored }
+
     /** 车机侧每次改判 +1：手机申请在发布期间若遇到车机改判，就不再提交（以车机最新决定为准）。 */
     private var carRevision = 0L
 
@@ -268,7 +274,19 @@ class AirPlayResourceState {
      *
      * 未知 `transferType` 一律忽略：宁可维持旧归属，也不要猜错方向。
      */
-    fun applyCarChange(params: Map<*, *>?): CarAudioTransfer? = synchronized(lock) { applyCarChangeLocked(params) }
+    fun applyCarChange(
+        params: Map<*, *>?,
+        /**
+         * 车机在 RECORD 后几毫秒发来的「恢复上次界面状态」不是用户让屏（宝马 MGU-81
+         * 的 `reasonStr="Restoring LUM"`）：它只是把资源归属同步回自己，我们若照单拆屏流，
+         * 车机会把整条会话判废并重开。此标志只对**主屏的 transferType=1**生效，音频照常处理。
+         */
+        ignoreInitialScreenTakeover: Boolean = false,
+    ): CarAudioTransfer? =
+        synchronized(lock) {
+            if (ignoreInitialScreenTakeover && isInitialRestoreReason(params)) initialScreenTakeoverIgnored = true
+            applyCarChangeLocked(params, ignoreInitialScreenTakeover)
+        }
 
     /**
      * 报告**本机**语音态（`Speech` / `speechMode`）。
@@ -378,7 +396,10 @@ class AirPlayResourceState {
         return "$base$borrow/$permanent"
     }
 
-    private fun applyCarChangeLocked(params: Map<*, *>?): CarAudioTransfer? {
+    private fun applyCarChangeLocked(
+        params: Map<*, *>?,
+        ignoreInitialScreenTakeover: Boolean = false,
+    ): CarAudioTransfer? {
         carRevision++
         var audioTransfer: CarAudioTransfer? = null
         (params?.get("resources") as? List<*>)?.forEach { raw ->
@@ -391,6 +412,12 @@ class AirPlayResourceState {
             when (transfer) {
                 // 1 接管：车机成为永久归属方，并可能带一个接管约束
                 1 -> {
+                    if (ignoreInitialScreenTakeover && isInitialRestoreReason(params) && id == RESOURCE_SCREEN) {
+                        // 会话刚 RECORD 完的「恢复上次界面」不是让屏。保持手机持屏，
+                        // 回给车机的 modesChanged 也说手机持屏——不拆流，会话才能活。
+                        // 只豁免首次；之后车机真要接管（倒车/来电）仍按正常仲裁处理。
+                        return@forEach
+                    }
                     resource.permanentEntity = ENTITY_CAR
                     resource.takeConstraint = (item["takeConstraint"] as? Number)?.toInt()
                     resource.borrowConstraint = (item["borrowConstraint"] as? Number)?.toInt()
@@ -490,6 +517,18 @@ class AirPlayResourceState {
          *
          * 缺省与空串分开报：`(-)` = 车机压根没给这个字段，`("")` = 给了但为空。
          */
+        /**
+         * 车机在会话刚建立时发来的「恢复上次用户界态」（宝马 MGU-81 实测
+         * `reasonStr="Restoring LUM"`，RECORD 后 1~15ms 到达，transferType=1）。
+         *
+         * 这不是用户把画面让给车机，而是车机在同步自己的初始归属。忽略大小写与词序，
+         * 只认同时含 restoring / lum 的文本——倒车影像（PDC / turn）不会命中。
+         */
+        fun isInitialRestoreReason(params: Map<*, *>?): Boolean {
+            val text = params?.get("reasonStr")?.toString()?.lowercase() ?: return false
+            return text.contains("restoring") && text.contains("lum")
+        }
+
         fun reasonText(params: Map<*, *>?): String {
             val raw = params?.get("reasonStr") ?: return "(-)"
             val text = raw.toString()

@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.bt
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,5 +41,29 @@ class AudioProfileGuardPolicyTest {
             "上限 ${AudioProfileGuardPolicy.MAX_MILLIS}ms 盖不住 4 分钟抖动窗口",
             AudioProfileGuardPolicy.MAX_MILLIS >= 240_000,
         )
+    }
+
+
+    @Test
+    fun stopsAfterThreeDropsEvenWithTimeRemaining() {
+        assertTrue(AudioProfileGuardPolicy.shouldKeepGuarding(0, 0))
+        assertTrue(AudioProfileGuardPolicy.shouldKeepGuarding(0, 2))
+        assertFalse(
+            "车机把 HFP 拉回来就再断一次会让 ACL 永远建不起来",
+            AudioProfileGuardPolicy.shouldKeepGuarding(0, AudioProfileGuardPolicy.MAX_DROPS),
+        )
+        // 时间上限仍然有效
+        assertFalse(AudioProfileGuardPolicy.shouldKeepGuarding(AudioProfileGuardPolicy.MAX_MILLIS, 0))
+    }
+
+    @Test
+    fun backoffGrowsAfterEachDrop() {
+        val first = AudioProfileGuardPolicy.sleepAfterDrop(1)
+        val second = AudioProfileGuardPolicy.sleepAfterDrop(2)
+        val third = AudioProfileGuardPolicy.sleepAfterDrop(3)
+        assertTrue("第一次断开后至少退避 2 秒", first >= 2_000)
+        assertTrue("退避应逐次拉长", second > first && third > second)
+        assertEquals("没断开过时用常规轮询间隔", AudioProfileGuardPolicy.POLL_MILLIS, AudioProfileGuardPolicy.sleepAfterDrop(0))
+        assertEquals("超出次数上限沿用最后一档", third, AudioProfileGuardPolicy.sleepAfterDrop(9))
     }
 }
