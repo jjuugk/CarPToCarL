@@ -48,6 +48,8 @@ data class CarPlayNowPlaying(
      * 换了 id 才会重新走 SETUP/START/分块那一套。
      */
     val artworkId: Int? = null,
+    /** 本地传输策略标记，iAP2 编码不包含此字段。 */
+    internal val navigationArtwork: Boolean = false,
 )
 
 object Iap2NowPlaying {

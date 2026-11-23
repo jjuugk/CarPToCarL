@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.airplay
 
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
+import io.github.shaonialife.carptocar.iap2.Iap2ArtworkSupport
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
 import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
@@ -52,6 +53,8 @@ class VirtualIap2LinkTest {
         val car = Iap2LinkEngine()
         /** 可变歌名源：测试「订阅先于歌名」「内容变化」两条路径。 */
         var nowPlaying: CarPlayNowPlaying? = null
+        var nowPlayingOverride: CarPlayNowPlaying? = null
+        var artwork: Map<Int, ByteArray> = emptyMap()
         val link =
             VirtualIap2Link(
                 log = { },
@@ -70,6 +73,8 @@ class VirtualIap2LinkTest {
                 alive = { false },
                 nowMillis = { clock },
                 nowPlayingProvider = { nowPlaying },
+                artworkProvider = { artwork[it] },
+                nowPlayingOverride = { nowPlayingOverride },
             )
         var clock = 0L
         var now = 1L
@@ -419,6 +424,69 @@ class VirtualIap2LinkTest {
             h.link.nowPlayingKey(np),
             h.link.nowPlayingKey(np.copy(title = "另一首")),
         )
+    }
+
+    @Test
+    fun navigationOverrideRequiresSubscriptionAndRestoresTheSameSong() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying = song("音乐标题")
+        h.nowPlayingOverride = song("转向指引")
+
+        h.link.pushNowPlaying()
+        h.tick()
+        h.settle()
+        assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("音乐标题"))
+
+        h.carSends(0x5000)
+        h.settle()
+        assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("转向指引"))
+        h.nowPlayingOverride = null
+        h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS
+        h.tick()
+        h.settle()
+        assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("音乐标题"))
+
+        h.carSends(0x5002)
+        h.nowPlayingOverride = song("迟到指引")
+        h.link.pushNowPlaying()
+        h.tick()
+        h.settle()
+        assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("音乐标题"))
+    }
+
+    @Test
+    fun navigationArtworkTimeoutDoesNotDisableMusicArtwork() {
+        Iap2ArtworkSupport.reset()
+        try {
+            val h = Harness()
+            h.readyForSubscriptions()
+            val guide = song("转向指引").copy(artworkId = 21, navigationArtwork = true)
+            h.nowPlayingOverride = guide
+            h.artwork = mapOf(21 to byteArrayOf(1), 22 to byteArrayOf(2))
+
+            h.carSends(0x5000)
+            h.settle()
+            assertEquals(Iap2NowPlaying.encode(guide).toList(), h.lastRawFrameOf(0x5001)?.toList())
+
+            h.clock += VirtualIap2Link.ARTWORK_START_TIMEOUT_MILLIS
+            h.tick()
+            h.link.pushNowPlaying()
+            h.tick()
+            h.settle()
+            assertFalse(Iap2ArtworkSupport.unsupported)
+            assertEquals(Iap2NowPlaying.encode(guide.copy(artworkId = null)).toList(), h.lastRawFrameOf(0x5001)?.toList())
+
+            val music = song("音乐标题").copy(artworkId = 22)
+            h.nowPlaying = music
+            h.nowPlayingOverride = null
+            h.link.pushNowPlaying()
+            h.tick()
+            h.settle()
+            assertEquals(Iap2NowPlaying.encode(music).toList(), h.lastRawFrameOf(0x5001)?.toList())
+        } finally {
+            Iap2ArtworkSupport.reset()
+        }
     }
 
     @Test

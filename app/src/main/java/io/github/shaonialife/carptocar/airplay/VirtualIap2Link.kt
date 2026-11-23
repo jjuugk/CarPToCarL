@@ -78,6 +78,7 @@ class VirtualIap2Link(
      * 留空，不会卡住链路）。真正的传输在 session 12 上走 [Iap2ArtworkTransfer]。
      */
     private val artworkProvider: ((Int) -> ByteArray?)? = null,
+    private val nowPlayingOverride: (() -> CarPlayNowPlaying?)? = null,
 ) {
     private val lock = Any()
 
@@ -113,6 +114,7 @@ class VirtualIap2Link(
     // ---- 0x5000 订阅后的周期补推（歌名晚于订阅到达时唯一能自愈的路径）----
     /** 车机是否订阅过 0x5000；没订阅不主动推 0x5001，避免改变既有会话形态。 */
     private var nowPlayingSubscribed = false
+    private var nowPlayingOverrideSubscribed = false
 
     /** 上次实际发出的 0x5001 内容键；订阅应答 / 事件补推 / 周期补推三条路径共用。 */
     private var lastPushedNowPlayingKey: String? = null
@@ -123,6 +125,8 @@ class VirtualIap2Link(
     // ---- 封面文件传输（session 12）状态 ----
     /** 正在传的封面 id；0 = 没有在传。 */
     private var artworkPendingId = 0
+    private var artworkPendingIsNavigation = false
+    private var navigationArtworkUnavailable = false
 
     /** 正在传的封面字节 —— 等车机回 START 之后才按块发出去。 */
     private var artworkPendingBytes: ByteArray? = null
@@ -313,7 +317,7 @@ class VirtualIap2Link(
     fun pushNowPlaying(quiet: Boolean = false) {
         synchronized(lock) {
             if (!mib3Identified && !tunnelIdentified) return
-            val nowPlaying = nowPlayingProvider?.invoke() ?: return
+            val nowPlaying = displayNowPlaying() ?: return
             lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
             sendNowPlayingLocked(nowPlaying)
             if (!quiet) {
@@ -363,7 +367,7 @@ class VirtualIap2Link(
         val now = nowMillis()
         if (lastNowPlayingPollMs != 0L && now - lastNowPlayingPollMs < NOW_PLAYING_POLL_MILLIS) return
         lastNowPlayingPollMs = now
-        val np = nowPlayingProvider?.invoke() ?: return
+        val np = displayNowPlaying() ?: return
         val key = nowPlayingKey(np)
         if (key == lastPushedNowPlayingKey) return
         lastPushedNowPlayingKey = key
@@ -479,6 +483,9 @@ class VirtualIap2Link(
             artworkDeliveredId = 0
             artworkSetupAtMs = 0L
             nowPlayingSubscribed = false
+            nowPlayingOverrideSubscribed = false
+            artworkPendingIsNavigation = false
+            navigationArtworkUnavailable = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
             // 导航订阅是链路级状态：对端重发 DETECT 后必须重收 0x5200 才再推
@@ -648,6 +655,11 @@ class VirtualIap2Link(
         artworkSetupAtMs = 0L
         // 标成「已处理」，避免同一张图在收尾时又被重排一次 SETUP
         artworkDeliveredId = id
+        if (artworkPendingIsNavigation) {
+            navigationArtworkUnavailable = true
+            log("IAPLINK: 导航封面未收到 START，本链路改用文字指引")
+            return
+        }
         if (Iap2ArtworkSupport.markUnsupported("封面 SETUP id=$id 等了 ${waited}ms 没有 START")) {
             log(
                 "IAPLINK: 车机不取封面（id=$id 的 SETUP 等了 ${waited}ms 没有 START）" +
@@ -978,9 +990,10 @@ class VirtualIap2Link(
                 // 每次（重）订阅都是全新上下文：清掉上次的内容键，允许同歌再推一次；
                 // 同时挂起周期补推——空态不是终点，歌名晚到时由节拍自愈。
                 nowPlayingSubscribed = true
+                nowPlayingOverrideSubscribed = true
                 lastPushedNowPlayingKey = null
                 lastNowPlayingPollMs = nowMillis()
-                val nowPlaying = nowPlayingProvider?.invoke()
+                val nowPlaying = displayNowPlaying()
                 if (nowPlaying != null) {
                     lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
                     sendNowPlayingLocked(nowPlaying)
@@ -992,6 +1005,11 @@ class VirtualIap2Link(
                     sendRawCsmLocked(MIB3_NOW_PLAYING_UPDATE_IDLE)
                     log("IAPLINK: MIB3 0x5000 → 0x5001（空态，无正在播放；已挂起周期补推）")
                 }
+            }
+
+            Iap2MessageIds.STOP_NOW_PLAYING_UPDATES -> {
+                // 保持上游音乐路径的订阅行为，只停止额外的导航覆盖。
+                nowPlayingOverrideSubscribed = false
             }
 
             ids.START_HID -> {
@@ -1177,6 +1195,16 @@ class VirtualIap2Link(
      */
     private fun buildNowPlayingUpdate(np: CarPlayNowPlaying): ByteArray = Iap2NowPlaying.encode(np)
 
+    private fun displayNowPlaying(): CarPlayNowPlaying? {
+        val overlay = if (nowPlayingOverrideSubscribed) nowPlayingOverride?.invoke() else null
+        if (overlay == null) return nowPlayingProvider?.invoke()
+        return if (overlay.navigationArtwork && navigationArtworkUnavailable) {
+            overlay.copy(artworkId = null)
+        } else {
+            overlay
+        }
+    }
+
     /**
      * 发 `0x5001`，并在带封面编号时紧接着发起 session 12 文件传输。
      *
@@ -1190,11 +1218,11 @@ class VirtualIap2Link(
         sendRawCsmLocked(buildNowPlayingUpdate(np))
         val id = np.artworkId ?: return
         if (id == artworkDeliveredId || id == artworkPendingId) return
-        startArtworkTransferLocked(id)
+        startArtworkTransferLocked(id, np.navigationArtwork)
     }
 
     /** 发封面 SETUP，把图放进待发槽，等车机回 START 再按块发。 */
-    private fun startArtworkTransferLocked(id: Int) {
+    private fun startArtworkTransferLocked(id: Int, navigation: Boolean) {
         if (engine.state != Iap2LinkEngine.State.NORMAL) {
             log("IAPLINK: 封面 id=$id 想传但链路未就绪（${engine.state}）——本轮跳过")
             return
@@ -1209,6 +1237,7 @@ class VirtualIap2Link(
             return
         }
         artworkPendingId = id
+        artworkPendingIsNavigation = navigation
         artworkPendingBytes = bytes
         artworkSetupAtMs = nowMillis()
         val queued =

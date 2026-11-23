@@ -160,6 +160,16 @@ object CarLifeHijack {
     @Volatile
     private var client: CarLifeHuClient? = null
 
+    @Volatile
+    internal var navigationNowPlayingEnabled = false
+        set(value) {
+            field = value
+            if (!value) client?.navigationDisplay?.clear()
+        }
+
+    internal fun navigationDisplay() =
+        client?.takeIf { navigationNowPlayingEnabled && it.isRunning }?.navigationDisplay?.current()
+
     /** 当前会话的视频通道；为 null 时收到的帧只进 GOP 缓存。 */
     @Volatile
     private var sender: VideoSink? = null
@@ -1178,6 +1188,7 @@ object CarLifeHijack {
                     onMediaInfo = { info -> onMediaInfo(info) },
                     onMediaProgress = { ms -> onMediaProgress(ms) },
                     onNaviNextTurn = { info -> onNaviNextTurn(info) },
+                    navigationNowPlayingEnabled = { navigationNowPlayingEnabled },
                     onEngineDisconnected = {
                         // onEngineDisconnected 只在「非主动 stop」时触发，旧 socket 不会误报。
                         logSink?.invoke("CARLIFE: 引擎控制通道断开——同步结束导航 HUD")

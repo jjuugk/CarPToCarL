@@ -61,6 +61,7 @@ import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionFallback
 import io.github.shaonialife.carptocar.media.MediaSessionsState
+import io.github.shaonialife.carptocar.media.NavigationNowPlaying
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
 import io.github.shaonialife.carptocar.net.CarNetworkReadiness
@@ -496,6 +497,7 @@ object SessionController {
     fun ensure(context: Context) {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
+        CarLifeHijack.navigationNowPlayingEnabled = DisplayPrefs.navigationNowPlaying(context)
         // 横屏兼容写入失败的原因（user build 限制 / shell 无权限）只有这里能落盘：
         // 车机侧设置面板的 toast 只给用户看，排查需要日志。
         AppOrientationCompat.diagSink = ::appendLog
@@ -867,6 +869,7 @@ object SessionController {
      * 「真爱假说」后，18:35 重连的整轮会话即使媒体事件触发也会被这行去重静默吞掉
      * ——车机端持续空白，日志里连一行「补推」都没有（2026-10-25 实测）。
      */
+    @Synchronized
     fun resetNowPlayingDedupe() {
         lastPushedNowPlayingKey = null
         // 封面同理：新会话是新的车机上下文，编号与缓存都得从头来（车机侧按 id 缓存，
@@ -874,6 +877,7 @@ object SessionController {
         artworkKey = null
         artworkBytes = null
         artworkId = 0
+        navigationArtwork = null
         artworkSeq = 0
         lastEncodedSource = null
         lastEncodedBytes = null
@@ -901,6 +905,28 @@ object SessionController {
 
     /** 标识符分配序号，1..255 循环 —— **换了 id 车机才会重新要图**（同 id 走它的缓存）。 */
     private var artworkSeq: Int = 0
+
+    private data class NavigationArtwork(val id: Int, val bytes: ByteArray)
+
+    @Volatile
+    private var navigationArtwork: NavigationArtwork? = null
+
+    @Synchronized
+    private fun ensureNavigationArtwork(bytes: ByteArray): Int {
+        val previous = navigationArtwork
+        if (previous != null && previous.bytes.contentEquals(bytes)) return previous.id
+        val id = allocateArtworkId(exclude = artworkId)
+        navigationArtwork = NavigationArtwork(id, bytes)
+        return id
+    }
+
+    // 音乐封面与箭头共享同一个车机编号空间，环回时避开另一张仍保留的图片。
+    private fun allocateArtworkId(exclude: Int): Int {
+        do {
+            artworkSeq = artworkSeq % 254 + 1
+        } while (artworkSeq == exclude)
+        return artworkSeq
+    }
 
     /**
      * 上次编码用的**源图对象**与它的编码结果。
@@ -945,8 +971,7 @@ object SessionController {
             appendLog("ART: 封面与上一张相同 ${bytes.size}B —— 沿用 id=$artworkId（不重传）")
             return artworkId
         }
-        artworkSeq = artworkSeq % 254 + 1
-        artworkId = artworkSeq
+        artworkId = allocateArtworkId(exclude = navigationArtwork?.id ?: 0)
         artworkBytes = bytes
         appendLog("ART: 封面就绪 id=$artworkId ${bytes.size}B（$key）")
         return artworkId
@@ -6419,9 +6444,14 @@ object SessionController {
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
+                            val navigation = NavigationNowPlaying(::buildNowPlaying, ::ensureNavigationArtwork)
+                            created.nowPlayingOverride = { navigation.displayOverride(CarLifeHijack.navigationDisplay()) }
                             // 封面字节：iAP2 文件传输（session 12）按 0x5001 里声明的 id 来取图。
-                            // 只认当前这一张 —— 旧 id 的迟到请求直接给 null，避免传错图。
-                            created.artworkSource = { id -> artworkBytes?.takeIf { id == artworkId } }
+                            // 分别按编号查当前箭头和音乐封面，拿不到的旧编号直接丢弃。
+                            created.artworkSource = { id ->
+                                navigationArtwork?.takeIf { it.id == id }?.bytes
+                                    ?: artworkBytes?.takeIf { id == artworkId }
+                            }
                             // 0x4155 CallStateUpdate 的数据源：车机订阅通话状态时按真实值应答，
                             // 否则它认定这台手机永远不打电话，通话时不切音频通路。
                             created.callStateSource = { callStateOf() }

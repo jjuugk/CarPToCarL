@@ -1112,6 +1112,54 @@
                     android:layout_marginStart="52dp"
                     android:background="#5A394444" />
 
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/navigation_now_playing_label"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/navigation_now_playing_note"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchNavigationNowPlaying"
+                        android:contentDescription="@string/navigation_now_playing_label"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
                 <!-- 媒体采样率策略：点击循环 自动 → 48kHz → 44.1kHz -->
                 <LinearLayout
                     android:id="@+id/rowAudioRate"

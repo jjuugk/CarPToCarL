@@ -57,11 +57,22 @@ object DisplayPrefs {
     private const val KEY_ADAPTIVE_TOUCH = "adaptive_touch_domain"
     private const val KEY_KEEP_SCREEN_STREAM = "keep_screen_stream_on_take"
     private const val KEY_PROACTIVE_AUDIO = "proactive_audio_on_link"
+    private const val KEY_NAVIGATION_NOW_PLAYING = "navigation_now_playing"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
     private const val KEY_LAST_CAR_FROM_CAR = "last_car_from_car"
     private const val KEY_LAST_STREAM_WIDTH = "last_stream_width"
     private const val KEY_LAST_STREAM_HEIGHT = "last_stream_height"
+
+    fun navigationNowPlaying(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NAVIGATION_NOW_PLAYING, false)
+
+    fun setNavigationNowPlaying(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_NAVIGATION_NOW_PLAYING, enabled)
+            .apply()
+    }
 
     /**
      * 上一次会话的分辨率快照（供「没连接时」界面展示）。

@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.carlife
 
+import io.github.shaonialife.carptocar.media.NavigationDisplay
+import io.github.shaonialife.carptocar.media.NavigationIcon
 import io.github.shaonialife.carptocar.util.LogThrottle
 import io.github.shaonialife.carptocar.video.H264Sps
 import java.io.DataInputStream
@@ -88,6 +90,7 @@ class CarLifeHuClient(
      * 导航开始/结束/每条诱导都会走这里。解析函数自己吞异常，畸形包不会拆链。
      */
     private val onNaviNextTurn: (info: CarLifeNaviNextTurn) -> Unit = {},
+    private val navigationNowPlayingEnabled: () -> Boolean = { false },
     /**
      * 控制通道意外断开（EOF/reset，非我们主动 [stop]）。
      *
@@ -233,6 +236,8 @@ class CarLifeHuClient(
     private val emptyMediaLog = LogThrottle(5_000L)
     /** 导航诱导每秒多拍，日志限流 10 秒一行；回调本身不受限流影响。 */
     private val naviLog = LogThrottle(10_000L)
+    private val hudSubscription = CarLifeHudSubscription(::send)
+    internal val navigationDisplay = NavigationDisplay()
 
     /** 命令帧写锁：心跳线程、握手线程与视频看门狗会并发下发，必须串行写同一条 socket。 */
     private val writeLock = Any()
@@ -580,6 +585,7 @@ class CarLifeHuClient(
 
     fun stop() {
         running.set(false)
+        navigationDisplay.clear()
         touchLock.lock()
         try {
             touchQueue.clear()
@@ -1045,7 +1051,20 @@ class CarLifeHuClient(
                 }
             }
 
+            CarLifeHudProtocol.SUBSCRIBE_DONE -> {
+                hudSubscription.receive(payload)
+            }
+
             CarLifeProtocol.MD_NAVI_NEXT_TURN -> {
+                if (navigationNowPlayingEnabled()) {
+                    val turn = CarLifeHudProtocol.turn(payload)
+                    if (turn != null) {
+                        val request = synchronized(navigationDisplay) {
+                            if (running.get() && navigationNowPlayingEnabled()) navigationDisplay.receive(turn) else null
+                        }
+                        if (request != null) NavigationIcon.prepare(navigationDisplay, request)
+                    }
+                }
                 // 手机导航诱导（转向/路名/距离）。只在第一条与解析失败时限流打日志：
                 // 诱导每秒多拍，逐条刷会把 0x10035 歌名和握手日志全挤掉。
                 val info = CarLifeNaviGuide.parse(payload)
@@ -2109,6 +2128,9 @@ class CarLifeHuClient(
                 Thread.sleep(1000)
                 if (!running.get()) return
                 send(CarLifeProtocol.HEARTBEAT, ByteArray(0))
+                if (versionMatched && navigationNowPlayingEnabled()) {
+                    hudSubscription.tick(android.os.SystemClock.uptimeMillis())
+                }
             }
         } catch (error: Exception) {
             if (running.get()) log("CARLIFE: 心跳中止 - ${error.message}")
