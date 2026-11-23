@@ -19,17 +19,17 @@
 
 **最新正式版**（免编译，直接装）：
 
-> **[`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk)**
-> —— 主线固定直链（当前 1.2.82，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
+> **[`CarPToCarL-1.2.83.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.83/CarPToCarL-1.2.83.apk)**
+> —— 主线固定直链（当前 1.2.83，14.2 MB）。**刻意不用 `releases/latest`**：那个指针
 > 按发布时间算，`-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404
 
 | 项        | 值                                                                              |
 | -------- | ------------------------------------------------------------------------------ |
 | 全部版本     | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases)（含更新日志与历史版本）        |
-| 本版固定包    | [`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk) |
+| 本版固定包    | [`CarPToCarL-1.2.83.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.83/CarPToCarL-1.2.83.apk) |
 | 系统要求     | Android 12 及以上（minSdk 31）                                                      |
-| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.82，但不要与其它来源的包混装                    |
-| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.82.apk`                              |
+| 签名       | 作者个人调试证书（仓库不含发布密钥）→ 可直接**覆盖安装** 1.0.0 ~ 1.2.83，但不要与其它来源的包混装                    |
+| 安装       | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.83.apk`                              |
 | 前置       | 手机需装 **CarLife+**（荣耀机型为 `com.baidu.carlife.honor`）                             |
 
 首次启动会弹出免责声明，需手动同意。装好后怎么配、常见故障怎么查，见
@@ -41,8 +41,8 @@
 
 | 项    | 值                                                                             |
 | ---- | ----------------------------------------------------------------------------- |
-| 当前版本 | `1.2.82`（正式版；并入 PR #39：CarLife 导航诱导 `0x10030` → iAP2 `0x5201/0x5202` 转发，**当前仅按小米 HUD 链路实现**；车机 `0x1D01` 清单明确无 `0x52xx` 时一律不发送。含 1.2.81 选档加固。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
-| 下载   | **[`CarPToCarL-1.2.82.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.82/CarPToCarL-1.2.82.apk)**（见上方「立即下载」）       |
+| 当前版本 | `1.2.83`（正式版；修 BMW MGU-81 全程无声——PCM 门禁只认引擎信号、暂停窗口 15s→1.5s、「立即重启一次」改先拆后建；并入 PR #37 BMW EntryEVO 链路死锁修复；并入 PR #40「仪表转向指引」开关（默认关，经「正在播放」显示 CarLife 转向文字与箭头）。详见「十一、版本历史」。版本号唯一来源：`app/build.gradle.kts` 的 `appVersionName`） |
+| 下载   | **[`CarPToCarL-1.2.83.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.83/CarPToCarL-1.2.83.apk)**（见上方「立即下载」）       |
 | 包名   | `io.github.shaonialife.carptocar`                                             |
 | 应用名  | **CarPToCarL**（不含任何第三方商标）                                                     |
 | 最低系统 | Android 12（minSdk 31，targetSdk 34）                                            |
@@ -830,6 +830,36 @@ app/src/main/aidl/io/github/shaonialife/carptocar/input/ICarInput.aidl
 > 也就是说 `1.2.44` 不用、直接发 `1.2.45`（单个 `4` 不违规，`1.2.43` 合法）。
 > `app/build.gradle.kts` 里有一段 `require` 强制执行：撞号时构建立刻失败，
 > 不会出现「发完版才发现号码犯忌」。
+
+### 1.2.83 —— 2026-11-23（BMW 无声修复 + EntryEVO 建链 + 仪表转向指引，正式版）
+
+**一、BMW MGU-81 全程无声**（根因是自家 PCM 门禁，不是协议失败、也不是编码器坏）
+
+现场：vivo V2337A → BMW MGU-81，档位 `t102/media/0x800000`（AAC-LC 48k 250ms），SETUP 返回 200 OK；
+85 秒的音频流只发出 1758 包（37.5 秒，44%），车机按实时时钟排播，缺口全变成静音。
+
+- `CarLifeMediaPlayback.canForwardPcm` 去掉 `sessionPlaying` 判据，只认引擎信号（`0x30003 PAUSE` / `FOCUS_RELEASED` / STOP / 车机侧 `onCarPause`）。切歌、以及「监听器未绑定 → 会话轮询兜底」会让播放器状态反复抖成 `playing=false`，旧逻辑把它当暂停，累计丢掉约 60% 的 PCM。界面与车机媒体键仍用真实播放状态。
+- `PAUSE_DROP_WINDOW_MS` 15 秒 → **1.5 秒**：残留队列几百毫秒就排空，15 秒窗口一直在吃真实音频。
+- 「立即重启一次」改为**先 stop + TEARDOWN 旧流、再 SETUP**。BMW 不允许同 `(type, audioType)` 的第二条流，旧实现「先建后拆」导致连按 4 次全部 400。通话档在线时拒绝重建，避免拆掉通话流。
+- **未做**：AAC 补静音。引擎真的停推时仍是断档，不是静音帧（AAC 不能填零字节，只能喂零样本重编码）。
+- **未修**：车机侧 `controlPort 6011` 不监听（85 个同步包有 84 个被 ICMP 拒）→ 没有 RTP↔NTP 锚点，车机只能按到达时刻排播。若改完仍有偶发卡顿，下一步查这条。
+
+**二、并入 PR #37（kongkong-l）：BMW EntryEVO（F49 / 阿尔派代工）建链死锁**
+
+- `Iap2LinkEngine`：NORMAL 态收到车机重发的纯 SYN 也回 SYN|ACK。旧实现只在 `NEGOTIATING` / `echoFirst` 处理，NORMAL 态静默丢弃 → 车机重启自己的链路引擎后停止 ACK 一切数据帧（ack 停在证书那帧），`0x5702/0x4300` 全堵在 5 帧窗口。乒乓防护仍由既有 `isPureSyn` 判据保证。
+- EntryEVO / ALPINE（`entry evo` + `alpine` 同时命中）走「干净单档」：该平台证书为 RSA-1024，challenge 固定 20B、只发一次、有限重传 1 次、1.5s 窗口；不再三档轮转，也不再跑诊断变体扫描（诊断版连发 6 帧会占满车机 5 帧窗口）。
+- `MfiLengthMemory` 新增 `hardRejected`：挑战期间断链是强证据，与 `0xAA04` 拒绝字分开记；有其它候选时真正剔除该档位，全部断链时才退回兜底全试。
+- 挑战期间断链改为抛 `IOException`：旧行为是在死链上继续发 `0xaa05`，把真正根因掩盖成「发送 0xaa05 时关闭」。
+
+**三、并入 PR #40（WHCMrShi）：经「正在播放」显示 CarLife 转向文字与箭头**
+
+- 设置页「显示」卡片新增 **「仪表转向指引」** 开关，键 `navigation_now_playing`，**默认关**。
+- 开启后按 Q4 实测的 HUD 订阅（`0x18043/0x18045`）读取指引，用原始转向码、字段 4 的显示距离、字段 6 的箭头，经车机已订阅的 `0x5001` 与封面文件传输（session 12）显示转向文字、道路与 PNG 箭头；真实音乐的播放状态与进度保留。导航结束、引擎断开、开关关闭时恢复音乐与封面。
+- 与 PR #39 的原生 `0x52xx` 路径**并存**：关闭本开关不影响那条 BYD HUD 链路。
+- 已知取舍：关掉开关**不会**主动取消车机侧订阅（没有 unsubscribe 帧），车机可能继续推 `0x10030`，只是不再消费。
+
+**验证**：1013 例单测 0 失败（1.2.82 为 992 例）；`assembleRelease` + `lintVitalRelease` 通过。
+**本版三项均未在本仓车型上实车验证**：BMW 无声修复只有日志证据；EntryEVO 由 PR 作者在 F49 实车验证，但那台车与本仓车型不同；转向指引 PR 作者明确写了「未安装、未路测」，文字/箭头/封面恢复仍需 Q4 + OPPO Car+ 两种启动顺序各测一次。
 
 ### 1.2.82 —— 2026-11-22（导航引导转发 iAP2，正式版）
 
