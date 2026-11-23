@@ -155,39 +155,15 @@
                         android:textStyle="bold" />
                 </FrameLayout>
 
-                <!-- 状态行：状态字 + 残留屏清理入口（检测到残留且用户暂缓时出现） -->
-                <LinearLayout
+                <TextView
+                    android:id="@+id/heroStateText"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:id="@+id/heroStateText"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="未连接"
-                        android:textColor="#EDF4F4"
-                        android:textSize="25sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/btnResidualCleanup"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="10dp"
-                        android:background="@drawable/bg_btn_tonal_warn"
-                        android:paddingStart="11dp"
-                        android:paddingTop="5dp"
-                        android:paddingEnd="11dp"
-                        android:paddingBottom="5dp"
-                        android:text="清理残留屏"
-                        android:textColor="#FFB4AB"
-                        android:textSize="11.5sp"
-                        android:textStyle="bold"
-                        android:visibility="gone" />
-                </LinearLayout>
+                    android:text="未连接"
+                    android:textColor="#EDF4F4"
+                    android:textSize="25sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/heroSubline"
@@ -950,7 +926,7 @@
             </LinearLayout>
 
             <!-- 显示设置（原「显示」面板内容迁移至此，2026-10-24）：
-                 本地 CarLife 劫持开关 + 流分辨率缩放 + 触摸注入节流
+                 本地 CarLife 劫持开关 + 流分辨率缩放
                  （目标帧率设置已移除：固定 60fps，见 DisplayPrefs.FPS） -->
             <LinearLayout
                 android:id="@+id/displayCard"
@@ -1372,49 +1348,6 @@
                     android:text="连接后自动读取车机分辨率"
                     android:textColor="@color/m3_primary"
                     android:textSize="12.5sp" />
-
-                <!-- 触摸注入节流 -->
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
-                    android:text="触摸注入节流"
-                    android:textColor="@color/m3_on_surface"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <SeekBar
-                        android:id="@+id/throttleSeek"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:max="6" />
-
-                    <TextView
-                        android:id="@+id/throttleValue"
-                        android:layout_width="72dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:gravity="end"
-                        android:text="关闭"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
-                    android:textColor="@color/m3_on_var"
-                    android:textSize="12sp" />
 
                 <!-- 触摸域自适应（默认关）：上报坐标域比画面大时按观测上限线性映射 -->
                 <LinearLayout

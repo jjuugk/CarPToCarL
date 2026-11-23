@@ -72,8 +72,7 @@ android {
 
     buildTypes {
         release {
-            // **不做代码混淆**：本项目依赖反射（SystemProperties、Shizuku API）与
-            // 自定义 AIDL，R8 需要额外 keep 规则；首版先保证可运行，混淆留待后续。
+            // 依赖 SystemProperties 反射，启用代码混淆前需要配置 R8 keep 规则。
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
@@ -95,7 +94,6 @@ android {
     }
 
     buildFeatures {
-        aidl = true
         buildConfig = true
     }
 
@@ -111,9 +109,6 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    // CarPlay 风格桌面：分页网格
-    implementation("androidx.viewpager2:viewpager2:1.1.0")
-    implementation("androidx.recyclerview:recyclerview:1.3.2")
     // AirPlay 配对密码学：X25519/Ed25519/ChaCha20-Poly1305/HKDF-SHA512
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 

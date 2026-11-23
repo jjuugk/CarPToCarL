@@ -42,11 +42,7 @@ import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
-import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.KnobRouter
-import io.github.shaonialife.carptocar.input.TouchRouter
-import io.github.shaonialife.carptocar.launcher.VirtualLauncher
-import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
 import io.github.shaonialife.carptocar.launcher.settings.DevModePrefs
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
@@ -57,14 +53,11 @@ import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.PermissionRepair
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
-import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.AppVersion
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogExporter
-import io.github.shaonialife.carptocar.util.SysShell
-import io.github.shaonialife.carptocar.video.StreamFps
 import java.util.Locale
 
 /**
@@ -76,7 +69,7 @@ const val EXTRA_CAR_APPROACH = "io.github.shaonialife.carptocar.extra.CAR_APPROA
 
 /**
  * 手机侧界面（Material 3 暗色重构，设计稿 design/phone-ui-proto.html）：
- * 英雄卡承载连接状态与主操作；连接准备清单化；Shell 状态与日志折叠收纳。
+ * 英雄卡承载连接状态与主操作；连接准备清单化；日志折叠收纳。
  * 会话管线（对象、日志缓冲）全部由 [SessionController] 持有——Activity 只是挂屏：
  * 销毁重建不影响会话，重进界面日志自动续显；连接状态由 1s 轮询对账。
  */
@@ -107,7 +100,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hubCar: ImageView
     private lateinit var hubCaption: TextView
     private lateinit var heroStateText: TextView
-    private lateinit var btnResidualCleanup: TextView
     private lateinit var heroSubline: TextView
     private lateinit var heroStats: TextView
     /** 「显示」卡片里的分辨率行（车机通告值 + 本次码流尺寸）。 */
@@ -139,11 +131,6 @@ class MainActivity : AppCompatActivity() {
     private var connectedAt = 0L
     private var hubBlink: ObjectAnimator? = null
 
-    // 启动残留屏检查进行中（英雄卡显示「检查中」）；发现的残留暂缓清理时
-    // 记在 pendingResidualDisplays，状态旁的「清理残留屏」按钮可再次发起
-    private var startupCheckRunning = false
-    private var pendingResidualDisplays: List<Pair<Int, String>>? = null
-
     // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
     private var lastSentFrames = 0L
 
@@ -153,8 +140,8 @@ class MainActivity : AppCompatActivity() {
     private var activeDisclaimer: androidx.appcompat.app.AlertDialog? = null
 
     /**
-     * 冷启动自动连接请求挂起中：等前置条件齐备（免责声明已接受、启动残留扫描已结束、
-     * 英雄卡空闲）才真正发起。旋转/重建不会置位——[maybeAutoConnect] 全程幂等。
+     * 冷启动自动连接请求挂起中：免责声明已接受、英雄卡空闲时才真正发起。
+     * 旋转/重建不会置位——[maybeAutoConnect] 全程幂等。
      */
     private var autoConnectRequested = false
 
@@ -378,8 +365,6 @@ class MainActivity : AppCompatActivity() {
      *
      * 满足全部前置条件才发起，任一不满足就**原地返回、保留请求**，由对应时机再调一次：
      * - 免责声明未接受 → 等 [showDisclaimer] 的 onAccept 回调续上；
-     * - 启动残留扫描进行中 / 有残留待确认 → 等 [detectResidualDisplays] 收尾续上
-     *   （否则「是否清理残留屏」弹窗会和连接流程的热点确认弹窗抢焦点）；
      * - 已在连接/已连接 → 不重复发起。
      *
      * 走的是和手动点「启动连接」完全相同的链路（权限 → 蓝牙开关 → WLAN → 会话），
@@ -393,7 +378,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
-        if (startupCheckRunning || pendingResidualDisplays != null) return
         if (SessionController.isSessionRunning() || SessionController.sessionStarting) return
         if (heroState != HeroState.IDLE) return
 
@@ -706,9 +690,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (heroState == HeroState.IDLE) {
             ctaButton.alpha = if (mac == null) CTA_BLOCKED_ALPHA else 1f
-            if (pendingResidualDisplays == null) {
-                heroSubline.text = if (mac == null) HINT_MAC_MISSING else HINT_IDLE_READY
-            }
+            heroSubline.text = if (mac == null) HINT_MAC_MISSING else HINT_IDLE_READY
         }
     }
 
@@ -898,10 +880,6 @@ class MainActivity : AppCompatActivity() {
         hubCar = findViewById(R.id.hubCar)
         hubCaption = findViewById(R.id.hubCaption)
         heroStateText = findViewById(R.id.heroStateText)
-        btnResidualCleanup = findViewById(R.id.btnResidualCleanup)
-        btnResidualCleanup.setOnClickListener {
-            pendingResidualDisplays?.let { promptResidualDisplays(it) }
-        }
         heroSubline = findViewById(R.id.heroSubline)
         heroStats = findViewById(R.id.heroStats)
         displayResolutionNote = findViewById(R.id.displayResolutionNote)
@@ -941,22 +919,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageView>(R.id.btnLogBottom).setOnClickListener {
             // 跳到底部：滚动后自动跟底也随之恢复
             scrollConsoleToBottom()
-        }
-
-        // 进程重启兜底：若上次会话未正常退役，「常亮」改过的屏幕超时需要恢复
-        run {
-            val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
-            if (prefs.contains("screen_off_timeout_backup") &&
-                VirtualLauncher.appDisplayId < 0
-            ) {
-                val backup = prefs.getInt("screen_off_timeout_backup", 60_000)
-                prefs.edit().remove("screen_off_timeout_backup").apply()
-                Bg.run("screen-timeout-restore") {
-                    SysShell.exec(
-                        "settings put system screen_off_timeout $backup",
-                    )
-                }
-            }
         }
 
         // 会话中枢（进程级）：登记 applicationContext + 创建会话对象；
@@ -1036,11 +998,6 @@ class MainActivity : AppCompatActivity() {
         // 启动后自动连接：只在**冷启动**发起（旋转/重建不重复）。
         // 真正发起由 maybeAutoConnect 判定——前置条件不齐时它会等下一次时机。
         // 「靠近车机」拉起的这一轮即使 Activity 正在后台重建，也要重新武装一次。
-        //
-        // 这里刻意留 700ms 再判定：`detectResidualDisplays()` 在 onCreate 更靠后执行，
-        // 它会把 startupCheckRunning 置真。延后判定是为了让残留虚拟屏扫描先开跑——
-        // 一边扫描一边起新会话会互相踩（旧屏未清就建新屏）。扫描结束时它也会再调一次
-        // maybeAutoConnect，所以真正的发起时机以自检完成为准，这里只是起步。
         val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
         val silentApproach = launchedByApproach && CarApproachPrefs.silentUi(this)
         // 用户**自己**点开了 App = 明确想用：立刻解除「刚断开过」的抑制。
@@ -1065,8 +1022,8 @@ class MainActivity : AppCompatActivity() {
         }
         // 静默触发：界面建好就走（等同按 Home），连接与状态交给通知栏。
         //
-        // 为什么不是「干脆不建界面」：整条管线（CarLife 接管、虚拟屏/编码器、启动自检）
-        // 都挂在 Activity 这一路上，绕开界面直接连，握手能过但**车机端收不到数据**
+        // 为什么不是「干脆不建界面」：CarLife 接管从 Activity 启动，
+        // 绕开界面直接连，握手能过但**车机端收不到数据**
         // （1.2.2 实车结论）。所以先让界面完整建起来，再退到后台——和用户连上后按 Home
         // 是同一种状态。
         //
@@ -1075,7 +1032,7 @@ class MainActivity : AppCompatActivity() {
         if (silentApproach && savedInstanceState == null && !needsDisclaimer) {
             log("APPROACH: 静默触发——界面不停留，进度与「断开」都在通知栏")
             overridePendingTransition(0, 0)
-            // 留 1.2 秒：让 onResume/窗口/权限检查先走完一轮，建屏那一步不能被掐断
+            // 留 1.2 秒：让 onResume/窗口/权限检查先走完一轮
             mainHandler.postDelayed(
                 { if (!isFinishing && !isDestroyed) moveTaskToBack(true) },
                 1_200L,
@@ -1097,7 +1054,7 @@ class MainActivity : AppCompatActivity() {
                     deadlineAt = disclaimerDeadlineAt,
                     onDecline = {
                         // 放弃使用：结束本任务并退出（不用 System.exit，保留正常生命周期收尾）。
-                        // 若已有会话在跑，先正常断开，避免留下无人管理的推流与虚拟屏。
+                        // 若已有会话在跑，先正常断开，避免留下无人管理的推流。
                         autoConnectRequested = false
                         runCatching { SessionController.disconnect(this) }
                         finishAndRemoveTask()
@@ -1417,8 +1374,7 @@ class MainActivity : AppCompatActivity() {
         // ---- 折叠卡：日志 ----
         bindExpandable(R.id.logHeader, logBody, logChevron)
 
-        // 启动残留虚拟屏检测（页面已不再展示 Shell 状态，仅保留自动清理与英雄卡状态联动）
-        detectResidualDisplays()
+        tickHero()
 
         // ---- 日志开关（默认开；关闭后不采集、不渲染；选择持久化） ----
         var logEnabled = preferences.getBoolean("logEnabled", true)
@@ -1464,14 +1420,7 @@ class MainActivity : AppCompatActivity() {
         // ---- 显示设置（原「显示」面板迁移至首页，2026-10-24） ----
         bindDisplayCard()
 
-        // 常亮+暗幕：界面开关已移除，行为固定为「默认开启」，由会话起停驱动
-        // （ScreenDimmer 由 VirtualLauncher.attach 在会话启动时挂载）。
-        ScreenDimmer.enabled = true
-
-        TouchRouter.logSink = { line -> log(line) }
         KnobRouter.logSink = { line -> log(line) }
-        VirtualLauncher.logSink = { line -> log(line) }
-        CarInputClient.logSink = { line -> log(line) }
 
         // 启动即开始守候 CarLife 端口 —— 车机画面的唯一来源（隐形屏已按用户要求移除）。
         // **不自动拉起 CarLife+**：由用户手动打开它并点「无线连接」，端口一开即接管。
@@ -1566,12 +1515,6 @@ class MainActivity : AppCompatActivity() {
         if (s == HeroState.CONNECTING) {
             heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
         }
-        // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
-        if (s == HeroState.IDLE && startupCheckRunning) {
-            heroStateText.text = "检查中"
-            heroSubline.text = "正在检查残留屏…"
-            heroProgress.visibility = View.VISIBLE
-        }
         updateConnectedSubline()
         updateHeroStats()
         updateDisplayResolutionNote()
@@ -1621,7 +1564,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实测帧率。
      * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
-     * 目标帧率不再展示（车机报 maxFPS 就跟随、没报按 60，见 [StreamFps]），只报实测值。
+     * 目标帧率不再展示（车机报 maxFPS 就跟随、没报按 60），只报实测值。
      *
      * 分辨率报**像素**，不再是「100%」这种只有自己看得懂的比例：车机原值在前，
      * 码流与它不一致时用 `→` 接实际值（直通模式由 CarLife 引擎定尺寸）。
@@ -1739,15 +1682,9 @@ class MainActivity : AppCompatActivity() {
 
         when (s) {
             HeroState.IDLE -> {
-                val pending = pendingResidualDisplays
                 // 门禁：本机蓝牙地址未填写 → 副标题直接说明卡在哪，按钮同时置灰
                 val macMissing = effectiveBluetoothMac() == null
-                heroSubline.text =
-                    when {
-                        pending != null -> "上次会话异常退出，遗留 ${pending.size} 个虚拟屏待清理"
-                        macMissing -> HINT_MAC_MISSING
-                        else -> HINT_IDLE_READY
-                    }
+                heroSubline.text = if (macMissing) HINT_MAC_MISSING else HINT_IDLE_READY
                 styleCta(
                     R.drawable.bg_cta_fill,
                     R.color.m3_on_primary,
@@ -1967,8 +1904,7 @@ class MainActivity : AppCompatActivity() {
                     runningNow ->
                         "保存后下次连接起效；当前连接按 ${SessionController.activeScalePercent}% 运行" +
                             (mapped?.let { "（$it）" } ?: "") +
-                            // 直通模式下码流尺寸是 CarLife 引擎说了算，缩放只影响本地虚拟屏：
-                            // 不点明的话，这行的像素换算会被当成「实际在推的分辨率」。
+                            // 直通模式下码流尺寸由 CarLife 引擎决定，不等于这里的像素换算。
                             if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
                                 " · 直通码流由引擎定"
                             } else {
@@ -1998,43 +1934,6 @@ class MainActivity : AppCompatActivity() {
                     DisplayPrefs.setScalePercent(ctx, percent)
                     snack("分辨率 $percent% 已保存，下次连接起效")
                     refreshScaleNote()
-                }
-            },
-        )
-
-        // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
-        // 这里先按默认 60 起，等 SETUP 拿到车机值后由 SessionController 覆盖。
-        VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
-
-        // 触摸注入节流（0=关闭，步进 8ms）
-        val throttleSeek = findViewById<SeekBar>(R.id.throttleSeek)
-        val throttleValue = findViewById<TextView>(R.id.throttleValue)
-
-        fun throttleText(ms: Int) = if (ms <= 0) "关闭" else "${ms}ms"
-
-        val savedThrottle = DisplayPrefs.moveThrottleMs(ctx)
-        throttleSeek.progress = savedThrottle / 8
-        throttleValue.text = throttleText(savedThrottle)
-        TouchRouter.moveThrottleMs = savedThrottle.toLong()
-
-        throttleSeek.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean,
-                ) {
-                    if (!fromUser) return
-                    val ms = progress * 8
-                    throttleValue.text = throttleText(ms)
-                    DisplayPrefs.setMoveThrottleMs(ctx, ms)
-                    TouchRouter.moveThrottleMs = ms.toLong()
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    snack("触摸节流 ${throttleText(DisplayPrefs.moveThrottleMs(ctx))}")
                 }
             },
         )
@@ -2725,16 +2624,6 @@ class MainActivity : AppCompatActivity() {
         SessionController.appendLog(message)
     }
 
-    /** Shell 查询/执行（仅后台线程调用；两个诊断面板共用，勿再各写局部函数）。 */
-    private fun shExec(
-        cmd: String,
-        timeoutMs: Long = 4_000L,
-    ): SysShell.Result =
-        SysShell
-            .exec(cmd, timeoutMs)
-
-    private fun sh(cmd: String): String = shExec(cmd).output
-
     /**
      * 导出日志到「下载/CarPToCarL/」并弹窗告知位置。
      */
@@ -2953,167 +2842,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 解析 dumpsys display 中的 CarPlay 虚拟屏：返回 (displayId, 名称)。
-     * 注意 uniqueId 形如 virtual:com.android.shell,2000,CarPlayDock,36——尾数 36 是
-     * 代次计数器而非显示屏 ID；真实 ID 在 "displayId=39, uniqueId='…'" 段里。
-     */
-    private fun parseCarPlayDisplays(dump: String): List<Pair<Int, String>> =
-        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|AppHi|App|Map)")
-            .findAll(dump)
-            .map { it.groupValues[1].toInt() to "CarPlay${it.groupValues[2]}" }
-            .distinctBy { it.first }
-            .toList()
-
-    /**
-     * 启动残留虚拟屏检测。
-     *
-     * 「高级 · Shell 全局状态」面板已按用户要求从界面移除（2026-10-24），这里只保留
-     * 有实际价值的部分：上次会话异常退出遗留的 CarPlay 虚拟屏自动清理 + 英雄卡状态联动。
-     */
-    private fun detectResidualDisplays() {
-        startupCheckRunning = true
-        tickHero()
-        Bg.run("residual-scan") {
-            var residual =
-                parseCarPlayDisplays(sh("dumpsys display"))
-                    .filter { it.first !in currentSessionDisplayIds() }
-            if (residual.isNotEmpty()) {
-                log(
-                    "SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
-                        residual.joinToString(", ") { "${it.second}(${it.first})" },
-                )
-                // 残留屏 = 上次会话异常退出（进程被杀）：横屏覆盖的会话末复原
-                // 也没执行——一并清理，避免应用在手机侧残留横屏状态
-                runCatching {
-                    val reset =
-                        AppOrientationCompat
-                            .resetAll(applicationContext)
-                    if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
-                }
-                // 先自动清理一轮（含旧版本 UserService 进程回收——其持有的屏跨进程
-                // 无法 release，只有进程回收能释放；重装 APK 后按版本复用的旧进程正是
-                // 「点清理释放 0/N」的根因，2026-10-16）。清不掉的再问用户。
-                val released = releaseDisplays(residual.map { it.first })
-                log("SHELL: 启动残留自动清理（释放 $released/${residual.size}）")
-                if (released > 0) {
-                    residual =
-                        parseCarPlayDisplays(sh("dumpsys display"))
-                            .filter { it.first !in currentSessionDisplayIds() }
-                }
-            }
-            runOnUiThread {
-                startupCheckRunning = false
-                if (residual.isNotEmpty()) {
-                    // 用户「暂不」时保留 pending，状态旁的按钮可再次发起清理
-                    pendingResidualDisplays = residual
-                    updateResidualChip()
-                    if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                    promptResidualDisplays(residual)
-                    // 自动展开日志卡：启动清理的两条记录直接可见（卡片默认折叠）
-                    findViewById<View>(R.id.logBody).visibility = View.VISIBLE
-                    findViewById<ImageView>(R.id.logChevron)
-                        .animate()
-                        .rotation(180f)
-                        .setDuration(250L)
-                        .start()
-                } else if (heroState == HeroState.IDLE) {
-                    // 无残留：恢复「未连接」默认状态展示
-                    applyHeroState(HeroState.IDLE)
-                }
-
-                // 启动自动连接在这里续最后一次：扫描期间英雄卡显示「检查中」，
-                // 且若有残留待确认，连接流程的热点/网络弹窗会和清理弹窗抢焦点，故推迟到这里。
-                maybeAutoConnect()
-            }
-
-            // 预绑定 UserService：预热触摸注入，并触发旧版本残留进程回收（绑定回调内含
-            // reapStaleUserServices——重装 APK 后旧进程持有的虚拟屏只有进程回收能释放）。
-            // **必须晚于上方残留扫描**：回收会让旧进程的虚拟屏立即消失。
-            CarInputClient.ensure(this)
-        }
-    }
-
-    /** 当前会话持有的虚拟屏（不参与残留清理）。 */
-    private fun currentSessionDisplayIds(): Set<Int> =
-        buildSet {
-            val launcher = VirtualLauncher
-            listOf(
-                launcher.dockDisplayId,
-                launcher.appDisplayId,
-                launcher.mapDisplayId,
-                launcher.gridDisplayId,
-            ).forEach { if (it >= 0) add(it) }
-        }
-
-    /** 启动检测到残留 CarPlay 虚拟屏：询问是否立即清理（上次会话异常退出遗留）。 */
-    private fun promptResidualDisplays(residual: List<Pair<Int, String>>) {
-        if (isFinishing || isDestroyed) return
-        val names = residual.joinToString("\n") { "· ${it.second}（displayId=${it.first}）" }
-        DarkMessageDialog.show(
-            activity = this,
-            title = "检测到残留虚拟屏",
-            message =
-                "发现 ${residual.size} 个上次会话遗留的 CarPlay 虚拟屏：\n$names\n\n" +
-                    "残留屏会持续占用显示资源，并可能影响下次连接。是否立即清理？",
-            actions =
-                listOf(
-                    DarkMessageDialog.Action("暂不") {},
-                    DarkMessageDialog.Action("清理", DarkMessageDialog.Emphasis.PRIMARY) {
-                        pendingResidualDisplays = null
-                        updateResidualChip()
-                        if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                        Bg.run("residual-cleanup") {
-                            val released = releaseDisplays(residual.map { it.first })
-                            log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
-                            runOnUiThread {
-                                snack("已释放 $released/${residual.size} 个残留屏")
-                                if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                            }
-                        }
-                    },
-                ),
-            onCancel = {
-                // 返回键/点外部关闭 = 暂不：保留英雄卡的「清理残留屏」入口
-                updateResidualChip()
-            },
-        )
-    }
-
-    /** 英雄卡状态旁的「清理残留屏」按钮显隐（有待清理残留时出现）。 */
-    private fun updateResidualChip() {
-        btnResidualCleanup.visibility =
-            if (pendingResidualDisplays != null) View.VISIBLE else View.GONE
-    }
-
-    /** 释放指定虚拟屏（CarInputClient 懒绑定 + 3 秒短等）。后台线程调用，返回成功数。 */
-    private fun releaseDisplays(ids: List<Int>): Int {
-        if (ids.isEmpty()) return 0
-        var svc = CarInputClient.service
-        if (svc == null) {
-            CarInputClient
-                .ensure(this)
-            val deadline = SystemClock.uptimeMillis() + 3_000L
-            while (svc == null && SystemClock.uptimeMillis() < deadline) {
-                Thread.sleep(150)
-                svc = CarInputClient.service
-            }
-        }
-        val bound = svc ?: return 0
-        ids.forEach { runCatching { bound.releaseDisplay(it) } }
-        // 未直接释放的屏极可能由旧版本 UserService 进程持有（releaseDisplay 只查本进程
-        // map，跨进程无法释放——重装 APK 后 Shizuku 不回收旧进程的已知问题）。
-        // 回收旧进程让其随进程销毁释放，再以实际扫描结果复核（进程回收是异步的）。
-        CarInputClient.reapStaleUserServices()
-        val deadline = SystemClock.uptimeMillis() + 2_000L
-        while (true) {
-            val alive = parseCarPlayDisplays(sh("dumpsys display")).map { it.first }.toSet()
-            val gone = ids.count { it !in alive }
-            if (gone >= ids.size || SystemClock.uptimeMillis() >= deadline) return gone
-            Thread.sleep(200)
-        }
-    }
-
-    /**
      * App 已在后台/前台时又被「靠近车机」拉起（singleTask + SINGLE_TOP）：
      * 不重建界面，只重新武装一次自动连接。已在连接或已连上时 [maybeAutoConnect] 自己会跳过。
      */
@@ -3131,7 +2859,6 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) return
         log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行）——由前台重新发起连接")
         autoConnectRequested = true
-        // App 已在后台运行过：启动自检那一轮早就跑完，不必再为它让路。
         // 只留一个极短延迟，让 onResume 先把窗口恢复到前台（权限弹窗需要已恢复的 Activity）。
         mainHandler.postDelayed({ maybeAutoConnect() }, 150L)
     }

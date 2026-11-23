@@ -69,17 +69,6 @@
 
     <issue
         id="GradleDependency"
-        message="A newer version of androidx.recyclerview:recyclerview than 1.3.2 is available: 1.4.0"
-        errorLine1="    implementation(&quot;androidx.recyclerview:recyclerview:1.3.2&quot;)"
-        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="build.gradle.kts"
-            line="51"
-            column="20"/>
-    </issue>
-
-    <issue
-        id="GradleDependency"
         message="A newer version of org.bouncycastle:bcprov-jdk18on than 1.78.1 is available: 1.79"
         errorLine1="    implementation(&quot;org.bouncycastle:bcprov-jdk18on:1.78.1&quot;)"
         errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
@@ -87,314 +76,6 @@
             file="build.gradle.kts"
             line="53"
             column="20"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingLeft=&quot;6px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="28"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingRight=&quot;10px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="29"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingTop=&quot;4px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="30"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingBottom=&quot;4px&quot;>"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="31"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:layout_width=&quot;100px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="35"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:padding=&quot;26px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="39"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:layout_marginLeft=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="46"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:layout_marginTop=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="47"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:layout_marginBottom=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="48"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:layout_marginLeft=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="55"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="            android:paddingLeft=&quot;10px&quot;>"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="71"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="                android:textSize=&quot;22px&quot; />"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="81"
-            column="17"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="                android:layout_marginTop=&quot;3px&quot;"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="87"
-            column="17"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="                android:textSize=&quot;13px&quot; />"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="89"
-            column="17"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingLeft=&quot;8px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="31"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingRight=&quot;8px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="32"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingTop=&quot;12px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="33"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:paddingBottom=&quot;12px&quot;>"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="34"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:textSize=&quot;22px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="45"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_marginTop=&quot;6px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="52"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:textSize=&quot;13px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="56"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_width=&quot;46px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="61"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_height=&quot;4px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="62"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_marginTop=&quot;5px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="63"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_marginTop=&quot;21px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="77"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_marginBottom=&quot;4px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="91"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:layout_height=&quot;110px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="97"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="PxUsage"
-        message="Avoid using &quot;`px`&quot; as units; use &quot;`dp`&quot; instead"
-        errorLine1="        android:padding=&quot;26px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="100"
-            column="9"/>
     </issue>
 
     
@@ -495,17 +176,6 @@
             column="17"/>
     </issue>
 
-    <issue
-        id="NotifyDataSetChanged"
-        message="It will always be more efficient to use more specific change events if you can. Rely on `notifyDataSetChanged` as a last resort."
-        errorLine1="        pager?.adapter?.notifyDataSetChanged()"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/launcher/GridActivity.kt"
-            line="356"
-            column="9"/>
-    </issue>
-
     
 
     
@@ -541,39 +211,6 @@
         message="This folder configuration (`v26`) is unnecessary; `minSdkVersion` is 31. Merge all the resources in this folder into `mipmap-anydpi`.">
         <location
             file="src/main/res/mipmap-anydpi-v26"/>
-    </issue>
-
-    <issue
-        id="StaticFieldLeak"
-        message="Do not place Android context classes in static fields (static reference to `ScreenDimmer` which has field `dimView` pointing to `View`); this is a memory leak"
-        errorLine1="/**"
-        errorLine2="^">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/ui/ScreenDimmer.kt"
-            line="16"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="StaticFieldLeak"
-        message="Do not place Android context classes in static fields; this is a memory leak"
-        errorLine1="    private var dimView: View? = null"
-        errorLine2="    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/ui/ScreenDimmer.kt"
-            line="38"
-            column="5"/>
-    </issue>
-
-    <issue
-        id="StaticFieldLeak"
-        message="Do not place Android context classes in static fields; this is a memory leak"
-        errorLine1="    private var watchView: View? = null"
-        errorLine2="    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/ui/ScreenDimmer.kt"
-            line="39"
-            column="5"/>
     </issue>
 
     <issue
@@ -643,17 +280,6 @@
     </issue>
 
     <issue
-        id="StaticFieldLeak"
-        message="Do not place Android context classes in static fields (static reference to `HiddenDisplaySource` which has field `context` pointing to `Context`); this is a memory leak"
-        errorLine1="    @Volatile"
-        errorLine2="    ^">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/SessionController.kt"
-            line="89"
-            column="5"/>
-    </issue>
-
-    <issue
         id="UseCompoundDrawables"
         message="This tag and its children can be replaced by one `&lt;TextView/>` and a compound drawable"
         errorLine1="    &lt;LinearLayout"
@@ -673,17 +299,6 @@
             file="src/main/res/layout/activity_settings_content.xml"
             line="9"
             column="6"/>
-    </issue>
-
-    <issue
-        id="UseCompoundDrawables"
-        message="This tag and its children can be replaced by one `&lt;TextView/>` and a compound drawable"
-        errorLine1="&lt;LinearLayout xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2=" ~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/item_app_cell.xml"
-            line="3"
-            column="2"/>
     </issue>
 
     <issue
@@ -761,17 +376,6 @@
             file="src/main/res/layout/car_home.xml"
             line="6"
             column="5"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.bg_badge_todo` appears to be unused"
-        errorLine1="&lt;shape xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot; android:shape=&quot;rectangle&quot;>"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/bg_badge_todo.xml"
-            line="2"
-            column="1"/>
     </issue>
 
     <issue
@@ -864,72 +468,6 @@
 
     <issue
         id="UnusedResources"
-        message="The resource `R.drawable.ic_check` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_check.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.ic_check_circle` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_check_circle.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.ic_dot` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_dot.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.ic_music` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_music.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.ic_spinner` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_spinner.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
-        message="The resource `R.drawable.ic_volume_off` appears to be unused"
-        errorLine1="&lt;vector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;"
-        errorLine2="^">
-        <location
-            file="src/main/res/drawable/ic_volume_off.xml"
-            line="1"
-            column="1"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
         message="The resource `R.string.accessibility_description` appears to be unused"
         errorLine1="    &lt;string name=&quot;accessibility_description&quot;>镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容&lt;/string>"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
@@ -946,17 +484,6 @@
         errorLine2="       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/drawable/bg_btn_tonal.xml"
-            line="5"
-            column="8"/>
-    </issue>
-
-    <issue
-        id="RedundantNamespace"
-        message="This namespace declaration is redundant"
-        errorLine1="&lt;shape xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot; android:shape=&quot;rectangle&quot;>"
-        errorLine2="       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/drawable/bg_btn_tonal_warn.xml"
             line="5"
             column="8"/>
     </issue>
@@ -1094,39 +621,6 @@
     </issue>
 
     <issue
-        id="ClickableViewAccessibility"
-        message="`onTouch` lambda should call `View#performClick` when a click is detected"
-        errorLine1="                setOnTouchListener { _, event ->"
-        errorLine2="                                   ^">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/ui/ScreenDimmer.kt"
-            line="185"
-            column="36"/>
-    </issue>
-
-    <issue
-        id="SetTextI18n"
-        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
-        errorLine1="            batteryText?.text = (if (charging) &quot;⚡&quot; else &quot;&quot;) + &quot;$percent%&quot;"
-        errorLine2="                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/launcher/DockActivity.kt"
-            line="245"
-            column="33"/>
-    </issue>
-
-    <issue
-        id="SetTextI18n"
-        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
-        errorLine1="            batteryText?.text = (if (charging) &quot;⚡&quot; else &quot;&quot;) + &quot;$percent%&quot;"
-        errorLine2="                                                              ~~~~~~~~~~~">
-        <location
-            file="src/main/java/io/github/shaonialife/carptocar/launcher/DockActivity.kt"
-            line="245"
-            column="63"/>
-    </issue>
-
-    <issue
         id="SetTextI18n"
         message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
         errorLine1="                btDesc.text = &quot;已与 $bondedCount 台设备配对 · 连接自动回连&quot;"
@@ -1256,28 +750,6 @@
     
 
     
-
-    <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;回到桌面&quot;, should use `@string` resource"
-        errorLine1="            android:contentDescription=&quot;回到桌面&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="38"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;回到桌面&quot;, should use `@string` resource"
-        errorLine1="        android:contentDescription=&quot;回到桌面&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_sidebar.xml"
-            line="99"
-            column="9"/>
-    </issue>
 
     <issue
         id="HardcodedText"
@@ -2237,61 +1709,6 @@
     </issue>
 
     <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;正在播放&quot;, should use `@string` resource"
-        errorLine1="            android:text=&quot;正在播放&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/view_dashboard.xml"
-            line="39"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;未在播放&quot;, should use `@string` resource"
-        errorLine1="            android:text=&quot;未在播放&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/view_dashboard.xml"
-            line="51"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;媒体信息未连接&quot;, should use `@string` resource"
-        errorLine1="            android:text=&quot;媒体信息未连接&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/view_dashboard.xml"
-            line="64"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="HardcodedText"
-        message="Hardcoded string &quot;⤢ 全屏地图&quot;, should use `@string` resource"
-        errorLine1="        android:text=&quot;⤢ 全屏地图&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/view_dashboard.xml"
-            line="123"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="RtlSymmetry"
-        message="When you define `paddingLeft` you should probably also define `paddingRight` for right-to-left symmetry"
-        errorLine1="            android:paddingLeft=&quot;10px&quot;>"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="71"
-            column="13"/>
-    </issue>
-
-    <issue
         id="RtlSymmetry"
         message="When you define `paddingRight` you should probably also define `paddingLeft` for right-to-left symmetry"
         errorLine1="            android:paddingRight=&quot;26dp&quot;"
@@ -2354,61 +1771,6 @@
         <location
             file="src/main/res/layout/fragment_panel_supersample.xml"
             line="49"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="RtlHardcoded"
-        message="Consider replacing `android:paddingLeft` with `android:paddingStart=&quot;6px&quot;` to better support right-to-left layouts"
-        errorLine1="        android:paddingLeft=&quot;6px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="28"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="RtlHardcoded"
-        message="Consider replacing `android:paddingRight` with `android:paddingEnd=&quot;10px&quot;` to better support right-to-left layouts"
-        errorLine1="        android:paddingRight=&quot;10px&quot;"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="29"
-            column="9"/>
-    </issue>
-
-    <issue
-        id="RtlHardcoded"
-        message="Consider replacing `android:layout_marginLeft` with `android:layout_marginStart=&quot;6px&quot;` to better support right-to-left layouts"
-        errorLine1="            android:layout_marginLeft=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="46"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="RtlHardcoded"
-        message="Consider replacing `android:layout_marginLeft` with `android:layout_marginStart=&quot;6px&quot;` to better support right-to-left layouts"
-        errorLine1="            android:layout_marginLeft=&quot;6px&quot;"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="55"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="RtlHardcoded"
-        message="Consider replacing `android:paddingLeft` with `android:paddingStart=&quot;10px&quot;` to better support right-to-left layouts"
-        errorLine1="            android:paddingLeft=&quot;10px&quot;>"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/layout/activity_dock_bar.xml"
-            line="71"
             column="13"/>
     </issue>
 

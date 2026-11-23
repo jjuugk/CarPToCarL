@@ -23,10 +23,6 @@ object DisplayPrefs {
     /** 车机没声明 maxFPS 时的目标帧率（无设置项，判定见 `video/StreamFps.kt`）。 */
     const val FPS = 60
 
-    /** 触摸 move 注入节流默认值（ms）：0=默认关闭，交互滞后时在「显示」面板调高试验。 */
-    const val MOVE_THROTTLE_DEFAULT = 0
-    const val MOVE_THROTTLE_MAX = 48
-
     /**
      * 触摸域自适应的默认值：**关**。
      *
@@ -53,7 +49,6 @@ object DisplayPrefs {
 
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
-    private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
     private const val KEY_ADAPTIVE_TOUCH = "adaptive_touch_domain"
     private const val KEY_KEEP_SCREEN_STREAM = "keep_screen_stream_on_take"
     private const val KEY_PROACTIVE_AUDIO = "proactive_audio_on_link"
@@ -167,24 +162,6 @@ object DisplayPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_SCALE, percent.coerceIn(SCALE_MIN, SCALE_MAX))
-            .apply()
-    }
-
-    /** 触摸 move 注入节流（ms；0=关闭）。 */
-    fun moveThrottleMs(context: Context): Int =
-        context
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getInt(KEY_MOVE_THROTTLE, MOVE_THROTTLE_DEFAULT)
-            .coerceIn(0, MOVE_THROTTLE_MAX)
-
-    fun setMoveThrottleMs(
-        context: Context,
-        ms: Int,
-    ) {
-        context
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putInt(KEY_MOVE_THROTTLE, ms.coerceIn(0, MOVE_THROTTLE_MAX))
             .apply()
     }
 

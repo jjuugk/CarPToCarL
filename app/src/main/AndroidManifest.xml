@@ -35,7 +35,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 音频通道激活时静音手机媒体音量（声音只从车机出），断开恢复 -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <!-- 暗幕（替代息屏）需要；系统「显示在其他应用上层」列表只收录声明本权限的应用 -->
+    <!-- 靠近车机时从后台启动需要悬浮窗权限。 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!--
      CarLife 画质增强：手机端 CarLife 引擎从 **/sdcard 根下** 的 BaiduCarlife 目录读
@@ -55,16 +55,6 @@
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
-
-    <queries>
-        <package android:name="com.autonavi.amapauto" />
-        <package android:name="com.autonavi.minimap" />
-        <!-- 应用桌面需要枚举全部可启动应用（Android 11+ 包可见性） -->
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
-        </intent>
-    </queries>
 
     <application
         android:name=".SenderApp"
@@ -105,21 +95,6 @@
         <receiver
             android:name=".service.NotificationActionReceiver"
             android:exported="false" />
-
-        <!-- 虚拟屏桌面（exported：shell am start 需要可从外部拉起） -->
-        <activity
-            android:name=".launcher.DockActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.CarPlaySender.Launcher" />
-
-        <activity
-            android:name=".launcher.GridActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.CarPlaySender.Launcher" />
 
         <!-- 靠近车机自动启动（2026-10-30）：只听系统蓝牙 ACL 事件——车机进入范围后
              自己回连手机时系统会投递 ACTION_ACL_CONNECTED，据此识别「车来了」。
