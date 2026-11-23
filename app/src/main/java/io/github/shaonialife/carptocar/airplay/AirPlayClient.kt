@@ -3274,22 +3274,7 @@ class AirPlayClient(
         //
         // **单声道必须排在对应立体声之后但同率之前**：奥迪 101/default 只有 mono 位，
         // 排太靠后会让 44.1k 立体声先命中（多一次重采样，甚至位图里根本没有）。
-        val ordered =
-            listOf(
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_STEREO,
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_MONO,
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_STEREO,
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_MONO,
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_48K_STEREO,
-                AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_LC_44K_STEREO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_MONO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_MONO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_48K_STEREO,
-                AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_LC_44K_STEREO,
-            )
-        val hit = pickDeclaredFormat(declared, wanted, ordered)
+        val hit = pickDeclaredFormat(declared, wanted, audioTypeFormatOrder())
         if (hit == null) {
             val declaredTypes = declared.mapNotNull { (it["audioType"] as? String)?.lowercase() }.distinct()
             if (wanted in declaredTypes) {
@@ -3339,6 +3324,39 @@ class AirPlayClient(
         log("AIRPLAY: audioType=$wanted 档可用 → ${profile.label}")
         return profile
     }
+
+    /**
+     * 车机 `/info` 是否为指定 [audioType] 声明了本端可发送的音频档位（无日志副作用）。
+     *
+     * 供资源仲裁层在借用主音频前确认「导航独立流是否可能建起来」：例如车机 101/default 仅声明
+     * Opus（当前未实现编码器）时返回 false，避免借用主音频把原车音源掐成静音却发不出导航声。
+     */
+    fun supportsAudioType(audioType: String): Boolean {
+        val wanted = audioType.trim().lowercase()
+        if (wanted.isEmpty()) return false
+        val info = negotiatedInfo ?: return false
+        val declared =
+            (info["audioFormats"] as? List<*>)
+                ?.mapNotNull { it as? Map<*, *> }
+                .orEmpty()
+        return pickDeclaredFormat(declared, wanted, audioTypeFormatOrder()) != null
+    }
+
+    private fun audioTypeFormatOrder(): List<Pair<Long, Long>> =
+        listOf(
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_STEREO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_48K_MONO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_STEREO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_MONO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_48K_STEREO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_LC_44K_STEREO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_MONO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_MONO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_48K_STEREO,
+            AUDIO_STREAM_TYPE to AUDIO_FORMAT_AAC_LC_44K_STEREO,
+        )
 
     /**
      * **通话音频**档位候选（`audioType=telephony`，2026-10-29 适配）。

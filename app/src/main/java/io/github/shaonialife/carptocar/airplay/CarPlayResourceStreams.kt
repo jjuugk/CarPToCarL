@@ -28,6 +28,8 @@ internal class CarPlayResourceStreams(
     private val onAudioOwnership: (Boolean) -> Boolean,
     private val onFailure: (String) -> Unit,
     private val log: (String) -> Unit,
+    /** 本轮会话是否具备可发送的导航独立音频流能力；false 时仅为导航意图不借用主音频。 */
+    private val canPlayNavigationAudio: () -> Boolean = { true },
     /** 单调时钟（只用于日志里的「存活多久 / 等了多久」，可注入便于单测）。 */
     private val nowMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
@@ -63,6 +65,8 @@ internal class CarPlayResourceStreams(
     private var screenResumes = 0
     private var streamStartedAtMs = 0L
     private var waitStartedAtMs = 0L
+    /** 仅在导航流不可用且跳过借用时记录一次，避免每条播报包刷屏。 */
+    private var navBorrowSkippedLogged = false
 
     /** 车机持有主屏、视频暂停中（控制会话仍在）。 */
     @Volatile
@@ -251,27 +255,83 @@ internal class CarPlayResourceStreams(
 
     private fun applyAudio() {
         val media = audioIntent.media
-        val navigation = audioIntent.navigation
-        // 媒体按用户优先级永久取得；导航按后台优先级临时借：可借原车收音机，冲不破车机静音/通话
-        if ((media || navigation) && (!client.phoneOwnsAudio || (media && client.phoneBorrowsAudio))) {
+        val rawNavigation = audioIntent.navigation
+        val navSupported = !rawNavigation || canPlayNavigationAudio()
+        if (rawNavigation && !navSupported && !media && !navBorrowSkippedLogged) {
+            navBorrowSkippedLogged = true
+            log("AUDIO-INTENT: 车机无可用导航独立音频流，跳过主音频临时借用（避免误静音原车音源）")
+        } else if (navSupported) {
+            navBorrowSkippedLogged = false
+        }
+        val plan =
+            planAudioStep(
+                media = media,
+                navigation = rawNavigation,
+                canPlayNavigationAudio = navSupported,
+                phoneOwnsAudio = client.phoneOwnsAudio,
+                phoneBorrowsAudio = client.phoneBorrowsAudio,
+            )
+        val acquirePriority = plan.acquirePriority
+        if (acquirePriority != null) {
             val acquired =
                 client.acquireAudioResource(
-                    if (media) AirPlayResourceState.PRIORITY_USER else AirPlayResourceState.PRIORITY_BACKGROUND,
-                    temporary = !media,
+                    acquirePriority,
+                    temporary = plan.acquireTemporary,
                 )
-            log("AUDIO-INTENT: media=$media navigation=$navigation acquired=$acquired ${client.resourceDescription}")
+            log(
+                "AUDIO-INTENT: media=$media navigation=${plan.effectiveNavigation} " +
+                    "acquired=$acquired ${client.resourceDescription}",
+            )
         }
-        if (!media && !navigation && client.phoneBorrowsAudio) {
+        if (plan.releaseBorrow) {
             // 导航播报结束：先停音频流，再把临时借用的主音频还给车机
             if (audioActive) audioActive = onAudioOwnership(false)
             if (!audioActive) client.releaseAudioBorrow()
         }
-        val wanted = client.phoneOwnsAudio && (audioActive || media || navigation)
+        val wanted = client.phoneOwnsAudio && (audioActive || media || plan.effectiveNavigation)
         if (wanted != audioActive) audioActive = onAudioOwnership(wanted)
     }
 
+    internal data class AudioStepPlan(
+        val effectiveNavigation: Boolean,
+        val acquirePriority: Int?,
+        val acquireTemporary: Boolean,
+        val releaseBorrow: Boolean,
+    )
+
     companion object {
         const val TYPE_SCREEN = 110L
+
+        /**
+         * 纯状态转移决策：根据播放意图、导航流可用性与当前归属决定是否借用/申请/归还主音频。
+         *
+         * 当车机无可用导航独立流（例如 101/default 仅声明当前未编码的 Opus）时，导航播报本身无法送出，
+         * 此时若仍临时借用主音频只会把原车收音机/媒体掐成静音却无播报声，因此将有效导航意图视作 false。
+         */
+        internal fun planAudioStep(
+            media: Boolean,
+            navigation: Boolean,
+            canPlayNavigationAudio: Boolean,
+            phoneOwnsAudio: Boolean,
+            phoneBorrowsAudio: Boolean,
+        ): AudioStepPlan {
+            val effectiveNavigation = navigation && canPlayNavigationAudio
+            val shouldAcquire =
+                (media || effectiveNavigation) && (!phoneOwnsAudio || (media && phoneBorrowsAudio))
+            val acquirePriority =
+                when {
+                    !shouldAcquire -> null
+                    media -> AirPlayResourceState.PRIORITY_USER
+                    else -> AirPlayResourceState.PRIORITY_BACKGROUND
+                }
+            val releaseBorrow = !media && !effectiveNavigation && phoneBorrowsAudio
+            return AudioStepPlan(
+                effectiveNavigation = effectiveNavigation,
+                acquirePriority = acquirePriority,
+                acquireTemporary = shouldAcquire && !media,
+                releaseBorrow = releaseBorrow,
+            )
+        }
 
         /**
          * 车机拿走主屏时保留视频流（实验开关，默认关；持久化见 `DisplayPrefs`）。
