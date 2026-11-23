@@ -44,7 +44,25 @@ internal class CarLifeMediaPlayback {
     private var pausedByCar = false
 
     val playing: Boolean get() = sessionPlaying ?: wirePlaying
-    val canForwardPcm: Boolean get() = sessionPlaying != false && !sourcePaused
+
+    /**
+     * PCM 门禁**只认引擎/车机信号**，不看手机媒体会话（2026-11-23 改）。
+     *
+     * 旧实现是 `sessionPlaying != false && !sourcePaused`，等于把「手机上的播放器状态」
+     * 当成了「引擎音频该不该发」的判据。而 [MediaSessionsState] 的 `playing` 包含两类
+     * 与音频无关的抖动：
+     *  - **切歌**：旧会话结束、新会话建立之间必然有一段 `false`；
+     *  - **监听器未绑定时的轮询兜底**：每秒枚举一次会话，状态更容易来回跳。
+     *
+     * 1.2.81 现场（BMW MGU-81，2026-11-23 07:58）就是被这两类抖动反复触发：
+     * `一念之间 true → false` 相隔 217ms、`有理想 true`、再 `暂停 10.6 秒`……85 秒的
+     * 音频流里约 50 秒在丢，车机只收到 37.5 秒音频（44%），听感就是全程无声。
+     *
+     * 现在只留 [sourcePaused]——它由引擎自己的 `0x30003 PAUSE` / `FOCUS_RELEASED` /
+     * `STOP` 与车机侧 `onCarPause()` 驱动。手机真暂停时引擎要么发 PAUSE，要么干脆
+     * 不推 PCM（没有残留可丢），两条路都不需要媒体会话参与。
+     */
+    val canForwardPcm: Boolean get() = !sourcePaused
 
     /**
      * 当前这次拦截是否「只能等车机还回来」（车机侧暂停）。
@@ -69,8 +87,11 @@ internal class CarLifeMediaPlayback {
             // 先发 PAUSE/STOP 再 INIT，焦点事件一次都没有）。
             eligible = resumed
             if (!playing) {
-                sourcePaused = true
-                pausedByCar = false
+                // **不置 sourcePaused**（2026-11-23）：媒体会话的 false 只说明「手机上那个
+                // 播放器当前不是播放态」，切歌、监听器回退轮询都会短暂报 false，而引擎
+                // 仍在按实时推 PCM。旧实现把它当暂停，直接触发 15 秒丢包窗口并
+                // clearPendingPcm()，实测吃掉了一半以上的音频（见 [canForwardPcm]）。
+                // 真正的暂停由引擎的 PAUSE/FOCUS_RELEASED 与车机侧 onCarPause() 表达。
                 wirePlaying = false
             }
         }
@@ -115,7 +136,10 @@ internal class CarLifeMediaPlayback {
             }
 
             CarLifeMediaActivity.RESUME -> {
-                if (sessionPlaying != false) sourcePaused = false
+                // 引擎显式 `0x30004` 是最高优先级的「我在播」信号：直接放行 PCM。
+                // 旧实现加了 `if (sessionPlaying != false)` 前置条件——媒体会话恰好
+                // 还没刷新（切歌/轮询兜底）时，RESUME 等于没生效。
+                sourcePaused = false
                 pausedByCar = false
                 eligible = false
                 wirePlaying = sessionPlaying != false
@@ -125,7 +149,8 @@ internal class CarLifeMediaPlayback {
                 if (focused != true) {
                     eligible = true
                     pcmAfterInit = false
-                    if (sessionPlaying != false) sourcePaused = false
+                    // 焦点回到引擎手里就是「它可以出声」：不再要求媒体会话也报 playing。
+                    sourcePaused = false
                 }
                 focused = true
                 pausedByCar = false
@@ -165,7 +190,9 @@ internal class CarLifeMediaPlayback {
 
     /** 车机解除静音触发恢复：允许后续媒体 PCM 立即放行（即便第三方播放器不补发 0x30004）。 */
     fun onCarResume() {
-        if (sessionPlaying == false) return
+        // 车机把音频还回来，比任何媒体会话状态都权威。旧实现有
+        // `if (sessionPlaying == false) return`：手机上那个播放器恰好报 false 时，
+        // 车机解了静音、我们却不放行，表现为「静音键按回来还是没声」。
         sourcePaused = false
         pausedByCar = false
         eligible = false

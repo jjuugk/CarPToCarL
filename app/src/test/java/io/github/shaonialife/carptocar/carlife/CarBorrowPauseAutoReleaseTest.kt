@@ -78,15 +78,16 @@ class CarBorrowPauseAutoReleaseTest {
     }
 
     @Test
-    fun `engine pause still uses fifteen second window independent of acquisition`() {
+    fun `engine pause still uses one and a half second window independent of acquisition`() {
         val clock = AtomicLong(1_000L)
         val acquired = AtomicBoolean(false)
         val sink = sink(clock, acquired)
 
-        // 引擎侧暂停：indefinite=false，15 秒窗口后自动放行，与 acquired 无关
+        // 引擎侧暂停：indefinite=false，1.5 秒窗口后自动放行，与 acquired 无关。
+        // 旧值 15 秒是在吃真实音频（残留队列几百毫秒就排空完了）。
         sink.setPlaybackPaused(true, indefinite = false)
-        assertTrue(sink.shouldDropPaused(1_000L + 14_999L))
-        assertFalse(sink.shouldDropPaused(1_000L + 15_000L))
+        assertTrue(sink.shouldDropPaused(1_000L + 1_499L))
+        assertFalse(sink.shouldDropPaused(1_000L + 1_500L))
     }
 
     @Test

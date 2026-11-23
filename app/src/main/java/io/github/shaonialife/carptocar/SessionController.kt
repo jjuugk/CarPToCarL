@@ -1539,6 +1539,16 @@ object SessionController {
     private var activeAudioProfile: AudioProfile? = null
 
     /**
+     * 当前媒体音频流的 `streamConnectionID`（0 = 没有/已拆）。
+     *
+     * 重建音频流时必须**先按这个 id TEARDOWN 旧流**：宝马车机对同一
+     * `(type, audioType)` 上的第二条流一律 `400 Bad Request`（1.2.81 现场连按 4 次
+     * 「立即重启一次」全是 400），旧流不拆就永远建不起来。
+     */
+    @Volatile
+    private var activeAudioConnectionId: Long = 0L
+
+    /**
      * 当前发给车机的音频档采样率（Hz）；0 = 本次没有音频流。
      *
      * 与 [CarLifeHijack.mediaSourceSampleRate]（引擎输出率）并列显示，可判断有无重采样。
@@ -4585,6 +4595,7 @@ object SessionController {
                 micUplink = uplink
             }
             activeAudioProfile = profile
+            activeAudioConnectionId = audio.streamConnectionId
             activeAudioReceiverKey = identity
             activeAudioStartedAt = android.os.SystemClock.uptimeMillis()
             val sender =
@@ -4607,6 +4618,7 @@ object SessionController {
             if (!sender.startPassthrough()) {
                 audioSender = null
                 activeAudioProfile = null
+                activeAudioConnectionId = 0L
                 activeAudioStartedAt = 0L
                 false
             } else {
@@ -4621,6 +4633,7 @@ object SessionController {
             appendLog("AUDIO: 通道启动异常 - ${error.message}")
             audioSender = null
             activeAudioProfile = null
+            activeAudioConnectionId = 0L
             activeAudioStartedAt = 0L
             false
         }
@@ -5027,7 +5040,28 @@ object SessionController {
         val context = appContext?.applicationContext ?: return false
         val old = audioSender ?: return false
         if (!old.isRunning) return false
-        appendLog("AUDIO: $reason → 重建音频流（接收端音频输出在通话期间被释放，需新建流才会重开）")
+        // 通话中在线的是通话档（activeCallProfile），这里按 activeAudioProfile 重建
+        // 会把通话流拆掉换成媒体流——声音直接串台。挂断后的切回由 switchAudioScene 负责。
+        if (audioInCallMode) {
+            appendLog("AUDIO: $reason → 当前在通话档上，不重建媒体流（挂断后会自动切回）")
+            return false
+        }
+        val oldConnId = activeAudioConnectionId
+        appendLog(
+            "AUDIO: $reason → 重建音频流（先 TEARDOWN 旧流 connId=$oldConnId、再 SETUP 新流：" +
+                "同一 (type,audioType) 上不允许两条并存）",
+        )
+        // 1) 先停发包：TEARDOWN 之后旧流不该再有包打到已释放的端口
+        old.stop()
+        audioSender = null
+        activeAudioStartedAt = 0L
+        // 2) 拆旧流。宝马车机对同一 (type,audioType) 的第二条流一律 400，
+        //    不拆就永远建不起来（1.2.81 现场连按 4 次「立即重启一次」全是 400）。
+        if (!client.teardownStreamById(profile.streamType, oldConnId)) {
+            appendLog("AUDIO: 旧流 TEARDOWN 未被接受（connId=$oldConnId）——仍尝试 SETUP：部分固件只回 ACK")
+        }
+        activeAudioConnectionId = 0L
+        // 3) 再建新流
         val info =
             try {
                 // 重建时把上行端口继续声明进去：不然车机以为手机不要麦了，通话里反而没上行
@@ -5037,14 +5071,12 @@ object SessionController {
                 null
             }
         if (info == null) {
-            appendLog("AUDIO: 重建协商失败——保持原音频流继续推（不降级成无声）")
+            appendLog("AUDIO: 重建 SETUP 失败——旧流已拆，本条音频无法恢复（重连会话可恢复）")
             return false
         }
+        activeAudioConnectionId = info.streamConnectionId
         // 新流的密钥盐变了，上行监听跟换
         micUplink?.updateKey(secret, info.streamConnectionId)
-        // 新流已就绪：停旧发送端。旧流不再有包，接收端会在超时后自行回收。
-        old.stop()
-        audioSender = null
         // 看门狗线程跟随 audioSender 字段：换流后自动续上，所以这里**不该**置
         // callWatcher = null —— 那只丢引用、旧线程仍在跑，紧接着 startCallWatcher()
         // 再起一个就成双线程（两边同时切音频流）。startCallWatcher 自己有 isAlive 检查。
@@ -5066,6 +5098,7 @@ object SessionController {
         if (!sender.startPassthrough()) {
             audioSender = null
             activeAudioStartedAt = 0L
+            activeAudioConnectionId = 0L
             appendLog("AUDIO: 音频流重建后启动失败——本次仅推视频（重连可恢复）")
             return false
         }
@@ -5156,6 +5189,8 @@ object SessionController {
             return false
         }
         micUplink?.updateKey(secret, info.streamConnectionId)
+        // 跟随当前在线的那条流：切回媒体档后，「立即重启一次」要拆的就是它
+        activeAudioConnectionId = info.streamConnectionId
         // 新流已就绪：停旧流。旧流不再有包，接收端会在超时后自行回收。
         old.stop()
         audioSender = null
@@ -5389,6 +5424,7 @@ object SessionController {
             )
             uiHintSink?.invoke("车机在补发 RECORD 后断开——下次连接改为只发一次 RECORD")
             activeAudioProfile = null
+            activeAudioConnectionId = 0L
             activeAudioStartedAt = 0L
             return
         }
@@ -5403,6 +5439,7 @@ object SessionController {
                     (activeCallProfile?.let { "（通话档 ${it.label}）" } ?: ""),
             )
             activeAudioProfile = null
+            activeAudioConnectionId = 0L
             activeAudioStartedAt = 0L
             return
         }
@@ -5417,12 +5454,14 @@ object SessionController {
                     "档位记忆保持不变）",
             )
             activeAudioProfile = null
+            activeAudioConnectionId = 0L
             activeAudioStartedAt = 0L
             return
         }
         val lived = if (startedAt > 0) android.os.SystemClock.uptimeMillis() - startedAt else -1L
         // 本轮记忆很快失效：下次连接重新按最新记忆选档
         activeAudioProfile = null
+        activeAudioConnectionId = 0L
         activeAudioStartedAt = 0L
         if (startedAt == 0L || identity.isBlank()) return
         val ctx = appContext?.applicationContext

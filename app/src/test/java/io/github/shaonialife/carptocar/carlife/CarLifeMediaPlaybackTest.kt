@@ -57,12 +57,21 @@ class CarLifeMediaPlaybackTest {
     }
 
     @Test
-    fun `explicit media session pause vetoes car resume`() {
+    fun `media session pause no longer vetoes pcm forwarding`() {
         val playback = CarLifeMediaPlayback()
+
+        // 手机媒体会话报暂停：切歌（旧会话结束、新会话建立）和「监听器未绑定时的
+        // 会话轮询兜底」都会这样报，与引擎是否在推 PCM 无关。
+        // 2026-11-23 BMW MGU-81 现场：85 秒的音频流里约 50 秒被这道门禁吃掉，
+        // 车机只收到 37.5 秒音频（44%），听感就是全程无声。
         playback.onSessionPlayback(false)
-        playback.onCarResume()
+        assertTrue("媒体会话暂停不得拦引擎 PCM", playback.canForwardPcm)
+        // 界面仍然如实反映手机播放器状态（媒体键也按它决定发 PLAY 还是 PAUSE）。
         assertFalse(playback.playing)
-        assertFalse(playback.canForwardPcm)
+
+        // 车机把音频还回来（解除静音）→ 立即放行，不再被媒体会话的 false 否决。
+        playback.onCarResume()
+        assertTrue(playback.canForwardPcm)
     }
 
     @Test
