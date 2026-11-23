@@ -16,6 +16,44 @@
 
 ---
 
+### 1.2.85 —— 2026-11-23（主干清理 + 会话稳定性 + 通用协议修正，正式版）
+
+> 跳过 `1.2.84`。本版把 `#41/#42/#44/#45` 的清理与修正合入主干，**不含车型 profile**，
+> 已跑通车机首包与默认报文不变。全部改动仅完成本地单测 / 构建验证，**尚未多车实车回归**。
+
+**一、删除已不可达的非主线链路（原 PR #42 主体，本地分两步完成）**
+
+- 自绘隐形屏 / 虚拟屏桌面 / Shizuku 注入残留整体移除：`capture/`、`render/` 两个包删除，
+  `launcher/` 只剩 `settings/`（AutoConnect / DevMode / Display），`ICarInput.aidl` 与
+  `CarInputClient` 删除，`detectResidualDisplays` / `throttleSeek` 等失效入口清除。
+- 车机画面**唯一来源**仍是本地劫持的 CarLife 引擎，`TouchRouter` 只剩 CarLife 9340 一条去向。
+- 会话保活靠 `CarPlayService` 的 `PARTIAL_WAKE_LOCK`，常亮 / 暗幕移除不影响连接。
+- 补清构建侧：`aidl = true` 关闭，`viewpager2` / `recyclerview` 依赖、18 个零引用 drawable、
+  过期 lint 条目与 NOTICE 声明同步删除。
+
+**二、MGU-81 会话反复重建三修（本地 `9d4af13`）**
+
+- RECORD 后 2s 内首次 `Restoring LUM` 接管只豁免 screen 流（音频照常接管），真让屏不受影响。
+- BT-GUARD 从「无限踢 HFP/A2DP」改为 3 次封顶 + 3/6/12s 退避。
+- 冻结恢复与连接重试合并为 `session/ReconnectGate` 一套互斥退避（3/10/30s、令牌作废、预算封顶）。
+
+**三、通用协议修正（PR #44 / #45）**
+
+- `101/default` 无可用 PCM/AAC 档（如 Opus-only）时，不再因导航意图临时借用主音频：
+  避免播报期间把原车收音机 / 媒体掐成静音却没有任何导航声；已支持 101/100 的车机走原路径。
+- API 33+ 注册 `_carplay-ctrl._tcp` 显式设置 `NsdServiceInfo.network = boundNetwork`，
+  并修复 `stop()` 清空 `registeredNetwork` 导致占位 MAC 重注册丢绑定的问题。
+
+**四、文档重构与协作契约**
+
+- 根 `README.md` 瘦身为简介 / 快速上手 / 兼容性表 / 文档索引；版本流水独立为 `CHANGELOG.md`。
+- `docs/current/` 为现行规范 / 架构唯一真源，`docs/archive/` 收 38 篇历史排障取证；
+  `PROJECT-GUIDE.md` 新增第 10 条红线「归档结论不得照抄进新修改」。
+- 新增 `AGENTS.md`（构建不变量、多车机兼容红线、按场景的文档指针）。
+
+**未做 / 未验证**：`#46` 导航引导语义修正、`#47` 0x4300 兜底档均未合入；
+以上修复尚未做多车实车回归，只有本地 993 例单测、lint new=0 与构建 / 合规守卫验证。
+
 ### 1.2.83 —— 2026-11-23（BMW 无声修复 + EntryEVO 建链 + 仪表转向指引，正式版）
 
 **一、BMW MGU-81 全程无声**（根因是自家 PCM 门禁，不是协议失败、也不是编码器坏）
