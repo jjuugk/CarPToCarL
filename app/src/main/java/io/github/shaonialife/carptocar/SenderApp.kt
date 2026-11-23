@@ -2,7 +2,6 @@ package io.github.shaonialife.carptocar
 
 import android.app.Application
 import android.bluetooth.BluetoothAdapter
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -10,7 +9,6 @@ import android.util.Log
 import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
-import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
@@ -45,27 +43,6 @@ class SenderApp : Application() {
             Log.e(TAG, "未捕获异常（线程 ${thread.name}，已吞掉保进程）", throwable)
             // 不调用 previous：默认处理器会 killProcess 杀死整个 app
         }
-        // 应用安装/卸载/更新 → 桌面与车机设置的共享应用清单缓存失效
-        val packageFilter =
-            IntentFilter().apply {
-                addAction(Intent.ACTION_PACKAGE_ADDED)
-                addAction(Intent.ACTION_PACKAGE_REMOVED)
-                addAction(Intent.ACTION_PACKAGE_REPLACED)
-                addDataScheme("package")
-            }
-        registerReceiver(
-            object : BroadcastReceiver() {
-                override fun onReceive(
-                    context: Context,
-                    intent: Intent,
-                ) {
-                    VirtualLauncher
-                        .invalidateAppsCache()
-                    Log.i(TAG, "应用清单缓存已失效（包变化）")
-                }
-            },
-            packageFilter,
-        )
         // 蓝牙适配器状态观测（2026-11-21 诊断）：验证「断 HFP/A2DP 会不会把部分手机的
         // 蓝牙栈带重启」。动态注册、随进程存活；只写文件日志，不改变任何连接行为。
         // 判读时与 BT-PROFILE / BT-GUARD / BT-C 的时间戳对齐。

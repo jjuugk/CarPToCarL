@@ -1373,49 +1373,6 @@
                     android:textColor="@color/m3_primary"
                     android:textSize="12.5sp" />
 
-                <!-- 触摸注入节流 -->
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
-                    android:text="触摸注入节流"
-                    android:textColor="@color/m3_on_surface"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <SeekBar
-                        android:id="@+id/throttleSeek"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:max="6" />
-
-                    <TextView
-                        android:id="@+id/throttleValue"
-                        android:layout_width="72dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:gravity="end"
-                        android:text="关闭"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
-                    android:textColor="@color/m3_on_var"
-                    android:textSize="12sp" />
-
                 <!-- 触摸域自适应（默认关）：上报坐标域比画面大时按观测上限线性映射 -->
                 <LinearLayout
                     android:layout_width="match_parent"

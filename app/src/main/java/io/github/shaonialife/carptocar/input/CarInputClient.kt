@@ -10,9 +10,9 @@ import android.content.Context
  *
  * 为什么可以直接停用：现在车机画面唯一来源是「本地劫持原生 CarLife」，车机触控由
  * CarLife 自己的 9340 socket 回传（见 `CarLifeHijack.handleTouch`），完全不需要
- * 系统级 MotionEvent 注入；虚拟屏/桌面那套只在旧的「隐形屏」形态下才用得上。
+ * 系统级 MotionEvent 注入；虚拟屏/桌面那套已在 2026-11-23 整体删除。
  *
- * 保留这个门面是为了让 [VirtualLauncher] / `TouchRouter` 等调用点的类型稳定，
+ * 保留这个门面只为 `MainActivity` 的「旧版本残留虚拟屏清理」还有调用点，
  * 它们对 `service == null` 本来就有降级分支。
  */
 object CarInputClient {

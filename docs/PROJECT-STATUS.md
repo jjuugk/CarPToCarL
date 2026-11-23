@@ -18,7 +18,7 @@
 | 形态 | 单模块 Android 应用，Kotlin；**发送端**（手机侧），不是接收端 |
 | 包名 / 系统 | `io.github.shaonialife.carptocar` · minSdk 31 / target / compileSdk 34（Android 12+） |
 | 当前版本 | **1.2.70**（versionCode 10270，APK 14,084,053 B） |
-| 代码规模 | 主源码 **180** 个 Kotlin 文件 / **59,142** 行；测试 **120** 文件 / **926** 例 / 16,257 行 |
+| 代码规模 | 主源码 **176** 个 Kotlin 文件 / **56,371** 行；测试 **130** 文件 / **979** 例 / 17,287 行 |
 | 仓库活跃度 | 272 次提交，2026-10-25 至今 25 天，README 记录 **57** 个版本条目（1.0.0 → 1.2.70） |
 | 真车验证 | 奥迪 MIB3（2026-10-11 全链路：出画 + 触摸可交互）；测试台 DiPlay / xcertplay / WinPlay |
 | 已知不通 | 宝马 300 / iD9（vivo V2547DA / Android 16）：12 次 iAP2 会话、**0 条 0x4301** |
@@ -135,7 +135,7 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 
 | 口径 | 主源码 | 测试文件 | 测试用例 | 说明 |
 |---|---|---|---|---|
-| `main`（发布线） | **180** | **120** | **926** | 含协议聚合层 10 文件；`95f8b6b` 之前为 169 / 118 / 900 |
+| `main`（发布线） | **176** | **130** | **979** | 含协议聚合层 10 文件；2026-11-23 删除隐形屏链路 18 文件 / 5,722 行，测试 -5 文件 / 34 例 |
 | `backup/main-pre-protocol-20261119` | 169 | 118 | 900 | 合并前的 main 快照，仅供对比与回滚 |
 
 `main` 口径 59,142 行主源码 / 16,257 行测试 ≈ **1 : 0.27**，重点覆盖协议编解码与密码学。
@@ -145,12 +145,12 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 | 包 | 文件 | 职责 | 包 | 文件 | 职责 |
 |---|---|---|---|---|---|
 | `airplay` | 24 | PairVerify、控制通道、流协商、加密、Timing | `iap2` | 22 | Link/CSM/发送端会话/NowPlaying |
-| `launcher` | 15 | 隐形屏（保留非默认）/ EGL 合成 | `bt` | 15 | RFCOMM Server/Client |
+| `launcher` | 3 | 只剩设置偏好（显示/触摸/转向） | `bt` | 17 | RFCOMM Server/Client |
 | `net` | 13 | WiFi 入网、mDNS 发现与 ctrl 广播 | `util` | 12 | 日志、导出、时钟等 |
 | `carlife` | 11 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 12 | AAC 编码、播放捕获、RTP 封装、`AudioSink` |
 | `protocol` | 10 | **重构新增**：抽象层 + 注册表 + 两个协议门面 | `input` | 8 | 触摸分流、消费键、CarInput(AIDL) |
 | `video` | 8 | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` | `ui` / `session` / `service` | 5 / 5 / 5 | 界面 / 会话总管 / 前台保活 |
-| `legal` | 3 | 免责声明 | `transport` / `render` / `media` / `capture` | 2 / 2 / 3 / 2 | iAP2 链路通道 / 合成 / 通知歌词与会话轮询兜底 / 采集 |
+| `legal` | 3 | 免责声明 | `transport` / `media` | 2 / 6 | iAP2 链路通道 / 通知歌词与会话轮询兜底 |
 | 根入口 | 3 | `MainActivity` / `SenderApp` / … | | | |
 
 结构性质：**协议主干 + 功能分层**的混合结构，不是纯按协议分组。三处交叉点已知：`net/` 里有 AirPlay 服务发现类、`transport/Iap2LinkChannel` 属 iAP2 但独立成包、`protocol/` 是跨协议抽象。

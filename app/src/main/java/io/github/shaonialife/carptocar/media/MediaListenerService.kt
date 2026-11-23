@@ -6,7 +6,7 @@ import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
-import io.github.shaonialife.carptocar.launcher.VirtualLauncher
+import io.github.shaonialife.carptocar.SessionController
 
 /**
  * 通知监听服务：借通知使用权枚举系统活跃媒体会话，向应用提供「正在播放」状态
@@ -405,7 +405,7 @@ object MediaSessionsState {
                 old?.playing != value?.playing ||
                 old?.art !== value?.art
         if (contentChanged) {
-            VirtualLauncher.logSink?.invoke(
+            SessionController.appendLog(
                 "MEDIA: " + (
                     value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
                         ?: "无活跃会话"

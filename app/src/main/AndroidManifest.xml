@@ -106,20 +106,9 @@
             android:name=".service.NotificationActionReceiver"
             android:exported="false" />
 
-        <!-- 虚拟屏桌面（exported：shell am start 需要可从外部拉起） -->
-        <activity
-            android:name=".launcher.DockActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.CarPlaySender.Launcher" />
-
-        <activity
-            android:name=".launcher.GridActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.CarPlaySender.Launcher" />
+        <!-- 虚拟屏桌面（Dock / Grid）已随隐形屏链路整体删除（2026-11-23）：
+             现在车机画面唯一来源是本地劫持的 CarLife 引擎，本 App 不再创建任何
+             虚拟屏、也不再往虚拟屏里 am start 自己的 Activity。 -->
 
         <!-- 靠近车机自动启动（2026-10-30）：只听系统蓝牙 ACL 事件——车机进入范围后
              自己回连手机时系统会投递 ACTION_ACL_CONNECTED，据此识别「车来了」。

@@ -1,27 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 系统栏统一深色：导航栏不显式设置时，MagicOS 会按浅色主题给一个**白色**底
-         （实测 #FCFCFC）——正常界面里是底部一条白边，假息屏时（全屏黑遮罩）
-         尤其突兀，看起来像没适配全面屏（2026-10-18 用户截图反馈）。
-         假息屏遮罩是 APPLICATION_OVERLAY 窗口，只能覆盖内容区（系统栏由 SystemUI
-         画在其上），所以系统栏颜色必须自身就是黑的才能与遮罩融为一体。 -->
+         （实测 #FCFCFC）——正常界面里是底部一条白边，看起来像没适配全面屏
+         （2026-10-18 用户截图反馈）。App 本身是深色界面，系统栏跟随底色。 -->
     <style name="Theme.CarPlaySender" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:statusBarColor">#000000</item>
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:colorBackground">#101418</item>
-    </style>
-
-    <!-- 车机桌面（dock/网格）：窗口透明——壁纸由 GL 合成器画在最底层，
-         Activity 不垫底色（否则壁纸被盖住） -->
-    <style name="Theme.CarPlaySender.Launcher" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="android:windowBackground">@android:color/transparent</item>
-        <item name="android:colorBackground">@android:color/transparent</item>
-        <item name="android:windowIsTranslucent">true</item>
-        <item name="android:statusBarColor">#000000</item>
-        <item name="android:navigationBarColor">#000000</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

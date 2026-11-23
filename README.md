@@ -258,7 +258,7 @@ App 侧不需要再改什么：`carlife_fps` 默认就是 **60**，连接建立 
 | `RECORD_AUDIO`                         | `AudioPlaybackCapture` 捕获本机媒体/导航声音      | ✅（要声音时） |
 | `POST_NOTIFICATIONS`                   | 前台服务常驻通知                                | ✅       |
 | 通知使用权（特殊权限）                            | 读取媒体会话：歌名/歌手/歌词/播放状态                    | 要歌词就必需  |
-| `SYSTEM_ALERT_WINDOW`                  | 暗幕（替代息屏）                                | ❌ 可选    |
+| `SYSTEM_ALERT_WINDOW`                  | 后台启动豁免（车机靠近时自动拉起界面）                    | ❌ 可选    |
 
 前四项里 `BLUETOOTH_CONNECT`、`NEARBY_WIFI_DEVICES`（Android 12/12L 的定位）属于**同一个权限组**，
 首次连接会合并成**一个**「要与 CarPToCarL 配合的设备」系统框——这是 Android 的系统级授权，
@@ -708,30 +708,31 @@ CarPToCarL/
 ### 主源码包结构（`app/src/main/java/io/github/shaonialife/carptocar/`）
 
 ```
-├── MainActivity.kt               # 操作台 UI（连接 / 声音 / 暗幕 / 日志）
+├── MainActivity.kt               # 操作台 UI（连接 / 声音 / 显示 / 日志）
 ├── SessionController.kt          # 会话总管（进程级单例）：链路生命周期、配对、WiFi、取消
-├── SenderApp.kt                  # Application（异常兜底、包变化失效缓存）
-├── carlife/       (11)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
-├── iap2/          (22)           # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
+├── SenderApp.kt                  # Application（异常兜底、日志/报文落盘）
+├── carlife/       (16)           # CarLife 劫持：HU 客户端 / 协议 / 音频 / 画质配置
+├── iap2/          (24)           # iAP2 链路层 + CSM + 发送端会话 + NowPlaying
 ├── airplay/       (24)           # AirPlay 配对 / 控制通道 / 流协商 / 加密 / Timing
 ├── protocol/      (10)           # 能力聚合层（Registry / 门面 / 事件）+ 代际与一致性审计
-├── bt/            (15)           # RFCOMM 双向（Server 等回连 / Client 主动连）
-├── net/           (13)           # WiFi 入网 / mDNS 发现 / ctrl 广播
+├── bt/            (17)           # RFCOMM 双向（Server 等回连 / Client 主动连）
+├── net/           (14)           # WiFi 入网 / mDNS 发现 / ctrl 广播
 ├── transport/      (2)           # iAP2 隧道封装（Iap2LinkChannel）
-├── audio/         (12)           # AAC 编码 / 播放捕获 → RTP/ChaCha20（+ AudioSink 契约）
+├── audio/         (11)           # AAC 编码 / 播放捕获 → RTP/ChaCha20（+ AudioSink 契约）
 ├── video/          (8)           # H.264 推流 / SPS 解析 / VideoConfig（+ VideoSink 契约）
-├── input/          (8)           # 触摸分流 / 消费键 / CarInput
-├── media/          (3)           # 通知使用权 → 媒体会话（+ 会话轮询兜底）
-├── capture/        (2)           # 画面源
-├── render/         (2)           # EGL 多屏合成 → 编码 Surface
-├── session/        (5)           # 会话编排：预检 / 取消 / 权限修复 / 尝试门
+├── input/          (9)           # 触摸路由 / 消费键 / 旋钮 / 触摸域映射
+├── media/          (6)           # 通知使用权 → 媒体会话（+ 会话轮询兜底）
+├── session/        (6)           # 会话编排：预检 / 取消 / 权限修复 / 尝试门
 ├── service/        (5)           # 前台保活 / 冻结恢复 / 通知动作
-├── launcher/      (15)           # 隐形屏启动器（保留，非默认画面来源）
-│   └── settings/   (4)           #   设置面板（显示缩放、应用方向兼容）
-├── ui/             (5)           # 暗幕、波形图、壁纸、深色弹窗、面板尺寸
+├── launcher/       (3)           # 仅剩设置偏好（显示缩放 / 自适应触摸 / 转向指引）
+│   └── settings/   (3)           #   偏好存取（AutoConnect / DevMode / Display）
+├── ui/             (3)           # 波形图、深色弹窗、面板尺寸
 ├── legal/          (3)           # 免责声明
 └── util/          (12)           # 后台任务池、日志导出、设备标识
 ```
+
+> `capture/` 与 `render/`（隐形屏画面源 + EGL 多屏合成）已于 2026-11-23 随隐形屏链路
+> 一并删除：现在车机画面唯一来源是本地劫持的 CarLife 引擎，本 App 不再创建虚拟屏。
 
 ### 各包职责速查
 

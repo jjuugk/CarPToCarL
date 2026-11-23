@@ -117,10 +117,10 @@
 | `audio` | AAC 编码、播放捕获、RTP 封装 | `bt` | RFCOMM Server/Client |
 | `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、消费键、CarInput（AIDL） |
 | `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活 |
-| `launcher` / `render` | 隐形屏（保留非默认）/ EGL 合成 | `ui` / `legal` / `util` | 暗幕、免责声明、日志导出等 |
+| `launcher` | 只剩设置偏好（显示缩放/自适应触摸/转向指引） | `ui` / `legal` / `util` | 波形图、深色弹窗、免责声明、日志导出等 |
 | `protocol` | 协议聚合层（门面 + 能力路由 + 代际审计） | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
 
-入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **120** 个文件 / **926** 例，重点覆盖协议编解码与密码学。
+入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **130** 个文件 / **979** 例，重点覆盖协议编解码与密码学。
 
 > **协议模块化重构已并入 `main`**（2026-11-19 快进，`main` = `be02fdc`；旧 main 备份在
 > `backup/main-pre-protocol-20261119`）。`protocol/` 10 文件：`ProtocolModule` / `ProtocolRegistry` /

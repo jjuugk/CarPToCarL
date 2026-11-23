@@ -45,8 +45,6 @@ import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.input.CarInputClient
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
-import io.github.shaonialife.carptocar.launcher.VirtualLauncher
-import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
 import io.github.shaonialife.carptocar.launcher.settings.DevModePrefs
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
@@ -57,7 +55,6 @@ import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.PermissionRepair
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
-import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.AppVersion
 import io.github.shaonialife.carptocar.util.Bg
@@ -943,12 +940,11 @@ class MainActivity : AppCompatActivity() {
             scrollConsoleToBottom()
         }
 
-        // 进程重启兜底：若上次会话未正常退役，「常亮」改过的屏幕超时需要恢复
+        // 进程重启兜底：旧版本「常亮」改过屏幕超时，且崩溃时没来得及还原——
+        // 这里给历史残留兜一次（新版已无常亮功能，只在备份键仍存在时触发一次）
         run {
             val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
-            if (prefs.contains("screen_off_timeout_backup") &&
-                VirtualLauncher.appDisplayId < 0
-            ) {
+            if (prefs.contains("screen_off_timeout_backup")) {
                 val backup = prefs.getInt("screen_off_timeout_backup", 60_000)
                 prefs.edit().remove("screen_off_timeout_backup").apply()
                 Bg.run("screen-timeout-restore") {
@@ -1464,13 +1460,8 @@ class MainActivity : AppCompatActivity() {
         // ---- 显示设置（原「显示」面板迁移至首页，2026-10-24） ----
         bindDisplayCard()
 
-        // 常亮+暗幕：界面开关已移除，行为固定为「默认开启」，由会话起停驱动
-        // （ScreenDimmer 由 VirtualLauncher.attach 在会话启动时挂载）。
-        ScreenDimmer.enabled = true
-
         TouchRouter.logSink = { line -> log(line) }
         KnobRouter.logSink = { line -> log(line) }
-        VirtualLauncher.logSink = { line -> log(line) }
         CarInputClient.logSink = { line -> log(line) }
 
         // 启动即开始守候 CarLife 端口 —— 车机画面的唯一来源（隐形屏已按用户要求移除）。
@@ -2003,41 +1994,6 @@ class MainActivity : AppCompatActivity() {
         )
 
         // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
-        // 这里先按默认 60 起，等 SETUP 拿到车机值后由 SessionController 覆盖。
-        VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
-
-        // 触摸注入节流（0=关闭，步进 8ms）
-        val throttleSeek = findViewById<SeekBar>(R.id.throttleSeek)
-        val throttleValue = findViewById<TextView>(R.id.throttleValue)
-
-        fun throttleText(ms: Int) = if (ms <= 0) "关闭" else "${ms}ms"
-
-        val savedThrottle = DisplayPrefs.moveThrottleMs(ctx)
-        throttleSeek.progress = savedThrottle / 8
-        throttleValue.text = throttleText(savedThrottle)
-        TouchRouter.moveThrottleMs = savedThrottle.toLong()
-
-        throttleSeek.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean,
-                ) {
-                    if (!fromUser) return
-                    val ms = progress * 8
-                    throttleValue.text = throttleText(ms)
-                    DisplayPrefs.setMoveThrottleMs(ctx, ms)
-                    TouchRouter.moveThrottleMs = ms.toLong()
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    snack("触摸节流 ${throttleText(DisplayPrefs.moveThrottleMs(ctx))}")
-                }
-            },
-        )
 
         // 触摸域自适应（默认关）：上报坐标域比画面大时按观测上限线性映射。
         // 即时生效——直接改 CarLifeHijack 的开关字段，不必重连；持久化走 DisplayPrefs。
@@ -2974,31 +2930,19 @@ class MainActivity : AppCompatActivity() {
         startupCheckRunning = true
         tickHero()
         Bg.run("residual-scan") {
-            var residual =
-                parseCarPlayDisplays(sh("dumpsys display"))
-                    .filter { it.first !in currentSessionDisplayIds() }
+            var residual = parseCarPlayDisplays(sh("dumpsys display"))
             if (residual.isNotEmpty()) {
                 log(
                     "SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
                         residual.joinToString(", ") { "${it.second}(${it.first})" },
                 )
-                // 残留屏 = 上次会话异常退出（进程被杀）：横屏覆盖的会话末复原
-                // 也没执行——一并清理，避免应用在手机侧残留横屏状态
-                runCatching {
-                    val reset =
-                        AppOrientationCompat
-                            .resetAll(applicationContext)
-                    if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
-                }
                 // 先自动清理一轮（含旧版本 UserService 进程回收——其持有的屏跨进程
                 // 无法 release，只有进程回收能释放；重装 APK 后按版本复用的旧进程正是
                 // 「点清理释放 0/N」的根因，2026-10-16）。清不掉的再问用户。
                 val released = releaseDisplays(residual.map { it.first })
                 log("SHELL: 启动残留自动清理（释放 $released/${residual.size}）")
                 if (released > 0) {
-                    residual =
-                        parseCarPlayDisplays(sh("dumpsys display"))
-                            .filter { it.first !in currentSessionDisplayIds() }
+                    residual = parseCarPlayDisplays(sh("dumpsys display"))
                 }
             }
             runOnUiThread {
@@ -3032,18 +2976,6 @@ class MainActivity : AppCompatActivity() {
             CarInputClient.ensure(this)
         }
     }
-
-    /** 当前会话持有的虚拟屏（不参与残留清理）。 */
-    private fun currentSessionDisplayIds(): Set<Int> =
-        buildSet {
-            val launcher = VirtualLauncher
-            listOf(
-                launcher.dockDisplayId,
-                launcher.appDisplayId,
-                launcher.mapDisplayId,
-                launcher.gridDisplayId,
-            ).forEach { if (it >= 0) add(it) }
-        }
 
     /** 启动检测到残留 CarPlay 虚拟屏：询问是否立即清理（上次会话异常退出遗留）。 */
     private fun promptResidualDisplays(residual: List<Pair<Int, String>>) {

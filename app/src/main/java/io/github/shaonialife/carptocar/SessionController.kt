@@ -27,7 +27,6 @@ import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
-import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
 import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
@@ -56,8 +55,6 @@ import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.MediaKeyRoute
 import io.github.shaonialife.carptocar.input.TouchReports
 import io.github.shaonialife.carptocar.input.TouchRouter
-import io.github.shaonialife.carptocar.launcher.VirtualLauncher
-import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionFallback
 import io.github.shaonialife.carptocar.media.MediaSessionsState
@@ -92,7 +89,6 @@ import io.github.shaonialife.carptocar.session.AsyncSessionStop
 import io.github.shaonialife.carptocar.session.CarNightMode
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.SessionAttemptGate
-import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
 import io.github.shaonialife.carptocar.util.ConnectStage
@@ -498,9 +494,6 @@ object SessionController {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
         CarLifeHijack.navigationNowPlayingEnabled = DisplayPrefs.navigationNowPlaying(context)
-        // 横屏兼容写入失败的原因（user build 限制 / shell 无权限）只有这里能落盘：
-        // 车机侧设置面板的 toast 只给用户看，排查需要日志。
-        AppOrientationCompat.diagSink = ::appendLog
         // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
@@ -1536,9 +1529,6 @@ object SessionController {
 
     /** 通话状态看门狗线程（音频会话期间每秒看一次 AudioManager.mode）。 */
     private var callWatcher: Thread? = null
-
-    @Volatile
-    var currentHiddenSource: HiddenDisplaySource? = null
 
     /** 当前会话的共享密钥与接收端地址：投影授权晚于连接时，动态补启音频用。 */
     @Volatile
@@ -3048,8 +3038,6 @@ object SessionController {
         Iap2RouteGuidance.reset()
         videoSender?.stop()
         videoSender = null
-        // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
-        ScreenDimmer.setSessionActive(false)
         audioSender?.stop()
         audioSender = null
         // 导航独立流（实验）随会话一起收：留着会在下一轮被当成「已建好」而跳过重建
@@ -3069,10 +3057,6 @@ object SessionController {
         rejectedCallProfileKey = null
         currentSharedSecret = null
         currentAudioHost = null
-        currentHiddenSource?.release()
-        currentHiddenSource = null
-        TouchRouter
-            .reset()
         // 本机应用态静默收尾（此刻会话正在拆，补发没人收，只会在日志里留一条发送失败）
         appStateReporter.stop(publishFinal = false)
         retired?.let {
@@ -3092,11 +3076,6 @@ object SessionController {
         // （2026-10-16 实测）。BT 退役只在用户终态做，见 disconnect()。
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
         BtSessionGate.sessionActive = false
-        // 「强制应用横屏」覆盖随会话结束统一复原（应用回到手机侧正常竖屏形态）。
-        // 异步：每应用两次 am compat shell 往返，6 个应用实测 ~1.6s；此前同步跑在
-        // 配对前，等于每次连接白等 1.6s（2026-10-18 实测）。执行器串行保证
-        // 「先复原上一会话、后写入本会话」的顺序。
-        appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
         // 协议一致性汇总：放在最后一行，拆链原因与问题清单一前一后，反馈日志时最上面、
         // 最下面各有一条结论，不用翻中间过程。
         flushProtocolAudit("会话退役")
@@ -4348,7 +4327,6 @@ object SessionController {
                     // 实验开关：保留视频流时**不能 detach**——采集端一连断开，编码器就没帧可送，
                     // 「不拆流」也就名存实亡。
                     if (!streamKept) CarLifeHijack.detach()
-                    ScreenDimmer.setSessionActive(false)
                     phaseHint =
                         if (streamKept) {
                             "车机暂时持有主屏资源——视频流保留，归还后立即恢复"
@@ -4392,7 +4370,6 @@ object SessionController {
                         CarLifeHijack.attach(sender, ::appendLog)
                         appendLog("RESOURCE: 主屏归还，已重新 SETUP/RECORD 并恢复视频（音频所有权独立）")
                     }
-                    ScreenDimmer.setSessionActive(true)
                     phaseHint = "主屏资源已归还，CarPlay 视频恢复"
                     startCarlifeWaitNotice()
                     startFirstFrameGate()
@@ -6909,10 +6886,7 @@ object SessionController {
                                                 // 用户一般是先点一下列表再转旋钮，锚点跟着手走
                                                 // 比固定屏幕中心好用得多（见 KnobRouter）。
                                                 if (it.down) KnobRouter.noteTouch(it.xPixels, it.yPixels)
-                                                TouchRouter.onContact(
-                                                    context.applicationContext,
-                                                    it,
-                                                )
+                                                TouchRouter.onContact(it)
                                             }
                                         } else if (report != null) {
                                                 appendLog(
@@ -7166,24 +7140,11 @@ object SessionController {
                                     val sessionTargetFps = StreamFps.resolve(setup.maxFps)
                                     activeScalePercent = scalePct
                                     activeTargetFps = sessionTargetFps
-                                    // 合成器出帧节奏跟着走：attach 时按 60 建（那时还没
-                                    // SETUP），车机上限要到这一刻才知道。不同步的话
-                                    // 多出来的帧会白白送去编码再丢掉。
-                                    VirtualLauncher.setStreamFps(sessionTargetFps)
                                     // 记录「车机通告分辨率」原值：英雄卡与「显示」卡片要如实
                                     // 展示它，而不是只显示缩放百分比（用户根本看不出画布多大）。
                                     activeCarWidth = setup.displayWidth
                                     activeCarHeight = setup.displayHeight
                                     activeCarResolutionFromCar = setup.displayFromCar
-                                    // 车机触摸在通告视图坐标系（如 1160×540），流已按比例
-                                    // 缩放（如 1450×674）——注入前需映射，否则点击漂移
-                                    TouchRouter
-                                        .setCoordinateScale(
-                                            setup.displayWidth,
-                                            setup.displayHeight,
-                                            streamW,
-                                            streamH,
-                                        )
                                     // CarLife 劫持链路用自己的坐标映射（车机视图 → 手机视频），
                                     // 这里只需把车机通告的视图尺寸交给它
                                     CarLifeHijack.setViewSize(setup.displayWidth, setup.displayHeight)
@@ -7482,7 +7443,6 @@ object SessionController {
                                         // 于是「已回放画面」不会被误判成「没有 CarLife 画面」。
                                         videoSessionFrameBase = CarLifeHijack.framesDelivered
                                         CarLifeHijack.attach(target) { line -> appendLog(line) }
-                                        ScreenDimmer.setSessionActive(true)
                                         initialScreenAttached = true
                                     } else {
                                         appendLog("MODE: 数据端口未就绪，直通启动失败")
