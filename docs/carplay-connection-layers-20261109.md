@@ -189,7 +189,7 @@ Activity 只是「挂屏」。划掉界面再进来，连接不受影响——�
   （微信提示音把音乐「卡一下」就是这里 311ms 空档造成的）。
 - **麦克风**：`audio/MicUplink`。**本版只到「收 + 解 + 落盘」**，把 PCM 注入 CarLife 引擎（9242）是下一步；
   车机是否真的往 `dataPort` 推流，仍需真车确认，判据是日志里的 `MIC: 结论——…`。
-- **输入**：`input/TouchRouter`、`input/CarInputClient`。触摸坐标要按车机画布与手机渲染尺寸换算，
+- **输入**：`input/TouchRouter`。触摸坐标要按车机画布与手机渲染尺寸换算，
   HID 按键走 `0x6802`/`0x6801`，方向盘语音键另有 AirPlay `requestSiri` 通路
   （见 [carlife-voice-siri-20261104.md](carlife-voice-siri-20261104.md)）。
 

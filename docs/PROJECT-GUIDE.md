@@ -108,19 +108,19 @@
 
 ## 5. 代码地图
 
-单模块 Android 应用，`main` 主源码 **180** 个 Kotlin 文件，按链路职责切包（协议主干 + 功能分层）：
+单模块 Android 应用（`app/`），按「协议主干 + 功能分层」切包（具体文件数与用例数以代码树和 `./gradlew :app:testDebugUnitTest` 为准）：
 
 | 包 | 职责 | 包 | 职责 |
 |---|---|---|---|
-| `carlife` | 冒充车机劫持本机引擎，98386/98311 下发 | `iap2` | Link/CSM/发送端会话/NowPlaying |
-| `airplay` | PairVerify、控制通道、流协商、加密、Timing | `video` | H.264 封装、SPS 解析、VideoConfig 声明 |
-| `audio` | AAC 编码、播放捕获、RTP 封装 | `bt` | RFCOMM Server/Client |
-| `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、消费键、CarInput（AIDL） |
-| `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活 |
-| `launcher` / `render` | 隐形屏（保留非默认）/ EGL 合成 | `ui` / `legal` / `util` | 暗幕、免责声明、日志导出等 |
+| `carlife` | 冒充车机劫持本机引擎，98386/98311 下发 | `iap2` | Link/CSM/发送端会话/NowPlaying/导航引导 |
+| `airplay` | PairVerify、控制通道、流协商、加密、Timing | `video` | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` |
+| `audio` | AAC 编码、直通/RTP 封装、`AudioSink` | `bt` | RFCOMM Server/Client |
+| `net` | WiFi 入网、mDNS 发现与 ctrl 广播 | `input` | 触摸分流、旋钮与消费键 |
+| `media` | 通知使用权 → 媒体/歌词数据源 | `service` | 前台保活与冻结恢复 |
+| `launcher/settings` | 显示、自动连接与开发者偏好设置 | `ui` / `legal` / `util` | 界面组件、免责声明、日志导出等 |
 | `protocol` | 协议聚合层（门面 + 能力路由 + 代际审计） | `session` / `transport` | 进程级会话编排 / iAP2 链路通道 |
 
-入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测 **120** 个文件 / **926** 例，重点覆盖协议编解码与密码学。
+入口：`MainActivity.kt`（操作台）、`SessionController.kt`（进程级会话总管）、`SenderApp.kt`。单测目录镜像源码包，重点覆盖协议编解码、状态机与密码学。
 
 > **协议模块化重构已并入 `main`**（2026-11-19 快进，`main` = `be02fdc`；旧 main 备份在
 > `backup/main-pre-protocol-20261119`）。`protocol/` 10 文件：`ProtocolModule` / `ProtocolRegistry` /
