@@ -2219,6 +2219,7 @@ class AirPlayClient(
      * 内置播放器经 0x10035 推来的歌名）。null = 始终发空态。
      */
     var nowPlayingSource: (() -> CarPlayNowPlaying?)? = null
+    internal var nowPlayingOverride: (() -> CarPlayNowPlaying?)? = null
 
     /**
      * 封面字节提供者：入参是 `0x5001` 里声明的 `artworkId`，返回 JPEG 原始字节。
@@ -2251,6 +2252,7 @@ class AirPlayClient(
                     alive = { socket?.isClosed == false },
                     mfiContext = context,
                     nowPlayingProvider = { nowPlayingSource?.invoke() },
+                    nowPlayingOverride = { nowPlayingOverride?.invoke() },
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                     artworkProvider = { id -> artworkSource?.invoke(id) },
                 ).also {

@@ -1856,6 +1856,13 @@ class MainActivity : AppCompatActivity() {
             snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
         }
 
+        val navigationNowPlayingSwitch = findViewById<SwitchCompat>(R.id.switchNavigationNowPlaying)
+        navigationNowPlayingSwitch.isChecked = DisplayPrefs.navigationNowPlaying(ctx)
+        navigationNowPlayingSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setNavigationNowPlaying(ctx, checked)
+            CarLifeHijack.navigationNowPlayingEnabled = checked
+        }
+
         // 媒体采样率策略：跟随车机 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
         val audioRateRow = findViewById<android.view.View>(R.id.rowAudioRate)
         val audioRateValue = findViewById<TextView>(R.id.audioRateValue)
