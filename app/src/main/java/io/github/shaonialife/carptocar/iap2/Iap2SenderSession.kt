@@ -1185,7 +1185,7 @@ class Iap2SenderSession(
         }
         val body =
             if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
-                Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.BT)
+                Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.BT, frame.body)
             } else {
                 Iap2SubscriptionReplies.idleBodyFor(replyId) ?: return false
             }
@@ -1202,6 +1202,9 @@ class Iap2SenderSession(
             "iap2 订阅应答 0x${frame.messageId.toString(16).padStart(4, '0')} → " +
                 "0x${replyId.toString(16).padStart(4, '0')}（$detail）",
         )
+        if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE && body.isNotEmpty()) {
+            pushRouteGuidance()
+        }
         return true
     }
 
@@ -1243,7 +1246,7 @@ class Iap2SenderSession(
             // 车机在蓝牙链路上订阅通讯/通话/列表/导航引导：就地回状态，别让它白等 10s
             if (answerSubscription(frame)) continue
             if (frame.messageId == Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES) {
-                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.BT)
+                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.BT, frame.body)
                 log("iap2 0x5203 车机停止导航引导订阅")
                 continue
             }
@@ -1727,9 +1730,10 @@ class Iap2SenderSession(
     /** 导航心跳：只刷最近一帧 0x5201，避免 DiPlay 30s 陈旧超时清 HUD。 */
     fun pushRouteGuidanceHeartbeat() {
         if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
-        val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.BT) ?: return
-        sendFireAndForget(frame.first, frame.second)
-        log("iap2 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+        for (frame in Iap2RouteGuidance.nextHeartbeatsFor(Iap2RouteGuidance.Link.BT)) {
+            sendFireAndForget(frame.first, frame.second)
+            log("iap2 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+        }
     }
 
     /**
