@@ -26,7 +26,7 @@ class AvailabilityBodyMemoryTest {
     }
 
     @Test
-    fun silentModernEscalatesToLegacyThenNone() {
+    fun silentModernEscalatesToLegacyThenDualGroupsThenNone() {
         val key = "$buick ${System.nanoTime()}"
         assertEquals(AvailabilityBodyMemory.Variant.MODERN_NESTED, AvailabilityBodyMemory.nextVariant(null, key))
 
@@ -35,8 +35,13 @@ class AvailabilityBodyMemoryTest {
         assertEquals(AvailabilityBodyMemory.Variant.LEGACY_FLAT, next)
         assertEquals(AvailabilityBodyMemory.Variant.LEGACY_FLAT, AvailabilityBodyMemory.nextVariant(null, key))
 
-        // 老版也静默 → 干脆不发，只等车机自己开口
-        val last = AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.LEGACY_FLAT)
+        // 老版也静默 → 兜底尝试双标识体（非通用系车机同样有机会走到标准双组形态）
+        val dual = AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.LEGACY_FLAT)
+        assertEquals(AvailabilityBodyMemory.Variant.DUAL_GROUPS, dual)
+        assertEquals(AvailabilityBodyMemory.Variant.DUAL_GROUPS, AvailabilityBodyMemory.nextVariant(null, key))
+
+        // 三档全静默 → 干脆不发，只等车机自己开口
+        val last = AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS)
         assertEquals(AvailabilityBodyMemory.Variant.NONE, last)
         assertEquals(AvailabilityBodyMemory.Variant.NONE, AvailabilityBodyMemory.nextVariant(null, key))
 
@@ -114,6 +119,22 @@ class AvailabilityBodyMemoryTest {
         val key = "bmw_92438 g08 bmw dual_${System.nanoTime()}"
         assertEquals(
             AvailabilityBodyMemory.Variant.MODERN_NESTED,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = false),
+        )
+    }
+
+    @Test
+    fun nonCinemoReceiverCanReachAndPinDualGroupsFallback() {
+        val key = "other_oem_headunit_${System.nanoTime()}"
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.MODERN_NESTED, preferDual = false)
+        AvailabilityBodyMemory.recordSilent(null, key, AvailabilityBodyMemory.Variant.LEGACY_FLAT, preferDual = false)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
+            AvailabilityBodyMemory.nextVariant(null, key, preferDual = false),
+        )
+        AvailabilityBodyMemory.recordSuccess(null, key, AvailabilityBodyMemory.Variant.DUAL_GROUPS)
+        assertEquals(
+            AvailabilityBodyMemory.Variant.DUAL_GROUPS,
             AvailabilityBodyMemory.nextVariant(null, key, preferDual = false),
         )
     }
