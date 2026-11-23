@@ -674,7 +674,14 @@ class Iap2LinkEngine(
             // 发起方 SYN，属于「它已应答」的信号（见下方 ACK 分支），再回一条就会形成
             // 双方互回 SYN|ACK 的无限乒乓（单测暴露：两个引擎互相喂帧时协商永不收敛）。
             val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
-            if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst)) {
+            // 2026-11-21 BMW EntryEVO(F49) 定谳：车机在 MFi 挑战阶段（此时本引擎已 NORMAL）
+            // 会重启自己的链路引擎、每秒重发纯 SYN（ctl=0x80 seq 固定）要求重协商。
+            // 旧逻辑只在 NEGOTIATING / 隧道(echoFirst) 态回 SYN|ACK，NORMAL 态静默丢弃 →
+            // 车机收不到回显就停止 ACK 一切数据帧（ack 永远停在证书那一帧），我们发出的
+            // 0x5702/0x4300 全堵在 5 帧窗口里（日志：积压 5 帧 / 链路停摆）→ 会话失败。
+            // iAP2 规范本就要求「收到纯 SYN 必须回 SYN|ACK」；乒乓防护由 isPureSyn 保证：
+            // 对端回 SYN|ACK 时该位为 0，会落到下面的 else-if，不会形成互回乒乓。
+            if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst || state == State.NORMAL)) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 adoptPeerTimings(sync)
