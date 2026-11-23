@@ -3,6 +3,7 @@ package io.github.shaonialife.carptocar.net
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.SystemClock
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DeviceIdentity
@@ -189,12 +190,14 @@ class CarPlayCtrlAdvertiser(
             log("$TAG: 跳过重复的强制重注册（${SystemClock.uptimeMillis() - registeredAtMillis}ms 前刚注册）")
             return true
         }
+        // stop() 会清空 registeredNetwork，先取出目标网络（确保占位 MAC 修复重注册时保留已绑定的车机网络）
+        val targetNetwork = network ?: registeredNetwork
         if (registered) {
             log("$TAG: 重新注册 mDNS 广播（${registeredSsid ?: "?"}${if (force) "，绑定后时机修正" else " → $ssid"}）")
             stop()
         }
         registeredSsid = ssid
-        registeredNetwork = network ?: registeredNetwork
+        registeredNetwork = targetNetwork
         var ok = start()
         if (!ok) {
             // 注销是异步的：极端情况下 registerService 会遇到 "listener already in use"，
@@ -221,6 +224,8 @@ class CarPlayCtrlAdvertiser(
                 mac = DeviceIdentity.bluetoothMac(context, forceRetry = true)
                 log("$TAG: 蓝牙 MAC 解析为占位值，已强制重试${if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（仍未成功——车机可能不会邀请；Shizuku 已移除，请手动在车机上允许本机）" else "成功"}")
             }
+            val boundNetwork = registeredNetwork
+            val bindInfoNetwork = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && boundNetwork != null
             val info =
                 NsdServiceInfo().apply {
                     serviceName = SERVICE_NAME
@@ -230,6 +235,9 @@ class CarPlayCtrlAdvertiser(
                     // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
                     setAttribute("id", mac)
                     setAttribute("srcvers", SENDER_SRCVERS)
+                    if (bindInfoNetwork) {
+                        this.network = boundNetwork
+                    }
                 }
             // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
             // 会撞上 "listener already in use"（真车实测 10-11 卡住 ctrl 广播）
@@ -246,9 +254,10 @@ class CarPlayCtrlAdvertiser(
             // 车机在 WiFi 上唯一可见的手机身份就是这几个 TXT 字段：占位 MAC / 版本不符都会
             // 直接导致「不发 ctrl 探测、0x4301 永不到达」，而此前日志完全看不到它们
             // （2026-10-19 奥迪 0.1.7 排查时无法归因），故每次注册都打一行。
+            val netNote = if (bindInfoNetwork) " network=bound" else ""
             log(
                 "$TAG: 已监听 :${socket.localPort}$portNote，广播 $SERVICE_TYPE " +
-                    "name=$SERVICE_NAME id=$mac srcvers=$SENDER_SRCVERS" +
+                    "name=$SERVICE_NAME id=$mac srcvers=$SENDER_SRCVERS$netNote" +
                     if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（⚠ 占位 MAC：车机不会邀请）" else "",
             )
             if (mac == DeviceIdentity.PLACEHOLDER_MAC) {
