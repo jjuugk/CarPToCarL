@@ -135,21 +135,21 @@ Android 手机连 CarPlay 车机没有官方路径——车机只认 iPhone。�
 
 | 口径 | 主源码 | 测试文件 | 测试用例 | 说明 |
 |---|---|---|---|---|
-| `main`（发布线） | **176** | **130** | **979** | 含协议聚合层 10 文件；2026-11-23 删除隐形屏链路 18 文件 / 5,722 行，测试 -5 文件 / 34 例 |
+| `main`（发布线） | **175** | **130** | **979** | 含协议聚合层 10 文件；2026-11-23 两轮删除隐形屏链路（18 文件 / 5,722 行；再删注入门面 `CarInputClient` + `ICarInput.aidl` 与 `MainActivity` 残留屏清理约 140 行），测试 -5 文件 / 34 例 |
 | `backup/main-pre-protocol-20261119` | 169 | 118 | 900 | 合并前的 main 快照，仅供对比与回滚 |
 
-`main` 口径 59,142 行主源码 / 16,257 行测试 ≈ **1 : 0.27**，重点覆盖协议编解码与密码学。
+`main` 口径 56,150 行主源码 / 17,288 行测试 ≈ **1 : 0.31**，重点覆盖协议编解码与密码学。
 
-### 5.2 包结构（main，180 文件）
+### 5.2 包结构（main，175 文件）
 
 | 包 | 文件 | 职责 | 包 | 文件 | 职责 |
 |---|---|---|---|---|---|
-| `airplay` | 24 | PairVerify、控制通道、流协商、加密、Timing | `iap2` | 22 | Link/CSM/发送端会话/NowPlaying |
-| `launcher` | 3 | 只剩设置偏好（显示/触摸/转向） | `bt` | 17 | RFCOMM Server/Client |
-| `net` | 13 | WiFi 入网、mDNS 发现与 ctrl 广播 | `util` | 12 | 日志、导出、时钟等 |
-| `carlife` | 11 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 12 | AAC 编码、播放捕获、RTP 封装、`AudioSink` |
-| `protocol` | 10 | **重构新增**：抽象层 + 注册表 + 两个协议门面 | `input` | 8 | 触摸分流、消费键、CarInput(AIDL) |
-| `video` | 8 | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` | `ui` / `session` / `service` | 5 / 5 / 5 | 界面 / 会话总管 / 前台保活 |
+| `airplay` | 24 | PairVerify、控制通道、流协商、加密、Timing | `iap2` | 24 | Link/CSM/发送端会话/NowPlaying |
+| `launcher` | 3 | 只剩设置偏好（显示/连接/开发模式） | `bt` | 17 | RFCOMM Server/Client |
+| `net` | 14 | WiFi 入网、mDNS 发现与 ctrl 广播 | `util` | 12 | 日志、导出、时钟等 |
+| `carlife` | 16 | 冒充车机劫持本机引擎（98386/98311） | `audio` | 11 | AAC 编码、播放捕获、RTP 封装、`AudioSink` |
+| `protocol` | 10 | **重构新增**：抽象层 + 注册表 + 两个协议门面 | `input` | 8 | 触摸分流、消费键、旋钮与媒体键路由 |
+| `video` | 8 | H.264 封装、SPS 解析、VideoConfig 声明、`VideoSink` | `ui` / `session` / `service` | 3 / 6 / 5 | 对话框与自绘视图 / 会话总管 / 前台保活 |
 | `legal` | 3 | 免责声明 | `transport` / `media` | 2 / 6 | iAP2 链路通道 / 通知歌词与会话轮询兜底 |
 | 根入口 | 3 | `MainActivity` / `SenderApp` / … | | | |
 

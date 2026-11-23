@@ -49,7 +49,7 @@ object CarIdleGuard {
 
     /**
      * 结束会话到真正 kill 之间留的时间：disconnect 会在后台线程收尾
-     * （RFCOMM close、虚拟屏释放、日志落盘），掐太快会丢最后几行日志，
+     * （RFCOMM close、编码器收尾、日志落盘），掐太快会丢最后几行日志，
      * 而这几行正是事后判断「为什么没连上」的唯一线索。
      */
     private const val KILL_DELAY_MILLIS = 600L

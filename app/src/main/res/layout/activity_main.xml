@@ -155,7 +155,7 @@
                         android:textStyle="bold" />
                 </FrameLayout>
 
-                <!-- 状态行：状态字 + 残留屏清理入口（检测到残留且用户暂缓时出现） -->
+                <!-- 状态行：连接状态字 -->
                 <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -171,22 +171,6 @@
                         android:textColor="#EDF4F4"
                         android:textSize="25sp"
                         android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/btnResidualCleanup"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="10dp"
-                        android:background="@drawable/bg_btn_tonal_warn"
-                        android:paddingStart="11dp"
-                        android:paddingTop="5dp"
-                        android:paddingEnd="11dp"
-                        android:paddingBottom="5dp"
-                        android:text="清理残留屏"
-                        android:textColor="#FFB4AB"
-                        android:textSize="11.5sp"
-                        android:textStyle="bold"
-                        android:visibility="gone" />
                 </LinearLayout>
 
                 <TextView

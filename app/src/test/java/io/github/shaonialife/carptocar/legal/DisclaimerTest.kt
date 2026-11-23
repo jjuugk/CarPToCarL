@@ -96,7 +96,10 @@ class DisclaimerContentTest {
         // 分享出去必须讲清的三类内容：测试范围、驾驶风险、系统权限
         assertTrue(text.contains("已经测试过的组合只有"))
         assertTrue(text.contains("驾驶安全"))
-        assertTrue(text.contains("Shizuku"))
+        // 权限清单必须落到实际用到的系统能力上（Shizuku/虚拟屏注入已随链路删除）
+        assertTrue(text.contains("系统权限与数据"))
+        assertTrue(text.contains("通知使用权"))
+        assertTrue(text.contains("蓝牙"))
         // 非官方声明（避免被误认为与 Apple 有关联）
         assertTrue(text.contains("非官方"))
         assertTrue(text.contains("商标"))

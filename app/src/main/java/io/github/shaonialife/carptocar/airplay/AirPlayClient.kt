@@ -1492,7 +1492,7 @@ class AirPlayClient(
             )
         }
         // 车机分辨率：`displays[].widthPixels/heightPixels`。宽容解析见 CarDisplayGeometry——
-        // 这里一旦静默落空，整条链路（流画布 / 虚拟屏 / CarLife 98311 / 触摸映射）就全部
+        // 这里一旦静默落空，整条链路（流画布 / CarLife 98311 / 触摸映射）就全部
         // 按手机分辨率跑，画面比例当场错，所以成功与失败都必须落一条日志。
         val carDisplay = selected?.let(CarDisplayGeometry::sizeOf)
         val fallbackDisplay = phoneFallbackSize()

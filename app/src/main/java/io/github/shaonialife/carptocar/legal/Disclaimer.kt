@@ -14,8 +14,10 @@ object DisclaimerPrefs {
      * 用户接受的是「当时那一版」内容，条款变了就该重新确认。
      *
      * v2（2026-10-18）：应用改名 CarPToCarL，补「非官方」「非 MFi」与 MIT 开源说明。
+     * v3（2026-11-23）：删隐形屏/虚拟屏链路后，权限清单与画面来源描述改写
+     * （去掉 Shizuku、虚拟屏注入、「应用横屏」与壁纸，改为 CarLife+ 码流转发）。
      */
-    const val CURRENT_VERSION = 2
+    const val CURRENT_VERSION = 3
 
     private const val PREFS = "disclaimer"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"

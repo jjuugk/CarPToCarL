@@ -277,7 +277,7 @@ class MediaListenerService : NotificationListenerService() {
     }
 }
 
-/** 全局「正在播放」状态（本进程内共享；GridActivity 音乐卡监听渲染）。 */
+/** 全局「正在播放」状态（本进程内共享；界面与仪表「正在播放」展示的数据源）。 */
 object MediaSessionsState {
     data class NowPlaying(
         val title: String?,

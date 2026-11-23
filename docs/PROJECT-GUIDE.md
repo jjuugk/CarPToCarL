@@ -47,7 +47,7 @@
 | L2 网络/发现 | 加入车机热点、mDNS `_airplay._tcp`、ctrl 广播 | 无热点凭据、mDNS 无服务、Wi-Fi 反复 onLost |
 | L3 iAP2 控制面 | 0x4300/0x5703 拿凭据与端点、CSM 消息 | 一直等不到 0x4301；链路 ACK 但业务层静默丢弃 |
 | L4 AirPlay 会话 | PairVerify、SETUP（拿画布/音频档）、RECORD | 403、SETUP 超时、`modesChanged` 200 仍黑屏 |
-| L5 应用编排 | `SessionController`、会话状态机、CarLife 劫持 | 前台/权限/虚拟屏/重启恢复 |
+| L5 应用编排 | `SessionController`、会话状态机、CarLife 劫持 | 前台/权限/编码器/重启恢复 |
 
 **数据面四通道**：视频 H.264（AirPlay 屏幕流）、音频媒体（CarLife 9240 / `0x3000x`）、TTS 导航（9241 / `0x4xxxx`）、HID 触控回传（CarLife 9340）。
 

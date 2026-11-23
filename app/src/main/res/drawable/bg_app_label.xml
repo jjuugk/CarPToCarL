@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- CarPlay 图标标签底：白色圆角胶囊（对照 CarPlay 主屏参考图） -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <solid android:color="#E6FFFFFF" />
-    <corners android:radius="6dp" />
-</shape>
