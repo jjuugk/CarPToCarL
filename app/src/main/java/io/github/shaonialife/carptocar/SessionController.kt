@@ -4404,6 +4404,9 @@ object SessionController {
         onAudioOwnership = { owned -> applyAudioOwnership(context, client, secret, owned) },
         onFailure = { reason -> endClientSession(client, reason) },
         log = ::appendLog,
+        canPlayNavigationAudio = {
+            navAudioSender?.isRunning == true || client.supportsAudioType(NAV_AUDIO_TYPE)
+        },
     )
 
     /**

@@ -107,4 +107,89 @@ class AudioProfilePickerTest {
         val declared = listOf(channel(100L, "alert", pcm48k))
         assertNull(pickDeclaredFormat(declared, "   ", ordered))
     }
+
+    @Test
+    fun opusOnlyNavDefaultIsRejected() {
+        // BMW iD8 实车 /info：101/default 仅声明 bit 30（Opus 48k 单声道，0x40000000）
+        val navOrder =
+            listOf(
+                101L to pcm48k,
+                101L to (1L shl 14),
+                101L to pcm44k,
+                101L to (1L shl 10),
+                101L to aac48k,
+                101L to aac44k,
+                100L to pcm48k,
+                100L to (1L shl 14),
+                100L to pcm44k,
+                100L to (1L shl 10),
+                100L to aac48k,
+                100L to aac44k,
+            )
+        val declared = listOf(channel(101L, "default", 1L shl 30))
+        assertNull(pickDeclaredFormat(declared, "default", navOrder))
+    }
+
+    @Test
+    fun navBorrowIsSkippedWhenNavStreamUnavailable() {
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = false,
+                navigation = true,
+                canPlayNavigationAudio = false,
+                phoneOwnsAudio = false,
+                phoneBorrowsAudio = false,
+            )
+        assertEquals(false, plan.effectiveNavigation)
+        assertNull(plan.acquirePriority)
+        assertEquals(false, plan.acquireTemporary)
+        assertEquals(false, plan.releaseBorrow)
+    }
+
+    @Test
+    fun navBorrowStillAcquiresWhenNavStreamSupported() {
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = false,
+                navigation = true,
+                canPlayNavigationAudio = true,
+                phoneOwnsAudio = false,
+                phoneBorrowsAudio = false,
+            )
+        assertEquals(true, plan.effectiveNavigation)
+        assertEquals(AirPlayResourceState.PRIORITY_BACKGROUND, plan.acquirePriority)
+        assertEquals(true, plan.acquireTemporary)
+        assertEquals(false, plan.releaseBorrow)
+    }
+
+    @Test
+    fun mediaStillAcquiresEvenWhenNavStreamUnavailable() {
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = true,
+                navigation = true,
+                canPlayNavigationAudio = false,
+                phoneOwnsAudio = false,
+                phoneBorrowsAudio = false,
+            )
+        assertEquals(false, plan.effectiveNavigation)
+        assertEquals(AirPlayResourceState.PRIORITY_USER, plan.acquirePriority)
+        assertEquals(false, plan.acquireTemporary)
+        assertEquals(false, plan.releaseBorrow)
+    }
+
+    @Test
+    fun existingNavBorrowIsReleasedIfNavStreamBecomesUnavailable() {
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = false,
+                navigation = true,
+                canPlayNavigationAudio = false,
+                phoneOwnsAudio = true,
+                phoneBorrowsAudio = true,
+            )
+        assertEquals(false, plan.effectiveNavigation)
+        assertNull(plan.acquirePriority)
+        assertEquals(true, plan.releaseBorrow)
+    }
 }
