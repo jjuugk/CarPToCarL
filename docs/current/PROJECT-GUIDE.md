@@ -104,6 +104,7 @@
 | 播放一段时间一顿一顿 | 看「最长停拍」归因：park / 混音 / 发包；发包占主导 → 非阻塞 `DatagramChannel` 已修 | README 1.2.70、1.2.65 节 |
 | 只有 20fps / 拖不动 | 车联设置帧率 60（默认档就是 20）；分辨率必须「默认」；改完断开重连 | 根 `README.md` 快速上手 |
 | 触摸失灵 / 拖不动 / 点完卡死 | 命令 ID `0x68001`~`0x68008` 错位、坐标不要二次缩放、缺 UP 时补发、MOVE 本地不再节流 | `touch-multitouch.md`（现行） |
+| 仪表没转向 / 转向方向不对 | 先看开关「使用手机高德地图获取导航数据」：打开时 CarLife `0x10030` 被拦，高德没开始导航就一条都不发；方向错只改 `AmapNaviMapper.toCarLifeIcon` | `amap-navi-source.md`（现行）、设置里「高德数据源自检」 |
 | 连上一会自己断 | 视频 0 帧约 30s 车机拆会话；空闲重发最后 IDR；写 socket 必须同一把锁 | [`../archive/connect-hardening.md`](../archive/connect-hardening.md)（历史取证） |
 | 车机反复重连 | 对端字节数是否比正常多一条消息净荷（历史真凶：0x5001 双重封包） | [`../archive/connect-recovery.md`](../archive/connect-recovery.md)（历史取证） |
 | 车机没歌名歌词 | 通知使用权是否真的 rebound（荣耀需关开一次）；98386 `MEDIA_LYRIC_SUPPORT=1` | [`../archive/iap2-lyric-lines.md`](../archive/iap2-lyric-lines.md)（历史取证） |
@@ -139,7 +140,7 @@
 
 ---
 
-## 6. 文档索引（现行真源 14 篇 + 历史归档 38 篇）
+## 6. 文档索引（现行真源 15 篇 + 历史归档 40 篇）
 
 > 定现行行为**只读 `current/`**。历史排障按 [`../archive/README.md`](../archive/README.md) 的分组取证，
 > 引用前先核对 §7 冲突红线。图例：✅ 实车验证 · 🧩 已实现 · 📐 规范 / 调研 · ⚠️ 含更正 / 待验证。
@@ -159,17 +160,18 @@
 | `videoconfig-canvas-contract.md` | ⚠️ | 11-08 定案默认 raw；视口只是头部元数据，不改码流与节奏 |
 | `touch-multitouch.md` | 🧩 | 双指走 0x68001 复合动作；收尾顺序 POINTER_UP→ACTION_UP |
 | `carlife-hijack-integration.md` | 🧩 | 劫持架构 / 开关 / 回退；7240 不通 1.5s 回退 |
+| `amap-navi-source.md` | ✅ | 手机高德 linksdk 数据源：开关**替换** CarLife 0x10030；转向码需独立映射；`type=100/200` 才是清帧依据 |
 | `WIRED-CARPLAY-FEASIBILITY.md` | 📐 | 有线路线否决结论（现行：只走无线） |
 | `LEGAL-NOTES.md` | 📐 | 收费风险、商业化三件套、脱敏与守卫脚本 |
 
-### 6.2 历史排障归档（`docs/archive/`，38 篇）
+### 6.2 历史排障归档（`docs/archive/`，40 篇）
 
 按组列在 [`../archive/README.md`](../archive/README.md)：
 
 - **A 已失效功能 / 外部存档（5 篇）**：MIB3 EA / VIWI / 车控三连篇、画面停摆分级干预、外部 AuDiCar 存档。
 - **B 历史排障 / 复盘（22 篇）**：带日期的诊断与自我更正，如 `carplay-black-screen-20261106.md`、
   `carlife-voice-siri-20261104.md`、`audio-call-issues.md`、`connect-recovery.md` 等。
-- **C 调研 / 可行性 / 对照 / 变更总账（11 篇）**：如 `CARLIFE-GATEWAY-FEASIBILITY.md`、
+- **C 调研 / 可行性 / 对照 / 变更总账（13 篇）**：如 `CARLIFE-GATEWAY-FEASIBILITY.md`、
   `wireless-diplay-comparison.md`、`changes-20261104.md` 等。
 
 **使用规则**：归档文档只用于还原「当时为什么这么判」、查旧链接与旧日志口径；

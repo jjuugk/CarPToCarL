@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar
 
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.app.AlertDialog
 import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
@@ -40,6 +41,7 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
+import io.github.shaonialife.carptocar.amap.AmapNaviSource
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
@@ -1821,6 +1823,23 @@ class MainActivity : AppCompatActivity() {
             CarLifeHijack.navigationNowPlayingEnabled = checked
         }
 
+        // 「使用手机高德地图获取导航数据」：打开即**替换** CarLife 0x10030，
+        // 实时生效（SessionController 的拦截是运行时判断，不必重连）。
+        val amapNaviSourceSwitch = findViewById<SwitchCompat>(R.id.switchAmapNaviSource)
+        amapNaviSourceSwitch.isChecked = DisplayPrefs.amapNaviSource(ctx)
+        amapNaviSourceSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setAmapNaviSource(ctx, checked)
+            AmapNaviSource.setEnabled(ctx, checked)
+            if (checked) {
+                snack("已启用：仪表转向改读手机高德地图，请在高德中开始导航")
+            } else {
+                snack("已关闭：仪表转向回到 CarLife")
+            }
+        }
+        findViewById<TextView>(R.id.btnAmapDiagnose).setOnClickListener {
+            showAmapDiagnoseDialog(ctx)
+        }
+
         // 媒体采样率策略：跟随车机 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
         val audioRateRow = findViewById<android.view.View>(R.id.rowAudioRate)
         val audioRateValue = findViewById<TextView>(R.id.audioRateValue)
@@ -2856,6 +2875,51 @@ class MainActivity : AppCompatActivity() {
         logText.post {
             if (follow) scrollConsoleToBottom() else updateLogBottomButton()
         }
+    }
+
+    /**
+     * 高德数据源自检。
+     *
+     * 存在的唯一理由：这套数据源的三种失败（没装高德 / 被厂商拦 bindService /
+     * 装了但没开始导航）在用户眼里长得一模一样——"没反应"。这里把结论摊开，
+     * 每秒刷新一次，用户在高德里点「开始导航」时能当场看到帧数动起来。
+     */
+    private fun showAmapDiagnoseDialog(context: Context) {
+        val padH = (20 * resources.displayMetrics.density).toInt()
+        val padV = (12 * resources.displayMetrics.density).toInt()
+        val body =
+            TextView(context).apply {
+                textSize = 13f
+                setPadding(padH, padV, padH, padV / 2)
+                setTextIsSelectable(true)
+            }
+        fun refresh() {
+            body.text = AmapNaviSource.diagnose()
+        }
+        refresh()
+        val dialog =
+            AlertDialog
+                .Builder(context)
+                .setTitle("高德数据源自检")
+                .setView(body)
+                .setPositiveButton("关闭", null)
+                .setNeutralButton("启用并检测") { _, _ ->
+                    DisplayPrefs.setAmapNaviSource(context, true)
+                    AmapNaviSource.setEnabled(context, true)
+                    refresh()
+                }.create()
+        dialog.show()
+        // 每秒刷新；对话框一关就停，不留跑不停的 Runnable。
+        val tick =
+            object : Runnable {
+                override fun run() {
+                    if (!dialog.isShowing) return
+                    refresh()
+                    mainHandler.postDelayed(this, 1_000L)
+                }
+            }
+        mainHandler.postDelayed(tick, 1_000L)
+        dialog.setOnDismissListener { mainHandler.removeCallbacks(tick) }
     }
 
     private var snackRunnable: Runnable? = null

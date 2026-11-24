@@ -53,6 +53,7 @@ object DisplayPrefs {
     private const val KEY_KEEP_SCREEN_STREAM = "keep_screen_stream_on_take"
     private const val KEY_PROACTIVE_AUDIO = "proactive_audio_on_link"
     private const val KEY_NAVIGATION_NOW_PLAYING = "navigation_now_playing"
+    private const val KEY_AMAP_NAVI_SOURCE = "amap_navi_source"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
     private const val KEY_LAST_CAR_FROM_CAR = "last_car_from_car"
@@ -66,6 +67,26 @@ object DisplayPrefs {
     fun setNavigationNowPlaying(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_NAVIGATION_NOW_PLAYING, enabled)
+            .apply()
+    }
+
+    /**
+     * 「使用手机高德地图获取导航数据」（默认关）。
+     *
+     * 打开后仪表/HUD 的导航诱导**改为只读手机高德地图**（linksdk 私有服务），
+     * CarLife `0x10030` 的诱导不再上仪表——是**替换**，不是叠加，也不是兜底。
+     * 关掉则完全回到 CarLife 一手包办的原行为。
+     *
+     * 为什么必须是显式开关而不是自动切换：两路同时往一个 HUD 推会互相顶掉，
+     * 箭头来回跳；且"这次为什么是 A"无法排查。实现见 `amap/AmapNaviSource.kt`。
+     */
+    fun amapNaviSource(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AMAP_NAVI_SOURCE, false)
+
+    fun setAmapNaviSource(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AMAP_NAVI_SOURCE, enabled)
             .apply()
     }
 

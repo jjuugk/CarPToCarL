@@ -1,18 +1,44 @@
-# 高德 linksdk 导航数据源接入方案（数据源已实机验证 · 接入未实施）
+# 高德导航数据源（手机高德 map linksdk · 已实施）
 
-> **状态**：📐 **数据源已跑通，接入主工程未实施**。本文是实施依据，不是现状描述。
-> **一句话结论**：手机高德地图的 `AmapLinkService` 能在不改任何系统设置的前提下返回真实导航诱导数据
-> （1Hz，字段完整），可以直接映射成 `CarLifeNaviNextTurn` 复用车机仪表与 NowPlaying 两条现成链路，
-> 不需要 API Key、不需要 carlife 引擎、不需要 root。
+> **状态**：✅ **P0/P1/P2 已实施**（2026-11-24）。数据源实测跑通，已接入仪表 `0x5201/0x5202`，
+> 并带开关「使用手机高德地图获取导航数据」**替换** CarLife `0x10030`。P3（NowPlaying 文字/箭头）未做。
+> **一句话**：手机高德地图的 `AmapLinkService` 能在不改任何系统设置的前提下返回真实导航诱导数据
+> （1Hz，字段完整），映射成 `CarLifeNaviNextTurn` 后复用车机仪表链路，
+> 不需要 API Key、不需要 CarLife 引擎、不需要 root。
 >
-> **证据**：2026-11-24 独立探针 APK 在荣耀 PTP-AN10 + 高德 17.02.0.2010 上实测通过
-> （`.tmp/amap-link-probe/`，APK 见 `dist/AmapLinkProbe-1.0-debug.apk`）。
+> **实测证据**：2026-11-24 独立探针在荣耀 PTP-AN10 + 高德 17.02.0.2010 上通过
+> （`.tmp/amap-link-probe/`，APK `dist/AmapLinkProbe-1.0-debug.apk`）。
 > 全链路 `bindService` → `authenticate success` → `registerListener=true` → `execute cmd=7/5 success`
-> → 每秒一帧 `type=4` 导航状态，`segmentRemainDist` 随行驶从 81m 走到 62m。
+> → 每秒一帧 `type=4`，`segmentRemainDist` 随行驶从 81m 走到 62m。
 >
-> **关联文档**：[`amap-linksdk-source-plan-20261123.md`](amap-linksdk-source-plan-20261123.md)（调研版，
-> 本文取代其结论中的"需自实现分块/AES/轮询"三条）、
-> [`amap-navi-sdk-source-plan-20261123.md`](amap-navi-sdk-source-plan-20261123.md)（官方 SDK 路线，已弃用）。
+> **关联文档**：archive 里两份调研（[`amap-linksdk-source-plan-20261123.md`](../archive/amap-linksdk-source-plan-20261123.md)、
+> [`amap-navi-sdk-source-plan-20261123.md`](../archive/amap-navi-sdk-source-plan-20261123.md)）
+> 只作取证；本文结论取代其「需自实现分块/AES/轮询」三条判断。
+
+## 零、代码位置（改之前先看这里）
+
+| 文件 | 职责 | 是否可单测 |
+|---|---|---|
+| `amap/AmapLinkClient.kt` | 绑定·认证·注册·回调分发·FD 读取·信封兜底解密·JSON 解析 | 否（Android/Binder） |
+| `amap/AmapNaviSnapshot.kt` | `type=4` 的纯数据快照 | — |
+| `amap/AmapNaviMapper.kt` | maneuver → CarLife ICON、字段映射、路名清洗 | **是** |
+| `amap/AmapNaviStateMachine.kt` | 三态、2s 迟到帧、15s STALE | **是** |
+| `amap/AmapNaviSource.kt` | 开关镜像、生命周期、节拍、自检文案 | 否（有 Handler） |
+| `app/src/test/.../amap/AmapNaviMapperTest.kt` | 20 例覆盖映射表与状态机 | — |
+
+接线点（都在 `SessionController`）：
+- `init` 里 `AmapNaviSource.onEmission = ::onAmapNaviEmission`（进程级常驻）；
+- `ensure()` 里 `AmapNaviSource.configure(...)` + `setEnabled(prefs)`；
+- CarLife 的 `addNaviNextTurnListener` 开头拦截：`if (AmapNaviSource.isReplacingCarLife()) return`。
+
+UI：设置面板「使用手机高德地图获取导航数据」开关（`switchAmapNaviSource`）+「查看高德数据源自检 ›」。
+偏好键 `amap_navi_source`（`DisplayPrefs.amapNaviSource`）。
+
+## 零-1、开关语义：替换，不是兜底
+
+开关打开 → 仪表只认高德，CarLife `0x10030` 不再编码成 `0x5201/0x5202`；关掉 → 完全回到原行为。
+**不做自动切换**：两路同时推会让 HUD 箭头互相顶，且"这次为什么是 A"无法排查。
+`0x13` 来源名写「高德地图」而不是「CarLife」，车机和日志都能分清这帧是谁给的。
 
 ---
 
@@ -184,8 +210,9 @@ refreshRouteGuidanceHeartbeat()   // 或结束分支：endRoute() + stopRouteGui
 3. 开关仍复用 `DisplayPrefs.KEY_NAVIGATION_NOW_PLAYING`（`DisplayPrefs.kt:55`），
    不额外加第二个用户可见开关。
 
-**取舍**：链路 B 依赖 CarLife 会话存在，若一期只求"仪表有转向"，
-可先只做链路 A，把 B 放二期。**建议一期只做 A**，避免动 `NavigationDisplay` 的既有语义。
+**取舍（已按此执行）**：链路 B 依赖 CarLife 会话存在，且要改 `NavigationDisplay` 的既有语义，
+所以本次**只做链路 A**。仪表能拿到转向/路名/距离，已经覆盖这个开关的核心诉求；
+NowPlaying 的转向文字留给 P3，动之前要单独评估它和 `navigation_now_playing` 开关的叠加行为。
 
 ## 六、状态机与清帧
 
@@ -205,20 +232,26 @@ refreshRouteGuidanceHeartbeat()   // 或结束分支：endRoute() + stopRouteGui
 4. **进程/连接断开也要补清帧**（照 `onCarLifeNavSourceDisconnected()` 的判据，
    `SessionController.kt:723`），但只在"本轮确实发过 amap 诱导"时清，防止清掉别人的 HUD。
 
-## 七、与 CarLife `0x10030` 的优先级
+## 七、与 CarLife `0x10030` 的关系：开关二选一
 
-**不做"两路同时发"**。同一个 HUD 两个数据源会互相顶掉，出现箭头跳变。
+**绝不同时发**——同一个 HUD 两个数据源会互相顶掉，箭头跳变，而且"这次为什么是 A"无法排查。
 
-推荐规则（**CarLife 优先，amap 兜底**）：
+已实现的规则（**开关决定谁上仪表，不是自动择优**）：
 
 ```
-if (CarLife 诱导最近 5s 内有帧)  → 忽略 amap，并暂停 amap 的 publish
-else                             → amap 接管，sourceName = "高德地图"
+开关「使用手机高德地图获取导航数据」打开
+    → CarLife 的 addNaviNextTurnListener 第一行就 return，0x10030 不上仪表
+    → 只有 AmapNaviSource 在 publish，sourceName = "高德地图"
+开关关闭
+    → AmapNaviSource 不发送（连绑定都不做），CarLife 一手包办，与改动前完全一致
 ```
 
-理由：CarLife `0x10030` 已跑通、字段够用、没有绑定权限风险，不能被一个实验数据源抢走主动权。
-反过来"amap 优先"只在一种情况成立：用户明确只用高德导航、CarLife 只是投屏壳。
-这个作为开关的第二个取值，不进默认路径。
+推翻原先"CarLife 优先、amap 兜底"的设计：那种写法在用户只用高德导航时永远轮不到 amap
+（CarLife 引擎只要还连着就会推诱导），而用户打开这个开关的意图就是"我就要高德的数据"。
+显式开关 + 严格二选一，行为才是确定的。
+
+代价要知道：**开关打开且高德没在导航时，仪表不会显示任何转向**（CarLife 那份被拦了）。
+这是有意为之——自检面板会明确写"已注册但未收到数据：请在高德地图里开始导航"。
 
 ## 八、开关、自检与回退
 
@@ -233,18 +266,19 @@ else                             → amap 接管，sourceName = "高德地图"
 - 回退：任何异常（绑定失败、解密失败、字段缺失、映射未知）都不抛，只丢帧并计数，
   **绝不影响 CarLife 与 iAP2 主链路**。
 
-## 九、实施分期
+## 九、实施状态
 
-| 期 | 内容 | 验收 |
+| 期 | 内容 | 状态 |
 |---|---|---|
-| **P0** | `AmapLinkClient` + `AmapNaviMapper` + 开关，只打日志不发送 | 日志能稳定打印映射后的 `CarLifeNaviNextTurn`，与高德 App 界面对得上 |
-| **P1** | 接链路 A（仪表 `0x5201/0x5202`），CarLife 优先互斥 | 车上仪表出现正确转向/路名/距离；结束能清帧 |
-| **P2** | `type=100/200` 到达态、15s STALE、自检面板 | 退出导航 2s 内 HUD 消失；到达显示"已到达" |
-| **P3**（可选） | 链路 B（NowPlaying 文字/箭头） | 音乐界面能显示转向文字 |
+| **P0** | `AmapLinkClient` + `AmapNaviMapper` + 开关 | ✅ 已完成（含转向上报与节流日志） |
+| **P1** | 接仪表 `0x5201/0x5202`，开关替换 CarLife `0x10030` | ✅ 已完成 |
+| **P2** | `type=100/200` 清帧、2s 迟到帧丢弃、15s STALE、自检面板 | ✅ 已完成 |
+| **P3**（可选） | NowPlaying 转向文字/箭头 | ⬜ 未做（要动 `NavigationDisplay` 语义，押后） |
 
-P0 的建议做法：先在主工程里加一个**只读诊断**（同探针逻辑，把映射结果写日志），
-装车跑一趟，比对"日志里的转向"与"高德界面箭头"是否一致 —— 这一趟就能把第六节的映射表证实或推翻。
-**不要在映射表被证实前做 P1 之后的事。**
+**唯一还没做的验证：实车比对转向方向。** 代码侧的 20 例单测只能证明"映射函数按表执行"，
+证明不了"这张表与高德界面一致"。装车后必须逐一确认：左转 / 右转 / 直行 / 掉头 / 环岛进出，
+各看一次仪表箭头。若某个方向画反，改 `AmapNaviMapper.toCarLifeIcon` 的一行即可，
+**不要动状态机和发送侧**（那部分与转向无关）。
 
 ## 十、测试计划
 
@@ -272,15 +306,16 @@ P0 的建议做法：先在主工程里加一个**只读诊断**（同探针逻�
 | 与 CarLife 双源互顶 | HUD 抖动 | 严格互斥优先级，不同时发 |
 | 高德私有 Service 非公开接口 | 合规/稳定性 | 只读本地 App 服务、不破解、不分发数据；文档注明非官方接口 |
 
-## 十二、明确不做
+## 十二、边界（刻意不做的事）
 
-- 不替换 CarLife `0x10030` 作为唯一来源。
+- **默认关**。开关不打开时连高德的包都不查，CarLife 路径一个字节不变——不改变任何已跑通车机的默认行为。
 - 不引入任何车型 profile（与"通用协议对齐"方向一致）。
 - 不实现分块传输协议（实测 FD 直读即可），只留 4MiB 上限保护。
 - 不把 AES-GCM 解密当主路径（实测明文），仅保留兜底函数。
 - 不用 `eventType` 做三态判定。
-- 不在一期碰 `NavigationDisplay` / NowPlaying（P3 再说）。
-- 不把 amap 的坐标写进任何现有字段。
+- 不碰 `NavigationDisplay` / NowPlaying（那是 P3，会改变 NowPlaying 的既有语义）。
+- 不把 amap 的坐标（GCJ-02 火星坐标）写进任何现有字段。
+- 不做"两路自动择优"，只做开关二选一（理由见第七节）。
 
 ---
 

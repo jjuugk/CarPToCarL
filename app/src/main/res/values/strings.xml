@@ -6,4 +6,7 @@
     <string name="app_name">CarPToCarL</string>
     <string name="navigation_now_playing_label">仪表转向指引</string>
     <string name="navigation_now_playing_note">通过“正在播放”显示 CarLife 的转向文字和箭头。</string>
+    <string name="amap_navi_source_label">使用手机高德地图获取导航数据</string>
+    <string name="amap_navi_source_note">打开后仪表转向只读手机高德地图，CarLife 的转向指引不再上仪表；需先在高德中开始导航。</string>
+    <string name="amap_navi_source_diagnose">查看高德数据源自检 ›</string>
 </resources>

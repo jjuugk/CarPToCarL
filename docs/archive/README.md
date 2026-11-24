@@ -5,7 +5,7 @@
 > [`../current/PROJECT-STATUS.md`](../current/PROJECT-STATUS.md)（体检报告）；
 > 目录地图见 [`../README.md`](../README.md)。
 >
-> 共 41 篇归档文档 + 本索引。2026-11-19 首批 5 篇，2026-11-23 按「现行真源 / 历史归档」分区再移入 33 篇，
+> 共 40 篇归档文档 + 本索引。2026-11-19 首批 5 篇，2026-11-23 按「现行真源 / 历史归档」分区再移入 33 篇，
 > 另新增 2 篇未实施方案提案。
 > 移动一律用 `git mv`，历史与 blame 完整保留。
 
@@ -49,7 +49,7 @@
 | [`wechat-notify-audio-stall-20261109.md`](wechat-notify-audio-stall-20261109.md) | 单次提示音卡死的现场复盘 | 静音阈值 300→0ms 的判据 |
 | [`wifi-link-watchdog.md`](wifi-link-watchdog.md) | 入网实现已改，旧判据只用于取证 | 断链时刻附近无 `WIFI:` 行即可排除 wlan0 |
 
-## C. 调研 / 可行性 / 对照 / 变更总账（14 篇）
+## C. 调研 / 可行性 / 对照 / 变更总账（13 篇）
 
 | 文档 | 归档原因 | 仍然有效的部分 |
 |---|---|---|
@@ -66,7 +66,6 @@
 | [`wireless-diplay-comparison.md`](wireless-diplay-comparison.md) | 测试台对照，非车机实现 | `0x5200` 只 ACK，不发导航箭头 |
 | [`amap-navi-sdk-source-plan-20261123.md`](amap-navi-sdk-source-plan-20261123.md) | **未实施方案提案**：官方导航 SDK `NaviInfo` 作为第二数据源的字段映射与接入点；未引入 AAR/key | `IconType` 需独立映射表；公开分发需高德技术服务许可 |
 | [`amap-linksdk-source-plan-20261123.md`](amap-linksdk-source-plan-20261123.md) | **未实施方案提案**：GitHub 开源 linksdk（非官方 AIDL）绑定与字段映射；默认关第二数据源 | 绑定受 MIUI/HyperOS 白名单限制；`ManeuverIconID` 第三套编码需独立映射表 |
-| [`amap-linksdk-integration-plan-20261124.md`](amap-linksdk-integration-plan-20261124.md) | **接入方案（数据源已实机验证，接入未实施）**：探针在荣耀+高德 17.02.0.2010 跑通，实测为明文/FD 直读/主动 1Hz，复用仪表与 NowPlaying 两条链路 | 转向码"值域重合"仅是推断，P0 必须先实车比对；`type=100/200` 才是清帧依据，不是 `eventType` |
 
 ## 归档规则
 

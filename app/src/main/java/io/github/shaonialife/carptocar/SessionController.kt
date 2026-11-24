@@ -2,6 +2,9 @@ package io.github.shaonialife.carptocar
 
 import android.content.Context
 import android.view.KeyEvent
+import io.github.shaonialife.carptocar.amap.AmapNaviEmission
+import io.github.shaonialife.carptocar.amap.AmapNaviSource
+import io.github.shaonialife.carptocar.amap.brief
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.AirPlayResourceState
 import io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent
@@ -469,6 +472,13 @@ object SessionController {
     private var streamingInviteCount = 0
     private var lastStreamingInviteAt = 0L
 
+    /** 只打一次的日志闸：高德接管与「车机不收 0x52xx」各一条，避免每秒刷屏。 */
+    private var amapReplacingLogged = false
+    private var amapBlockedLogged = false
+
+    /** `0x5201` 的 `0x13` 来源名：让车机与本机日志都能分辨这条诱导是谁给的。 */
+    private const val AMAP_NAVI_SOURCE_NAME = "高德地图"
+
     init {
         CarLifeHijack.onSourceAudioPlayback = ::onSourceAudioPlayback
         // 引擎断开 → 同步清 HUD 的回调必须**进程级常驻**：
@@ -479,6 +489,9 @@ object SessionController {
         // 的 EVENT 行，clear 帧没发、10s 心跳还在跑）。这里改成 init 里注册一次，
         // retire 不再摘；跨轮误触发由回调内的 isSessionRunning()/活跃导航守卫挡住。
         CarLifeHijack.onNaviSourceDisconnected = ::onCarLifeNavSourceDisconnected
+        // 高德 linksdk 数据源（设置里的「使用手机高德地图获取导航数据」）同样是进程级：
+        // 开关打开时它**替换** CarLife 0x10030 成为唯一的仪表导航数据源。
+        AmapNaviSource.onEmission = ::onAmapNaviEmission
     }
 
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
@@ -486,6 +499,9 @@ object SessionController {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
         CarLifeHijack.navigationNowPlayingEnabled = DisplayPrefs.navigationNowPlaying(context)
+        // 高德数据源：开关打开才绑定（不打开就不碰高德的私有服务，连包都懒得查）。
+        AmapNaviSource.configure(context.applicationContext, ::appendLog)
+        AmapNaviSource.setEnabled(context.applicationContext, DisplayPrefs.amapNaviSource(context))
         // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
         SysShell.violationSink = ::appendLog
         installNowPlayingBridge()
@@ -684,6 +700,16 @@ object SessionController {
             // 监听器是进程级常驻的；会话退役后 CarLife 引擎可能还在推诱导，
             // 这时不能重新激活 iAP2 心跳，否则断链后还有一个 10s 空转节拍。
             if (!isSessionRunning()) return@addNaviNextTurnListener
+            // 开关「使用手机高德地图获取导航数据」打开时，仪表只认高德：
+            // CarLife 的 0x10030 到此为止，不再编码成 0x5201/0x5202。
+            // 这是**替换**语义——两路同时推会让 HUD 箭头互相顶。
+            if (AmapNaviSource.isReplacingCarLife()) {
+                if (!amapReplacingLogged) {
+                    amapReplacingLogged = true
+                    appendLog("EVENT: 已切换高德导航数据源 → CarLife 0x10030 不再上仪表（关开关即恢复）")
+                }
+                return@addNaviNextTurnListener
+            }
             val ending = info.action == CarLifeNaviGuide.ACTION_END
             val detail =
                 "${CarLifeNaviGuide.actionLabel(info.action)} " +
@@ -709,6 +735,45 @@ object SessionController {
             refreshRouteGuidanceHeartbeat()
         }
         // 数据源 E（引擎断开）在 init 里进程级注册，见 onCarLifeNavSourceDisconnected。
+    }
+
+    /**
+     * 高德数据源的发送出口（开关打开时唯一一条）。
+     *
+     * 三条处理与 CarLife 那条刻意保持一致，因为下游是同一个 `Iap2RouteGuidance`：
+     * 守声明 → 发布 → 扇出 → 心跳/清除。
+     *
+     * 与 CarLife 的区别只有来源名：`0x13` 里写「高德地图」而不是「CarLife」，
+     * 车机（和事后看日志的人）才能分清这帧是谁给的。
+     */
+    private fun onAmapNaviEmission(emission: AmapNaviEmission) {
+        if (!isSessionRunning()) return
+        // 车机可收清单明确无 0x52xx 时一个字节都不发，连心跳都不启（与 CarLife 同判据）。
+        if (Iap2RouteGuidance.blockedByDeclaration()) {
+            if (!amapBlockedLogged) {
+                amapBlockedLogged = true
+                appendLog("EVENT: 高德导航诱导 → 车机可收清单无 0x52xx（不支持 iAP2 导航引导）→ 明确不发送")
+            }
+            return
+        }
+        when (emission) {
+            is AmapNaviEmission.Guide -> {
+                appendLog(
+                    "EVENT: 高德导航诱导 ${emission.turn.brief()}" +
+                        " → 补推 iAP2 0x5201/0x5202 + 启动 10s 心跳",
+                )
+                Iap2RouteGuidance.publish(emission.turn, sourceName = AMAP_NAVI_SOURCE_NAME)
+                pushRouteGuidanceAll()
+                refreshRouteGuidanceHeartbeat()
+            }
+
+            AmapNaviEmission.Clear -> {
+                appendLog("EVENT: 高德导航结束 → 同步补推 iAP2 0x5201 清除帧并停止心跳")
+                Iap2RouteGuidance.endRoute()
+                pushRouteGuidanceAll()
+                stopRouteGuidanceHeartbeat()
+            }
+        }
     }
 
     /**
