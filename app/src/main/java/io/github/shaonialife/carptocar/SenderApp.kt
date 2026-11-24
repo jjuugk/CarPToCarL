@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
@@ -35,6 +36,8 @@ class SenderApp : Application() {
         CarGpsOption.load(this)
         // 方向盘语音键手势（默认开）：短按三次重启音频。按键线程每按一次都会读
         VoiceKeyGesture.load(this)
+        // 音频兼容实验（默认关，对所有车型生效）：拨档下次连接起效
+        AudioCompatExperiment.load(this)
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，
         // 原因见 SessionTrace 注释（报文量大会挤掉过程日志）。必须在业务起来之前 attach。
         SessionTrace.attach(this)

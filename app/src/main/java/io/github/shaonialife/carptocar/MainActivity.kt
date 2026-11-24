@@ -33,6 +33,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
+import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -1837,6 +1838,26 @@ class MainActivity : AppCompatActivity() {
             AudioRatePreference.save(ctx, next)
             refreshAudioRate()
             snack("媒体采样率：${next.label}（下次连接起效）")
+        }
+
+        // 音频兼容实验：默认关、对所有车型生效；点一下循环 关→A→B→A+B。
+        val compatRow = findViewById<android.view.View>(R.id.rowAudioCompatExperiment)
+        val compatValue = findViewById<TextView>(R.id.audioCompatValue)
+        val compatNote = findViewById<TextView>(R.id.audioCompatNote)
+
+        fun refreshCompat() {
+            val mode = AudioCompatExperiment.current
+            compatValue.text = mode.label
+            compatNote.text = mode.detail
+        }
+
+        refreshCompat()
+        compatRow.setOnClickListener {
+            val next = AudioCompatExperiment.current.next()
+            AudioCompatExperiment.save(ctx, next)
+            refreshCompat()
+            snack("音频兼容实验：${next.label}（下次连接起效，对所有车型生效）")
+            log("AUDIO: 兼容实验档切到 ${next.label}（下次连接起效）")
         }
 
         // 方向盘语音键三连击 → 重启音频（默认开）。

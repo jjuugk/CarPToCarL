@@ -179,6 +179,41 @@ class AudioProfilePickerTest {
     }
 
     @Test
+    fun mbuxExperimentBorrowsMediaWithoutChangingPriority() {
+        // B 策略：媒体从「永久 claim」改「临时借用」，优先级仍是 USER（借得到），
+        // 永久归属留车机——减少 MBUX 对永久夺走主音频的翻脸概率。
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = true,
+                navigation = false,
+                canPlayNavigationAudio = false,
+                phoneOwnsAudio = false,
+                phoneBorrowsAudio = false,
+                borrowMediaAudio = true,
+            )
+        assertEquals(AirPlayResourceState.PRIORITY_USER, plan.acquirePriority)
+        assertEquals(true, plan.acquireTemporary)
+        assertEquals(true, plan.borrowMediaAudio)
+        assertEquals(false, plan.releaseBorrow) // 媒体一直在播就不归还
+    }
+
+    @Test
+    fun defaultMediaStillClaimsPermanently() {
+        // 默认（OFF）行为必须与加开关前一致：媒体 USER 优先级 + 永久 claim。
+        val plan =
+            CarPlayResourceStreams.planAudioStep(
+                media = true,
+                navigation = false,
+                canPlayNavigationAudio = false,
+                phoneOwnsAudio = false,
+                phoneBorrowsAudio = false,
+            )
+        assertEquals(AirPlayResourceState.PRIORITY_USER, plan.acquirePriority)
+        assertEquals(false, plan.acquireTemporary)
+        assertEquals(false, plan.borrowMediaAudio)
+    }
+
+    @Test
     fun existingNavBorrowIsReleasedIfNavStreamBecomesUnavailable() {
         val plan =
             CarPlayResourceStreams.planAudioStep(

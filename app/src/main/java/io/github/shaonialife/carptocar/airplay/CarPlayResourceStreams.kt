@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.airplay
 
+import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.util.concurrent.Executors
 
@@ -263,6 +264,8 @@ internal class CarPlayResourceStreams(
         } else if (navSupported) {
             navBorrowSkippedLogged = false
         }
+        // 音频兼容实验 B：对所有车型生效，拨了就算。判据在 applyAudio 里现算——切换
+        // 档位后下次 reconcile 就按新策略，不必重连。OFF 时与改动前逐字节一致。
         val plan =
             planAudioStep(
                 media = media,
@@ -270,6 +273,7 @@ internal class CarPlayResourceStreams(
                 canPlayNavigationAudio = navSupported,
                 phoneOwnsAudio = client.phoneOwnsAudio,
                 phoneBorrowsAudio = client.phoneBorrowsAudio,
+                borrowMediaAudio = AudioCompatExperiment.current.borrowAudio,
             )
         val acquirePriority = plan.acquirePriority
         if (acquirePriority != null) {
@@ -280,7 +284,8 @@ internal class CarPlayResourceStreams(
                 )
             log(
                 "AUDIO-INTENT: media=$media navigation=${plan.effectiveNavigation} " +
-                    "acquired=$acquired ${client.resourceDescription}",
+                    "acquired=$acquired ${client.resourceDescription}" +
+                    if (plan.borrowMediaAudio) " · 音频兼容实验 B：媒体按临时借用申请" else "",
             )
         }
         if (plan.releaseBorrow) {
@@ -297,6 +302,8 @@ internal class CarPlayResourceStreams(
         val acquirePriority: Int?,
         val acquireTemporary: Boolean,
         val releaseBorrow: Boolean,
+        /** 诊断标记：本次媒体申请走了音频兼容实验 B 的临时借用。 */
+        val borrowMediaAudio: Boolean = false,
     )
 
     companion object {
@@ -314,6 +321,15 @@ internal class CarPlayResourceStreams(
             canPlayNavigationAudio: Boolean,
             phoneOwnsAudio: Boolean,
             phoneBorrowsAudio: Boolean,
+            /**
+             * 音频兼容实验 B：媒体主音频也走临时借用（优先级仍是 USER，保证能借到），
+             * 而不是永久 claim。默认 false —— 所有既有调用与单测保持原行为。
+             *
+             * `borrowForPhone(USER)` 在永久归属是车机时设 `phoneBorrowing=true`，此时
+             * `entity == ENTITY_PHONE`，[startAudioChannel] 的 `phoneOwnsAudio` 门禁照过，
+             * 音频流照常建；区别只在 `modesChanged` 里永久归属留车机、多一条借用标记。
+             */
+            borrowMediaAudio: Boolean = false,
         ): AudioStepPlan {
             val effectiveNavigation = navigation && canPlayNavigationAudio
             val shouldAcquire =
@@ -328,8 +344,9 @@ internal class CarPlayResourceStreams(
             return AudioStepPlan(
                 effectiveNavigation = effectiveNavigation,
                 acquirePriority = acquirePriority,
-                acquireTemporary = shouldAcquire && !media,
+                acquireTemporary = shouldAcquire && (!media || borrowMediaAudio),
                 releaseBorrow = releaseBorrow,
+                borrowMediaAudio = shouldAcquire && media && borrowMediaAudio,
             )
         }
 

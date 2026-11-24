@@ -13,6 +13,7 @@ import io.github.shaonialife.carptocar.airplay.PairingMemory
 import io.github.shaonialife.carptocar.airplay.PostRecordWatch
 import io.github.shaonialife.carptocar.airplay.StreamOrderMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
+import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
 import io.github.shaonialife.carptocar.audio.AudioSender
@@ -4292,7 +4293,10 @@ object SessionController {
         onFailure = { reason -> endClientSession(client, reason) },
         log = ::appendLog,
         canPlayNavigationAudio = {
-            navAudioSender?.isRunning == true || client.supportsAudioType(NAV_AUDIO_TYPE)
+            // 音频兼容实验 A 跳过导航流后，即使车机 /info 声明了 default 档也不要为导航
+            // 临时借用主音频——否则只是把原车音源掐成静音却无播报声。
+            !AudioCompatExperiment.current.skipNav &&
+                (navAudioSender?.isRunning == true || client.supportsAudioType(NAV_AUDIO_TYPE))
         },
     )
 
@@ -4581,6 +4585,12 @@ object SessionController {
         context: Context,
     ) {
         val audioType = NAV_AUDIO_TYPE
+        // 音频兼容实验 A：只建媒体流，不建 t101/default 导航独立流。
+        // 对所有车型生效；OFF 时照常建流，逐字节不变。
+        if (AudioCompatExperiment.current.skipNav) {
+            appendLog("AUDIO: 导航流（101/$audioType）—— 音频兼容实验 A 生效：跳过导航独立流（媒体流照常）")
+            return
+        }
         val secret =
             sharedSecret ?: run {
                 appendLog("AUDIO: 导航流（101/$audioType）—— 没有会话密钥，导航播报将无声")
@@ -7213,6 +7223,14 @@ object SessionController {
                                                 "常规（TEARDOWN 后重建）"
                                             },
                                     )
+                                    if (AudioCompatExperiment.enabled) {
+                                        appendLog(
+                                            "AUDIO: 音频兼容实验档=${AudioCompatExperiment.current.label}" +
+                                                " · 接收端=${client.receiverIdentity()}" +
+                                                "（A 跳过导航流=${AudioCompatExperiment.current.skipNav}" +
+                                                " / B 借用主音频=${AudioCompatExperiment.current.borrowAudio}）",
+                                        )
+                                    }
                                     synchronized(sessionLifecycleLock) {
                                         requireAttempt(attempt)
                                         videoSender = initialSender

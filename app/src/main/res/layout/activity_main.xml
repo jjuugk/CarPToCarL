@@ -1196,6 +1196,65 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
+                <!-- 音频兼容实验：点击循环 关 → A → B → A+B（默认关，对所有车型生效） -->
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
+                <LinearLayout
+                    android:id="@+id/rowAudioCompatExperiment"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="音频兼容实验"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/audioCompatNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="不改音频行为（默认）"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/audioCompatValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_icon_tile"
+                        android:gravity="center"
+                        android:minWidth="56dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:text="关"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <!-- 方向盘语音键三连击 → 重启音频（默认开） -->
                 <View
                     android:layout_width="match_parent"
