@@ -63,6 +63,7 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionFallback
 import io.github.shaonialife.carptocar.media.MediaSessionsState
 import io.github.shaonialife.carptocar.media.NavigationDisplay
+import io.github.shaonialife.carptocar.media.NavigationIcon
 import io.github.shaonialife.carptocar.media.NavigationNowPlaying
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
@@ -766,6 +767,8 @@ object SessionController {
                 Iap2RouteGuidance.publish(emission.turn, sourceName = AMAP_NAVI_SOURCE_NAME)
                 pushRouteGuidanceAll()
                 refreshRouteGuidanceHeartbeat()
+                // 媒体卡片与仪表同一份影子状态：清除帧两侧必然同步，不会「仪表空了卡片还挂着」。
+                pushNowPlayingGuide()
             }
 
             AmapNaviEmission.Clear -> {
@@ -773,6 +776,8 @@ object SessionController {
                 Iap2RouteGuidance.endRoute()
                 pushRouteGuidanceAll()
                 stopRouteGuidanceHeartbeat()
+                // 立刻把媒体卡片交还真实歌曲，不等下一次歌名变化。
+                pushNowPlayingGuide()
             }
         }
     }
@@ -932,6 +937,33 @@ object SessionController {
     /** 上次推送的 0x5001 内容键（title|artist），用于去重。 */
     private var lastPushedNowPlayingKey: String? = null
 
+    /** 上次推到媒体卡片的导航文案（转向+距离+路名），用于去重。 */
+    private var lastPushedGuideKey: String? = null
+
+    /**
+     * 导航引导变化 → 立刻刷一次媒体卡片（`0x5001`）。
+     *
+     * **不能复用 [pushNowPlayingAll]**：它按 `title|artist`（真实歌曲）去重，
+     * 导航期间歌名没变，调用会直接被挡掉，卡片永远停在上一首歌。
+     *
+     * 这段是 2026-11-24 实机缺口的补丁：媒体卡片原本只跟随「媒体事件」刷新
+     * （歌名变化 / CarLife 0x10036 进度），纯 CarPlay 场景下高德 1Hz 推诱导时
+     * 一个 0x5001 都不会发 —— 仪表箭头在动，媒体卡片一动不动。
+     */
+    private fun pushNowPlayingGuide() {
+        // 总闸关着时这条通道不存在，不要制造无意义的发包。
+        if (!CarLifeHijack.navigationNowPlayingEnabled) return
+        // 影子状态已由 AmapNaviSource.dispatch / CarLifeHuClient 先写入，这里只读。
+        val guide = nowPlayingGuide()
+        val key = guide?.let { "${it.title}|${it.road}" }
+        if (key == lastPushedGuideKey) return
+        // **只有真的发出去了才记账**：链路未识别 / displayNowPlaying 为空时 push 返回 false，
+        // 那时若同样写 lastPushedGuideKey，后续每秒都会被判成「内容未变」而永久跳过——
+        // 现象就是仪表箭头在动、媒体卡片一动不动，日志里连一条 0x5001 都没有
+        // （2026-11-24 真机实锤：箭头图与文案都没到车机）。
+        if (currentClient?.pushNowPlaying(quiet = true) == true) lastPushedGuideKey = key
+    }
+
     /**
      * 新一轮连接开始：清掉 0x5001 去重键。
      *
@@ -977,17 +1009,30 @@ object SessionController {
     /** 标识符分配序号，1..255 循环 —— **换了 id 车机才会重新要图**（同 id 走它的缓存）。 */
     private var artworkSeq: Int = 0
 
-    private data class NavigationArtwork(val id: Int, val bytes: ByteArray)
+    private data class NavigationArtwork(
+        val id: Int,
+        /** 实际发给车机的字节（原样 PNG 或深底白箭头 JPEG，见 [NavigationIcon.toCardJpeg]）。 */
+        val bytes: ByteArray,
+        /** 转换前的箭头 PNG：1Hz 复查时只比它，命中就不再解码+重压。 */
+        val source: ByteArray,
+        /** 编码时「加深色底」开关的状态：开关一变必须换新编号，否则车机会一直用缓存里的旧图。 */
+        val darkTile: Boolean,
+    )
 
     @Volatile
     private var navigationArtwork: NavigationArtwork? = null
 
     @Synchronized
-    private fun ensureNavigationArtwork(bytes: ByteArray): Int {
+    private fun ensureNavigationArtwork(png: ByteArray): Int {
+        // 官方箭头是**纯白透明底 PNG**，浅色媒体卡片上等于隐形。是否转成深底 JPEG
+        // 由「转向箭头加深色底」开关决定（默认关：原样发，深色卡片上最好看）。
+        val dark = appContext?.let { DisplayPrefs.arrowDarkTile(it) } == true
         val previous = navigationArtwork
-        if (previous != null && previous.bytes.contentEquals(bytes)) return previous.id
+        if (previous != null && previous.darkTile == dark && previous.source.contentEquals(png)) return previous.id
+        val converted = if (dark) NavigationIcon.toCardJpeg(png) else png
+        val bytes = if (converted.isEmpty()) png else converted
         val id = allocateArtworkId(exclude = artworkId)
-        navigationArtwork = NavigationArtwork(id, bytes)
+        navigationArtwork = NavigationArtwork(id, bytes, png, dark)
         return id
     }
 

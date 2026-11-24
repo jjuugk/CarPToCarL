@@ -9,4 +9,6 @@
     <string name="amap_navi_source_label">使用手机高德地图获取导航数据</string>
     <string name="amap_navi_source_note">打开后仪表和“正在播放”的转向都只读手机高德地图，CarLife 的转向指引不再使用；需先在高德中开始导航。</string>
     <string name="amap_navi_source_diagnose">查看高德数据源自检 ›</string>
+    <string name="arrow_dark_tile_label">转向箭头加深色底</string>
+    <string name="arrow_dark_tile_note">官方箭头是纯白透明底，在浅色“正在播放”卡片上会看不见。打开后发「深底白箭头」（JPEG）；关着则原样发送官方 PNG。</string>
 </resources>

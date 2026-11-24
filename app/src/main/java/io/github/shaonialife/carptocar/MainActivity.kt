@@ -1840,6 +1840,19 @@ class MainActivity : AppCompatActivity() {
             showAmapDiagnoseDialog(ctx)
         }
 
+        // 「转向箭头加深色底」：默认关。只影响媒体卡片里箭头那几张字节的编码方式，
+        // 不动仪表 0x5201/0x5202，也不需要重连——下一次换箭头时按新设置编码。
+        val arrowDarkTileSwitch = findViewById<SwitchCompat>(R.id.switchArrowDarkTile)
+        arrowDarkTileSwitch.isChecked = DisplayPrefs.arrowDarkTile(ctx)
+        arrowDarkTileSwitch.setOnCheckedChangeListener { _, checked ->
+            DisplayPrefs.setArrowDarkTile(ctx, checked)
+            if (checked) {
+                snack("已启用：箭头转成「深底白箭头」再发，浅色卡片上也能看见")
+            } else {
+                snack("已关闭：箭头按官方原图（纯白透明底）发送")
+            }
+        }
+
         // 媒体采样率策略：跟随车机 / 48kHz / 44.1kHz。两端对齐避免重采样，下次连接起效。
         val audioRateRow = findViewById<android.view.View>(R.id.rowAudioRate)
         val audioRateValue = findViewById<TextView>(R.id.audioRateValue)

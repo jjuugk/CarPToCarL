@@ -101,6 +101,53 @@ internal object NavigationIcon {
         }
     }
 
+    /**
+     * 媒体卡片（`0x5001` 封面位）用的字节：把箭头 PNG 压成**深底白箭头 JPEG**。
+     *
+     * **由「转向箭头加深色底」开关控制，默认关闭**（`DisplayPrefs.arrowDarkTile`）。
+     * 为什么需要它（2026-11-24 测试台实测：卡片左侧整块空白）：
+     *
+     * 1. 官方箭头是**纯白**（实测 14372 个不透明像素平均 RGB=255,255,255），
+     *    而媒体卡片在测试台/部分车机上是**浅色**底——白画在白上等于没有图；
+     * 2. 现阶段唯一被证明能显示的封面格式是 JPEG（歌曲封面走的就是这条），
+     *    发 PNG 没有成功案例。
+     *
+     * JPEG 不支持透明通道，`compress` 会把透明区写成黑色——正好成了白箭头的底，
+     * 浅色卡片上是一块深色图标，深色卡片上只剩白箭头，两种底都看得见。
+     * 默认关是因为深色卡片的车上原样发更好看，不该为浅色场景默认改观感。
+     *
+     * @return JPEG 字节；输入是全透明（没有箭头）时返回空数组，调用方回退原图。
+     */
+    internal fun toCardJpeg(png: ByteArray): ByteArray {
+        val source = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return ByteArray(0)
+        try {
+            if (isFullyTransparent(source)) return ByteArray(0)
+            val size = NavigationIconLayout.SIZE
+            val tile = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            try {
+                // 留 6% 边距：箭头贴着卡片边缘会显得挤，也避免车机方图裁切吃掉笔画。
+                val inset = size * 0.06f
+                tile.eraseColor(TILE_BACKGROUND)
+                Canvas(tile).drawBitmap(
+                    source,
+                    null,
+                    RectF(inset, inset, size - inset, size - inset),
+                    Paint(Paint.FILTER_BITMAP_FLAG),
+                )
+                return ByteArrayOutputStream().use { out ->
+                    if (tile.compress(Bitmap.CompressFormat.JPEG, 92, out)) out.toByteArray() else ByteArray(0)
+                }
+            } finally {
+                tile.recycle()
+            }
+        } finally {
+            source.recycle()
+        }
+    }
+
+    /** 箭头图标的底色（近黑的中性灰）。浅底卡片上成块、深底卡片上不吃掉白箭头。 */
+    private val TILE_BACKGROUND = 0xFF16181D.toInt()
+
     private fun isFullyTransparent(image: Bitmap): Boolean {
         if (!image.hasAlpha()) return false
         // Scan one row at a time to avoid allocating an extra full-resolution pixel buffer.

@@ -54,6 +54,7 @@ object DisplayPrefs {
     private const val KEY_PROACTIVE_AUDIO = "proactive_audio_on_link"
     private const val KEY_NAVIGATION_NOW_PLAYING = "navigation_now_playing"
     private const val KEY_AMAP_NAVI_SOURCE = "amap_navi_source"
+    private const val KEY_ARROW_DARK_TILE = "arrow_dark_tile"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
     private const val KEY_LAST_CAR_FROM_CAR = "last_car_from_car"
@@ -67,6 +68,26 @@ object DisplayPrefs {
     fun setNavigationNowPlaying(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_NAVIGATION_NOW_PLAYING, enabled)
+            .apply()
+    }
+
+    /**
+     * 「转向箭头加深色底」（默认**关**）。
+     *
+     * 媒体卡片上的转向箭头来自官方图标，是**纯白透明底 PNG**。车机/测试台的卡片若是
+     * 浅色底，白箭头等于隐形——打开这个开关，发出去之前把箭头压成「深底白箭头 JPEG」，
+     * 深浅两种底都看得见。
+     *
+     * 为什么默认关：转成 JPEG 就不再是原图（失去透明通道，多一块深色方块）。
+     * 深色卡片的车上原样发就很好看，不该为了浅色场景默认改变它的观感。
+     */
+    fun arrowDarkTile(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ARROW_DARK_TILE, false)
+
+    fun setArrowDarkTile(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_ARROW_DARK_TILE, enabled)
             .apply()
     }
 

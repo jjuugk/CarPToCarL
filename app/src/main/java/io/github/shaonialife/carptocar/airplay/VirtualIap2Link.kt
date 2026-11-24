@@ -313,11 +313,12 @@ class VirtualIap2Link(
      * CarLife 0x10035 到达的——若订阅先于歌名，就会停在空态。所以歌名就绪后必须
      * 由外部主动补推一次。链路尚未建立（MIB3 未识别）时静默忽略。
      */
-    /** @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。 */
-    fun pushNowPlaying(quiet: Boolean = false) {
+    /** @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。
+     *  @return 是否真的发出了一帧（链路未识别 / 无内容时为 false）。 */
+    fun pushNowPlaying(quiet: Boolean = false): Boolean {
         synchronized(lock) {
-            if (!mib3Identified && !tunnelIdentified) return
-            val nowPlaying = displayNowPlaying() ?: return
+            if (!mib3Identified && !tunnelIdentified) return false
+            val nowPlaying = displayNowPlaying() ?: return false
             lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
             sendNowPlayingLocked(nowPlaying)
             if (!quiet) {
@@ -326,6 +327,7 @@ class VirtualIap2Link(
                         " 歌手=${nowPlaying.artist ?: "?"}）",
                 )
             }
+            return true
         }
     }
 
@@ -987,7 +989,30 @@ class VirtualIap2Link(
             }
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
-                if (!mib3) return
+                // 隧道链路（非 MIB3）也要把覆盖层挂上。此前这里直接 return，导致
+                // `nowPlayingOverrideSubscribed` 只在 MIB3 会话里为真——隧道车的车机
+                // 明明订阅了「正在播放更新」，导航文字却永远上不了媒体卡片
+                // （2026-11-24 实机：0x5000 到达，仪表 0x5201 正常，卡片整程只有歌曲）。
+                // 注意只开户、不主动发空态：隧道车此前的形态是「订阅后等媒体事件」，
+                // 多发一帧空态属于改变既有行为。
+                if (!mib3) {
+                    if (onTunnel) {
+                        nowPlayingSubscribed = true
+                        nowPlayingOverrideSubscribed = true
+                        lastPushedNowPlayingKey = null
+                        lastNowPlayingPollMs = nowMillis()
+                        // 订阅那一刻若已有导航/歌曲，直接给一帧，不必等下一次变化。
+                        displayNowPlaying()?.let {
+                            lastPushedNowPlayingKey = nowPlayingKey(it)
+                            sendNowPlayingLocked(it)
+                            log(
+                                "IAPLINK: 隧道 0x5000 → 0x5001（歌名=${it.title ?: "?"}" +
+                                    " 歌手=${it.artist ?: "?"} 状态=${it.status}）",
+                            )
+                        }
+                    }
+                    return
+                }
                 // 每次（重）订阅都是全新上下文：清掉上次的内容键，允许同歌再推一次；
                 // 同时挂起周期补推——空态不是终点，歌名晚到时由节拍自愈。
                 nowPlayingSubscribed = true

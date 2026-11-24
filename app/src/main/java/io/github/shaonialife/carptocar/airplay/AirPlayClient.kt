@@ -2333,9 +2333,7 @@ class AirPlayClient(
      * 主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。
      * quiet = 播放位置逐秒补推：照常发包，但不刷日志。
      */
-    fun pushNowPlaying(quiet: Boolean = false) {
-        obtainIapLink().pushNowPlaying(quiet)
-    }
+    fun pushNowPlaying(quiet: Boolean = false): Boolean = obtainIapLink().pushNowPlaying(quiet)
 
     /**
      * 通话状态变化时主动补推一次 0x4155（见 [VirtualIap2Link.pushCallState]）。
