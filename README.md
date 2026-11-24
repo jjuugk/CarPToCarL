@@ -13,7 +13,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前发布版 | **1.2.85**（正式版）。逐版变更见 [CHANGELOG.md](CHANGELOG.md) |
+| 当前发布版 | **1.2.86**（正式版）。逐版变更见 [CHANGELOG.md](CHANGELOG.md) |
 | 包名 | `io.github.shaonicalife.carptocar` |
 | 系统要求 | Android 12+（minSdk 31 / targetSdk 34） |
 | 画面来源 | 手机 **CarLife+**（荣耀机型为系统内置「荣耀车联」，逆向基线 8.8.5） |
@@ -32,15 +32,15 @@
 
 ### 下载与安装
 
-> **[`CarPToCarL-1.2.85.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.85/CarPToCarL-1.2.85.apk)**
-> —— 主线固定直链（13.5 MB）。刻意不用 `releases/latest`：那个指针按发布时间算，
+> **[`CarPToCarL-1.2.86.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.86/CarPToCarL-1.2.86.apk)**
+> —— 主线固定直链（13.6 MB）。刻意不用 `releases/latest`：那个指针按发布时间算，
 > `-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404。
 
 | 项 | 值 |
 | --- | --- |
 | 全部版本 | [Releases 页面](https://github.com/jjuugk/CarPToCarL/releases) |
-| 安装 | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.85.apk`（**同签名覆盖装，保留应用数据**） |
-| 签名 | 作者个人调试证书（仓库不含发布密钥）→ 可直接覆盖 1.0.0 ~ 1.2.85；不要与其它来源的包混装 |
+| 安装 | 系统安装器直接装，或 `adb install -r CarPToCarL-1.2.86.apk`（**同签名覆盖装，保留应用数据**） |
+| 签名 | 作者个人调试证书（仓库不含发布密钥）→ 可直接覆盖 1.0.0 ~ 1.2.86；不要与其它来源的包混装 |
 | 首次启动 | 弹出免责声明，需手动同意 |
 
 ### 前置条件

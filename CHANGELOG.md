@@ -16,6 +16,57 @@
 
 ---
 
+### 1.2.86 —— 2026-11-24（高德导航上媒体卡片：转向文字 + 箭头，正式版）
+
+> 承接 1.2.85 的高德 linksdk 数据源（那条只做到仪表 `0x5201/0x5202`）。本版补齐
+> **第二条出口**：媒体卡片 `0x5001 NowPlaying` 的转向文字与箭头。验证环境为
+> WinPlay 测试台 + 荣耀 PTP-AN10 + 高德 17.02.0.2010，**未做多车实车回归**。
+
+**一、新增：高德导航接媒体卡片（P3）**
+
+- `AmapNaviSource.dispatch()` 里维护一份 `Guide` 影子状态，与仪表出口同一份数据两条出口：
+  清除帧两侧必然同步，不会出现「仪表空了、卡片还挂着上一路口」。
+- `SessionController.pushNowPlayingGuide()` 三道闸（顺序不可换）：
+  `navigation_now_playing` 总闸 → 高德开关 → CarLife。总闸必须在最前——
+  「要不要占住媒体显示位」和「导航数据从哪来」是两件事。
+- 文案用 `NavigationText.maneuver()` + `CarLifeNaviGuide.label()`（ICON 码表）。
+  **不能用** `NavigationDisplay.turnName`：那张表吃 CarLife protobuf raw 码，
+  2..9 与 ICON 撞车（raw 7=左转 vs ICON 7=右后方）。
+- 箭头改用 **CarLife 引擎官方那批** `nsdk_drawable_rg_ic_turn_*`（240×240 PNG，12 张 16KB，
+  放 `res/raw/navi_turn_*.png`）——正是车机从 `0x10030 turnIconData` 收到的同一批字节。
+  高德 APK 里没有主诱导箭头：它是 native/GL 画的，`res` 里只有 12 个 96px 路口小示意图。
+
+**二、修复：媒体卡片整程收不到导航（三处断点，缺一不可）**
+
+1. **隧道链路不挂覆盖层**：`START_NOW_PLAYING_UPDATES` 分支开头 `if (!mib3) return`，
+   非 MIB3 会话（WinPlay / 多数测试台与国产车机）`nowPlayingOverrideSubscribed` 永远 false，
+   `displayNowPlaying()` 直接走原始媒体 provider —— 导航文案根本没机会上卡片。
+   现在隧道链路也开户（只开户、不主动发空态，保持既有形态）。
+2. **去重键在发送失败时也被写死**：旧逻辑先记账再推，首次推送若赶上链路未识别，
+   之后每秒都判「内容未变」永久跳过（现象：仪表箭头在动、卡片一动不动，日志零条 0x5001）。
+   改为 `pushNowPlaying` 返回「是否真的发出」，只在成功时记账。
+3. **卡片刷新只跟媒体事件**：纯 CarPlay 场景下高德 1Hz 推诱导时没有 0x5001 触发点，
+   现在每帧引导都当场刷一次卡片（按「转向+距离+路名」去重）。
+
+**三、新增开关：转向箭头加深色底（默认关）**
+
+- 官方箭头是纯白透明底 PNG（实测不透明像素平均 RGB=255,255,255），
+  **浅色媒体卡片上等于隐形** —— 测试台实测卡片左侧整块空白就是这个原因。
+- 打开后 `NavigationIcon.toCardJpeg()` 把箭头压成「深底白箭头 JPEG」
+  （`0xFF16181D` 底 + 6% 边距），深浅两种底都看得见；关着仍原样发官方 PNG
+  （深色卡片的车上更好看，不该为浅色场景默认改观感）。
+- 开关状态参与 `NavigationArtwork` 缓存键，切换即换新编号，否则车机会一直用缓存旧图。
+
+**四、验证与已知落差**
+
+- 真机日志：卡片文案「41m 左转 / 银新东一路」、订阅后周期补推同步生效；
+  箭头封面 `SETUP id=1 4201B` → `SUCCESS`（PNG 时代 2515B，肉眼不可见）。
+- 单测：`ArrowShapeTest`（16 个 ICON 码逐条 + raw/ICON 防呆）、`NavigationTextTest`
+  （999m/1000m/1500m/负数四档）；`AudioSenderTest.nonBlockingDataChannelWriteContract`
+  为存量 flaky，单跑通过。
+- 未验证：真车逐张比对媒体卡片箭头方向（单测跑不了 Bitmap）。
+  仪表对、卡片反 → 改 `ArrowShape`；两边都反 → 改 `AmapNaviMapper`。
+
 ### 1.2.85 —— 2026-11-23（主干清理 + 会话稳定性 + 通用协议修正，正式版）
 
 > 跳过 `1.2.84`。本版把 `#41/#42/#44/#45` 的清理与修正合入主干，**不含车型 profile**，
