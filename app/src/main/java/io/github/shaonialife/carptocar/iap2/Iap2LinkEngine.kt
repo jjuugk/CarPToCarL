@@ -182,6 +182,23 @@ class Iap2LinkEngine(
      */
     private var adoptedPeerControlSessionId: Int? = null
 
+    /**
+     * 采纳的对端**会话表原文**（类型/版本都留着，不只取控制会话）。
+     *
+     * 封面文件传输必须发在**对端真的声明过**的会话上，不能写死 12 号：
+     *
+     * - 奥迪 MIB3（`Audi_MMI_8349` / `AUDI 4260` / `MIB3H AS G4x`）真机日志里，
+     *   车机 SYN 携带的是 `sessions=1/k0/v1, 2/k2/v1` —— **只有 1 号和 2 号，没有 12 号**；
+     *   我们把 `SETUP` 发到 12 号，车机既不 START 也不 FAILURE（2026-11-15 实测
+     *   19 次 SETUP / 0 次 START / 0 次 SUCCESS）；链路层照常 ACK 那些帧，
+     *   所以日志上看不出「发错了会话」，只看得出「车机不理」。
+     * - 真 iPhone 在奥迪上把封面 JPEG 发在 **2 号会话**（`iphone-ref-1015` §3.4：
+     *   `80 01` / `80 c0` / `80 05` / `81 01` + 166 条 2038B 分片 / `81 05`）。
+     * - 测试台 WinPlay/DiPlay 声明 `10/k0, 11/k2, 12/k1`，挑出来的仍是 12，
+     *   行为与既有实现完全一致。
+     */
+    private var adoptedPeerSessions: List<SessionDescriptor> = emptyList()
+
     /** 采纳的对端 sync 载荷（协商回显/诊断用）。 */
     private var adoptedSynchronization: SynchronizationPayload? = null
 
@@ -198,6 +215,14 @@ class Iap2LinkEngine(
 
     /** 诊断：首次采纳对端会话表时回调（打印对端提议的会话表，便于真车排查）。 */
     var onPeerSynchronizationAdopted: ((SynchronizationPayload) -> Unit)? = null
+
+    /**
+     * 本端在 SYN 里声明的会话表；null = 默认三档（10 控制 / 11 EA / 12 文件传输）。
+     *
+     * 只为单测能扮演「奥迪形态的车机」（`{1:control, 2:data}`，不声明文件传输会话）。
+     * 生产路径不要改它：真车能连上靠的正是这张默认表。
+     */
+    var declaredSessions: List<SessionDescriptor>? = null
 
     /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
     var onUnknownSessionData: ((Int, Int) -> Unit)? = null
@@ -421,6 +446,7 @@ class Iap2LinkEngine(
         peerSynchronization = null
         adoptedSynchronization = null
         adoptedPeerControlSessionId = null
+        adoptedPeerSessions = emptyList()
         peerRetransmissionTimeoutMillis = null
         peerHandshakeRejections = 0
         declaredMaxOutgoing = maxOutgoing
@@ -693,6 +719,7 @@ class Iap2LinkEngine(
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
                     adoptedPeerControlSessionId = it.id
                 }
+                adoptedPeerSessions = sync.sessions
                 lastReceivedInOrder = sequence
                 // **每次** SYN 都只回一帧 SYN|ACK（不回裸 ACK）：
                 //  ① 语义完整：SYN|ACK 自带确认位与 ack 字段，裸 ACK 是冗余的
@@ -725,6 +752,7 @@ class Iap2LinkEngine(
                 sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
                     adoptedPeerControlSessionId = it.id
                 }
+                adoptedPeerSessions = sync.sessions
                 // Watermark must also advance (the pure SYN branch does the same): when left at 0,
                 // the initiator treats the responder's first data frame as an "expired frame", only re-sending ack=0 —
                 // the responder's send window gets poisoned by this bogus ack (backlog never flushes, unit test located)
@@ -756,8 +784,13 @@ class Iap2LinkEngine(
                 // 上抛给任何消费者。但链路层仍要 ACK——不确认会让对端不停重传同一个包，
                 // 连带把控制会话也拖慢（EA 的序号账法与控制会话独立，只补 ACK 不前移自身序号）。
                 sendAcknowledgement()
-            } else if (sessionId == SESSION_FILE_TRANSFER && onFileTransferData != null) {
-                // 封面文件传输：车机在 session 12 上的 START / SUCCESS / FAILURE。
+            } else if ((sessionId == SESSION_FILE_TRANSFER || sessionId == artworkSessionId) &&
+                onFileTransferData != null
+            ) {
+                // 封面文件传输：车机在文件传输会话上的 START / SUCCESS / FAILURE。
+                // **不只看 12 号**：奥迪只声明 {1:control, 2:data}，封面走 2 号；
+                // 只认 12 号时那些应答会落进「未知会话」，业务层永远等不到 START
+                // （2026-11-15 奥迪 19 次 SETUP / 0 次 START 的第二个成因）。
                 // 链路层 ACK 已在上面的 handleAcknowledgement 里统一处理过，这里只管业务。
                 onFileTransferData?.invoke(payload!!)
             } else {
@@ -1064,6 +1097,41 @@ class Iap2LinkEngine(
     /** 出向控制消息的会话 ID：采纳了对端表就用其 control ID（Audi=1），否则本表 10。 */
     private fun controlSessionId(): Int = adoptedPeerControlSessionId ?: SESSION_CONTROL
 
+    /**
+     * 封面文件传输该发在哪个会话上（见 [adoptedPeerSessions]）。
+     *
+     * 优先级：对端声明的**文件传输**会话（kind=1）→ 对端任意非控制会话 → 本表 12。
+     * 奥迪只声明 `{1:control, 2:data}`，落到第二条 = 2 号，与真 iPhone 一致；
+     * 测试台声明 12/k1，落到第一条 = 12 号，行为不变。
+     */
+    val artworkSessionId: Int
+        get() {
+            val sessions = adoptedPeerSessions
+            if (sessions.isEmpty()) return SESSION_FILE_TRANSFER
+            val control = controlSessionId()
+            sessions
+                .firstOrNull { it.kind == FILE_TRANSFER_KIND && it.id != control }
+                ?.let { return it.id }
+            sessions
+                .firstOrNull { it.kind != CONTROL_KIND && it.id != control }
+                ?.let { return it.id }
+            return SESSION_FILE_TRANSFER
+        }
+
+    /**
+     * 对端是否**明确**声明了文件传输会话。
+     *
+     * 假 = 这台车是「接收方发起」形态（奥迪）：不要抢发 SETUP，只把编号写进 0x5001，
+     * 等车机在数据会话上回 `START` 再发块 —— 真 iPhone 在奥迪上就是这么走的
+     * （`iphone-ref-1015` §3.4 里奥迪侧没有任何 SETUP 帧，只有车机先发的
+     * `80 01` / `81 01`）。
+     */
+    val peerDeclaresFileTransfer: Boolean
+        get() {
+            val control = controlSessionId()
+            return adoptedPeerSessions.any { it.kind == FILE_TRANSFER_KIND && it.id != control }
+        }
+
     private fun retransmitDue(nowMillis: Long) {
         val next = unacknowledged.minByOrNull { it.deadlineMillis } ?: return
         next.deadlineMillis = nowMillis + retransmissionDelayMillis()
@@ -1112,11 +1180,12 @@ class Iap2LinkEngine(
                 maxRetransmissions = maxRetransmissions,
                 maxAcknowledgements = 3,
                 sessions =
-                    listOf(
-                        SessionDescriptor(SESSION_CONTROL, 0, 2),
-                        SessionDescriptor(SESSION_EA, 2, 1),
-                        SessionDescriptor(SESSION_FILE_TRANSFER, 1, 2),
-                    ),
+                    declaredSessions
+                        ?: listOf(
+                            SessionDescriptor(SESSION_CONTROL, CONTROL_KIND, 2),
+                            SessionDescriptor(SESSION_EA, EA_KIND, 1),
+                            SessionDescriptor(SESSION_FILE_TRANSFER, FILE_TRANSFER_KIND, 2),
+                        ),
             ).encode()
         writePacket(payload, sentSequence, CONTROL_SYNCHRONIZE, 0)
     }
@@ -1239,6 +1308,12 @@ class Iap2LinkEngine(
 
         /** 会话描述符里的类型字段：0 = 控制会话（xcertplay/extractor/catplay 一致）。 */
         private const val CONTROL_KIND = 0
+
+        /** 会话类型 1 = 文件传输（测试台声明 `12/k1`；奥迪不声明这一档）。 */
+        private const val FILE_TRANSFER_KIND = 1
+
+        /** 会话类型 2 = 数据/EA 档（奥迪声明 `2/k2`，真 iPhone 在上面传封面）。 */
+        private const val EA_KIND = 2
 
         /**
          * iAP2 DETECT/同步标记。协议核 `libcardeck_protocol.so` 逆向交叉验证一致：

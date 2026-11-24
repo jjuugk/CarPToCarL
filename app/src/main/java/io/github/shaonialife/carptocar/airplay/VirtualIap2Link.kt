@@ -143,6 +143,9 @@ class VirtualIap2Link(
      */
     private var artworkSetupAtMs = 0L
 
+    /** 「接收方发起」形态下已记过一行「还在等车机要图」，别每拍刷屏。 */
+    private var artworkWaitLogged = false
+
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
      *
@@ -489,6 +492,7 @@ class VirtualIap2Link(
             nowPlayingOverrideSubscribed = false
             artworkPendingIsNavigation = false
             navigationArtworkUnavailable = false
+            artworkWaitLogged = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
             // 导航订阅是链路级状态：对端重发 DETECT 后必须重收 0x5200 才再推
@@ -653,6 +657,20 @@ class VirtualIap2Link(
         if (id == 0 || artworkSetupAtMs == 0L) return
         val waited = nowMillis() - artworkSetupAtMs
         if (waited < ARTWORK_START_TIMEOUT_MILLIS) return
+        if (!engine.peerDeclaresFileTransfer) {
+            // 接收方发起形态（奥迪）：车机什么时候来要图不由我们决定——真 iPhone 抓包里
+            // 32.6s 宣告、49.2s 才传完（`iphone-ref-1015` §3.4），中间隔着十几秒。
+            // 所以这里**不清待发槽、不判「这车不取封面」**，只记一次「还在等」：
+            // 判死会让整轮都不再声明编号，比慢一拍更糟。
+            if (!artworkWaitLogged) {
+                artworkWaitLogged = true
+                log(
+                    "IAPLINK: 封面 id=$id 已等 ${waited}ms，车机还没在会话 ${engine.artworkSessionId} " +
+                        "上要图——继续等（不判不支持）",
+                )
+            }
+            return
+        }
         artworkPendingId = 0
         artworkPendingBytes = null
         artworkSetupAtMs = 0L
@@ -1247,7 +1265,21 @@ class VirtualIap2Link(
         startArtworkTransferLocked(id, np.navigationArtwork)
     }
 
-    /** 发封面 SETUP，把图放进待发槽，等车机回 START 再按块发。 */
+    /**
+     * 把图放进待发槽，等车机回 `START` 再按块发。
+     *
+     * **发不发 SETUP 取决于对端形态**（[Iap2LinkEngine.peerDeclaresFileTransfer]）：
+     *
+     * - 对端声明了文件传输会话（测试台 WinPlay/DiPlay：`10/k0 11/k2 12/k1`）→ 照旧先发
+     *   `SETUP(编号, 总字节, 类型)`，这是台架上验证过的一整套；
+     * - 对端没有声明（奥迪 MIB3：只声明 `1/control 2/data`）→ **不发 SETUP**，只把编号
+     *   交给 0x5001，等车机在它的数据会话上主动要图。真 iPhone 在奥迪上正是这个形态：
+     *   抓包里奥迪侧一条 SETUP 都没有，只有车机先发的 `80 01` / `81 01`
+     *   （`iphone-ref-1015` §3.4）。
+     *
+     * 以前两条都按「发 SETUP + 等 START」走，而 SETUP 发在写死的 12 号会话上——奥迪
+     * 从没声明过 12 号，于是 19 次 SETUP 一次回声都没有，封面永远到不了车机。
+     */
     private fun startArtworkTransferLocked(id: Int, navigation: Boolean) {
         if (engine.state != Iap2LinkEngine.State.NORMAL) {
             log("IAPLINK: 封面 id=$id 想传但链路未就绪（${engine.state}）——本轮跳过")
@@ -1266,20 +1298,29 @@ class VirtualIap2Link(
         artworkPendingIsNavigation = navigation
         artworkPendingBytes = bytes
         artworkSetupAtMs = nowMillis()
+        artworkWaitLogged = false
+        val session = engine.artworkSessionId
+        if (!engine.peerDeclaresFileTransfer) {
+            log(
+                "IAPLINK: 封面 id=$id ${bytes.size}B 等车机在会话 $session 上要图" +
+                    "（对端未声明文件传输会话，不发 SETUP）",
+            )
+            return
+        }
         val queued =
             engine.sendOnSession(
                 Iap2ArtworkTransfer.setup(id, bytes.size),
-                Iap2LinkEngine.SESSION_FILE_TRANSFER,
+                session,
                 nowMillis(),
                 retransmitLimit = ARTWORK_RETRANSMIT_LIMIT,
                 dropWhenExhausted = true,
             )
         log(
-            "IAPLINK: 封面传输 SETUP id=$id ${bytes.size}B（已排队=$queued，等车机 START）",
+            "IAPLINK: 封面传输 SETUP id=$id ${bytes.size}B 会话=$session（已排队=$queued，等车机 START）",
         )
     }
 
-    /** 处理车机在 session 12 上的应答：START → 发块；SUCCESS/FAILURE → 收尾。 */
+    /** 处理车机在文件传输会话上的应答：START → 发块；SUCCESS/FAILURE → 收尾。 */
     private fun handleFileTransferLocked(datagram: ByteArray) {
         val response = Iap2ArtworkTransfer.parseResponse(datagram) ?: return
         if (response.transferId != artworkPendingId) {
@@ -1293,14 +1334,21 @@ class VirtualIap2Link(
             response.isStart -> {
                 // 车机答应了：这条「它收不收封面」的记忆就没意义了，超时判定同步撤掉
                 artworkSetupAtMs = 0L
-                val bytes = artworkPendingBytes ?: return
+                val bytes = artworkPendingBytes
+                if (bytes == null) {
+                    // 编号是我们宣告的、车机也来要了，但本地已经没有这张图的字节
+                    // （链路重置/换歌抢先清槽）。只能放弃这一次传输，车机会自己收尾。
+                    log("IAPLINK: 车机要封面 id=${response.transferId}，但本地无待发字节——跳过")
+                    return
+                }
+                val session = engine.artworkSessionId
                 val chunks = Iap2ArtworkTransfer.chunks(response.transferId, bytes)
                 var queuedChunks = 0
                 var queuedBytes = 0
                 for (chunk in chunks) {
                     if (!engine.sendOnSession(
                             chunk,
-                            Iap2LinkEngine.SESSION_FILE_TRANSFER,
+                            session,
                             nowMillis(),
                             retransmitLimit = ARTWORK_RETRANSMIT_LIMIT,
                             dropWhenExhausted = true,
@@ -1312,7 +1360,8 @@ class VirtualIap2Link(
                     queuedBytes += chunk.size - 2
                 }
                 log(
-                    "IAPLINK: 封面传输 START → 已排队 $queuedChunks 块 / $queuedBytes B" +
+                    "IAPLINK: 封面传输 START id=${response.transferId} 会话=$session → " +
+                        "已排队 $queuedChunks 块 / $queuedBytes B" +
                         if (queuedChunks < chunks.size) "（⚠ 链路拒绝，剩余放弃）" else "",
                 )
             }

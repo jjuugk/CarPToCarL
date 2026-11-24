@@ -843,3 +843,38 @@ EIR 判定）→ 再开本开关试。奥迪 MIB3 固件 `CoWSupported: false`�
 `0x4E0A 语言=…` · `车机可收清单未声明 0x… （bt/tunnel）… 裁掉/仍照常发送` ·
 `订阅应答 0x4157 → 0x4158` · `0x5200 → 0x5201` · `PROTO! WARN [UNSOLICITED_MESSAGE]`。
 
+## §16 封面文件传输的会话选择：奥迪没有 12 号会话（2026-11-24）
+
+**症状**：仪表上没有音频封面（MMI 媒体卡也没有），歌名/歌手正常；日志里每次切歌都有
+`封面传输 SETUP id=N … 等车机 START`，但一条 `START` / `SUCCESS` / `FAILURE` 都没有
+（2026-11-15 奥迪实测：19 次 SETUP / 0 次 START）。
+
+**根因不是车机不收，是我们发错了会话**：
+
+| 证据 | 内容 |
+|---|---|
+| 奥迪 MIB3 真机日志 | `LINK: 采纳对端会话表 maxOutgoing=5 maxLen=2048 sessions=1/k0/v1, 2/k2/v1` —— **只有 1（控制）和 2（数据）**，没有 12 |
+| 旧实现 | `SETUP` 与分片写死 `SESSION_FILE_TRANSFER = 12`；链路层照常 ACK，所以日志看不出「发错了会话」 |
+| 真 iPhone 奥迪抓包（`iphone-ref-1015` §3.4） | 封面 JPEG（16.6 万字节、166 条 2038B 分片）发在 **2 号会话**；控制包是 `80 01 / 80 c0 / 80 05 / 81 01 / 81 c0 / 81 05`，**车机先发 `START`**，全程没有 `SETUP` |
+| 测试台（WinPlay/DiPlay） | 声明 `10/k0/v2, 11/k2/v1, 12/k1/v2`，挑出来仍是 12 —— 所以台架上一直好的，真车才知道坏了 |
+
+**实现**（`iap2/Iap2LinkEngine.kt` + `airplay/VirtualIap2Link.kt`）：
+
+- 采纳对端 SYN 时连**整张会话表**一起记下来（以前只取控制会话 ID）；
+- `artworkSessionId`：对端声明了 `kind=1`（文件传输）→ 用它；否则用对端任意
+  **非控制**会话（奥迪 = 2）；再没有 → 退回本表 12；
+- 入向数据不再只认 12 号：`artworkSessionId` 上的 `START/SUCCESS/FAILURE` 同样进封面状态机
+  （以前奥迪的应答会落进「未知会话」被丢掉）；
+- 对端**没声明**文件传输会话时（`peerDeclaresFileTransfer=false`）**不抢发 SETUP**，
+  只把编号写进 `0x5001` 等车机来要图 —— 与真 iPhone 同形；这类车机也不再用「8 秒没
+  START 就判它不取封面」的规则（真机抓包里从宣告到传完隔了十几秒），只记一行「继续等」。
+
+**为什么仪表现在应该有图了**：3874 固件里仪表取封面走的是
+`DSIKombiPictureServer.responseCoverArt{id, sourceType, coverArtType, ResourceLocator{id,url}}`，
+图源是 MMI 的 `CoverArtContainer`；CarPlay 侧只有 `CDSICarplayImpl::updateCoverArt(path)`
+一条入口（落盘 `/var/volatile/carplay/carplay_cover_art_%u.jpg`，600→500×500）。
+这条入口的上游就是 iAP2 文件传输——**传不上去，仪表那一路永远没东西可取**。
+
+**看日志判定**：`封面 id=N … 等车机在会话 2 上要图（不发 SETUP）` → 走的是接收方发起形态；
+`封面传输 START id=N 会话=2 → 已排队 M 块` → 车机真的要图了；
+`封面传输 SUCCESS id=N` → 图已到车机（此时仪表仍无图，就看 KI 固件的设计变型）。

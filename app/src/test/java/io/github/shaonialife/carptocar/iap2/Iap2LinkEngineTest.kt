@@ -192,6 +192,75 @@ class Iap2LinkEngineTest {
     }
 
     /**
+     * 奥迪形态：车机 SYN 只声明 `{1:control, 2:data}`，**没有 12 号会话**。
+     *
+     * 真机日志（`Audi_MMI_8349` / `AUDI 4260`）：`sessions=1/k0/v1, 2/k2/v1`。
+     * 旧实现把 `SETUP` 写死发到 12 号——车机从未声明这条会话，于是既不 START 也不
+     * FAILURE（2026-11-15 实测 19 次 SETUP / 0 次 START），封面永远到不了车机，
+     * 仪表（经 `DSIKombiPictureServer` 取 MMI 的封面容器）自然没有图。
+     *
+     * 真 iPhone 在奥迪上把封面发在 **2 号会话**（`iphone-ref-1015` §3.4）。
+     * 本用例锁住三件事：会话选 2、不抢发 SETUP、2 号会话上的 START 能上抛。
+     */
+    @Test
+    fun audiSessionTableRoutesArtworkToItsDataSession() {
+        val phone = Iap2LinkEngine()
+        val accessory =
+            Iap2LinkEngine().also {
+                it.declaredSessions =
+                    listOf(
+                        Iap2LinkEngine.SessionDescriptor(1, 0, 1),
+                        Iap2LinkEngine.SessionDescriptor(2, 2, 1),
+                    )
+            }
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        assertEquals("奥迪只声明 1/2 号，封面应落到它的数据会话 2", 2, phone.artworkSessionId)
+        assertTrue("对端没声明文件传输会话 → 不能抢发 SETUP", !phone.peerDeclaresFileTransfer)
+
+        phone.takeOutput()
+        val datagram = Iap2ArtworkTransfer.setup(9, 5_432)
+        assertTrue(phone.sendOnSession(datagram, phone.artworkSessionId, tick()))
+        val frames = parseFrames(phone.takeOutput())
+        assertEquals(1, frames.size)
+        assertEquals("封面数据报必须发在对端声明过的会话上", 2, frames[0].sessionId)
+
+        // 车机在 2 号会话回 START → 必须进封面状态机，而不是落进「未知会话」
+        val transfers = ArrayList<ByteArray>()
+        val unknownSessions = ArrayList<Int>()
+        phone.onFileTransferData = { transfers += it }
+        phone.onUnknownSessionData = { id, _ -> unknownSessions += id }
+        val start = byteArrayOf(9, Iap2ArtworkTransfer.CMD_START.toByte())
+        accessory.sendOnSession(start, 2, tick())
+        phone.feed(accessory.takeOutput(), tick())
+        assertEquals("2 号会话上的 START 必须上抛", 1, transfers.size)
+        assertTrue("接了文件传输回调就不该再报未知会话，实际=$unknownSessions", unknownSessions.isEmpty())
+    }
+
+    /** 对端明确声明文件传输会话（测试台 12/k1）时，仍然走 12 号、照旧先发 SETUP。 */
+    @Test
+    fun peerDeclaringFileTransferKeepsSession12() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        phone.start(0)
+        accessory.start(0)
+        exchangeUntilNormal(phone, accessory)
+
+        assertEquals(12, phone.artworkSessionId)
+        assertTrue(phone.peerDeclaresFileTransfer)
+    }
+
+    /** 还没采纳到对端会话表（协商前/对端只发 marker）时退回本表 12，行为与旧实现一致。 */
+    @Test
+    fun artworkSessionFallsBackTo12BeforeNegotiation() {
+        val phone = Iap2LinkEngine()
+        assertEquals(12, phone.artworkSessionId)
+        assertTrue(!phone.peerDeclaresFileTransfer)
+    }
+
+    /**
      * 发送窗口按**对端声明的 maxOutgoing** 截断，超出的先 hold 住等 ACK。
      *
      * 别克 BUICK_3138 声明 `maxOutgoing=5`，我们旧逻辑回显 0x7F 后一次连发 7 帧
