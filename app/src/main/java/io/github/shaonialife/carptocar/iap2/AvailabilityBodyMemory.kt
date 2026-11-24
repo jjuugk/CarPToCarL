@@ -54,8 +54,9 @@ object AvailabilityBodyMemory {
         NONE("不发 0x4300"),
     }
 
-    /** 默认尝试顺序：新版 → 老版 → 不发。 */
-    val ORDER: List<Variant> = listOf(Variant.MODERN_NESTED, Variant.LEGACY_FLAT, Variant.NONE)
+    /** 默认尝试顺序：新版（保奥迪/宝马/测试台首包不变）→ 老版 → 双标识兜底 → 不发。 */
+    val ORDER: List<Variant> =
+        listOf(Variant.MODERN_NESTED, Variant.LEGACY_FLAT, Variant.DUAL_GROUPS, Variant.NONE)
 
     /**
      * 通用系（SAIC-GM / Cinemo 栈）的尝试顺序：**双标识体优先**，其余同默认。
