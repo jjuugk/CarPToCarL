@@ -9,6 +9,7 @@ import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
+import io.github.shaonialife.carptocar.audio.OpusEncoder
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.CarPlayUplinkHealth
 import io.github.shaonialife.carptocar.iap2.Iap2Csm
@@ -2679,6 +2680,9 @@ class AirPlayClient(
         /** AAC-LC 48000Hz 立体声（1<<23；catplay `AAC_LC_48000_STEREO`）。 */
         const val AUDIO_FORMAT_AAC_48K_STEREO = 1L shl 23
 
+        /** Opus 48000Hz 单声道（1<<30 = 0x40000000，AltAudio 导航独立流用）。 */
+        const val AUDIO_FORMAT_OPUS_48K_MONO = 1L shl 30
+
         /**
          * 媒体音频通道的 audioType（真 iPhone 媒体音频走这条）。
          * 具体选哪个由 [negotiateAudio] 按车机 /info 的 audioFormats 决定——这里只是
@@ -2731,6 +2735,7 @@ class AirPlayClient(
             when (codec) {
                 AudioCodec.PCM -> 1L
                 AudioCodec.AAC_LC -> 4L
+                AudioCodec.OPUS -> 32L
             }
 
         /** 车机音量 ≤ 这个值（dB）视为静音位（AirPlay 里 -144 约等于全静音）。 */
@@ -2901,7 +2906,11 @@ class AirPlayClient(
         // spf 取值：AAC 一帧 1024 采样；PCM 与发送端每包 352 帧保持一致
         val spfValue =
             tuning.spf?.let {
-                if (profile.codec == AudioCodec.AAC_LC) it.toLong() else AudioSender.SAMPLES_PER_PACKET.toLong()
+                when (profile.codec) {
+                    AudioCodec.AAC_LC -> it.toLong()
+                    AudioCodec.OPUS -> OpusEncoder.FRAME_SAMPLES.toLong()
+                    AudioCodec.PCM -> AudioSender.SAMPLES_PER_PACKET.toLong()
+                }
             }
         log(
             "AIRPLAY: 音频协商 → audioType=${profile.audioType} " +
@@ -3378,6 +3387,7 @@ class AirPlayClient(
                 AUDIO_FORMAT_PCM_44K_STEREO -> Triple(44_100, AudioCodec.PCM, 2)
                 AUDIO_FORMAT_PCM_44K_MONO -> Triple(44_100, AudioCodec.PCM, 1)
                 AUDIO_FORMAT_AAC_48K_STEREO -> Triple(48_000, AudioCodec.AAC_LC, 2)
+                AUDIO_FORMAT_OPUS_48K_MONO -> Triple(48_000, AudioCodec.OPUS, 1)
                 else -> Triple(44_100, AudioCodec.AAC_LC, 2)
             }
         val channel =
@@ -3429,6 +3439,7 @@ class AirPlayClient(
             AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_PCM_44K_MONO,
             AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_48K_STEREO,
             AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_AAC_LC_44K_STEREO,
+            AUDIO_STREAM_TYPE_ALT to AUDIO_FORMAT_OPUS_48K_MONO,
             AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_STEREO,
             AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_48K_MONO,
             AUDIO_STREAM_TYPE to AUDIO_FORMAT_PCM_44K_STEREO,

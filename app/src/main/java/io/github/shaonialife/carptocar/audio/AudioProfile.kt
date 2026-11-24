@@ -7,6 +7,9 @@ enum class AudioCodec {
 
     /** AAC-LC 裸帧（无 ADTS/AU 头），type=102 通路。 */
     AAC_LC,
+
+    /** Opus 裸帧（RFC 6716，每帧 20ms / 960 采样），type=101 AltAudio 通路。 */
+    OPUS,
 }
 
 /**

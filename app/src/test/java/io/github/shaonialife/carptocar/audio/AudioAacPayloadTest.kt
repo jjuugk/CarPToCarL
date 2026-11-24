@@ -23,7 +23,12 @@ class AudioAacPayloadTest {
             streamKey = key,
             log = {},
             codec = codec,
-            streamType = if (codec == AudioCodec.AAC_LC) 102L else 100L,
+            streamType =
+                when (codec) {
+                    AudioCodec.AAC_LC -> 102L
+                    AudioCodec.OPUS -> 101L
+                    AudioCodec.PCM -> 100L
+                },
         )
 
     @Test
@@ -63,6 +68,21 @@ class AudioAacPayloadTest {
         // 字节 1：M(0x80) | PT(102)
         assertEquals(0x80 or 102, first[1].toInt() and 0xFF)
         assertEquals(102, second[1].toInt() and 0xFF)
+    }
+
+    @Test
+    fun opusFrameGoesOnTheWireByteForByteWithAltAudioPayloadType() {
+        val frame = ByteArray(160) { index -> ((index * 29 + 0x78) and 0xFF).toByte() }
+        val wire = sender(AudioCodec.OPUS).sealPacket(frame, 1, 960, 0, marker = true)
+        assertEquals(0x80 or 101, wire[1].toInt() and 0xFF)
+        val decrypted =
+            AirPlayCrypto.chachaOpen(
+                key,
+                ByteArray(12).also { wire.copyOfRange(wire.size - 8, wire.size).copyInto(it, 4) },
+                wire.copyOfRange(12, wire.size - 8),
+                wire.copyOfRange(4, 12),
+            )
+        assertArrayEquals(frame, decrypted)
     }
 }
 
