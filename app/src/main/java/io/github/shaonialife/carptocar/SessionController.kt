@@ -62,6 +62,7 @@ import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.MediaSessionFallback
 import io.github.shaonialife.carptocar.media.MediaSessionsState
+import io.github.shaonialife.carptocar.media.NavigationDisplay
 import io.github.shaonialife.carptocar.media.NavigationNowPlaying
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.net.AirPlayFeatures
@@ -775,6 +776,26 @@ object SessionController {
             }
         }
     }
+
+    /**
+     * 媒体卡片（iAP2 `0x5001` NowPlaying 覆盖层）的导航数据源。
+     *
+     * 三道闸的顺序有意义，不要调换：
+     *
+     * 1. `navigation_now_playing` 是**总闸**——关着就交还真实媒体，
+     *    两个数据源一个都不看。它管的是「要不要用导航占住媒体的显示位置」，
+     *    与「导航数据从哪来」是两件事，所以不能因为高德开关开着就绕过它。
+     * 2. 高德开关打开时**只认高德**，与仪表链路的替换语义一致。
+     *    不这么分流的话，CarLife `0x10030` 会把高德刚写上去的转向顶掉——
+     *    这就是文档里说的「两路同时推，箭头互相打架」。
+     * 3. 否则回到 CarLife 引擎的 `0x10030`。
+     */
+    private fun nowPlayingGuide(): NavigationDisplay.Guide? =
+        when {
+            !CarLifeHijack.navigationNowPlayingEnabled -> null
+            AmapNaviSource.isReplacingCarLife() -> AmapNaviSource.currentGuide()
+            else -> CarLifeHijack.navigationDisplay()
+        }
 
     /**
      * CarLife+ 引擎控制通道意外断开（非本进程主动停止，例如手机上强杀引擎进程）。
@@ -6410,7 +6431,7 @@ object SessionController {
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
                             val navigation = NavigationNowPlaying(::buildNowPlaying, ::ensureNavigationArtwork)
-                            created.nowPlayingOverride = { navigation.displayOverride(CarLifeHijack.navigationDisplay()) }
+                            created.nowPlayingOverride = { navigation.displayOverride(nowPlayingGuide()) }
                             // 封面字节：iAP2 文件传输（session 12）按 0x5001 里声明的 id 来取图。
                             // 分别按编号查当前箭头和音乐封面，拿不到的旧编号直接丢弃。
                             created.artworkSource = { id ->

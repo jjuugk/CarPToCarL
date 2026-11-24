@@ -61,7 +61,15 @@ internal object NavigationIcon {
         }
     }
 
-    private fun render(bytes: ByteArray): ByteArray {
+    /**
+     * 把任意来源的箭头 PNG 规整成 256×256、透明底、保持原比例。
+     *
+     * 两处调用：CarLife `0x10030` 的 `turnIconData`（引擎给的原图），以及
+     * [ManeuverArrow] 启动时从 `res/raw` 读出来的官方图标。**必须走同一套缩放**，
+     * 否则同一辆车上切数据源时箭头大小会跳一下（CarLife 原图 240×240，
+     * 我们不发原尺寸而是统一到 [NavigationIconLayout.SIZE]）。
+     */
+    internal fun render(bytes: ByteArray): ByteArray {
         val bounds =
             BitmapFactory.Options().apply {
                 inJustDecodeBounds = true

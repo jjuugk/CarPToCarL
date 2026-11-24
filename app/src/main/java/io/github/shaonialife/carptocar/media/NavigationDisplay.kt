@@ -1,7 +1,5 @@
 package io.github.shaonialife.carptocar.media
 
-import java.util.Locale
-
 internal data class HudTurn(
     val action: Int,
     val turn: Int,
@@ -77,17 +75,13 @@ internal class NavigationDisplay {
     @Synchronized
     fun current(): Guide? =
         turn?.let {
-            Guide("${formatDistance(it.distance)} ${turnName(it.turn)}", it.road, artwork)
+            // 距离格式与高德数据源共用 [NavigationText]，两路切换时用户看不到写法差异。
+            // 转向名仍用本类的 turnName：它吃的是 CarLife protobuf raw 码，
+            // 与高德侧手上的 ICON 码不是一套（见 ArrowShape 的注释）。
+            Guide(NavigationText.maneuver(it.distance, turnName(it.turn)), it.road, artwork)
         }
 
     private companion object {
-        private fun formatDistance(meters: Int): String =
-            if (meters < 1000) {
-                "${meters}m"
-            } else {
-                String.format(Locale.ROOT, "%.1f", meters / 1000.0).removeSuffix(".0") + "km"
-            }
-
         private fun turnName(code: Int): String =
             when (code) {
                 1 -> "直行"

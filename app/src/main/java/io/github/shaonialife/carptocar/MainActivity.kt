@@ -1831,9 +1831,9 @@ class MainActivity : AppCompatActivity() {
             DisplayPrefs.setAmapNaviSource(ctx, checked)
             AmapNaviSource.setEnabled(ctx, checked)
             if (checked) {
-                snack("已启用：仪表转向改读手机高德地图，请在高德中开始导航")
+                snack("已启用：仪表和媒体卡片转向改读手机高德地图，请在高德中开始导航")
             } else {
-                snack("已关闭：仪表转向回到 CarLife")
+                snack("已关闭：仪表和媒体卡片转向回到 CarLife")
             }
         }
         findViewById<TextView>(R.id.btnAmapDiagnose).setOnClickListener {

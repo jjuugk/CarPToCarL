@@ -160,7 +160,7 @@
 | `videoconfig-canvas-contract.md` | ⚠️ | 11-08 定案默认 raw；视口只是头部元数据，不改码流与节奏 |
 | `touch-multitouch.md` | 🧩 | 双指走 0x68001 复合动作；收尾顺序 POINTER_UP→ACTION_UP |
 | `carlife-hijack-integration.md` | 🧩 | 劫持架构 / 开关 / 回退；7240 不通 1.5s 回退 |
-| `amap-navi-source.md` | ✅ | 手机高德 linksdk 数据源：开关**替换** CarLife 0x10030；转向码需独立映射；`type=100/200` 才是清帧依据 |
+| `amap-navi-source.md` | ✅ | 手机高德 linksdk 数据源：开关**替换** CarLife 0x10030；转向码需独立映射；`type=100/200` 才是清帧依据；P3 已接媒体卡片（文字+官方图标） |
 | `WIRED-CARPLAY-FEASIBILITY.md` | 📐 | 有线路线否决结论（现行：只走无线） |
 | `LEGAL-NOTES.md` | 📐 | 收费风险、商业化三件套、脱敏与守卫脚本 |
 

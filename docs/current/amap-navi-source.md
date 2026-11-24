@@ -1,7 +1,8 @@
 # 高德导航数据源（手机高德 map linksdk · 已实施）
 
-> **状态**：✅ **P0/P1/P2 已实施**（2026-11-24）。数据源实测跑通，已接入仪表 `0x5201/0x5202`，
-> 并带开关「使用手机高德地图获取导航数据」**替换** CarLife `0x10030`。P3（NowPlaying 文字/箭头）未做。
+> **状态**：✅ **P0/P1/P2/P3 全部实施**（2026-11-24）。数据源实测跑通，已接管两条链路：
+> 仪表 `0x5201/0x5202` 与媒体卡片 `0x5001`（NowPlaying 覆盖层，转向文字 + 官方箭头图标），
+> 由开关「使用手机高德地图获取导航数据」**替换** CarLife `0x10030`。
 > **一句话**：手机高德地图的 `AmapLinkService` 能在不改任何系统设置的前提下返回真实导航诱导数据
 > （1Hz，字段完整），映射成 `CarLifeNaviNextTurn` 后复用车机仪表链路，
 > 不需要 API Key、不需要 CarLife 引擎、不需要 root。
@@ -23,13 +24,21 @@
 | `amap/AmapNaviSnapshot.kt` | `type=4` 的纯数据快照 | — |
 | `amap/AmapNaviMapper.kt` | maneuver → CarLife ICON、字段映射、路名清洗 | **是** |
 | `amap/AmapNaviStateMachine.kt` | 三态、2s 迟到帧、15s STALE | **是** |
-| `amap/AmapNaviSource.kt` | 开关镜像、生命周期、节拍、自检文案 | 否（有 Handler） |
+| `amap/AmapNaviSource.kt` | 开关镜像、生命周期、节拍、自检文案、**媒体卡片影子状态** | 否（有 Handler） |
+| `media/ArrowShape.kt` | 转向 ICON → 箭头形状（P3） | **是** |
+| `res/raw/navi_turn_*.png` | 12 张官方转向图标，240×240，共 16KB（P3） | — |
+| `media/ManeuverArrow.kt` | 官方箭头图标加载（`res/raw` → 256×256 缓存）（P3） | 否（Bitmap） |
+| `media/NavigationText.kt` | 距离格式化，两路数据源共用（P3） | **是** |
 | `app/src/test/.../amap/AmapNaviMapperTest.kt` | 20 例覆盖映射表与状态机 | — |
+| `app/src/test/.../media/ArrowShapeTest.kt` | 16 个 ICON 码 + 未知码 + raw/ICON 防呆 | — |
+| `app/src/test/.../media/NavigationTextTest.kt` | 距离边界（999m/1km/1.5km/负数） | — |
 
 接线点（都在 `SessionController`）：
 - `init` 里 `AmapNaviSource.onEmission = ::onAmapNaviEmission`（进程级常驻）；
 - `ensure()` 里 `AmapNaviSource.configure(...)` + `setEnabled(prefs)`；
-- CarLife 的 `addNaviNextTurnListener` 开头拦截：`if (AmapNaviSource.isReplacingCarLife()) return`。
+- CarLife 的 `addNaviNextTurnListener` 开头拦截：`if (AmapNaviSource.isReplacingCarLife()) return`；
+- `nowPlayingGuide()` 三道闸决定媒体卡片读谁（见 5.2）：
+  `navigation_now_playing` 总闸 → 高德开关 → `AmapNaviSource.currentGuide()` / `CarLifeHijack.navigationDisplay()`。
 
 UI：设置面板「使用手机高德地图获取导航数据」开关（`switchAmapNaviSource`）+「查看高德数据源自检 ›」。
 偏好键 `amap_navi_source`（`DisplayPrefs.amapNaviSource`）。
@@ -169,8 +178,15 @@ amap/AmapLinkClient         绑定·认证·注册·回调分发·FD 读取·信
         ▼
 amap/AmapNaviMapper         type 分发 + 字段清洗 + maneuver 映射（零 Android 依赖，可单测）
         │  CarLifeNaviNextTurn
-        ├──────────► Iap2RouteGuidance.publish(info)      ← 链路 A：仪表 0x5201/0x5202
-        └──────────► NowPlaying 转向文字/箭头              ← 链路 B：需小改造（见 5.2）
+        ├──────────► Iap2RouteGuidance.publish(info)    ← 链路 A：仪表 0x5201/0x5202
+        │
+        └──────────► AmapNaviSource.guide（影子状态）    ← 链路 B：媒体卡片 0x5001
+                          │  NavigationDisplay.Guide
+                          ▼
+                     NavigationNowPlaying.displayOverride
+                          ├ title  = "200m 右转"（NavigationText + CarLifeNaviGuide.label）
+                          ├ artist = 下一条路名
+                          └ artwork= ManeuverArrow 自绘箭头
 ```
 
 ### 5.1 链路 A：仪表（零改动）
@@ -194,25 +210,85 @@ refreshRouteGuidanceHeartbeat()   // 或结束分支：endRoute() + stopRouteGui
 - **结束帧必须当场扇出**：`endRoute()` 之后立刻 `pushRouteGuidanceAll()`，不能只停心跳等 30s 兜底。
 - **停止心跳**：结束走 `stopRouteGuidanceHeartbeat()`，否则 10s 空转。
 
-### 5.2 链路 B：NowPlaying 转向文字/箭头（需小改造）
+### 5.2 链路 B：NowPlaying 转向文字/箭头（已实施 · P3）
 
-现状：`SessionController.kt:6348`
-`created.nowPlayingOverride = { navigation.displayOverride(CarLifeHijack.navigationDisplay()) }`
-—— 提供者是 `CarLifeHijack.navigationDisplay()`（`CarLifeHijack.kt:170`），
-它要求 `CarLifeHuClient` 实例存在且 `isRunning`，**纯 iAP2 会话拿不到**。
+**最终方案比调研时的设想简单**：没有抽"提供者注册表"，也没有给 `NavigationDisplay`
+补 `iconToHudRaw()` —— 后者是**不必要的一层转换**。`NavigationDisplay.Guide` 已经是
+"文字 + 路名 + 箭头 PNG"的成品结构，高德侧直接造一个交给覆盖层即可。
+`NavigationDisplay` 类本身**一个字节都没改**（只把距离格式化抽成 `NavigationText` 共用）。
 
-改造方案（不破坏 CarLife 路径）：
-1. 把"导航显示提供者"抽成函数注册表，CarLife 与 amap 各注册一个，**CarLife 优先**。
-2. `NavigationDisplay` 从 `CarLifeHuClient` 成员提升（或新增一个 amap 专用实例），
-   供 `HudTurn` 复用：`HudTurn(action, turn, road, distance, icon)`（`media/NavigationDisplay.kt:5`）——
-   `turn` 是 **CarLife raw 码**，amap 侧要给 `rawToIcon` 的**反向值**或直接复用已映射的 ICON，
-   实现时需新增一个 `iconToHudRaw()`，不要硬塞。
-3. 开关仍复用 `DisplayPrefs.KEY_NAVIGATION_NOW_PLAYING`（`DisplayPrefs.kt:55`），
-   不额外加第二个用户可见开关。
+两处新增：
 
-**取舍（已按此执行）**：链路 B 依赖 CarLife 会话存在，且要改 `NavigationDisplay` 的既有语义，
-所以本次**只做链路 A**。仪表能拿到转向/路名/距离，已经覆盖这个开关的核心诉求；
-NowPlaying 的转向文字留给 P3，动之前要单独评估它和 `navigation_now_playing` 开关的叠加行为。
+1. **`AmapNaviSource.guide`（影子状态）**：`dispatch()` 里先把 emission 转成
+   `NavigationDisplay.Guide` 存起来，再交给仪表出口。放在同一个 dispatch 里是为了
+   两条链路的"当前状态"永远同步 —— 否则清除帧先到一边晚到另一边，会出现
+   仪表已经空了、媒体卡片还挂着上一个路口箭头。
+
+   转换规则（`AmapNaviEmission.toGuide`）：
+
+   | Guide 字段 | 取值 |
+   |---|---|
+   | `title` | `NavigationText.maneuver(remainDistance, CarLifeNaviGuide.label(nextTurn))` → `"200m 右转"` |
+   | `road` | `roadName`（下一条路名，与仪表 `0x5201` 语义一致） |
+   | `artwork` | `ManeuverArrow.render(nextTurn)` |
+
+   ⚠️ 转向名**用 ICON 码表** `CarLifeNaviGuide.label`，不用 `NavigationDisplay` 的
+   `turnName`：那张表吃的是 protobuf raw 码，2..9 上数值撞车但语义不同
+   （raw 7 = 左转，ICON 7 = 右后方），混用会把"左转"显示成"左后方"。
+
+2. **`nowPlayingGuide()`（SessionController）**：三道闸，顺序不可换：
+
+   ```kotlin
+   !CarLifeHijack.navigationNowPlayingEnabled -> null          // 总闸：交还真实媒体
+   AmapNaviSource.isReplacingCarLife()        -> AmapNaviSource.currentGuide()
+   else                                       -> CarLifeHijack.navigationDisplay()
+   ```
+
+   第一闸必须是 `navigation_now_playing`：它管的是"要不要用导航占住媒体的显示位置"，
+   与"导航数据从哪来"是两件事，不能因为高德开关开着就绕过它。
+   第二闸与仪表链路的替换语义一致，否则 CarLife `0x10030` 会把高德刚写上去的
+   转向顶掉（就是第七节说的"双源互顶"）。
+
+### 5.3 箭头图标从哪来（不要自己画）
+
+第一版是 Canvas 现画的，上手一看太糙：三角是等腰的、拐角是直角、环岛像钥匙孔。
+换成官方图标后差别很大。
+
+**高德地图 APK 里没有现成的主诱导箭头。** 它的导航箭头是 native/GL 画的，
+`res/drawable-xhdpi-v4/maneuver_icon_*.png` 只有 12 个 96px 的路口小示意图
+（`across_turn_left` 那种带灰底的方框），放大到 256 必糊。
+
+所以用 **CarLife 引擎自己那套** `nsdk_drawable_rg_ic_turn_*`（240×240 PNG，调色板格式），
+从 `.tmp/carlife.apk` 提取后放进 `app/src/main/res/raw/navi_turn_*.png`，共 12 张 16KB：
+
+| ICON 码 | 资源 | 说明 |
+|---|---|---|
+| STRAIGHT(9) | `navi_turn_front` | 直行 |
+| LEFT_TURN(2) / RIGHT_TURN(3) | `navi_turn_left` / `right` | 左/右转 |
+| LEFT_FRONT(4) / RIGHT_FRONT(5) | `navi_turn_left_front` / `right_front` | 左/右前方 |
+| LEFT_BACK(6) / RIGHT_BACK(7) | `navi_turn_left_back` / `right_back` | 左/右后方 |
+| U_TURN_LEFT(8) | `navi_turn_back` | 掉头（∩ 形） |
+| ROUNDABOUT_ENTER(11) | `navi_turn_ring` | 进环岛（半透明圆环） |
+| ROUNDABOUT_EXIT(12) | `navi_turn_ring_right` | 驶出环岛（右行国家默认右出口） |
+| ARRIVE_DEST(15) | `navi_turn_dest` | 到达（格子旗） |
+| ARRIVE_TOLL(14) | `navi_turn_tollgate` | 收费站 |
+
+其余（自车、途经点、服务区、隧道、未知码）→ `NavigationIcon.blank`
+（透明图 → 车机清掉封面位，只显示文字）。
+
+三个实现约定：
+
+- **放 `res/raw` 不放 `drawable`**：aapt 会优化 drawable 里的 PNG（crunched），
+  raw 原样打包；而且 `openRawResource` 直接给原始字节，不用解码再编码一次。
+- **`NavigationIcon.render` 统一到 256×256**：与 CarLife `turnIconData` 走同一套缩放，
+  否则切数据源时箭头大小会跳（原图 240，`fit()` 只缩不放，最终居中在 256 画布上）。
+- **刻意不加"浅底描边"**：这批图是纯白无描边的，白底上看不清。但 CarLife 路径发出去的
+  是同一批字节、车机显示正常，说明媒体卡片/仪表是深色底。加描边就不是原图了，
+  而且会把干净的图形压重。真要适配浅底该改车机侧，不是在传输层给图上色。
+
+加载时机：`AmapNaviSource.configure()` 里 `ManeuverArrow.prepare(context)` 一次读完放内存，
+之后 `render()` 是纯查表。张数写进自检面板（"媒体卡片图标：12/12 张"），
+缺图时日志会打一行 `AMAP: 箭头图标仅加载 X/12 张`。
 
 ## 六、状态机与清帧
 
@@ -273,12 +349,16 @@ NowPlaying 的转向文字留给 P3，动之前要单独评估它和 `navigation
 | **P0** | `AmapLinkClient` + `AmapNaviMapper` + 开关 | ✅ 已完成（含转向上报与节流日志） |
 | **P1** | 接仪表 `0x5201/0x5202`，开关替换 CarLife `0x10030` | ✅ 已完成 |
 | **P2** | `type=100/200` 清帧、2s 迟到帧丢弃、15s STALE、自检面板 | ✅ 已完成 |
-| **P3**（可选） | NowPlaying 转向文字/箭头 | ⬜ 未做（要动 `NavigationDisplay` 语义，押后） |
+| **P3** | NowPlaying 转向文字/箭头 | ✅ 已完成（文字 + 官方图标，`NavigationDisplay` 语义未改） |
 
 **唯一还没做的验证：实车比对转向方向。** 代码侧的 20 例单测只能证明"映射函数按表执行"，
 证明不了"这张表与高德界面一致"。装车后必须逐一确认：左转 / 右转 / 直行 / 掉头 / 环岛进出，
 各看一次仪表箭头。若某个方向画反，改 `AmapNaviMapper.toCarLifeIcon` 的一行即可，
 **不要动状态机和发送侧**（那部分与转向无关）。
+
+P3 的箭头图与转向码之间还有一层映射（`ArrowShape`），同样只经过单测，
+**没有在真车上逐张看过**——如果仪表箭头对、媒体卡片箭头反，问题在 `ArrowShape`；
+两边都反，问题在 `AmapNaviMapper`。
 
 ## 十、测试计划
 
@@ -286,14 +366,22 @@ NowPlaying 的转向文字留给 P3，动之前要单独评估它和 `navigation
 - `AmapNaviMapper`：全表 maneuver → ICON；未知码 → 0；缺失字段 → 丢帧；`speed=-1` 不报错。
 - 状态机：`type=4` 连续帧合并、`type=100/200` 清帧、结束 2s 内迟到帧丢弃、15s STALE。
 - 优先级：CarLife 有帧时 amap 被抑制；CarLife 静默 5s 后 amap 接管。
+- `ArrowShape`：16 个 ICON 码逐条映射、未知码 → NONE、raw 7（左转）与 ICON 7（右后方）不混用。
+- `NavigationText`：999m / 1000m / 1500m / 负数四档距离格式。
 - 回归：现有 `Iap2RouteGuidance` 用例全绿（不改它的语义）。
 
 实车：
 1. 高德开始导航 → 日志出现 `type=4` 且 `segmentRemainDist` 递减。
 2. 仪表箭头方向与高德界面一致（左/右/直/掉头/环岛各一次）。
-3. 高德退出导航 → 2s 内 HUD 清除。
-4. CarLife 导航同时开启 → 不打架（CarLife 优先）。
-5. 关开关 → 完全无行为，日志无 amap 相关行。
+3. 媒体卡片（NowPlaying）显示"`200m 右转` + 路名 + 箭头图"，与仪表转向一致。
+4. 高德退出导航 → 2s 内 HUD 与媒体卡片同时清除，音乐信息立即恢复。
+5. 关 `navigation_now_playing` → 媒体卡片交还真实歌曲；关高德开关 → 回到 CarLife。
+6. 两个开关的四种组合各试一次，确认不会出现"仪表空了、卡片还挂着"。
+7. 关开关 → 完全无行为，日志无 amap 相关行。
+
+> 单测跑不了的只有箭头**外观**：`ManeuverArrow` 依赖 `Bitmap`，JVM 单测里跑不起来。
+> 图标本身是官方原图（已在 `.tmp/nowplaying-preview.png` 里按真机比例合成过 9 张卡片预览），
+> 剩下要确认的只有"车机那边尺寸/清晰度是否合适"。
 
 ## 十一、风险清单
 
@@ -313,7 +401,6 @@ NowPlaying 的转向文字留给 P3，动之前要单独评估它和 `navigation
 - 不实现分块传输协议（实测 FD 直读即可），只留 4MiB 上限保护。
 - 不把 AES-GCM 解密当主路径（实测明文），仅保留兜底函数。
 - 不用 `eventType` 做三态判定。
-- 不碰 `NavigationDisplay` / NowPlaying（那是 P3，会改变 NowPlaying 的既有语义）。
 - 不把 amap 的坐标（GCJ-02 火星坐标）写进任何现有字段。
 - 不做"两路自动择优"，只做开关二选一（理由见第七节）。
 

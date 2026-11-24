@@ -3,6 +3,10 @@ package io.github.shaonialife.carptocar.amap
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide
+import io.github.shaonialife.carptocar.media.ManeuverArrow
+import io.github.shaonialife.carptocar.media.NavigationDisplay
+import io.github.shaonialife.carptocar.media.NavigationText
 
 /**
  * 高德数据源的进程级门面：管开关、管生命周期、管状态机节拍。
@@ -32,6 +36,22 @@ internal object AmapNaviSource {
     /** 状态机产出（引导帧 / 清除）。由 `SessionController` 装配。 */
     @Volatile
     var onEmission: ((AmapNaviEmission) -> Unit)? = null
+
+    /**
+     * 媒体卡片（iAP2 `0x5001` NowPlaying 覆盖层）用的引导。
+     *
+     * 与仪表那条 [onEmission] 是**同一份数据、两条出口**：仪表吃 `0x5201/0x5202`，
+     * 媒体卡片吃这一份。放在这里而不是让 `SessionController` 再订阅一次，
+     * 是为了保证两条链路的「当前状态」永远同步——否则清除帧先到一边晚到另一边，
+     * 会出现仪表已经空了、媒体卡片还挂着上一个路口箭头的情况。
+     *
+     * `null` = 当前没有导航（或已被清除）。
+     */
+    @Volatile
+    private var guide: NavigationDisplay.Guide? = null
+
+    /** 当前引导。媒体卡片覆盖层每秒读取一次，命中就是一次字段读。 */
+    fun currentGuide(): NavigationDisplay.Guide? = guide
 
     private val machine = AmapNaviStateMachine()
 
@@ -73,6 +93,12 @@ internal object AmapNaviSource {
     ) {
         appContext = context.applicationContext
         logger = log
+        // 媒体卡片的箭头图标一次性读进内存（12 张共 16KB）。放这里而不是 start()：
+        // 开关关着也可能被 nowPlayingGuide() 读到旧 guide，图得随时可用。
+        val loaded = ManeuverArrow.prepare(context.applicationContext)
+        if (loaded < ManeuverArrow.expectedCount) {
+            log("AMAP: 箭头图标仅加载 $loaded/${ManeuverArrow.expectedCount} 张，缺的形状只显示文字")
+        }
     }
 
     /** 读开关并存进镜像；由 `SessionController.ensure` 与设置面板的开关共同驱动。 */
@@ -138,6 +164,9 @@ internal object AmapNaviSource {
             }
         client?.stop()
         client = null
+        // 无论要不要清 HUD，媒体卡片的影子状态都该归零：留着它等于让覆盖层
+        // 继续显示一份已经没人更新的转向（数据源都被关了）。
+        guide = null
         if (clearHud && wasGuiding) dispatch(AmapNaviEmission.Clear)
     }
 
@@ -160,8 +189,33 @@ internal object AmapNaviSource {
     }
 
     private fun dispatch(emission: AmapNaviEmission) {
+        // 先更新媒体卡片的影子状态，再交给仪表出口：反过来的话，出口若同步触发一次
+        // 0x5001 重推，读到的还是上一帧的转向。
+        guide = emission.toGuide()
         onEmission?.invoke(emission)
     }
+
+    /**
+     * 引导帧 → 媒体卡片文案 + 箭头。
+     *
+     * 转向名用 [CarLifeNaviGuide.label]（ICON 码表），**不要**换成
+     * `NavigationDisplay` 的 turnName——那张表吃的是 CarLife protobuf raw 码，
+     * 数值在 2..9 上与 ICON 撞车但语义不同，混用会把「左转」显示成「左后方」。
+     *
+     * 距离取 `remainDistance`（段剩余，到下一个动作的米数），不是 `totalDistance`
+     * （全程剩余），与仪表 `0x5201` 的 `0x0a` 语义一致。
+     */
+    private fun AmapNaviEmission.toGuide(): NavigationDisplay.Guide? =
+        when (this) {
+            is AmapNaviEmission.Guide ->
+                NavigationDisplay.Guide(
+                    title = NavigationText.maneuver(turn.remainDistance, CarLifeNaviGuide.label(turn.nextTurn)),
+                    road = turn.roadName,
+                    artwork = ManeuverArrow.render(turn.nextTurn),
+                )
+
+            AmapNaviEmission.Clear -> null
+        }
 
     /**
      * 自检文案：设置面板直接显示这几行。
@@ -193,6 +247,10 @@ internal object AmapNaviSource {
                 val age = System.currentTimeMillis() - last
                 append("（最后 ").append(age / 1000).append(" 秒前）")
             }
+            // 媒体卡片那张图读不出来时，仪表有箭头、屏幕只剩文字，外观像"车机不认这张图"。
+            // 把张数摆在这里，省得再去翻日志。
+            append("\n媒体卡片图标：").append(ManeuverArrow.loadedCount)
+                .append('/').append(ManeuverArrow.expectedCount).append(" 张")
             c.lastError?.let { append("\n最近错误：").append(it) }
             append("\n结论：").append(c.diagnose())
         }

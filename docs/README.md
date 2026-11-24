@@ -38,7 +38,7 @@
 | [`videoconfig-canvas-contract.md`](current/videoconfig-canvas-contract.md) | VideoConfig 声明与车机画布的契约（视口只是头部元数据） |
 | [`touch-multitouch.md`](current/touch-multitouch.md) | 触摸 / 双指手势的命令通道与坐标约定 |
 | [`carlife-hijack-integration.md`](current/carlife-hijack-integration.md) | CarLife 劫持架构、开关与回退 |
-| [`amap-navi-source.md`](current/amap-navi-source.md) | 手机高德 linksdk 导航数据源：开关替换 CarLife `0x10030`、转向映射表、清帧判据、自检 |
+| [`amap-navi-source.md`](current/amap-navi-source.md) | 手机高德 linksdk 导航数据源：开关替换 CarLife `0x10030`、转向映射表、清帧判据、自检、仪表+媒体卡片双链路 |
 | [`WIRED-CARPLAY-FEASIBILITY.md`](current/WIRED-CARPLAY-FEASIBILITY.md) | 有线路线否决结论（现行约束：只走无线） |
 | [`LEGAL-NOTES.md`](current/LEGAL-NOTES.md) | 合规边界、收费风险与商业化三件套 |
 
