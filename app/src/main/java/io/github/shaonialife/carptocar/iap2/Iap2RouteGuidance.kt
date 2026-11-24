@@ -2,7 +2,7 @@ package io.github.shaonialife.carptocar.iap2
 
 import io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide
 import io.github.shaonialife.carptocar.carlife.CarLifeNaviNextTurn
-import java.util.EnumSet
+import java.util.EnumMap
 
 /**
  * CarLife 导航诱导 → Apple iAP2 `0x5201/0x5202` 的编码与分发状态。
@@ -56,9 +56,14 @@ import java.util.EnumSet
 object Iap2RouteGuidance {
     enum class Link { TUNNEL, BT }
 
-    private data class Bodies(
-        val frames: List<Pair<Int, ByteArray>>,
-        val update: ByteArray,
+    private data class Snapshot(
+        val clear: Boolean,
+        val state: Int,
+        val road: String,
+        val remainDistance: Int,
+        val maneuverType: Int,
+        val description: String,
+        val sourceName: String,
     )
 
     /** 无数据时给订阅的合法空体。 */
@@ -73,20 +78,23 @@ object Iap2RouteGuidance {
      */
     fun blockedByDeclaration(): Boolean = AccessoryDeclaration.acceptsRouteGuidance() == false
 
+    const val DEFAULT_COMPONENT_ID = 42
+    const val DEFAULT_SOURCE_APP = "CarLife"
+
     private const val APPLE_MANEUVER_DEPART = 0
     private const val APPLE_MANEUVER_ACTIVE = 2
     private const val STATE_ROUTE_READY = 3
     private const val STATE_GUIDING = 6
     private const val STATE_CLEARED = 0
     private const val DRIVING_SIDE_RIGHT = 2
-    private const val SOURCE_APP = "高德地图"
     private const val MAX_ROAD_BYTES = 64
+    private const val MAX_COMPONENTS_PER_LINK = 4
 
     private val lock = Any()
-    private val subscribed = EnumSet.noneOf(Link::class.java)
-    private val lastUpdateSeq = mutableMapOf<Link, Int>()
-    private val lastManeuverSeq = mutableMapOf<Link, Int>()
-    private var current: Bodies? = null
+    private val subscribed = EnumMap<Link, LinkedHashSet<Int>>(Link::class.java)
+    private val lastUpdateSeq = mutableMapOf<Pair<Link, Int>, Int>()
+    private val lastManeuverSeq = mutableMapOf<Pair<Link, Int>, Int>()
+    private var current: Snapshot? = null
     private var sequence = 0
 
     /** 是否还在导航活跃期；只有它为 true 时才允许心跳刷新 DiPlay 的 30s 超时。 */
@@ -100,9 +108,12 @@ object Iap2RouteGuidance {
      * `ACTION_END` 是显式结束：立刻换成 clear 快照并停活跃态；调用方紧接着
      * 扇出 [nextFramesFor]，车机会同步收到 0x5201 state=0 并清 HUD。
      */
-    fun publish(info: CarLifeNaviNextTurn) {
-        val bodies = encode(info) ?: return
-        install(bodies, active = info.action != CarLifeNaviGuide.ACTION_END)
+    fun publish(
+        info: CarLifeNaviNextTurn,
+        sourceName: String = DEFAULT_SOURCE_APP,
+    ) {
+        val snapshot = toSnapshot(info, sourceName)
+        install(snapshot, active = !snapshot.clear)
     }
 
     /**
@@ -110,58 +121,90 @@ object Iap2RouteGuidance {
      * 同样处理，让车机立即结束 HUD 引导，不等 30s 陈旧兜底。
      */
     fun endRoute() {
-        install(clearBodies(), active = false)
+        install(clearSnapshot(), active = false)
     }
 
-    private fun install(bodies: Bodies, active: Boolean) {
+    private fun install(snapshot: Snapshot, active: Boolean) {
         synchronized(lock) {
-            current = bodies
+            current = snapshot
             routeActive = active
             sequence++
         }
     }
 
-    /** 车机 0x5200 订阅：记录链路并返回应回的 0x5201 载荷体（无数据时为空体）。 */
-    fun onSubscribe(link: Link): ByteArray {
+    /**
+     * 车机 0x5200 订阅：从 TLV param 0（u16）解析组件 ID（未带时回退 [DEFAULT_COMPONENT_ID]
+     * 兼容 DiPlay 等空体订阅），记录链路并返回应回的首组件 0x5201 载荷体（无数据时为空体）。
+     */
+    fun onSubscribe(
+        link: Link,
+        body: ByteArray = ByteArray(0),
+    ): ByteArray {
         synchronized(lock) {
-            subscribed.add(link)
-            val bodies = current ?: return IDLE_BODY
-            // 订阅应答本身就是一帧 0x5201，只标记 update 已发；0x5202 详情
-            // 留给紧随其后的下一拍补上，否则晚订阅的车机永远拿不到 maneuver。
-            lastUpdateSeq[link] = sequence
-            return bodies.update
+            val ids = parseComponentIds(body).ifEmpty { listOf(DEFAULT_COMPONENT_ID) }
+            val linkComponents = subscribed.getOrPut(link) { linkedSetOf() }
+            for (id in ids) {
+                if (linkComponents.size < MAX_COMPONENTS_PER_LINK || id in linkComponents) {
+                    linkComponents.add(id)
+                }
+            }
+            val snapshot = current ?: return IDLE_BODY
+            val primaryId = ids.first()
+            // 订阅应答本身就是一帧 0x5201，只标记该组件 update 已发；0x5202 详情
+            // 及额外组件留给紧随其后的下一拍补上，否则晚订阅的车机永远拿不到 maneuver。
+            lastUpdateSeq[link to primaryId] = sequence
+            return encodeUpdate(snapshot, primaryId)
         }
     }
 
-    /** 车机 0x5203 停止订阅：清掉该链路状态。 */
-    fun onUnsubscribe(link: Link) {
+    /** 车机 0x5203 停止订阅：带组件 ID 时仅移除对应组件，空体时清掉整条链路。 */
+    fun onUnsubscribe(
+        link: Link,
+        body: ByteArray = ByteArray(0),
+    ) {
         synchronized(lock) {
-            subscribed.remove(link)
-            lastUpdateSeq.remove(link)
-            lastManeuverSeq.remove(link)
+            val ids = parseComponentIds(body)
+            if (ids.isEmpty()) {
+                subscribed.remove(link)
+                lastUpdateSeq.keys.removeAll { it.first == link }
+                lastManeuverSeq.keys.removeAll { it.first == link }
+                return
+            }
+            val linkComponents = subscribed[link] ?: return
+            for (id in ids) {
+                linkComponents.remove(id)
+                lastUpdateSeq.remove(link to id)
+                lastManeuverSeq.remove(link to id)
+            }
+            if (linkComponents.isEmpty()) subscribed.remove(link)
         }
     }
 
-    fun isSubscribed(link: Link): Boolean = synchronized(lock) { link in subscribed }
+    fun isSubscribed(link: Link): Boolean = synchronized(lock) { !subscribed[link].isNullOrEmpty() }
 
     /**
-     * 取出该链路尚未发过的帧：0x5201 在前，随后是 0x5202（索引 0 与 2）。
-     * update 与 maneuver 分别按序号去重：订阅应答已经发过 0x5201 时，这里
-     * 只补 0x5202，不会重复刷同一个状态帧。
+     * 取出该链路尚未发过的帧：先发 0x5202（索引 0 与 2）定义转向条目，再发引用它们的 0x5201。
+     * update 与 maneuver 分别按 (链路, 组件ID) 序号去重：订阅应答已经发过 0x5201 时，
+     * 这里只补 0x5202，不会重复刷同一个状态帧。
      */
     fun nextFramesFor(link: Link): List<Pair<Int, ByteArray>> {
         synchronized(lock) {
             if (blockedByDeclaration()) return emptyList()
-            if (link !in subscribed) return emptyList()
-            val bodies = current ?: return emptyList()
-            val out = ArrayList<Pair<Int, ByteArray>>(3)
-            if (lastUpdateSeq[link] != sequence) {
-                lastUpdateSeq[link] = sequence
-                bodies.frames.firstOrNull()?.let { out += it }
-            }
-            if (bodies.frames.size > 1 && lastManeuverSeq[link] != sequence) {
-                lastManeuverSeq[link] = sequence
-                out.addAll(bodies.frames.drop(1))
+            val components = subscribed[link] ?: return emptyList()
+            if (components.isEmpty()) return emptyList()
+            val snapshot = current ?: return emptyList()
+            val out = ArrayList<Pair<Int, ByteArray>>(components.size * 3)
+            for (componentId in components) {
+                val key = link to componentId
+                if (!snapshot.clear && lastManeuverSeq[key] != sequence) {
+                    lastManeuverSeq[key] = sequence
+                    out += ROUTE_GUIDANCE_MANEUVER_UPDATE to encodeManeuver(snapshot, componentId, APPLE_MANEUVER_DEPART)
+                    out += ROUTE_GUIDANCE_MANEUVER_UPDATE to encodeManeuver(snapshot, componentId, APPLE_MANEUVER_ACTIVE)
+                }
+                if (lastUpdateSeq[key] != sequence) {
+                    lastUpdateSeq[key] = sequence
+                    out += Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to encodeUpdate(snapshot, componentId)
+                }
             }
             return out
         }
@@ -171,19 +214,37 @@ object Iap2RouteGuidance {
     fun hasActiveRoute(): Boolean = synchronized(lock) { routeActive && current != null }
 
     /**
-     * 心跳帧：只重发最近一版 0x5201，**不走序号去重**（同一版也要反复刷），
+     * 心跳帧（首组件）：只重发最近一版 0x5201，**不走序号去重**（同一版也要反复刷），
      * 且不带 0x5202——DiPlay 只更新 `lastRouteUpdateNs`，不需要重画 maneuver。
      *
-     * 发过之后把该链路的 update 序号标记为已发，避免紧接着的 200ms 常规拍
+     * 发过之后把该组件的 update 序号标记为已发，避免紧接着的 200ms 常规拍
      * 又重复推一帧完全相同的 0x5201。
      */
     fun nextHeartbeatFor(link: Link): Pair<Int, ByteArray>? {
         synchronized(lock) {
             if (blockedByDeclaration()) return null
-            if (!routeActive || link !in subscribed) return null
-            val bodies = current ?: return null
-            lastUpdateSeq[link] = sequence
-            return bodies.frames.firstOrNull()
+            if (!routeActive) return null
+            val componentId = subscribed[link]?.firstOrNull() ?: return null
+            val snapshot = current ?: return null
+            lastUpdateSeq[link to componentId] = sequence
+            return Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to encodeUpdate(snapshot, componentId)
+        }
+    }
+
+    /** 心跳帧（该链路所有已订阅组件）：逐组件重发最近一版 0x5201。 */
+    fun nextHeartbeatsFor(link: Link): List<Pair<Int, ByteArray>> {
+        synchronized(lock) {
+            if (blockedByDeclaration()) return emptyList()
+            if (!routeActive) return emptyList()
+            val components = subscribed[link] ?: return emptyList()
+            if (components.isEmpty()) return emptyList()
+            val snapshot = current ?: return emptyList()
+            val out = ArrayList<Pair<Int, ByteArray>>(components.size)
+            for (componentId in components) {
+                lastUpdateSeq[link to componentId] = sequence
+                out += Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to encodeUpdate(snapshot, componentId)
+            }
+            return out
         }
     }
 
@@ -199,55 +260,87 @@ object Iap2RouteGuidance {
         }
     }
 
-    /** 与真机结束帧一致：只带 0x00=42、0x01=0、0x07=0，不附 0x5202。 */
-    private fun clearBodies(): Bodies {
-        val update =
-            Iap2Csm.u16(0x00, 42) +
-                Iap2Csm.u8(0x01, STATE_CLEARED) +
-                Iap2Csm.u32(0x07, 0L)
-        return Bodies(listOf(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to update), update)
-    }
+    private fun clearSnapshot(): Snapshot =
+        Snapshot(
+            clear = true,
+            state = STATE_CLEARED,
+            road = "",
+            remainDistance = 0,
+            maneuverType = 0,
+            description = "",
+            sourceName = DEFAULT_SOURCE_APP,
+        )
 
-    private fun encode(info: CarLifeNaviNextTurn): Bodies? {
-        if (info.action == CarLifeNaviGuide.ACTION_END) return clearBodies()
+    private fun toSnapshot(
+        info: CarLifeNaviNextTurn,
+        sourceName: String,
+    ): Snapshot {
+        if (info.action == CarLifeNaviGuide.ACTION_END) return clearSnapshot()
         val state =
             if (info.action == CarLifeNaviGuide.ACTION_START) STATE_ROUTE_READY else STATE_GUIDING
         val road = sanitizeRoad(info.roadName)
-
-        val update =
-            Iap2Csm.u16(0x00, 42) +
-                Iap2Csm.u8(0x01, state) +
-                Iap2Csm.string(0x03, "") +
-                (if (road.isEmpty()) ByteArray(0) else Iap2Csm.string(0x04, road)) +
-                Iap2Csm.u32(0x07, info.totalDistance.coerceAtLeast(0).toLong()) +
-                Iap2Csm.u32(0x0a, info.remainDistance.coerceAtLeast(0).toLong()) +
-                // Apple 实测是 4 字节 00 00 00 02；DiPlay 按 u16 读前两字节得 0。
-                Iap2Csm.u32(0x0d, APPLE_MANEUVER_ACTIVE.toLong()) +
-                Iap2Csm.string(0x13, SOURCE_APP) +
-                Iap2Csm.u8(0x14, 1)
-
         val type = CarLifeNaviGuide.appleManeuverType(info.nextTurn)
         // 真机 0x5202 的 field2 是 maneuvers 文字；用「<转向><道路>」这个形态，
         // 车机即使不认识 field3 也能从文字里读出意图。
         val description = "${CarLifeNaviGuide.label(info.nextTurn)}$road"
-        val maneuverBody = { index: Int ->
-            Iap2Csm.u16(0x00, 42) +
-                Iap2Csm.u16(0x01, index) +
-                Iap2Csm.string(0x02, description) +
-                Iap2Csm.u8(0x03, type) +
-                (if (road.isEmpty()) ByteArray(0) else Iap2Csm.string(0x04, road)) +
-                Iap2Csm.u8(0x07, DRIVING_SIDE_RIGHT) +
-                Iap2Csm.string(0x08, "")
+        val cleanSource = sanitizeRoad(sourceName).ifEmpty { DEFAULT_SOURCE_APP }
+        return Snapshot(
+            clear = false,
+            state = state,
+            road = road,
+            remainDistance = info.remainDistance.coerceAtLeast(0),
+            maneuverType = type,
+            description = description,
+            sourceName = cleanSource,
+        )
+    }
+
+    private fun encodeUpdate(
+        snapshot: Snapshot,
+        componentId: Int,
+    ): ByteArray {
+        if (snapshot.clear) {
+            // 与真机结束帧一致：只带 0x00=componentId、0x01=0、0x07=0，不附 0x5202。
+            return Iap2Csm.u16(0x00, componentId) +
+                Iap2Csm.u8(0x01, STATE_CLEARED) +
+                Iap2Csm.u32(0x07, 0L)
         }
-        // 索引 0 = Apple 的「从…出发」，索引 2 = 抓包里 0x0d 的字面值。
-        // 两条都写同一条诱导，这样车机无论把 0x0d 当 u16 还是 u32 读，箭头都对。
-        val frames =
-            listOf(
-                Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE to update,
-                ROUTE_GUIDANCE_MANEUVER_UPDATE to maneuverBody(APPLE_MANEUVER_DEPART),
-                ROUTE_GUIDANCE_MANEUVER_UPDATE to maneuverBody(APPLE_MANEUVER_ACTIVE),
-            )
-        return Bodies(frames, update)
+        // CarLife 0x10030 field 4（totalDistance）是路段总距离而非全程剩余里程，
+        // 不填入 iAP2 0x07（RouteGuidanceDistanceRemaining，规范可选字段），避免仪表显示错误总剩余里程。
+        return Iap2Csm.u16(0x00, componentId) +
+            Iap2Csm.u8(0x01, snapshot.state) +
+            Iap2Csm.string(0x03, "") +
+            (if (snapshot.road.isEmpty()) ByteArray(0) else Iap2Csm.string(0x04, snapshot.road)) +
+            Iap2Csm.u32(0x0a, snapshot.remainDistance.toLong()) +
+            // Apple 实测是 4 字节 00 00 00 02；DiPlay 按 u16 读前两字节得 0。
+            Iap2Csm.u32(0x0d, APPLE_MANEUVER_ACTIVE.toLong()) +
+            Iap2Csm.string(0x13, snapshot.sourceName) +
+            Iap2Csm.u8(0x14, 1)
+    }
+
+    private fun encodeManeuver(
+        snapshot: Snapshot,
+        componentId: Int,
+        index: Int,
+    ): ByteArray =
+        Iap2Csm.u16(0x00, componentId) +
+            Iap2Csm.u16(0x01, index) +
+            Iap2Csm.string(0x02, snapshot.description) +
+            Iap2Csm.u8(0x03, snapshot.maneuverType) +
+            (if (snapshot.road.isEmpty()) ByteArray(0) else Iap2Csm.string(0x04, snapshot.road)) +
+            Iap2Csm.u8(0x07, DRIVING_SIDE_RIGHT) +
+            Iap2Csm.string(0x08, "")
+
+    private fun parseComponentIds(body: ByteArray): List<Int> {
+        if (body.isEmpty()) return emptyList()
+        val out = ArrayList<Int>(2)
+        for (param in Iap2Csm.parseParams(body)) {
+            if (param.id == 0x00 && param.value.size == 2) {
+                val id = ((param.value[0].toInt() and 0xFF) shl 8) or (param.value[1].toInt() and 0xFF)
+                if (id !in out) out += id
+            }
+        }
+        return out
     }
 
     /** iAP2 字符串是 NUL 结尾 UTF-8，且路名过长会挤爆 CSM 分片预算。 */

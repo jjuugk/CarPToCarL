@@ -106,7 +106,7 @@ class CarLifeNaviGuideTest {
     }
 
     @Test
-    fun `编码出 Apple 形态的 0x5201 与两条 0x5202`() {
+    fun `编码出 Apple 形态的 0x5202 先于 0x5201`() {
         Iap2RouteGuidance.reset()
         Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL)
         Iap2RouteGuidance.publish(
@@ -121,28 +121,61 @@ class CarLifeNaviGuideTest {
         )
         val frames = Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.TUNNEL)
         assertEquals(3, frames.size)
-        assertEquals(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, frames[0].first)
+        // 规范要求 0x5202 路口定义先于引用它的 0x5201 发送
+        assertEquals(Iap2RouteGuidance.ROUTE_GUIDANCE_MANEUVER_UPDATE, frames[0].first)
         assertEquals(Iap2RouteGuidance.ROUTE_GUIDANCE_MANEUVER_UPDATE, frames[1].first)
-        assertEquals(Iap2RouteGuidance.ROUTE_GUIDANCE_MANEUVER_UPDATE, frames[2].first)
+        assertEquals(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, frames[2].first)
 
-        val update = Iap2Csm.parseParams(frames[0].second).associateBy { it.id }
-        assertEquals(42, u16(update[0x00]!!.value))
-        assertEquals(6, update[0x01]!!.value[0].toInt() and 0xFF) // 诱导中，真机值 6
-        assertEquals(2500, u32(update[0x07]!!.value))
-        assertEquals(120, u32(update[0x0a]!!.value))
-        assertEquals(4, update[0x0d]!!.value.size) // Apple 实测 4 字节
-        assertEquals(2, u32(update[0x0d]!!.value))
-        assertEquals("高德地图", update[0x13]!!.value.decodeToString().trimEnd('\u0000'))
-
-        val maneuver = Iap2Csm.parseParams(frames[1].second).associateBy { it.id }
+        val maneuver = Iap2Csm.parseParams(frames[0].second).associateBy { it.id }
+        assertEquals(42, u16(maneuver[0x00]!!.value))
         assertEquals(0, u16(maneuver[0x01]!!.value))
         assertEquals(11, maneuver[0x03]!!.value[0].toInt() and 0xFF)
         assertEquals(2, maneuver[0x07]!!.value[0].toInt() and 0xFF) // 右行实测值
         assertEquals("测试路B", maneuver[0x04]!!.value.decodeToString().trimEnd('\u0000'))
-        assertEquals(2, u16(Iap2Csm.parseParams(frames[2].second).first { it.id == 0x01 }.value))
+        assertEquals(2, u16(Iap2Csm.parseParams(frames[1].second).first { it.id == 0x01 }.value))
+
+        val update = Iap2Csm.parseParams(frames[2].second).associateBy { it.id }
+        assertEquals(42, u16(update[0x00]!!.value))
+        assertEquals(6, update[0x01]!!.value[0].toInt() and 0xFF) // 诱导中，真机值 6
+        assertNull(update[0x07]) // 路段总距离不误填入 iAP2 全程剩余字段 0x07
+        assertEquals(120, u32(update[0x0a]!!.value))
+        assertEquals(4, update[0x0d]!!.value.size) // Apple 实测 4 字节
+        assertEquals(2, u32(update[0x0d]!!.value))
+        assertEquals("CarLife", update[0x13]!!.value.decodeToString().trimEnd('\u0000'))
 
         // 同一条诱导不重复推
         assertTrue(Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.TUNNEL).isEmpty())
+    }
+
+    @Test
+    fun `保留 0x5200 声明的组件 ID 且 0x5203 按组件退订`() {
+        Iap2RouteGuidance.reset()
+        val subBody = Iap2Csm.u16(0x00, 1) + Iap2Csm.u16(0x00, 7)
+        Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL, subBody)
+        Iap2RouteGuidance.publish(
+            CarLifeNaviNextTurn(
+                action = CarLifeNaviGuide.ACTION_UPDATE,
+                nextTurn = CarLifeNaviGuide.LEFT_TURN,
+                rawNextTurn = 7,
+                roadName = "测试路C",
+                remainDistance = 80,
+            ),
+        )
+        val frames = Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.TUNNEL)
+        assertEquals(6, frames.size)
+        val componentIds = frames.map { u16(Iap2Csm.parseParams(it.second).first { p -> p.id == 0x00 }.value) }
+        assertEquals(listOf(1, 1, 1, 7, 7, 7), componentIds)
+
+        // 仅退订组件 1，组件 7 仍保持活跃并可继续收到更新与心跳
+        Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL, Iap2Csm.u16(0x00, 1))
+        assertTrue(Iap2RouteGuidance.isSubscribed(Iap2RouteGuidance.Link.TUNNEL))
+        val heartbeats = Iap2RouteGuidance.nextHeartbeatsFor(Iap2RouteGuidance.Link.TUNNEL)
+        assertEquals(1, heartbeats.size)
+        assertEquals(7, u16(Iap2Csm.parseParams(heartbeats[0].second).first { it.id == 0x00 }.value))
+
+        // 退订剩余组件后整链取消订阅
+        Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL, Iap2Csm.u16(0x00, 7))
+        assertTrue(!Iap2RouteGuidance.isSubscribed(Iap2RouteGuidance.Link.TUNNEL))
     }
 
     @Test
@@ -244,9 +277,8 @@ class CarLifeNaviGuideTest {
         assertEquals(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, heartbeat!!.first)
         val params = Iap2Csm.parseParams(heartbeat.second).associateBy { it.id }
         assertEquals(6, params[0x01]!!.value[0].toInt() and 0xFF) // 诱导中，不是 clear
-        assertEquals(12000, u32(params[0x07]!!.value))
+        assertNull(params[0x07]) // 活跃更新不把路段距离误填进全程剩余 0x07
         assertEquals(300, u32(params[0x0a]!!.value))
-        // 心跳已把这一版 update 记账，常规拍不能再重复发
         assertTrue(Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.BT).isEmpty())
         // 但下一拍心跳仍可取到同一帧（不走去重），这样才能持续刷新 DiPlay 计时器
         assertNotNull(Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.BT))

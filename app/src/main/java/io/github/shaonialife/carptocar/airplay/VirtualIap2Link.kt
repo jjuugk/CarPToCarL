@@ -396,9 +396,10 @@ class VirtualIap2Link(
         synchronized(lock) {
             if (!mib3Identified && !tunnelIdentified) return
             if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
-            val frame = Iap2RouteGuidance.nextHeartbeatFor(Iap2RouteGuidance.Link.TUNNEL) ?: return
-            sendCsmLocked(frame.first, frame.second)
-            log("IAPLINK: 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+            for (frame in Iap2RouteGuidance.nextHeartbeatsFor(Iap2RouteGuidance.Link.TUNNEL)) {
+                sendCsmLocked(frame.first, frame.second)
+                log("IAPLINK: 心跳 0x5201（${frame.second.size}B，刷新 DiPlay 30s 导航超时）")
+            }
         }
     }
 
@@ -944,7 +945,7 @@ class VirtualIap2Link(
                     log("IAPLINK: 0x5200 订阅但可收清单未声明导航引导 → 不回 0x5201（按声明裁剪）")
                     return
                 }
-                val body = Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL)
+                val body = Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL, frame.body)
                 sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
                 log(
                     if (body.isEmpty()) {
@@ -958,7 +959,7 @@ class VirtualIap2Link(
             }
 
             Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES -> {
-                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL)
+                Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL, frame.body)
                 log("IAPLINK: 0x5203 车机停止导航引导订阅")
             }
 
