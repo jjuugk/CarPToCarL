@@ -49,6 +49,9 @@ class AppStateReporter(
     @Volatile
     private var engineVoice = false
 
+    /** 当前引擎是否处于语音会话；供语音键松开后等待回答播完再处理音频。 */
+    fun engineVoiceActive(): Boolean = engineVoice
+
     /** 最近一次收到 TTS PCM 的时刻（0 = 本轮语音会话还没有说过话）。同样跨线程读。 */
     @Volatile
     private var lastSpeechAudioAt = 0L

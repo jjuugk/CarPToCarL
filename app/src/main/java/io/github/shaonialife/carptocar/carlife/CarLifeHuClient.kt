@@ -222,6 +222,39 @@ class CarLifeHuClient(
     @Volatile
     private var touchOut: OutputStream? = null
 
+    /** AMcar 车机麦桥：9242 的独立写通道（默认不开，行为与改造前一致）。 */
+    @Volatile
+    private var micSocket: java.net.Socket? = null
+
+    @Volatile
+    private var micOut: OutputStream? = null
+
+    /** 打开（或复用）9242 写通道，返回 OutputStream 给有界写回器。 */
+    @Synchronized
+    fun openMicOutput(): OutputStream? {
+        micOut?.let { return it }
+        if (!running.get()) return null
+        val socket =
+            runCatching { openPortSocket(CarLifeProtocol.PORT_VR) }
+                .onFailure { log("CARLIFE-VOICE: 9242 写通道连接失败 - ${it.message}") }
+                .getOrNull() ?: return null
+        micSocket = socket
+        micOut =
+            runCatching { socket.getOutputStream() }
+                .onFailure { runCatching { socket.close() } }
+                .getOrNull()
+        return micOut
+    }
+
+    /** 关闭 9242 写通道；不碰读通道与其他端口。 */
+    @Synchronized
+    fun closeMicOutput() {
+        runCatching { micOut?.close() }
+        runCatching { micSocket?.close() }
+        micOut = null
+        micSocket = null
+    }
+
     @Volatile
     private var lastTouchReconnectAt = 0L
 
@@ -446,6 +479,10 @@ class CarLifeHuClient(
 
     /** 已记录过的未处理控制消息 id（避免刷屏）。 */
     private val unknownLogged = HashSet<Int>()
+
+    /** 引擎请求/结束使用车机麦克风（0x10024 / 0x10023）。默认无消费者，行为与改造前一致。 */
+    @Volatile
+    var onCarMicRequest: ((Boolean) -> Unit)? = null
 
     /** 「引擎要求内容加密」这轮是否已经报过（每轮一条，见 [CarLifeProtocol.MD_ENCRYPT_SETUP]）。 */
     private val encryptSetupLogged = AtomicBoolean(false)
@@ -921,6 +958,16 @@ class CarLifeHuClient(
                     log("CARLIFE: 主动推送 98311 视频编码初始化 ${requestedWidth}x$requestedHeight@$videoFps")
                     sendEncoderInit()
                 }.apply { isDaemon = true }.start()
+            }
+
+            CarLifeProtocol.MD_MIC_RECOGNITION, CarLifeProtocol.MD_MIC_END -> {
+                // 小爱用「车机麦克风」时才会发；上层默认没有消费者，这里只记一行。
+                val active = serviceType == CarLifeProtocol.MD_MIC_RECOGNITION
+                log(
+                    "CARLIFE-VOICE: 识别状态 active=$active（AMcar 车机麦桥" +
+                        if (onCarMicRequest == null) "未启用，仅上报）" else "已接线）",
+                )
+                onCarMicRequest?.invoke(active)
             }
 
             CarLifeProtocol.MD_MODULE_STATUS -> {
@@ -2186,6 +2233,7 @@ class CarLifeHuClient(
         sockets.clear()
         cmdOut = null
         touchOut = null
+        closeMicOutput()
     }
 
     private fun startReader(name: String, body: () -> Unit) {

@@ -63,6 +63,9 @@ internal object CarLifeProtocol {
     const val MD_FEATURE_CONFIG = 65617
     const val MD_MODULE_STATUS = 65574
     const val HU_MODULE_CONTROL = 98344
+    // 引擎请求/结束使用车机麦克风（AMcar 实验桥的触发点，0x10024 / 0x10023）。
+    const val MD_MIC_RECOGNITION = 65572
+    const val MD_MIC_END = 65571
 
     /**
      * 65574 里的模块号（`ModuleStatusManage` 的 7 个 `ModuleStatusModel`，字节码实证）。

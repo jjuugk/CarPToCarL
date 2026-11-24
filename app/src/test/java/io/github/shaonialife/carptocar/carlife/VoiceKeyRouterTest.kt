@@ -4,126 +4,125 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * 车机语音键状态机回归（1.2.22）。
- *
- * 触发依据：手机上 `CarPToCarL-log-20261103-085250.txt` 08:52:12~42 的
- * `requestSiri siriAction=1/2/3` 序列；取值来自 Apple `AirPlayCommon.h`
- * `AirPlaySiriAction`：0=NotApplicable / 1=Prewarm / 2=ButtonDown / 3=ButtonUp。
- */
+/** 方控语音键状态机（AMcar 语义：1 按下 / 2 激活 / 3 松开，500ms 确认，60s 租约）。 */
 class VoiceKeyRouterTest {
     private var now = 1_000L
     private val sent = mutableListOf<Int>()
     private val logs = mutableListOf<String>()
+    private val scheduled = mutableListOf<Pair<Long, () -> Unit>>()
+
     private val router =
         VoiceKeyRouter(
             nowMillis = { now },
             send = { sent.add(it) },
             log = { logs.add(it) },
+            scheduleDelay = { delay, action -> scheduled.add(now + delay to action) },
         )
 
     private fun advance(ms: Long) {
         now += ms
+        scheduled
+            .filter { it.first <= now }
+            .forEach { it.second() }
+        scheduled.removeAll { it.first <= now }
     }
 
+    private fun press() = router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_PRESS)
+
+    private fun activate() = router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_ACTIVATE)
+
+    private fun release() = router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_RELEASE)
+
     @Test
-    fun prewarmDoesNotStartVoice() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_PREWARM)
+    fun prewarmOnlyRecordsPress() {
+        press()
         assertTrue(sent.isEmpty())
-        assertTrue(logs.single().contains("Prewarm"))
+        assertTrue(logs.last().contains("等待长按确认"))
     }
 
     @Test
-    fun buttonDownSendsVrStart() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
+    fun longPressStartsImmediately() {
+        press()
+        advance(VoiceKeyRouter.HOLD_MILLIS)
+        activate()
         assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
+        assertTrue(logs.last().contains("硬按键 33"))
     }
 
     @Test
-    fun shortPressLeavesStopToCarLife() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(890L) // 实测日志里最短的一次按住是 0.89s：等提示音就松手
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
-        assertTrue(logs.last().contains("不发 VR_STOP"))
-    }
-
-    @Test
-    fun longPressSendsVrStopOnRelease() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(3_870L) // 实测日志里最长的一次按住
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        assertEquals(
-            listOf(CarLifeProtocol.HardKey.VR_START, CarLifeProtocol.HardKey.VR_STOP),
-            sent,
-        )
-        assertTrue(logs.last().contains("PTT 收尾"))
-    }
-
-    @Test
-    fun thresholdIsInclusive() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(VoiceKeyRouter.PTT_HOLD_MILLIS)
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        assertEquals(2, sent.size)
-    }
-
-    @Test
-    fun repeatedButtonDownDoesNotResendStart() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        repeat(20) {
-            advance(100L)
-            router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        }
+    fun earlyActivationIsDeferredUntilHoldComplete() {
+        press()
+        activate()
+        assertTrue(sent.isEmpty())
+        advance(VoiceKeyRouter.HOLD_MILLIS - 1)
+        assertTrue(sent.isEmpty())
+        advance(1)
         assertEquals(1, sent.size)
     }
 
     @Test
-    fun buttonUpWithoutDownIsIgnored() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
+    fun releaseBeforeHoldCancelsPendingStart() {
+        press()
+        activate()
+        release()
+        advance(VoiceKeyRouter.HOLD_MILLIS + 100)
         assertTrue(sent.isEmpty())
     }
 
     @Test
-    fun staleReleaseDoesNotSendStop() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(VoiceKeyRouter.STALE_PRESS_MILLIS + 1)
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
+    fun releaseNeverSendsStop() {
+        press()
+        advance(2_000)
+        activate()
+        release()
         assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
-        assertTrue(logs.last().contains("不补 VR_STOP"))
-        // 状态作废后，下一次按下要能重新发 VR_START
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        assertEquals(2, sent.size)
+        assertTrue(sent.none { it == CarLifeProtocol.HardKey.VR_STOP })
     }
 
     @Test
-    fun hidAndRequestSiriShareOneEdge() {
-        router.onHidDown("0x6802 0xCF")
-        advance(200L)
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
-        advance(2_000L)
-        router.onHidUp("0x6802 0xCF")
+    fun leaseSendsStopWhenEngineGivesNoState() {
+        press()
+        advance(VoiceKeyRouter.HOLD_MILLIS)
+        activate()
+        advance(VoiceKeyRouter.LEASE_MILLIS)
         assertEquals(
             listOf(CarLifeProtocol.HardKey.VR_START, CarLifeProtocol.HardKey.VR_STOP),
             sent,
         )
-        // 松开后重复的 ButtonUp 不能再补一次 VR_STOP
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        assertEquals(2, sent.size)
+        assertTrue(logs.last().contains("租约到期"))
     }
 
     @Test
-    fun resetClearsPendingPress() {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        router.reset()
-        advance(2_000L)
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
+    fun newActivationInvalidatesOldLease() {
+        press()
+        advance(VoiceKeyRouter.HOLD_MILLIS)
+        activate()
+        press()
+        advance(VoiceKeyRouter.HOLD_MILLIS)
+        activate() // 上一轮先补 34，再发新的 33
+        assertEquals(
+            listOf(
+                CarLifeProtocol.HardKey.VR_START,
+                CarLifeProtocol.HardKey.VR_STOP,
+                CarLifeProtocol.HardKey.VR_START,
+            ),
+            sent,
+        )
+        advance(VoiceKeyRouter.LEASE_MILLIS)
+        // 只有第二轮自己的租约补 34；第一轮租约被令牌作废，
+        // 否则这里会多出一条（共 5 条 / 3 个 34）。
+        assertEquals(4, sent.size)
+        assertEquals(2, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
     }
 
     @Test
-    fun unknownSiriActionIsIgnored() {
+    fun releaseWithoutPressIsIgnored() {
+        release()
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun unknownActionIsIgnored() {
         router.onSiriAction(null)
         router.onSiriAction(0)
         router.onSiriAction(99)
@@ -132,9 +131,19 @@ class VoiceKeyRouterTest {
     }
 
     @Test
-    fun realLogSequenceProducesStartStopPairs() {
+    fun hidPathUsesSameStateMachine() {
+        router.onHidDown("0x6802 0xCF")
+        advance(VoiceKeyRouter.HOLD_MILLIS)
+        assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
+        advance(2_000)
+        router.onHidUp("0x6802 0xCF")
+        assertEquals(1, sent.size)
+    }
+
+    @Test
+    fun realLogSequence() {
         // 08:52:12.092=1 / 12.643=2 / 16.512=3 / 19.076=2 / 22.766=3 /
-        // 30.410=2 / 32.564=3 / 41.953=2 / 42.846=3
+        // 30.410=2 / 32.564=3 / 41.953=2 / 42.893=3
         val sequence =
             listOf(
                 1L to 1,
@@ -145,83 +154,24 @@ class VoiceKeyRouterTest {
                 7_644L to 2,
                 2_154L to 3,
                 9_389L to 2,
-                893L to 3,
+                940L to 3,
             )
         sequence.forEach { (delta, action) ->
             advance(delta)
             router.onSiriAction(action)
         }
-        assertEquals(4, sent.count { it == CarLifeProtocol.HardKey.VR_START })
-        // 三次长按补 VR_STOP，最后那次 0.89s 短按不补
-        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
-    }
-
-    // ---- 三连击重启音频（VoiceKeyGesture） ----
-
-    /** 手势开启的实例：默认实例不传 gestureEnabled，等于关，现有用例不受影响。 */
-    private var tripleTaps = 0
-    private val gestureRouter =
-        VoiceKeyRouter(
-            nowMillis = { now },
-            send = { sent.add(it) },
-            log = { logs.add(it) },
-            gestureEnabled = { true },
-            onTripleTap = { tripleTaps++ },
-        )
-
-    /** 短按一次（按住 [holdMs]，之后空闲 [gapMs]）。 */
-    private fun tap(
-        router: VoiceKeyRouter,
-        holdMs: Long = 300L,
-        gapMs: Long = 200L,
-    ) {
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(holdMs)
-        router.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        advance(gapMs)
+        // 按 AMcar 原样：只有第一次带 action=1（按下），后续 2/3 成对时
+        // 补足长按的回调拿不到按下时刻，不会起识别——这是照抄保留的行为。
+        assertEquals(1, sent.count { it == CarLifeProtocol.HardKey.VR_START })
+        assertEquals(0, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
     }
 
     @Test
-    fun threeQuickTapsRestartAudio() {
-        repeat(3) { tap(gestureRouter) }
-        assertEquals("三连击只触发一次", 1, tripleTaps)
-        // 手势成立时要撤掉刚发出的识别：3 次 VR_START + 1 次 VR_STOP
-        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_START })
-        assertEquals(1, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
-        assertTrue(logs.any { it.contains("三连击") })
-    }
-
-    @Test
-    fun fourthTapDoesNotRetrigger() {
-        repeat(4) { tap(gestureRouter) }
-        assertEquals("第四次点击要重新从 1 数起", 1, tripleTaps)
-    }
-
-    @Test
-    fun slowTapsDoNotTrigger() {
-        // 每次间隔 900ms：第一次按下到第三次松开 2.7s，超出窗口
-        repeat(3) { tap(gestureRouter, holdMs = 300L, gapMs = 900L) }
-        assertEquals(0, tripleTaps)
-    }
-
-    @Test
-    fun longPressDoesNotCountAsTap() {
-        // 按住说话 2s（PTT）+ 两次短按：不能凑成三连击
-        gestureRouter.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_DOWN)
-        advance(2_000L)
-        gestureRouter.onSiriAction(VoiceKeyRouter.SIRI_ACTION_BUTTON_UP)
-        advance(200L)
-        tap(gestureRouter)
-        tap(gestureRouter)
-        assertEquals(0, tripleTaps)
-    }
-
-    @Test
-    fun gestureDisabledKeepsOriginalBehaviour() {
-        // 默认实例 = 手势关闭
-        repeat(3) { tap(router) }
-        assertEquals(0, tripleTaps)
-        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_START })
-        assertEquals("关闭时一次 VR_STOP 都不该补", 0, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
+    fun resetClearsPendingState() {
+        press()
+        activate()
+        router.reset()
+        advance(VoiceKeyRouter.HOLD_MILLIS + 100)
+        assertTrue(sent.isEmpty())
     }
 }

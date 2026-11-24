@@ -2,6 +2,8 @@ package io.github.shaonialife.carptocar.airplay
 
 import android.content.Context
 import android.os.SystemClock
+import io.github.shaonialife.carptocar.audio.AmcarCarMicReceiver
+import io.github.shaonialife.carptocar.audio.AmcarMicStreamFormat
 import io.github.shaonialife.carptocar.audio.AudioCodec
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
@@ -76,6 +78,10 @@ class AirPlayClient(
     /** 音频 SETUP 时用的车机地址（会话中途要重新核对音量时复用）。 */
     @Volatile
     private var lastAudioHost: String? = null
+
+    /** AMcar 实验桥：本会话单独开的车机麦输入流（不挂主音频流）。 */
+    @Volatile
+    private var carMicrophone: AmcarCarMicReceiver? = null
     /**
      * 当前使用的接收端端点。0x4301 晚到 / mDNS 后上线时由主控热更新；
      * 配对循环每轮重试都重新读取，改动在下一轮即生效。
@@ -680,6 +686,9 @@ class AirPlayClient(
                         val root = parseFeedbackBody(body)
                         if (root != null) {
                             updateScreenReceiveStats(root)
+                            // 欠载判据每次都跑（只算数、不打日志）：1s 一次的频率正好覆盖
+                            // 车机的消费时钟，挂在下面的日志节流后面会漏掉 29/30 的样本。
+                            trackFeedbackClock(root)
                             if (sent <= 8 || sent % 30 == 0) logFeedbackBody(root)
                         }
                     }
@@ -714,6 +723,34 @@ class AirPlayClient(
                     "connId=${stream["streamConnectionID"]} sampleTime=${stream["sampleTime"]} " +
                     "ts=${stream["timestamp"]} tsRawNs=${stream["timestampRawNs"]} 全字段=$stream",
             )
+        }
+    }
+
+    /**
+     * 按 streamConnectionID 跟踪车机侧的音频消费时钟，判欠载（队列治理的信号源）。
+     *
+     * 倍率 = ΔsampleTime / (sr × Δt)：≈1.00 说明车机在按时消费；停滞（Δ≤0）说明
+     * 「收到但没在播」；低于 [RATE_ALERT_LOW] 才是欠载（高于 [RATE_ALERT_HIGH] 是
+     * 追赶，加深队列反而更糟，不回调）。两种欠载情形都触发 [onAudioUnderflow]，
+     * 由主控决定要不要加深媒体队列。回调为 null 时只记时钟，不做任何判断。
+     */
+    private fun trackFeedbackClock(root: Map<*, *>) {
+        if (onAudioUnderflow == null) return
+        val streams = root["streams"] as? List<*> ?: return
+        for (entry in streams) {
+            val stream = entry as? Map<*, *> ?: continue
+            val connId = (stream["streamConnectionID"] as? Number)?.toLong() ?: continue
+            val sampleTime = (stream["sampleTime"] as? Number)?.toDouble() ?: continue
+            val rate = (stream["sr"] as? Number)?.toDouble()?.takeIf { it > 0 } ?: continue
+            val nowMs = android.os.SystemClock.uptimeMillis()
+            val previous = feedbackClocks.put(connId, FeedbackClock(sampleTime, nowMs, rate))
+            if (previous == null) continue
+            val elapsedMs = nowMs - previous.atMs
+            if (elapsedMs <= 0) continue
+            val ratio = (sampleTime - previous.sampleTime) / (rate * elapsedMs / 1000.0)
+            if (sampleTime - previous.sampleTime <= 0 || ratio < RATE_ALERT_LOW) {
+                runCatching { onAudioUnderflow?.invoke() }
+            }
         }
     }
 
@@ -2225,6 +2262,24 @@ class AirPlayClient(
     var onMediaKey: ((Int) -> Unit)? = null
 
     /**
+     * 车机 `/feedback` 报音频欠载时的回调（队列治理，默认 null）。
+     *
+     * 判据见 [trackFeedbackClock]：`sampleTime` 停滞或消费倍率 < [RATE_ALERT_LOW]。
+     * 由 SessionController 注入，惰性转发给当前 audioSender（它可能还没建好或已重建）。
+     * null 时跟踪逻辑完全跳过，不产生任何行为差异。
+     */
+    var onAudioUnderflow: (() -> Unit)? = null
+
+    /** 上一次 feedback 的音频流时钟（按 streamConnectionID 隔离，避免多流串台）。 */
+    private val feedbackClocks = HashMap<Long, FeedbackClock>()
+
+    private data class FeedbackClock(
+        val sampleTime: Double,
+        val atMs: Long,
+        val rate: Double,
+    )
+
+    /**
      * 车机 HID 报告「全松开」时本次释放的 usage 集合（1.2.22）。
      *
      * 由 [VirtualIap2Link] 在状态式报告的下跳沿给出，SessionController 据此判断是否
@@ -2540,6 +2595,10 @@ class AirPlayClient(
     }
 
     private companion object {
+        /** 音频消费倍率告警下界（低于它算欠载，高于 [RATE_ALERT_HIGH] 是追赶不算）。 */
+        const val RATE_ALERT_LOW = 0.95
+        const val RATE_ALERT_HIGH = 1.05
+
         /**
          * RECORD 后多长内的 `Restoring LUM` 算「初始接管」而不是用户让屏（毫秒）。
          * 宝马 MGU-81 实测 1~15ms 到达；2 秒留足慢车机的事件通道延迟，又不会把
@@ -3587,6 +3646,145 @@ class AirPlayClient(
             runCatching { dataSocket.close() }
             runCatching { controlSocket?.close() }
         }
+    }
+
+    // ---- 车机麦输入流（AMcar 实验桥；只有上层打开实验开关才会调用）----
+
+    /** 车机 `/info` 有没有声明我们支持的输入档位（speechRecognition 的 LPCM 24k）。 */
+    fun supportedCarMicFormat(): AmcarMicStreamFormat? = AmcarMicStreamFormat.select(negotiatedInfo)
+
+    /**
+     * 开一路 AirPlay 麦克风输入流（车机 → 手机），按 AMcar 的单档单次纪律移植。
+     *
+     * 3874 曾对连续多组 `input=true` SETUP 回 400 并在 0.1 秒内拆链，所以这里最多发一次
+     * SETUP；明确被拒时只关本地 UDP socket，不发 TEARDOWN、不重试、不动主音频流。
+     * `framesPerPacket` 与 `spf` 同值，RECORD 只当尽力而为（接收端可能已在推流）。
+     */
+    @Synchronized
+    fun openCarMicrophone(
+        secret: ByteArray,
+        output: (ByteArray) -> Boolean,
+        isCurrent: () -> Boolean = { true },
+        onForwarding: () -> Unit = {},
+        onFailure: (String) -> Unit = {},
+        onPrepared: (AmcarCarMicReceiver) -> Boolean = { true },
+        onReady: () -> Boolean = { true },
+    ): AmcarCarMicReceiver? {
+        if (!isCurrent() || cancelled || socket == null) {
+            log("CAR-MIC: 会话未就绪，跳过输入流 SETUP")
+            return null
+        }
+        carMicrophone?.takeIf { !it.ready }?.let { closeCarMicrophone(it) }
+        if (carMicrophone != null) {
+            log("CAR-MIC: 已有输入流，本次不重复 SETUP")
+            return null
+        }
+        val format =
+            supportedCarMicFormat() ?: run {
+                log("CAR-MIC: /info 未声明 speechRecognition LPCM24k 输入位图——不开流")
+                return null
+            }
+        val host = lastAudioHost ?: receiverHost() ?: return null
+        val id = (SecureRandom().nextLong() and Long.MAX_VALUE).coerceAtLeast(1L)
+        val receiver =
+            try {
+                AmcarCarMicReceiver.prepare(id, secret, output, log, onForwarding, onFailure)
+            } catch (error: Exception) {
+                log("CAR-MIC: 绑定 UDP 端口失败 - ${error.message}")
+                return null
+            }
+        var setupSent = false
+        return try {
+            carMicrophone = receiver
+            if (!onPrepared(receiver) || !isCurrent()) {
+                receiver.close()
+                carMicrophone = null
+                return null
+            }
+            val description = format.description(id, receiver.dataPort, receiver.controlPort)
+            log("CAR-MIC: SETUP format=$format fields=$description")
+            setupSent = true
+            val (status, body) =
+                request(
+                    "SETUP",
+                    "rtsp://$host:${endpoint.airPlayPort}/",
+                    BinaryPlist.encode(mapOf("streams" to listOf(description))),
+                    timeoutMillis = 6_000,
+                    contentType = "application/x-apple-binary-plist",
+                )
+            log("CAR-MIC: SETUP result=$status")
+            if (!status.contains("200")) {
+                receiver.close()
+                carMicrophone = null
+                return null
+            }
+            val response = BinaryPlist.parse(body) as? Map<*, *> ?: error("Invalid microphone SETUP body")
+            val stream =
+                (response["streams"] as? List<*>)
+                    ?.filterIsInstance<Map<*, *>>()
+                    ?.firstOrNull { (it["type"] as? Number)?.toInt() == 100 }
+            receiver.streamId = (stream?.get("streamID") as? Number)?.toLong()
+            if (!isCurrent() || cancelled || !receiver.ready) {
+                closeCarMicrophone(receiver)
+                return null
+            }
+            log("CAR-MIC: ✓ 输入流已接受 streamID=${receiver.streamId} dataPort=${receiver.dataPort}")
+            if (!record()) log("CAR-MIC: RECORD 未确认（接收端可能已在推流）——继续监听，不拆输入流")
+            if (!isCurrent() || cancelled || !receiver.ready) {
+                closeCarMicrophone(receiver)
+                return null
+            }
+            if (!onReady()) {
+                closeCarMicrophone(receiver)
+                return null
+            }
+            receiver.start()
+            log("CAR-MIC: transport ready; waiting for first authenticated RTP")
+            receiver
+        } catch (error: Exception) {
+            log("CAR-MIC: SETUP 失败 ${error.javaClass.simpleName}: ${error.message}")
+            if (setupSent && !cancelled && socket != null) {
+                closeCarMicrophone(receiver)
+            } else {
+                receiver.close()
+                carMicrophone = null
+            }
+            null
+        }
+    }
+
+    /** 关掉输入流。只在确实发过 SETUP 且会话还活着时才补一个 TEARDOWN 释放资源。 */
+    @Synchronized
+    fun closeCarMicrophone(receiver: AmcarCarMicReceiver? = carMicrophone) {
+        val current = receiver ?: return
+        current.close()
+        if (carMicrophone !== current) return
+        if (cancelled || socket == null) {
+            carMicrophone = null
+            return
+        }
+        val host = lastAudioHost ?: receiverHost()
+        val streamId = current.streamId
+        if (host != null && streamId != null) {
+            val descriptor =
+                linkedMapOf<String, Any>(
+                    "type" to 100L,
+                    "streamID" to streamId,
+                )
+            runCatching {
+                val (status, _) =
+                    request(
+                        "TEARDOWN",
+                        "rtsp://$host:${endpoint.airPlayPort}/",
+                        BinaryPlist.encode(mapOf("streams" to listOf(descriptor))),
+                        timeoutMillis = 3_000,
+                    )
+                log("CAR-MIC: TEARDOWN result=$status")
+            }.onFailure { log("CAR-MIC: TEARDOWN 未确认 - ${it.message}") }
+        } else {
+            log("CAR-MIC: 输入流无可确认 streamID，仅关闭本地接收，未发送通配 TEARDOWN")
+        }
+        carMicrophone = null
     }
 
     /** 该 (type, audioType) 档位声明的输出延迟（ms）；无有效值用兜底。 */

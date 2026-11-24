@@ -1364,6 +1364,65 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
+                <!-- 音频队列治理：点击切换 关/开（默认关，音频卡顿时可开启尝试） -->
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
+                <LinearLayout
+                    android:id="@+id/rowAudioQueueGovernor"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="音频队列治理"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/audioQueueNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="默认关，原样逐帧直发。音频卡顿时可开启尝试（加缓冲不能修链路丢包）。下次连接起效。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/audioQueueValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_icon_tile"
+                        android:gravity="center"
+                        android:minWidth="56dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:text="关"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <!-- 方向盘语音键三连击 → 重启音频（默认开） -->
                 <View
                     android:layout_width="match_parent"
@@ -1388,24 +1447,24 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="语音键三连击重启音频"
+                            android:text="车机麦克风上行（AMcar 实验）"
                             android:textColor="@color/m3_on_surface"
                             android:textSize="14sp"
                             android:textStyle="bold" />
 
                         <TextView
-                            android:id="@+id/voiceTripleRestartNote"
+                            android:id="@+id/amcarMicUplinkNote"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="方向盘语音键短按三次：清空音频缓冲并重建音频流，专治「画面在、音乐没了」；后两次不再当作语音识别。"
+                            android:text="默认关。打开后引擎请求车机麦（0x10024）才开一路输入流，解密并降到 16k 后写回 9242；CarWith 的麦克风来源需手动选「车机」。"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
 
                     <androidx.appcompat.widget.SwitchCompat
                         xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchVoiceTripleRestart"
+                        android:id="@+id/switchAmcarMicUplink"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"

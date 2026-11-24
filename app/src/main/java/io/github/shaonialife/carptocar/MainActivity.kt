@@ -35,6 +35,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
+import io.github.shaonialife.carptocar.audio.AudioQueueOption
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -42,9 +43,9 @@ import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.amap.AmapNaviSource
+import io.github.shaonialife.carptocar.carlife.AmcarMicUplinkOption
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
-import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
@@ -1892,30 +1893,47 @@ class MainActivity : AppCompatActivity() {
             log("AUDIO: 兼容实验档切到 ${next.label}（下次连接起效）")
         }
 
-        // 方向盘语音键三连击 → 重启音频（默认开）。
-        // 只说「短按三次」，不提 VR_START/VR_STOP：用户要的是「怎么用」和「什么时候用」。
-        val tripleRestartSwitch = findViewById<SwitchCompat>(R.id.switchVoiceTripleRestart)
-        val tripleRestartNote = findViewById<TextView>(R.id.voiceTripleRestartNote)
-        tripleRestartSwitch.isChecked = VoiceKeyGesture.tripleTapRestartEnabled
+        // 音频队列治理（默认关）：稳态积压 / 欠载加深 / 静音关流。音频卡顿时可开启尝试。
+        val queueRow = findViewById<android.view.View>(R.id.rowAudioQueueGovernor)
+        val queueValue = findViewById<TextView>(R.id.audioQueueValue)
+        val queueNote = findViewById<TextView>(R.id.audioQueueNote)
 
-        fun refreshTripleRestartNote() {
-            tripleRestartNote.text =
-                if (tripleRestartSwitch.isChecked) {
-                    "方向盘语音键短按三次：清空音频缓冲并重建音频流，专治「画面在、音乐没了」；" +
-                        "后两次不再当作语音识别。"
+        fun refreshQueue() {
+            queueValue.text = AudioQueueOption.label
+            queueNote.text = AudioQueueOption.note
+        }
+
+        refreshQueue()
+        queueRow.setOnClickListener {
+            val next = !AudioQueueOption.enabled
+            AudioQueueOption.save(ctx, next)
+            refreshQueue()
+            snack("音频队列治理：${AudioQueueOption.label}（下次连接起效）")
+            log("AUDIO: 队列治理开关切到 ${AudioQueueOption.label}（下次连接起效）")
+        }
+
+        // AMcar 式车机麦克风上行（默认关）。
+        val amcarMicSwitch = findViewById<SwitchCompat>(R.id.switchAmcarMicUplink)
+        val amcarMicNote = findViewById<TextView>(R.id.amcarMicUplinkNote)
+        amcarMicSwitch.isChecked = AmcarMicUplinkOption.enabled
+
+        fun refreshAmcarMicNote() {
+            amcarMicNote.text =
+                if (amcarMicSwitch.isChecked) {
+                    "已开启：引擎请求车机麦时开一路输入流，解密后写回 9242；请在 CarWith 里把麦克风来源切到「车机」。"
                 } else {
-                    "已关闭：语音键按几次就起几次语音识别（原样）。"
+                    "默认关。打开后引擎请求车机麦（0x10024）才开一路输入流，解密并降到 16k 后写回 9242；CarWith 的麦克风来源需手动选「车机」。"
                 }
         }
-        refreshTripleRestartNote()
-        tripleRestartSwitch.setOnCheckedChangeListener { _, checked ->
-            VoiceKeyGesture.saveTripleTapRestart(ctx, checked)
-            refreshTripleRestartNote()
+        refreshAmcarMicNote()
+        amcarMicSwitch.setOnCheckedChangeListener { _, checked ->
+            AmcarMicUplinkOption.save(ctx, checked)
+            refreshAmcarMicNote()
             snack(
                 if (checked) {
-                    "已开启：方向盘语音键短按三次重启音频"
+                    "已开启车机麦克风上行实验——下次连接生效"
                 } else {
-                    "已关闭：语音键恢复原来的单次识别行为"
+                    "已关闭车机麦克风上行——会话中途关闭会立刻停输入流"
                 },
             )
         }

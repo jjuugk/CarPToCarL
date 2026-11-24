@@ -82,6 +82,17 @@ class AudioSender(
      * （bit14/bit10），发立体声负载过去会被解成噪声或干脆不响。媒体流仍是立体声。
      */
     private val channelCount: Int = CHANNELS,
+    /**
+     * 是否媒体流。**只有媒体流**启用队列治理的静音关流与欠载加深；导航流有大段空白，
+     * 按静音断流会把播报切断（见 [AudioQueueGovernor] 类注释）。默认 true 保持既有构造
+     * 点（媒体流）与单测的行为不变；导航流在 SessionController 里显式传 false。
+     */
+    private val isMedia: Boolean = true,
+    /**
+     * 队列治理开关（默认关）。**关掉时 [writePcm] 走原来的同步直发，字节与时间轴完全不变**；
+     * 打开后才启用单写者泵线程 + 分帧队列 + 三态治理。由 [AudioQueueOption] 在会话起步时读取。
+     */
+    private val queueGovernorEnabled: Boolean = false,
 ) : AudioSink {
     companion object {
         const val CHANNELS = 2
@@ -151,6 +162,16 @@ class AudioSender(
 
         /** 静音前媒体音量的持久化键（进程被杀也不丢恢复目标）。 */
         private const val KEY_SAVED_VOLUME = "audio_saved_media_volume"
+
+        /** 队列溢出日志节流（2 秒一条，避免欠载时刷屏）。 */
+        private const val QUEUE_OVERFLOW_LOG_GAP_NANOS = 2_000_000_000L
+
+        /** 泵线程空闲等待（有 notify 唤醒，超时只是兜底）。 */
+        private const val PUMP_IDLE_WAIT_MILLIS = 200L
+
+        /** 软配额之上的硬缓冲余量（帧）：媒体 6 / 导航 10，吸收 GC 造成的瞬时落后。 */
+        private const val MEDIA_HARD_EXTRA_FRAMES = 6
+        private const val NAV_HARD_EXTRA_FRAMES = 10
 
         /** 小端 s16 → 大端 s16（每两字节换序）。CarPlay 线格式要求大端样本。 */
         fun bigEndianS16(source: ByteArray): ByteArray {
@@ -288,6 +309,27 @@ class AudioSender(
 
     /** 复用的一帧缓冲（[dispatchPcm] 内部会再拷一份，不会别名）。 */
     private val pcmFrame = ByteArray(framePcmBytes)
+
+    // ---- 队列治理（默认关；开时才用）----
+
+    /** 三态策略：稳态积压 / 欠载加深 / 静音关流。时钟可注入，纯 JVM。 */
+    private val queueGovernor = AudioQueueGovernor(isMedia = isMedia)
+
+    /** 待发帧队列：只有开关打开、且走直通模式时才有人写。 */
+    /** 用 Object 而非 Any：synchronized 块里要调 wait/notifyAll。 */
+    private val pendingLock = java.lang.Object()
+    private val pendingFrames = ArrayDeque<ByteArray>()
+    private var pumpThread: Thread? = null
+    private var framesDroppedQueue = 0L
+    private var lastQueueOverflowLogAtNanos = 0L
+    private var lastSilenceLogAtNanos = 0L
+
+    /** 软配额（帧）：关闭时恒 1（= 攒满一帧即发）；开启时按三态算。 */
+    private val queueCapacity: Int
+        get() = queueGovernor.capacity()
+
+    private val hardCap: Int
+        get() = queueCapacity + if (isMedia) MEDIA_HARD_EXTRA_FRAMES else NAV_HARD_EXTRA_FRAMES
 
     /**
      * 重采样器：CarLife 引擎可能给 44.1k，车机协商的是 48k（或反之）。
@@ -508,9 +550,16 @@ class AudioSender(
             running.set(true)
             // 直通模式不静音手机：音频来源是 CarLife 引擎（它已自行采集并推 PCM），
             // 静音 STREAM_MUSIC 可能破坏引擎的采集源（采集点不确定，不能赌是 REMOTE_SUBMIX）。
+            // 队列治理只在开关打开时启用：关掉时下面不建泵线程，writePcm 走原来的同步直发。
+            queueGovernor.enabled = queueGovernorEnabled
+            if (queueGovernorEnabled) {
+                queueGovernor.onStreamStarted()
+                startPumpIfNeeded()
+            }
             log(
                 "AUDIO: 已启动直通模式（外部注入 PCM → $host:$dataPort，" +
-                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz ${if (channelCount == 1) "单声道" else "立体声"}；RECORD 后开始发包）",
+                    "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz ${if (channelCount == 1) "单声道" else "立体声"}；RECORD 后开始发包，" +
+                    "队列治理=${if (queueGovernorEnabled) "开（${if (isMedia) "媒体" else "导航"}，软配额 $queueCapacity 帧）" else "关（逐帧直发）"}）",
             )
             true
         } catch (error: Exception) {
@@ -532,9 +581,13 @@ class AudioSender(
         if (!running.get() || record != null) return
         if (!readyToSend.compareAndSet(false, true)) return
         startSyncLoop()
+        // RECORD 激活才是真正的起流点：开启 1s 欠载过滤窗口（此时车机刚开始消费，
+        // 早期空窗属正常），关闭时 onStreamStarted 不产生任何行为差异。
+        queueGovernor.onStreamStarted()
         log(
             "AUDIO: RECORD 已激活——开始发包（直通：PCM 到齐 ${framePcmBytes}B 一帧即发，" +
-                "每包 $samplesPerPacket 样本；无混音、无定拍泵、不补静音）",
+                "每包 $samplesPerPacket 样本；无混音、无定拍泵、不补静音" +
+                (if (queueGovernor.enabled) "；队列治理开（软配额 $queueCapacity 帧）" else "") + "）",
         )
     }
 
@@ -601,13 +654,110 @@ class AudioSender(
                     }
                 }
             if (!frameReady) break
-            dispatchPcm(pcmFrame)
+            if (queueGovernor.enabled) {
+                enqueueFrame(pcmFrame)
+            } else {
+                dispatchPcm(pcmFrame)
+            }
+        }
+    }
+
+    /**
+     * 队列治理开启时，把一帧放进待发队列（[writePcm] 的出口）。
+     *
+     * 静音关流：只媒体流生效，连续 3s 无有效样本就丢弃待发帧、暂停入队，恢复有声自动续流；
+     * 起流 3s 宽限期内照常发送（车机靠静音包维持时钟），只有判定 STOP 才断。
+     * 溢出：排队超过「软配额 + 硬余量」才裁回软配额（丢最旧的帧，保留最新音频）。
+     */
+    private fun enqueueFrame(frame: ByteArray) {
+        val silence = queueGovernor.observe(frame, frame.size)
+        if (silence == AudioQueueGovernor.Silence.STOP) {
+            var dropped = 0
+            synchronized(pendingLock) {
+                dropped = pendingFrames.size
+                pendingFrames.clear()
+            }
+            framesDroppedQueue += dropped
+            logSilenceStopOnce(dropped)
+            return
+        }
+        val overflow =
+            synchronized(pendingLock) {
+                pendingFrames.addLast(frame.copyOf())
+                var dropped = 0
+                while (pendingFrames.size > hardCap) {
+                    pendingFrames.removeFirst()
+                    dropped++
+                    framesDroppedQueue++
+                }
+                pendingLock.notifyAll()
+                dropped
+            }
+        if (overflow > 0) logQueueOverflowOnce(overflow)
+    }
+
+    private fun logSilenceStopOnce(dropped: Int) {
+        val now = System.nanoTime()
+        if (lastSilenceLogAtNanos != 0L && now - lastSilenceLogAtNanos < QUEUE_OVERFLOW_LOG_GAP_NANOS) return
+        lastSilenceLogAtNanos = now
+        log(
+            "AUDIO: 媒体流静音超过 ${AudioQueueGovernor.SILENCE_STOP_MILLIS / 1000}s——" +
+                "暂停入队（丢弃 $dropped 帧），恢复有声后自动续流",
+        )
+    }
+
+    private fun logQueueOverflowOnce(dropped: Int) {
+        val now = System.nanoTime()
+        if (lastQueueOverflowLogAtNanos != 0L && now - lastQueueOverflowLogAtNanos < QUEUE_OVERFLOW_LOG_GAP_NANOS) return
+        lastQueueOverflowLogAtNanos = now
+        log(
+            "AUDIO: 队列积压丢弃 $dropped 帧（排队 ${synchronized(pendingLock) { pendingFrames.size }}，" +
+                "软配额 $queueCapacity，硬上限 $hardCap）——泵长期跟不上，不是抖动",
+        )
+    }
+
+    /** 车机 `/feedback` 报欠载时由主控调用；返回是否被采纳（起流 1s 内反馈会被过滤）。 */
+    fun noteUnderflow(): Boolean {
+        val accepted = queueGovernor.noteUnderflow()
+        if (accepted) {
+            log(
+                "AUDIO: 车机报欠载——媒体目标积压升到 ${AudioQueueGovernor.UNDERFLOW_MEDIA_FRAMES} 帧，" +
+                    "保持 ${AudioQueueGovernor.UNDERFLOW_HOLD_MILLIS / 1000}s",
+            )
+            synchronized(pendingLock) { pendingLock.notifyAll() }
+        }
+        return accepted
+    }
+
+    /** 启动单写者泵线程（幂等；只在队列治理开启时调用）。 */
+    private fun startPumpIfNeeded() {
+        if (pumpThread != null) return
+        Thread(
+            {
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+                while (running.get()) {
+                    val frame =
+                        synchronized(pendingLock) {
+                            val next = pendingFrames.removeFirstOrNull()
+                            if (next == null) runCatching { pendingLock.wait(PUMP_IDLE_WAIT_MILLIS) }
+                            next
+                        }
+                    if (frame == null || !running.get()) continue
+                    dispatchPcm(frame)
+                }
+            },
+            "audio-pump",
+        ).apply {
+            isDaemon = true
+            start()
+            pumpThread = this
         }
     }
 
     /** 清空尚未发出的 PCM（车机暂停/静音时立即止声）。RTP 时间轴保持连续。 */
     fun clearPcm() {
         synchronized(pcmLock) { pcmLen = 0 }
+        synchronized(pendingLock) { pendingFrames.clear() }
     }
 
     /**
@@ -638,6 +788,8 @@ class AudioSender(
         resampleInRate = 0
         sendFailures = 0
         synchronized(pcmLock) { pcmLen = 0 }
+        synchronized(pendingLock) { pendingFrames.clear() }
+        queueGovernor.onStreamStarted()
         log("AUDIO: 已清空待发 PCM、重采样相位归零；RTP 时间轴保持连续——$reason")
         return true
     }
@@ -787,6 +939,14 @@ class AudioSender(
         thread = null
         readyToSend.set(false)
         synchronized(pcmLock) { pcmLen = 0 }
+        synchronized(pendingLock) {
+            pendingFrames.clear()
+            pendingLock.notifyAll()
+        }
+        pumpThread?.interrupt()
+        pumpThread = null
+        queueGovernor.reset()
+        queueGovernor.enabled = false
         resampler.reset()
         resampleInRate = 0
         restorePhoneMedia()

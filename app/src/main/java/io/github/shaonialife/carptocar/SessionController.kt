@@ -16,9 +16,11 @@ import io.github.shaonialife.carptocar.airplay.PairingMemory
 import io.github.shaonialife.carptocar.airplay.PostRecordWatch
 import io.github.shaonialife.carptocar.airplay.StreamOrderMemory
 import io.github.shaonialife.carptocar.airplay.VirtualIap2Link
+import io.github.shaonialife.carptocar.audio.AmcarCarMicReceiver
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioProfile
 import io.github.shaonialife.carptocar.audio.AudioProfileMemory
+import io.github.shaonialife.carptocar.audio.AudioQueueOption
 import io.github.shaonialife.carptocar.audio.AudioSender
 import io.github.shaonialife.carptocar.audio.AudioTuning
 import io.github.shaonialife.carptocar.audio.MicUplink
@@ -37,8 +39,9 @@ import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
 import io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide
 import io.github.shaonialife.carptocar.carlife.LyricLines
+import io.github.shaonialife.carptocar.carlife.AmcarMicUplinkOption
+import io.github.shaonialife.carptocar.carlife.AmcarMicWriter
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
-import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.AccessoryDeclaration
 import io.github.shaonialife.carptocar.iap2.ArtworkDedupe
@@ -96,6 +99,7 @@ import io.github.shaonialife.carptocar.session.CarNightMode
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.ReconnectGate
 import io.github.shaonialife.carptocar.session.SessionAttemptGate
+import io.github.shaonialife.carptocar.session.VoiceSessionGate
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
 import io.github.shaonialife.carptocar.util.ConnectStage
@@ -501,6 +505,8 @@ object SessionController {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
         CarLifeHijack.navigationNowPlayingEnabled = DisplayPrefs.navigationNowPlaying(context)
+        // AMcar 式车机麦桥：默认关；偏好在这里读一次，关闭时报文逐字不变。
+        AmcarMicUplinkOption.load(context.applicationContext)
         // 高德数据源：开关打开才绑定（不打开就不碰高德的私有服务，连包都懒得查）。
         AmapNaviSource.configure(context.applicationContext, ::appendLog)
         AmapNaviSource.setEnabled(context.applicationContext, DisplayPrefs.amapNaviSource(context))
@@ -607,6 +613,8 @@ object SessionController {
         appStateBridgeInstalled = true
         CarLifeHijack.onVoiceSession = { active -> appStateReporter.onEngineVoice(active) }
         CarLifeHijack.onSpeechAudio = { appStateReporter.onSpeechAudio() }
+        // AMcar 车机麦桥：引擎 0x10024/0x10023 才会走到这里，默认无消费者时是空操作。
+        CarLifeHijack.onCarMicRequest = { active -> onCarMicRequest(active) }
     }
 
     /** 协议门面是否已装配进聚合层（幂等）。 */
@@ -1356,8 +1364,7 @@ object SessionController {
                 sendVoiceHardKey(keycode)
             }
         appendLog(
-            "CARLIFE: 车机语音键 0x%02X → ".format(keycode) +
-                (if (keycode == CarLifeProtocol.HardKey.VR_STOP) "0x68008" else "0x10066") +
+            "CARLIFE: 车机语音键 0x%02X → 0x68008".format(keycode) +
                 if (ok) " 已送达" else " 未送达（CarLife 未接管）",
         )
     }
@@ -1400,18 +1407,119 @@ object SessionController {
      */
     private val voiceKey =
         VoiceKeyRouter(
-            // 边沿判定、PTT 收尾、三连击都在 VoiceKeyRouter 里完成；这里拿到的已经是
-            // 「判定完的动作」（VR_START/VR_STOP 硬键码），只负责下发。
+            // AMcar 语义：500ms 长按确认、松手不补结束键、60s 租约补发；
+            // 这里拿到的已经是「判定完的动作」（VR_START/VR_STOP 硬键码），只负责下发。
             send = { keycode -> carLifeCommandSender.execute { dispatchVoiceHardKey(keycode) } },
             log = ::appendLog,
-            // 短按三次 = 重启音频（见 VoiceKeyGesture 注释）。回调里只做一次线程切换：
-            // 重启要跑 RTSP SETUP/RECORD，绝不能占 iAP2 事件线程，也不该挤 CarLife 命令队列。
-            gestureEnabled = { VoiceKeyGesture.tripleTapRestartEnabled },
-            onTripleTap = {
-                appendLog("AUDIO: 语音键三连击 → 安排一次音频重启")
-                audioRestartWorker.execute { restartAudioNow("方向盘语音键三连击") }
+            onVoiceEnd = {
+                // 等助手回答播完再重建音频（不能松手就拆，否则回答被掐掉）。
+                audioRestartWorker.execute {
+                    Thread.sleep(1_200)
+                    if (!appStateReporter.engineVoiceActive()) {
+                        restartAudioNow("方控语音键松开——助手回答结束")
+                    }
+                }
             },
         )
+
+    // ---- AMcar 式车机麦克风桥（默认关，关闭时整条链不构造）----
+
+    /** 一次车机麦请求独占一份输入流资源，代次令牌防止旧 SETUP 污染新会话。 */
+    private val carMicGate = VoiceSessionGate<AmcarCarMicReceiver>()
+
+    /** 9242 写回器；只在实验开关打开且引擎真的请求车机麦时创建。 */
+    @Volatile
+    private var carMicWriter: AmcarMicWriter? = null
+
+    /**
+     * 引擎请求（0x10024）/ 结束（0x10023）使用车机麦克风。
+     *
+     * 关闭实验开关时这里直接返回；0x10023 在手机麦模式下也会到，因此结束分支
+     * 不能写「输入流已关闭」这种会误导排障的日志。
+     */
+    private fun onCarMicRequest(active: Boolean) {
+        if (!active) {
+            val receiver = carMicGate.cancel()
+            carMicWriter?.record(false)
+            if (receiver != null) {
+                appendLog("CAR-MIC: 引擎结束识别——关闭输入流")
+                carMicSessionClient?.closeCarMicrophone(receiver)
+            }
+            carMicSessionClient = null
+            return
+        }
+        if (!AmcarMicUplinkOption.enabled || connectCancelled) return
+        val client = currentClient
+        if (client == null || client.cancelled || !client.sessionEstablished) {
+            appendLog("CAR-MIC: 引擎请求车机麦克风，但 AirPlay 会话未就绪——跳过")
+            return
+        }
+        val token = carMicGate.begin() ?: return
+        carMicSessionClient = client
+
+        fun isCurrent(): Boolean =
+            carMicGate.isCurrent(token) &&
+                currentClient === client &&
+                !connectCancelled &&
+                !client.cancelled &&
+                AmcarMicUplinkOption.enabled
+
+        fun failVoice(reason: String) {
+            if (!carMicGate.isCurrent(token)) return
+            val receiver = carMicGate.fail(token)
+            receiver?.close()
+            if (receiver != null) Bg.run("car-mic-failed") { client.closeCarMicrophone(receiver) }
+            appendLog("CAR-MIC: $reason；本次输入已停止，请在 CarWith 中确认麦克风来源")
+        }
+
+        Bg.run("car-mic-setup") {
+            if (!isCurrent()) return@run
+            val writer =
+                carMicWriter ?: CarLifeHijack.openMicWriter(
+                    closeSocket = { carMicWriter = null },
+                    failed = { failVoice("语音下游 socket 卡死") },
+                )?.also { carMicWriter = it }
+            if (writer == null) {
+                failVoice("VR(9242) 写回通道未就绪")
+                return@run
+            }
+            val secret = airplaySharedSecret
+            if (secret == null) {
+                failVoice("没有配对共享密钥，无法派生输入流密钥")
+                return@run
+            }
+            client.openCarMicrophone(
+                secret = secret,
+                output = { pcm -> carMicGate.offerIfCurrent(token) { isCurrent() && writer.offer(pcm) } },
+                isCurrent = ::isCurrent,
+                onPrepared = { receiver -> isCurrent() && carMicGate.attach(token, receiver) },
+                onReady = { isCurrent() && carMicGate.markWaiting(token) },
+                onForwarding = {
+                    if (isCurrent() && carMicGate.forwarding(token) { writer.record(true) }) {
+                        appendLog("CAR-MIC: ✓ 车机麦克风已接入 CarLife 9242（0x58001）")
+                    }
+                },
+                onFailure = { reason -> failVoice(reason) },
+            ) ?: failVoice("输入流 SETUP 未建立")
+        }
+    }
+
+    @Volatile
+    private var carMicSessionClient: AirPlayClient? = null
+
+    /** 会话退役时一并收掉 AMcar 车机麦桥；开关关着时全部是空操作。 */
+    private fun closeAmcarMicBridge() {
+        val receiver = carMicGate.cancel()
+        carMicWriter?.close()
+        carMicWriter = null
+        if (receiver != null) {
+            carMicSessionClient?.closeCarMicrophone(receiver)
+        } else {
+            carMicSessionClient?.closeCarMicrophone()
+        }
+        carMicSessionClient = null
+        airplaySharedSecret = null
+    }
 
     /**
      * 重启音频专用线程。
@@ -1646,6 +1754,10 @@ object SessionController {
      */
     @Volatile
     var micUplink: MicUplink? = null
+
+    /** 本会话的 AirPlay 配对共享密钥，AMcar 车机麦输入流用它派生 Input key。 */
+    @Volatile
+    private var airplaySharedSecret: ByteArray? = null
 
     @Volatile
     var currentClient: AirPlayClient? = null
@@ -3092,6 +3204,7 @@ object SessionController {
         // stop() 里会落 wav 并打一行 `MIC: 结论——…`，所以必须在会话日志收尾之前调。
         micUplink?.stop()
         micUplink = null
+        closeAmcarMicBridge()
         // 通话场景标记必须随会话清掉：留着的话下一轮会被当成「已经在通话档」，
         // 进入通话时 switchAudioScene 直接返回 true，一条通话流都不会建。
         audioInCallMode = false
@@ -4521,6 +4634,8 @@ object SessionController {
             appendLog("AUDIO: 明文会话（未配对）无共享密钥——跳过音频通道")
             return false
         }
+        // AMcar 车机麦桥的输入流密钥也从这份共享密钥派生，会话级保存。
+        airplaySharedSecret = sharedSecret
         if (host == null) {
             appendLog("AUDIO: 无接收端可用地址，跳过音频通道")
             return false
@@ -4663,6 +4778,9 @@ object SessionController {
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
                     channelCount = profile.channels,
+                    // 队列治理（默认关）：只有媒体流做欠载加深 + 静音关流。
+                    isMedia = true,
+                    queueGovernorEnabled = AudioQueueOption.enabled,
                 )
             audioSender = sender
             if (!sender.startPassthrough()) {
@@ -4768,6 +4886,9 @@ object SessionController {
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
                 channelCount = profile.channels,
+                // 导航流：不启用静音关流（播报有大段空白）与欠载加深。
+                isMedia = false,
+                queueGovernorEnabled = AudioQueueOption.enabled,
             )
         if (!nav.startPassthrough()) {
             appendLog("AUDIO: 导航流（101/$audioType）发送端启动失败 —— 导航播报将无声")
@@ -5149,6 +5270,9 @@ object SessionController {
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
                 channelCount = profile.channels,
+                // 重建的仍是媒体位置主音频流，队列治理参数与首次构造保持一致。
+                isMedia = true,
+                queueGovernorEnabled = AudioQueueOption.enabled,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
@@ -5263,6 +5387,9 @@ object SessionController {
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
                 channelCount = target.channels,
+                // 切换档位后仍是媒体位置主音频流，队列治理参数与首次构造保持一致。
+                isMedia = true,
+                queueGovernorEnabled = AudioQueueOption.enabled,
             )
         audioSender = sender
         if (!sender.startPassthrough()) {
@@ -6446,6 +6573,17 @@ object SessionController {
                                 )
                             },
                         ).also { created ->
+                            // 欠载反馈（队列治理，默认关）：惰性转发给当前媒体流发送端。
+                            // 它可能在回调注入时还没建好、或已重建多次，所以不能持有旧实例；
+                            // 同时用连接代次校验，避免上一轮会话的迟到的 feedback 加深新流队列。
+                            // 开关关闭时不挂回调：trackFeedbackClock 直接跳过，连时钟表都不写。
+                            if (AudioQueueOption.enabled) {
+                                created.onAudioUnderflow = {
+                                    // 只认当前 client：重连重建后旧 client 的迟到 feedback
+                                    // 不能加深新流的队列。audioSender 惰性读取，天然拿到最新实例。
+                                    if (currentClient === created) audioSender?.noteUnderflow()
+                                }
+                            }
                             // 车机媒体键（iAP2 0x6802 通路）：方向盘/面板的上一曲、下一曲。
                             // 放在这里而不是调用点，保证重连重建 client 时也挂得上。
                             created.onMediaKey = { keyCode ->
