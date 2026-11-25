@@ -56,6 +56,7 @@ import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.PermissionRepair
+import io.github.shaonialife.carptocar.ui.ConnectionStageCard
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
 import io.github.shaonialife.carptocar.ui.SignalWavesView
@@ -132,6 +133,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var carLifeStatus: TextView
     private lateinit var snackbar: TextView
+    /** 连接阶段卡片（只读快照，沿用英雄卡的 1s tick 刷新）。 */
+    private lateinit var connectionStageCard: ConnectionStageCard
+
+    /** 设置页是否正在显示（返回键优先退出设置页）。 */
+    private var settingsOpen = false
 
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
     private var heroState: HeroState? = null
@@ -909,6 +915,11 @@ class MainActivity : AppCompatActivity() {
         switchLog = findViewById(R.id.switchLog)
         logText = findViewById(R.id.logText)
         snackbar = findViewById(R.id.snackbar)
+        connectionStageCard = ConnectionStageCard(findViewById(R.id.connectionStageCard))
+
+        // 设置页与首页共用同一 Activity：只切可见性，控件 ID 与原有绑定保持不变。
+        findViewById<View>(R.id.btnSettings).setOnClickListener { openSettings() }
+        findViewById<View>(R.id.btnSettingsBack).setOnClickListener { closeSettings() }
 
         deviceSubtitle.text = deviceName()
         logText.movementMethod = ScrollingMovementMethod()
@@ -1498,6 +1509,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ==================== 设置页切换 ====================
+
+    private fun openSettings() {
+        if (settingsOpen) return
+        settingsOpen = true
+        findViewById<View>(R.id.settingsPage).visibility = View.VISIBLE
+        findViewById<View>(R.id.topBar).visibility = View.GONE
+        log("UI: 进入设置页（显示 / 连接实验 / 流分辨率）")
+    }
+
+    private fun closeSettings() {
+        if (!settingsOpen) return
+        settingsOpen = false
+        findViewById<View>(R.id.settingsPage).visibility = View.GONE
+        findViewById<View>(R.id.topBar).visibility = View.VISIBLE
+    }
+
+    override fun onBackPressed() {
+        if (settingsOpen) closeSettings() else super.onBackPressed()
+    }
+
     // ==================== 英雄卡状态机 ====================
 
     /**
@@ -1541,6 +1573,7 @@ class MainActivity : AppCompatActivity() {
         }
         updateConnectedSubline()
         updateHeroStats()
+        connectionStageCard.render(SessionController.connectionStageSnapshot())
         updateDisplayResolutionNote()
         updateAudioTag()
         updateReadyRow()
@@ -3172,7 +3205,3 @@ class MainActivity : AppCompatActivity() {
         if (SessionController.ssidSink === ssidSink) SessionController.ssidSink = null
     }
 }
-import io.github.shaonialife.carptocar.ui.ConnectionStageCard
-    /** 连接阶段卡片（只读快照，沿用英雄卡的 1s tick 刷新）。 */
-    private lateinit var connectionStageCard: ConnectionStageCard
-        connectionStageCard = ConnectionStageCard(findViewById(R.id.connectionStageCard))
