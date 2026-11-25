@@ -154,6 +154,24 @@
                         android:textColor="#5C6B6B"
                         android:textSize="10sp"
                         android:textStyle="bold" />
+
+                    <!-- 连接成功瞬间的轻提示：不改车机图标本体，3 秒后自动消失 -->
+                    <TextView
+                        android:id="@+id/heroAudioHint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|center_horizontal"
+                        android:layout_marginTop="2dp"
+                        android:background="@drawable/bg_hero_hint"
+                        android:elevation="6dp"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="轻点图标可重启音频"
+                        android:textColor="@color/m3_on_pri_container"
+                        android:textSize="10.5sp"
+                        android:visibility="gone" />
                 </FrameLayout>
 
                 <!-- 状态行：连接状态字 -->

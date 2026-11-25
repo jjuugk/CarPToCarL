@@ -106,6 +106,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var signalWaves: SignalWavesView
     private lateinit var hubPlate: FrameLayout
     private lateinit var hubCar: ImageView
+    /** 连接成功瞬间出现的轻提示（图标本体不变，3s 后消失）。 */
+    private lateinit var heroAudioHint: TextView
     private lateinit var hubCaption: TextView
     private lateinit var heroStateText: TextView
     private lateinit var heroSubline: TextView
@@ -143,6 +145,12 @@ class MainActivity : AppCompatActivity() {
     private var heroState: HeroState? = null
     private var connectedAt = 0L
     private var hubBlink: ObjectAnimator? = null
+
+    /** 连接成功后 3 秒自动收起轻提示；重复连接会重新计时。 */
+    private val hideHeroAudioHint =
+        Runnable {
+            if (!isFinishing && !isDestroyed) heroAudioHint.visibility = View.GONE
+        }
 
     // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
     private var lastSentFrames = 0L
@@ -891,6 +899,19 @@ class MainActivity : AppCompatActivity() {
         signalWaves = findViewById(R.id.signalWaves)
         hubPlate = findViewById(R.id.hubPlate)
         hubCar = findViewById(R.id.hubCar)
+        heroAudioHint = findViewById(R.id.heroAudioHint)
+        // 连接后点车机图标 = 重启音频；图标外观与动画完全沿用原来的状态机。
+        hubPlate.isClickable = true
+        hubPlate.isFocusable = true
+        hubPlate.setOnClickListener {
+            if (heroState != HeroState.CONNECTED || !SessionController.isStreaming()) {
+                snack("当前没有在推流的会话，无法重启音频")
+                return@setOnClickListener
+            }
+            heroAudioHint.visibility = View.GONE
+            SessionController.requestAudioRestart("英雄卡车机图标")
+            snack("正在重启音频…（结果见日志 AUDIO: 行）")
+        }
         hubCaption = findViewById(R.id.hubCaption)
         heroStateText = findViewById(R.id.heroStateText)
         heroSubline = findViewById(R.id.heroSubline)
@@ -1731,6 +1752,14 @@ class MainActivity : AppCompatActivity() {
         hubBlink?.cancel()
         hubBlink = null
         hubCar.alpha = 1f
+        mainHandler.removeCallbacks(hideHeroAudioHint)
+        if (s == HeroState.CONNECTED) {
+            // 图标本身不变，只在连接成功的瞬间告诉用户「它是可以点的」。
+            heroAudioHint.visibility = View.VISIBLE
+            mainHandler.postDelayed(hideHeroAudioHint, 3_000L)
+        } else {
+            heroAudioHint.visibility = View.GONE
+        }
         if (s == HeroState.CONNECTING) {
             hubBlink =
                 ObjectAnimator.ofFloat(hubCar, View.ALPHA, 1f, 0.45f).apply {
