@@ -67,22 +67,6 @@
                         android:text="CarLife+ 未启动" />
                 </LinearLayout>
 
-                <!-- 设置入口：显示 / 连接实验 / 流分辨率已移到独立设置页 -->
-                <TextView
-                    android:id="@+id/btnSettings"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginStart="10dp"
-                    android:background="@drawable/bg_tbtn"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:gravity="center"
-                    android:paddingStart="13dp"
-                    android:paddingEnd="13dp"
-                    android:text="设置"
-                    android:textColor="@color/m3_primary"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
             </LinearLayout>
 
             <!-- 内容区容器：竖屏时 ScrollView 包住英雄卡与详情；
@@ -1148,6 +1132,69 @@
                 layout="@layout/view_settings_page"
                 android:visibility="gone" />
             </FrameLayout>
+
+            <!-- 底部切换栏：首页 / 设置。设置页是同 Activity 的覆盖层，切换只改可见性。 -->
+            <LinearLayout
+                android:id="@+id/bottomTabs"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:background="#111719"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:id="@+id/tabHome"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tabHomeLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="首页"
+                        android:textColor="@color/m3_primary"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
+
+                    <View
+                        android:id="@+id/tabHomeIndicator"
+                        android:layout_width="28dp"
+                        android:layout_height="2dp"
+                        android:layout_marginTop="5dp"
+                        android:background="@color/m3_primary" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/tabSettings"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tabSettingsLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="设置"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
+
+                    <View
+                        android:id="@+id/tabSettingsIndicator"
+                        android:layout_width="28dp"
+                        android:layout_height="2dp"
+                        android:layout_marginTop="5dp"
+                        android:background="@color/m3_on_var" />
+                </LinearLayout>
+            </LinearLayout>
         </LinearLayout>
 
     <!-- Snackbar（自绘 M3 反色胶囊） -->
@@ -1158,7 +1205,7 @@
         android:layout_gravity="bottom"
         android:layout_marginStart="18dp"
         android:layout_marginEnd="18dp"
-        android:layout_marginBottom="26dp"
+        android:layout_marginBottom="70dp"
         android:background="@drawable/bg_card"
         android:backgroundTint="@color/m3_inverse"
         android:drawableStart="@drawable/ic_check_circle_small"

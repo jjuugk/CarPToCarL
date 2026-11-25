@@ -917,9 +917,10 @@ class MainActivity : AppCompatActivity() {
         snackbar = findViewById(R.id.snackbar)
         connectionStageCard = ConnectionStageCard(findViewById(R.id.connectionStageCard))
 
-        // 设置页与首页共用同一 Activity：只切可见性，控件 ID 与原有绑定保持不变。
-        findViewById<View>(R.id.btnSettings).setOnClickListener { openSettings() }
-        findViewById<View>(R.id.btnSettingsBack).setOnClickListener { closeSettings() }
+        // 底部「首页 / 设置」切换：设置页与首页共用同一 Activity，只切可见性。
+        findViewById<View>(R.id.tabHome).setOnClickListener { closeSettings() }
+        findViewById<View>(R.id.tabSettings).setOnClickListener { openSettings() }
+        applyTabState()
 
         deviceSubtitle.text = deviceName()
         logText.movementMethod = ScrollingMovementMethod()
@@ -1516,6 +1517,7 @@ class MainActivity : AppCompatActivity() {
         settingsOpen = true
         findViewById<View>(R.id.settingsPage).visibility = View.VISIBLE
         findViewById<View>(R.id.topBar).visibility = View.GONE
+        applyTabState()
         log("UI: 进入设置页（显示 / 连接实验 / 流分辨率）")
     }
 
@@ -1524,6 +1526,17 @@ class MainActivity : AppCompatActivity() {
         settingsOpen = false
         findViewById<View>(R.id.settingsPage).visibility = View.GONE
         findViewById<View>(R.id.topBar).visibility = View.VISIBLE
+        applyTabState()
+    }
+
+    /** 底部两个 tab 的选中态：主色文字 + 指示条，另一半用弱色。 */
+    private fun applyTabState() {
+        val active = ContextCompat.getColor(this, R.color.m3_primary)
+        val inactive = ContextCompat.getColor(this, R.color.m3_on_var)
+        findViewById<TextView>(R.id.tabHomeLabel).setTextColor(if (settingsOpen) inactive else active)
+        findViewById<TextView>(R.id.tabSettingsLabel).setTextColor(if (settingsOpen) active else inactive)
+        findViewById<View>(R.id.tabHomeIndicator).setBackgroundColor(if (settingsOpen) inactive else active)
+        findViewById<View>(R.id.tabSettingsIndicator).setBackgroundColor(if (settingsOpen) active else inactive)
     }
 
     override fun onBackPressed() {
