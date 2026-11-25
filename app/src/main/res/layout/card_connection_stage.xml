@@ -90,20 +90,6 @@
         android:textSize="11sp" />
 
     <TextView
-        android:id="@+id/stageVideo"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="5dp"
-        android:textSize="11sp" />
-
-    <TextView
-        android:id="@+id/stageAudio"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="5dp"
-        android:textSize="11sp" />
-
-    <TextView
         android:id="@+id/stageTiming"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

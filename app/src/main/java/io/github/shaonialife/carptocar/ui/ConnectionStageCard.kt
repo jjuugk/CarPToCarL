@@ -23,8 +23,6 @@ class ConnectionStageCard(root: View) {
     private val control: TextView = root.findViewById(R.id.stageControl)
     private val channels: TextView = root.findViewById(R.id.stageChannels)
     private val display: TextView = root.findViewById(R.id.stageDisplay)
-    private val video: TextView = root.findViewById(R.id.stageVideo)
-    private val audio: TextView = root.findViewById(R.id.stageAudio)
     private val timing: TextView = root.findViewById(R.id.stageTiming)
     private val tcp: TextView = root.findViewById(R.id.stageTcp)
 
@@ -89,21 +87,6 @@ class ConnectionStageCard(root: View) {
             (s.displaySize ?: "待获取") to neutral,
             "   ·   视频输出 " to neutral,
             (s.videoFormat ?: "待写出") to if (s.videoFormat != null) success else neutral,
-        )
-        facts(
-            video,
-            "视频 " to neutral,
-            (if (s.writtenFrames > 0) "${s.writtenFrames}帧写出" else "等待首帧") to
-                if (s.writtenFrames > 0) success else neutral,
-            " / 来源 ${s.sourceFrames}   ·   进入 ${s.uiRequests} / 重建 ${s.screenRebuilds}" to neutral,
-        )
-        facts(
-            audio,
-            "音频 " to neutral,
-            (if (s.audioPackets > 0) "${s.audioPackets}包写出" else "等待音频包") to
-                if (s.audioPackets > 0) success else neutral,
-            " / " to neutral,
-            "非零PCM ${s.signalPackets}包" to if (s.signalPackets > 0) success else neutral,
         )
         val timingOk = s.timingRequests > 0 && s.timingReplies == s.timingRequests
         facts(
