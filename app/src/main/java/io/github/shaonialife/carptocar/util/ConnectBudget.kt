@@ -62,6 +62,9 @@ class ConnectBudget(
     /** 本轮是否有进行中的计时（未 [begin] 时一切记录为空操作）。 */
     val isActive: Boolean get() = synchronized(lock) { active }
 
+    /** 当前阶段（连接阶段卡片只读；未 begin 时为 null）。 */
+    val currentStage: ConnectStage? get() = synchronized(lock) { current?.stage }
+
     /** 开始一轮连接。[note] 写清触发来源（0x5703 / 0x4301 / 解冻恢复…）。 */
     fun begin(note: String) {
         synchronized(lock) {

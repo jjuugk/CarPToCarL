@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.airplay
 
+import android.os.SystemClock
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 
@@ -23,11 +24,31 @@ class TimingServer(
     private var running = false
 
     /** 收到的 timesync 请求计数（诊断：车机是否真的来同步媒体时钟）。 */
-    private var syncRequests = 0L
+    @Volatile private var syncRequests = 0L
     private var lastSyncLogAt = 0L
+
+    /** 实际发出去的应答数；请求数 - 应答数 = 还没回完/回失败的包。 */
+    @Volatile private var syncReplies = 0L
+    @Volatile private var lastReplyAtMs = 0L
+    @Volatile private var sendErrors = 0L
 
     /** 非 timesync 包计数（诊断：有没有别的 UDP 报文打到这个端口）。 */
     private var unexpected = 0L
+
+    /** 连接阶段卡片用的只读快照（读到的是某一瞬间，不保证请求/回包同帧一致）。 */
+    data class Stats(
+        val requests: Long,
+        val replies: Long,
+        val lastReplyAgeMs: Long?,
+        val sendErrors: Long,
+    )
+
+    fun snapshot(): Stats = Stats(
+        requests = syncRequests,
+        replies = syncReplies,
+        lastReplyAgeMs = if (lastReplyAtMs == 0L) null else SystemClock.elapsedRealtime() - lastReplyAtMs,
+        sendErrors = sendErrors,
+    )
 
     val port: Int get() = socket?.localPort ?: 0
 
@@ -81,7 +102,10 @@ class TimingServer(
             }
             try {
                 s.send(DatagramPacket(response, response.size, packet.address, packet.port))
+                syncReplies++
+                lastReplyAtMs = SystemClock.elapsedRealtime()
             } catch (_: Exception) {
+                sendErrors++
             }
         }
     }

@@ -3172,3 +3172,7 @@ class MainActivity : AppCompatActivity() {
         if (SessionController.ssidSink === ssidSink) SessionController.ssidSink = null
     }
 }
+import io.github.shaonialife.carptocar.ui.ConnectionStageCard
+    /** 连接阶段卡片（只读快照，沿用英雄卡的 1s tick 刷新）。 */
+    private lateinit var connectionStageCard: ConnectionStageCard
+        connectionStageCard = ConnectionStageCard(findViewById(R.id.connectionStageCard))

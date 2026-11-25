@@ -1879,3 +1879,6 @@
         android:textSize="12.5sp"
         android:visibility="gone" />
 </FrameLayout>
+            <!-- 连接阶段：参考 hypercar 的实时会话卡片，数据来自 SessionController -->
+            <include layout="@layout/card_connection_stage" />
+

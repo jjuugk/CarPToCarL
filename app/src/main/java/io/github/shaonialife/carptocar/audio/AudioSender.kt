@@ -276,6 +276,13 @@ class AudioSender(
     private var packetsSent = 0L
     private var bytesSent = 0L
 
+    /** 有非零样本的 PCM 包数（连接阶段卡片用；AAC 通路不统计，保持 0）。 */
+    @Volatile private var signalPackets = 0L
+
+    /** 连接阶段卡片实时读取，只在 UI 线程调用。 */
+    val packetsSentTotal: Long get() = packetsSent
+    val nonSilentPacketsTotal: Long get() = signalPackets
+
     /**
      * 非阻塞发送时因内核缓冲满而丢掉的包数（2026-11-17）。
      * 丢包是**预期行为**：车机暂停/拥塞时不消费，晚到的包毫无意义；丢掉保住节拍，
@@ -1346,6 +1353,7 @@ class AudioSender(
                     return true // 不是链路断，别 stop——丢包是预期行为
                 }
                 packetsSent++
+                if (codec == AudioCodec.PCM && payload.any { it != 0.toByte() }) signalPackets++
                 bytesSent += wire.size
                 resetSendFailures()
                 return true

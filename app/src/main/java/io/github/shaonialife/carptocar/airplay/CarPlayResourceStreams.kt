@@ -62,9 +62,13 @@ internal class CarPlayResourceStreams(
 
     // 诊断计数（只在工作线程上读写）：一轮会话里「让屏 → 等 → 起流 → 又被抢」到底循环了几次、
     // 每次送流实际活了多久。没有这两个数就只能靠人工比对时间戳，且看不出「越抢越快」。
-    private var screenLosses = 0
-    private var screenResumes = 0
+    @Volatile private var screenLosses = 0
+    @Volatile private var screenResumes = 0
     private var streamStartedAtMs = 0L
+
+    /** 连接阶段卡片只读：让屏次数 / 重新起流次数（工作线程写，UI 每 1s 取一次）。 */
+    val screenLossCount: Int get() = screenLosses
+    val screenResumeCount: Int get() = screenResumes
     private var waitStartedAtMs = 0L
     /** 仅在导航流不可用且跳过借用时记录一次，避免每条播报包刷屏。 */
     private var navBorrowSkippedLogged = false

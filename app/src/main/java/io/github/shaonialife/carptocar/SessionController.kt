@@ -8069,3 +8069,48 @@ internal fun pairingFallback(
     val usePlainSession = !pairingForbidden && (pairingUnsupported || attemptedPairing)
     return PairingFallback(useBtRetireHack = useBtRetireHack, usePlainSession = usePlainSession)
 }
+import io.github.shaonialife.carptocar.session.ConnectionStageSnapshot
+    /**
+     * 首页「连接阶段」卡片的一次只读取样（每 1s 由 MainActivity 调用）。
+     *
+     * 这里只集合已经存在的事实，不改任何会话状态：
+     *  - RECORD / SETUP / 归属取当前 AirPlayClient；
+     *  - 视频帧取 VideoSender 与 CarLife 引擎已送达帧；
+     *  - 计时取 TimingServer 的请求/应答计数；
+     *  - TCP 的 ack/队列/重传本机无采样，卡片显示「—」而不是伪造 0。
+     */
+    fun connectionStageSnapshot(): ConnectionStageSnapshot {
+        val client = currentClient
+        val video = videoSender
+        val audio = audioSender
+        val timing = client?.timingStats
+        val carW = activeCarWidth
+        val carH = activeCarHeight
+        val streamW = activeStreamWidth
+        val streamH = activeStreamHeight
+        return ConnectionStageSnapshot(
+            active = isSessionEstablished() || sessionStarting,
+            hint = phaseHint ?: (connectBudget.currentStage?.label ?: "尚未发起连接"),
+            stage = connectBudget.currentStage?.label ?: if (isStreaming()) "推流中" else "空闲",
+            recordAccepted = client?.recordAccepted == true,
+            resourcesAccepted = client?.wasSessionEstablished == true,
+            controlReady = client?.controlSessionAlive == true,
+            wifiReady = BtSessionGate.iap2Ready || client?.sessionEstablished == true ||
+                wifiConnector?.currentNetwork != null && video?.isRunning == true,
+            videoChannelReady = video?.isRunning == true,
+            audioChannelReady = audio?.isRunning == true,
+            screenOwnedByPhone = client?.phoneOwnsScreen,
+            displaySize = if (carW > 0 && carH > 0) "${carW}×${carH}" else null,
+            videoFormat = if (streamW > 0 && streamH > 0) "${streamW}×${streamH} H.264" else null,
+            writtenFrames = video?.framesSentTotal ?: 0L,
+            sourceFrames = CarLifeHijack.framesDelivered,
+            uiRequests = resourceStreams?.screenLossCount?.toLong() ?: 0L,
+            screenRebuilds = resourceStreams?.screenResumeCount?.toLong() ?: 0L,
+            audioPackets = audio?.packetsSentTotal ?: 0L,
+            signalPackets = audio?.nonSilentPacketsTotal ?: 0L,
+            timingRequests = timing?.requests ?: 0L,
+            timingReplies = timing?.replies ?: 0L,
+            timingReplyAgeMs = timing?.lastReplyAgeMs,
+        )
+    }
+

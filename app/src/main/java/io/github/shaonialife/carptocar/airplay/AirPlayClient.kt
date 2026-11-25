@@ -4920,3 +4920,9 @@ class AirPlayClient(
  * 其余失败（端口未开等）保持快速轮询等邀请。
  */
 internal fun pairingRetryBackoffMs(failureMessage: String): Long = if (failureMessage.contains("403")) 5_000L else 500L
+    /** 连接阶段卡片只读：车机 timesync 请求/应答统计。 */
+    val timingStats: TimingServer.Stats get() = timingServer.snapshot()
+
+    /** 连接阶段卡片只读：RECORD 是否拿到过 200（跳过重复 RECORD 也视为已激活）。 */
+    val recordAccepted: Boolean get() = recordedAtMs > 0L
+
