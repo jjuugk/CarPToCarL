@@ -1155,6 +1155,10 @@
                         android:id="@+id/tabHomeLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:drawableStart="@drawable/ic_car"
+                        android:drawablePadding="7dp"
+                        android:drawableTint="@color/m3_on_var"
+                        android:gravity="center_vertical"
                         android:text="首页"
                         android:textColor="@color/m3_primary"
                         android:textSize="12.5sp"
@@ -1167,6 +1171,12 @@
                         android:layout_marginTop="5dp"
                         android:background="@color/m3_primary" />
                 </LinearLayout>
+
+                <View
+                    android:layout_width="1dp"
+                    android:layout_height="28dp"
+                    android:layout_gravity="center_vertical"
+                    android:background="#1AFFFFFF" />
 
                 <LinearLayout
                     android:id="@+id/tabSettings"
@@ -1182,6 +1192,10 @@
                         android:id="@+id/tabSettingsLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:drawableStart="@drawable/ic_menu_display"
+                        android:drawablePadding="7dp"
+                        android:drawableTint="@color/m3_on_var"
+                        android:gravity="center_vertical"
                         android:text="设置"
                         android:textColor="@color/m3_on_var"
                         android:textSize="12.5sp"
