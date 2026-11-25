@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置页「仪表导航」子分组：视觉合并四项开关，逻辑与 ID 保持独立 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#11191B" />
+    <corners android:radius="16dp" />
+    <stroke android:width="1dp" android:color="#247EDCE6" />
+</shape>
