@@ -33,7 +33,7 @@
 ### 下载与安装
 
 > **[`CarPToCarL-1.2.89.apk`](https://github.com/jjuugk/CarPToCarL/releases/download/v1.2.89/CarPToCarL-1.2.89.apk)**
-> —— 主线固定直链（13.6 MB）。刻意不用 `releases/latest`：那个指针按发布时间算，
+> —— 主线固定直链（13.7 MB）。刻意不用 `releases/latest`：那个指针按发布时间算，
 > `-switchpool` 分支包一发布就会把它抢走，主线的 `latest` 直链随之 404。
 
 | 项 | 值 |
