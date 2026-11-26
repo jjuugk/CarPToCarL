@@ -1214,7 +1214,7 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 连接准备 ----
         // 启动后自动连接：默认开启。打开 App 即发起连接，不必每次点英雄卡；
-        // 需要在连之前改「下次连接起效」的项（分辨率缩放 / CarLife 劫持开关）时关掉它。
+        // 需要在连之前改「下次连接起效」的项（CarLife 劫持开关）时关掉它。
         //
         // 只有一个开关，就在「连接准备」卡里。顶部标题栏那个快捷开关已按用户要求移除
         // （2026-11-14：加了之后嫌顶部多一块，还是回卡片里）。
@@ -1608,7 +1608,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.settingsPage).visibility = View.VISIBLE
         findViewById<View>(R.id.topBar).visibility = View.GONE
         applyTabState()
-        log("UI: 进入设置页（显示 / 连接实验 / 流分辨率）")
+        log("UI: 进入设置页（显示 / 连接实验）")
     }
 
     private fun closeSettings() {
@@ -2239,76 +2239,6 @@ class MainActivity : AppCompatActivity() {
             SessionController.requestAudioRestart("界面按钮「立即重启一次」")
             snack("正在重启音频…（结果见日志 AUDIO: 行）")
         }
-
-        // 流分辨率缩放（30%–160%，步进 5；下次连接起效）
-        val scaleSeek = findViewById<SeekBar>(R.id.displayScaleSeek)
-        val scaleValue = findViewById<TextView>(R.id.displayScaleValue)
-        val scaleNote = findViewById<TextView>(R.id.displayScaleNote)
-
-        fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
-
-        fun percentOf(progress: Int) = DisplayPrefs.SCALE_MIN + progress * DisplayPrefs.SCALE_STEP
-
-        val saved = DisplayPrefs.scalePercent(ctx)
-        scaleSeek.progress = progressOf(saved)
-        scaleValue.text = "$saved%"
-
-        fun refreshScaleNote() {
-            val runningNow = SessionController.videoSender?.isRunning == true
-            val percent = DisplayPrefs.scalePercent(ctx)
-            // 百分比单独摆着没有信息量：顺手换算成像素（与 SessionController 同一套
-            // 偶数对齐、最小边限制），用户一眼能看出「120% 到底是多少」。
-            val car =
-                if (runningNow && SessionController.activeCarWidth > 0) {
-                    SessionController.activeCarWidth to SessionController.activeCarHeight
-                } else {
-                    DisplayPrefs.lastSession(ctx)?.let { it.carWidth to it.carHeight }
-                }
-            val mapped =
-                car?.let { (w, h) ->
-                    val sw = ((w * percent / 100f).toInt().coerceAtLeast(320) / 2) * 2
-                    val sh = ((h * percent / 100f).toInt().coerceAtLeast(180) / 2) * 2
-                    "$percent% ≈ ${sw}×$sh"
-                }
-            scaleNote.text =
-                when {
-                    runningNow ->
-                        "保存后下次连接起效；当前连接按 ${SessionController.activeScalePercent}% 运行" +
-                            (mapped?.let { "（$it）" } ?: "") +
-                            // 直通模式下码流尺寸是 CarLife 引擎说了算，缩放只影响本地虚拟屏：
-                            // 不点明的话，这行的像素换算会被当成「实际在推的分辨率」。
-                            if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
-                                " · 直通码流由引擎定"
-                            } else {
-                                ""
-                            }
-                    mapped != null -> "保存后下次连接起效 · $mapped"
-                    else -> "保存后下次连接起效"
-                }
-        }
-        refreshScaleNote()
-
-        scaleSeek.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean,
-                ) {
-                    if (!fromUser) return
-                    scaleValue.text = "${percentOf(progress)}%"
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val percent = percentOf(scaleSeek.progress)
-                    DisplayPrefs.setScalePercent(ctx, percent)
-                    snack("分辨率 $percent% 已保存，下次连接起效")
-                    refreshScaleNote()
-                }
-            },
-        )
 
         // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
 

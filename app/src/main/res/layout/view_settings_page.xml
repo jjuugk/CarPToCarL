@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 设置页：2026-11-25 从首页拆出「显示 / 连接实验 · 排查用 / 流分辨率」三块。
-     所有控件 ID 保持不变，MainActivity 里原有的绑定与点击逻辑无需改动。 -->
+<!-- 设置页：2026-11-25 从首页拆出「显示 / 连接实验 · 排查用」两块。
+     流分辨率缩放 2026-11-26 移除：直通模式下码流尺寸由 CarLife 引擎决定，车机画布
+     取 /info 通告值，缩放滑条对视频流没有实际作用（只剩非劫持兜底路径和 UI 文案）。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/settingsRoot"
@@ -45,10 +46,9 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
 
-            <!-- 设置页内容（2026-11-25 从首页移入）：显示 / 连接实验 / 流分辨率。
-            原注释：
-                 本地 CarLife 劫持开关 + 流分辨率缩放 + 触摸注入节流
-                 （目标帧率设置已移除：固定 60fps，见 DisplayPrefs.FPS） -->
+            <!-- 设置页内容（2026-11-25 从首页移入）：显示 / 连接实验。
+                 本地 CarLife 劫持开关 + 音频重启手势 + 触摸域自适应
+                 （目标帧率、流分辨率缩放均已移除：帧率跟随 /info，分辨率由引擎与车机画布决定） -->
             <LinearLayout
                 android:id="@+id/displayCard"
                 android:layout_width="match_parent"
@@ -99,7 +99,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="分辨率缩放 · 音频重启手势 · 劫持开关"
+                            android:text="音频重启手势 · 劫持开关"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
@@ -1019,50 +1019,6 @@
                     android:textColor="@color/m3_primary"
                     android:textSize="12sp"
                     android:textStyle="bold" />
-
-                <!-- 流分辨率缩放 -->
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="流分辨率"
-                    android:textColor="@color/m3_on_surface"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <SeekBar
-                        android:id="@+id/displayScaleSeek"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:max="26" />
-
-                    <TextView
-                        android:id="@+id/displayScaleValue"
-                        android:layout_width="52dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:gravity="end"
-                        android:text="100%"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/displayScaleNote"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="保存后下次连接起效"
-                    android:textColor="@color/m3_on_var"
-                    android:textSize="12sp" />
 
                 <!-- 车机分辨率（只读）：来自车机 AirPlay /info，没连接时显示上次会话的快照 -->
                 <TextView

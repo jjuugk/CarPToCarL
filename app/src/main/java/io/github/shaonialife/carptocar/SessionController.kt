@@ -1846,10 +1846,6 @@ object SessionController {
 
     // ---- 「显示」运行时生效值（会话建立时快照；英雄卡展示运行时值而非偏好值）----
 
-    /** 本会话流分辨率缩放百分比（按车机分辨率的百分比生成；100=原尺寸）。 */
-    @Volatile
-    var activeScalePercent: Int = 100
-
     /**
      * 本会话目标帧率：车机 `/info displays[0].maxFPS` 有值就跟随，没声明按 60
      * （判定见 [StreamFps]）。会话建立前是 60，SETUP 之后才是最终值。
@@ -7552,33 +7548,18 @@ object SessionController {
                                 // - Connection reset` 同一毫秒）。故先建 VideoSender 并
                                 // openDataPort()，再协商音频，最后 RECORD + 启动编码器。
                                 var initialScreenAttached = false
-                                var pendingVideoW = 0
-                                var pendingVideoH = 0
-                                var pendingVideoDensity = 0
                                 if (host != null) {
-                                    // 「显示」偏好：流画布/虚拟屏按车机分辨率百分比生成。
-                                    // 只在会话建立时生效——编码器与虚拟屏尺寸此时定型；
-                                    // 密度同步缩放，逻辑布局（dp）与 100% 完全一致。
-                                    val scalePct =
-                                        appContext
-                                            ?.let {
-                                                DisplayPrefs
-                                                    .scalePercent(it)
-                                            } ?: 100
-                                    val scale = scalePct / 100f
-                                    // 缩放后向下对齐偶数（H.264 要求）：虚拟屏/合成器/编码器
-                                    // 三方必须同一尺寸，故在源头对齐（VideoSender 内另有兜底）
-                                    val streamW =
-                                        ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
-                                    val streamH =
-                                        ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
+                                    // 申请尺寸 = 车机 /info 通告画布，偶数对齐（H.264 要求）。
+                                    // 直通模式下真正的码流由 CarLife 引擎决定，这里只是申请值；
+                                    // 非劫持兜底路径才用它当构造尺寸。2026-11-26 移除缩放滑条：
+                                    // 缩放值不影响画布声明、不影响码流，只是历史遗留。
+                                    val streamW = ((setup.displayWidth.coerceAtLeast(320)) / 2) * 2
+                                    val streamH = ((setup.displayHeight.coerceAtLeast(180)) / 2) * 2
                                     // 目标帧率：车机 `/info displays[0].maxFPS` 说了算，
                                     // 车机没声明按 60（判定见 video/StreamFps.kt）。
                                     val sessionTargetFps = StreamFps.resolve(setup.maxFps)
-                                    activeScalePercent = scalePct
                                     activeTargetFps = sessionTargetFps
-                                    // 记录「车机通告分辨率」原值：英雄卡与「显示」卡片要如实
-                                    // 展示它，而不是只显示缩放百分比（用户根本看不出画布多大）。
+                                    // 记录「车机通告分辨率」原值：英雄卡与「显示」卡片如实展示。
                                     activeCarWidth = setup.displayWidth
                                     activeCarHeight = setup.displayHeight
                                     activeCarResolutionFromCar = setup.displayFromCar
@@ -7596,17 +7577,6 @@ object SessionController {
                                             setup.displayHeight,
                                         )
                                     }
-                                    pendingVideoW = streamW
-                                    pendingVideoH = streamH
-                                    // dock 屏密度随画布短边等比（设计基准 1160×540@420dpi，
-                                    // 见 design/launcher-proto.html：dock 48dp=126px）：高分辨率
-                                    // 车机（测试台 2320×1080=2×）下 dock 文字/图标与奥迪同比例
-                                    // 放大——此前固定 420dpi，dock 相对画布减半显小（2026-10-17）。
-                                    // 上限 4×（4K 级画布）。
-                                    pendingVideoDensity =
-                                        (420f * minOf(streamW, streamH) / 540f)
-                                            .toInt()
-                                            .coerceIn(120, 1680)
                                     // 直通模式下码流分辨率由 CarLife 决定（默认 1280×720，引擎
                                     // 白名单还会把非标尺寸降档）：这里的构造值只是**兜底**，
                                     // VideoConfig 真正声明的是车机画布（见 canvasSize），
@@ -7634,7 +7604,7 @@ object SessionController {
                                             } else {
                                                 "（车机未通告·手机横屏兜底）"
                                             }) +
-                                            " → 流 ${streamOutW}×${streamOutH}（$scalePct%）" +
+                                            " → 流 ${streamOutW}×${streamOutH}" +
                                             "@${sessionTargetFps}fps（${StreamFps.describe(setup.maxFps)}）",
                                     )
                                     if (streamOutW != streamW || streamOutH != streamH) {
