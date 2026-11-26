@@ -6,11 +6,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import io.github.shaonialife.carptocar.airplay.FeatureTrimOption
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioQueueOption
 import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
+import io.github.shaonialife.carptocar.iap2.MfiCertBytesOption
+import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
+import io.github.shaonialife.carptocar.session.VideoReadyGateOption
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.video.FirstFramePolicy
@@ -41,6 +45,16 @@ class SenderApp : Application() {
         AudioCompatExperiment.load(this)
         // 音频队列治理（默认关，音频卡顿时可开启尝试）：建音频流时读一次
         AudioQueueOption.load(this)
+        // 三项协议实验（都默认关）：
+        //  - 视频真送达才算本轮连上（黑屏假成功时不再清零重连计数）
+        //  - MFi 挑战长度按证书参数字节兜底（OID 识别不出时才用）
+        //  - SETUP 特征位裁剪（去掉 7 项无实现的能力）
+        VideoReadyGateOption.load(this)
+        MfiCertBytesOption.load(this)
+        FeatureTrimOption.load(this)
+        // 媒体卡片导航刷新的策略（间隔默认 3 秒 + 相同箭头图不换编号）：
+        // 只在发帧时读当前值，改设置立即生效
+        NavCardRefreshOption.load(this)
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，
         // 原因见 SessionTrace 注释（报文量大会挤掉过程日志）。必须在业务起来之前 attach。
         SessionTrace.attach(this)

@@ -2276,6 +2276,15 @@ class AirPlayClient(
      */
     var onAudioUnderflow: (() -> Unit)? = null
 
+    /**
+     * 「能力清单已按 [FeatureTrimOption] 裁剪」只报一次（每个 client 实例一次）。
+     *
+     * SETUP 会为屏幕 / 音频 / 隧道各发一次，同一个裁剪结果没必要打三遍；但本轮到底裁没裁
+     * 必须能从日志里查——否则排查「连上后某个功能半开」时无法确认是不是这项在起作用。
+     */
+    @Volatile
+    private var featureTrimLogged = false
+
     /** 上一次 feedback 的音频流时钟（按 streamConnectionID 隔离，避免多流串台）。 */
     private val feedbackClocks = HashMap<Long, FeedbackClock>()
 
@@ -4762,6 +4771,15 @@ class AirPlayClient(
         /** false = 未配对/未加密会话：必须显式带 `et=NONE`（catplay do_initial_setup 同款）。 */
         encrypted: Boolean = true,
     ): ByteArray {
+        // 实验开关：裁掉无实现路径的扩展能力（默认关 → 原样返回 14 项同一列表）。
+        val offeredFeatures = FeatureTrimOption.apply(CONTROLLER_FEATURES)
+        if (FeatureTrimOption.enabled && !featureTrimLogged) {
+            featureTrimLogged = true
+            log(
+                "AIRPLAY: 能力清单精简 ${CONTROLLER_FEATURES.size} → ${offeredFeatures.size} 项（去掉 " +
+                    CONTROLLER_FEATURES.filterNot { it in offeredFeatures }.joinToString("/") + "）",
+            )
+        }
         val fields =
             linkedMapOf<String, Any?>(
                 "deviceID" to deviceId,
@@ -4793,7 +4811,9 @@ class AirPlayClient(
                 "statsCollectionEnabled" to true,
                 "updateSessionRequest" to false,
                 "keepAliveLowPower" to true,
-                "features" to CONTROLLER_FEATURES,
+                // 车机侧 `enabledFeatures = 车机支持 ∩ 手机提议`，多提会让它按「你会」开分支，
+                // 再发来我们不会处理的报文——那是静默失效，比直接 400 难查。
+                "features" to offeredFeatures,
             )
         if (!encrypted) {
             // AirPlayEncryptionType::NONE = 1<<0（catplay 未走 /pair-setup 时的降级值）。

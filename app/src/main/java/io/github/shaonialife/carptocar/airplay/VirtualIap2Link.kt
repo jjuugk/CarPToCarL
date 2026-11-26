@@ -920,6 +920,15 @@ class VirtualIap2Link(
                     mfiRecognizedLength = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.recognize(certificate)
                     if (mfiRecognizedLength != null) {
                         log("IAPLINK: 隧道 MFi 证书识别 → 首选 ${mfiRecognizedLength}B（协议核 OID 规则；失败自动回退试探）")
+                    } else if (io.github.shaonialife.carptocar.iap2.MfiCertBytesOption.enabled) {
+                        val fallback =
+                            io.github.shaonialife.carptocar.iap2.MfiCertificateLength.fallbackByParamBytes(certificate.size)
+                        mfiRecognizedLength = fallback
+                        log(
+                            "IAPLINK: 隧道 MFi 证书无可识别 OID → 按参数总长 " +
+                                "${certificate.size + io.github.shaonialife.carptocar.iap2.MfiCertificateLength.PARAM_HEADER_BYTES}B " +
+                                "兜底首选 ${fallback}B（猜错自动回退）",
+                        )
                     }
                     startNextMfiChallengeLocked()
                 } else {

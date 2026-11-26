@@ -705,6 +705,14 @@ class Iap2SenderSession(
         mfiRecognizedLength = MfiCertificateLength.recognize(certDer)
         if (mfiRecognizedLength != null) {
             log("iap2 MFi 证书识别 → 首选 ${mfiRecognizedLength}B（协议核 OID 规则；失败自动回退试探）")
+        } else if (MfiCertBytesOption.enabled) {
+            // 证书里没有 Apple 私有 OID（新车型 / 非标准配件常见）：按参数总长粗判一个首猜，
+            // 同样只插队首、猜错自动回退——避免首连盲试 3+6+3 秒。
+            mfiRecognizedLength = MfiCertificateLength.fallbackByParamBytes(certDer.size)
+            log(
+                "iap2 MFi 证书无可识别 OID → 按参数总长 ${certDer.size + MfiCertificateLength.PARAM_HEADER_BYTES}B " +
+                    "兜底首选 ${mfiRecognizedLength}B（>${MfiCertificateLength.CERTIFICATE_PARAM_THRESHOLD_BYTES}→20/否则 32；猜错自动回退）",
+            )
         } else {
             log("iap2 MFi 证书未识别到长度——按原基线+记忆逐档试探")
         }

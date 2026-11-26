@@ -51,6 +51,8 @@ import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
+import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
+import io.github.shaonialife.carptocar.iap2.NavRefreshGate
 import io.github.shaonialife.carptocar.iap2.NmeaAssembler
 import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
@@ -97,9 +99,10 @@ import io.github.shaonialife.carptocar.session.AppStateReporter
 import io.github.shaonialife.carptocar.session.AsyncSessionStop
 import io.github.shaonialife.carptocar.session.CarNightMode
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
+import io.github.shaonialife.carptocar.session.ConnectionStageSnapshot
 import io.github.shaonialife.carptocar.session.ReconnectGate
 import io.github.shaonialife.carptocar.session.SessionAttemptGate
-import io.github.shaonialife.carptocar.session.ConnectionStageSnapshot
+import io.github.shaonialife.carptocar.session.VideoReadyGateOption
 import io.github.shaonialife.carptocar.session.VoiceSessionGate
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
@@ -812,6 +815,42 @@ object SessionController {
             else -> CarLifeHijack.navigationDisplay()
         }
 
+    private val cardGuideLock = Any()
+
+    /** 卡片上「已生效」的导航版本：窗口内所有 0x5001 都复用它（含箭头图编号）。 */
+    @Volatile
+    private var frozenCardGuide: NavigationDisplay.Guide? = null
+
+    private var frozenCardGuideAtMs = 0L
+
+    /**
+     * 媒体卡片用的导航引导（带刷新间隔，2026-11-25）。
+     *
+     * `nowPlayingOverride` 是在**每次构造 `0x5001` 时**被调用的，而媒体进度每秒一条
+     * `0x10036`（见 [pushNowPlayingPosition]）——所以导航箭头与文案也跟着每秒重取一次，
+     * 这条路径原先**完全没有节流**。这里把窗口内的版本冻结住：卡片内容每 N 秒才换一次，
+     * 进度条仍由 `0x5001` 自己每秒推进，不受影响。
+     *
+     * 导航结束（`null`）直通：卡片要立刻退出导航态，不能等窗口。
+     */
+    private fun nowPlayingGuideForCard(): NavigationDisplay.Guide? {
+        val current = nowPlayingGuide()
+        val interval = NavCardRefreshOption.intervalMillis
+        synchronized(cardGuideLock) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (current == null) {
+                frozenCardGuide = null
+                frozenCardGuideAtMs = now
+                return null
+            }
+            val frozen = frozenCardGuide
+            if (interval > 0L && frozen != null && now - frozenCardGuideAtMs < interval) return frozen
+            frozenCardGuide = current
+            frozenCardGuideAtMs = now
+            return current
+        }
+    }
+
     /**
      * CarLife+ 引擎控制通道意外断开（非本进程主动停止，例如手机上强杀引擎进程）。
      * 手机端来不及下发 action=3，如果不主动补一帧 clear，车机会一直保留 HUD 引导，
@@ -960,18 +999,102 @@ object SessionController {
      * （歌名变化 / CarLife 0x10036 进度），纯 CarPlay 场景下高德 1Hz 推诱导时
      * 一个 0x5001 都不会发 —— 仪表箭头在动，媒体卡片一动不动。
      */
-    private fun pushNowPlayingGuide() {
+    private fun pushNowPlayingGuide(force: Boolean = false) {
         // 总闸关着时这条通道不存在，不要制造无意义的发包。
         if (!CarLifeHijack.navigationNowPlayingEnabled) return
         // 影子状态已由 AmapNaviSource.dispatch / CarLifeHuClient 先写入，这里只读。
         val guide = nowPlayingGuide()
         val key = guide?.let { "${it.title}|${it.road}" }
-        if (key == lastPushedGuideKey) return
+        if (key == lastPushedGuideKey) {
+            // 内容没变：之前排过的尾发已经没有意义，撤掉。
+            clearPendingGuidePush()
+            return
+        }
+        val now = android.os.SystemClock.uptimeMillis()
+        navCardGate.intervalMillis = NavCardRefreshOption.intervalMillis
+        // 清卡片（guide == null，导航结束）与尾发帧直通，其余按间隔合并。
+        if (!navCardGate.shouldEmitNow(now, forced = force || guide == null)) {
+            scheduleGuideTailFlush(navCardGate.dueDelayMs(now))
+            return
+        }
         // **只有真的发出去了才记账**：链路未识别 / displayNowPlaying 为空时 push 返回 false，
         // 那时若同样写 lastPushedGuideKey，后续每秒都会被判成「内容未变」而永久跳过——
         // 现象就是仪表箭头在动、媒体卡片一动不动，日志里连一条 0x5001 都没有
         // （2026-11-24 真机实锤：箭头图与文案都没到车机）。
-        if (currentClient?.pushNowPlaying(quiet = true) == true) lastPushedGuideKey = key
+        if (currentClient?.pushNowPlaying(quiet = true) == true) {
+            lastPushedGuideKey = key
+            navCardGate.markEmitted(now)
+            clearPendingGuidePush()
+        }
+    }
+
+    /**
+     * 媒体卡片导航刷新的节流闸门。
+     *
+     * 间隔来自 [NavCardRefreshOption]（默认 3 秒，1–15 秒或「不限」），
+     * 每次发帧时读一次，改设置立即生效、不必重连。
+     */
+    private val navCardGate = NavRefreshGate()
+
+    private val navCardLock = Any()
+
+    /** 待执行的尾发任务（与 10s 导航心跳共用同一个 Timer，不额外起线程）。 */
+    private var navCardTailTask: TimerTask? = null
+
+    /** 窗口内还有一版没发出去。 */
+    @Volatile
+    private var navCardPending = false
+
+    /**
+     * 排一次媒体卡片尾发。
+     *
+     * 为什么必须有：`pushNowPlayingGuide` 是**事件驱动**的（CarLife 0x10030 / 高德 1Hz），
+     * 窗口内最后一次变化之后如果没人再触发，那一版就永远发不出去——卡片的距离数字
+     * 会停在窗口开始那一刻。这里显式定时补发。
+     */
+    private fun scheduleGuideTailFlush(delayMs: Long) {
+        navCardPending = true
+        if (delayMs <= 0L) {
+            flushPendingGuidePush()
+            return
+        }
+        synchronized(navCardLock) {
+            navCardTailTask?.cancel()
+            val task =
+                object : TimerTask() {
+                    override fun run() {
+                        try {
+                            flushPendingGuidePush()
+                        } catch (t: Throwable) {
+                            appendLog(
+                                "CARD: 导航卡片尾发异常，已丢弃本版：" +
+                                    "${t.javaClass.simpleName} ${t.message ?: ""}",
+                            )
+                        }
+                    }
+                }
+            navCardTailTask = task
+            routeGuidanceHeartbeatTimer.schedule(task, delayMs)
+        }
+    }
+
+    private fun flushPendingGuidePush() {
+        synchronized(navCardLock) {
+            navCardTailTask = null
+            if (!navCardPending) return
+            navCardPending = false
+        }
+        if (!isSessionRunning()) return
+        // 重新读一次当前 guide：窗口内它可能又变了几版，这里发的是最新的。
+        pushNowPlayingGuide(force = true)
+    }
+
+    private fun clearPendingGuidePush() {
+        synchronized(navCardLock) {
+            navCardTailTask?.cancel()
+            navCardTailTask = null
+            navCardPending = false
+        }
     }
 
     /**
@@ -985,12 +1108,21 @@ object SessionController {
     @Synchronized
     fun resetNowPlayingDedupe() {
         lastPushedNowPlayingKey = null
+        // 导航卡片的去重键同理，且原先漏了这一条：上一轮推过的「300 米右转」会吞掉
+        // 这一轮完全一样的内容——重连后卡片停在空白，日志里连「补推」都没有。
+        lastPushedGuideKey = null
+        clearPendingGuidePush()
+        navCardGate.reset()
         // 封面同理：新会话是新的车机上下文，编号与缓存都得从头来（车机侧按 id 缓存，
         // 沿用旧 id 会让它直接用缓存、根本不来要图）。
         artworkKey = null
         artworkBytes = null
         artworkId = 0
         navigationArtwork = null
+        // 指纹表同属「上一轮车机上下文」：新会话的编号空间从 1 重新开始，
+        // 留着旧 id 只会让车机按编号去查它根本没有的缓存。
+        navigationArtworks.clear()
+        frozenCardGuide = null
         artworkSeq = 0
         lastEncodedSource = null
         lastEncodedBytes = null
@@ -1032,17 +1164,49 @@ object SessionController {
     @Volatile
     private var navigationArtwork: NavigationArtwork? = null
 
+    /** 箭头图「内容指纹 → 已分配编号」的对照表（同一张图永远同一个编号）。 */
+    private class CachedNavArtwork(
+        val id: Int,
+        val bytes: ByteArray,
+    )
+
+    /** 12 种箭头 × 深色底开关两种状态 = 24，留一倍余量；真超了整表清空重来。 */
+    private val navArtworkCacheMax = 32
+
+    /** 只在 [ensureNavigationArtwork] 的锁内访问。 */
+    private val navigationArtworks = LinkedHashMap<String, CachedNavArtwork>()
+
     @Synchronized
     private fun ensureNavigationArtwork(png: ByteArray): Int {
         // 官方箭头是**纯白透明底 PNG**，浅色媒体卡片上等于隐形。是否转成深底 JPEG
         // 由「转向箭头加深色底」开关决定（默认关：原样发，深色卡片上最好看）。
         val dark = appContext?.let { DisplayPrefs.arrowDarkTile(it) } == true
+        val reuse = NavCardRefreshOption.reuseArtwork
+        // 「相同图片不换编号」（[NavCardRefreshOption.reuseArtwork]，默认开）：
+        // 按**内容指纹**复用编号，而不是只比「最近一张」。只比最近一张有个漏：
+        // 转向 A→B→A 时上一张是 B，A 会被再分配一个新编号，车机为同一张图存两份。
+        // 12 种形状 × 深色底开关两种状态，最多 24 个编号。
+        // 关掉这个开关就每次都分配新编号，车机会重新拉图——用于排查「箭头图不跟着变」，
+        // 代价是图片被反复传输。
+        val fingerprint = "${if (dark) 1 else 0}#${png.size}#${png.contentHashCode()}"
+        if (reuse) {
+            navigationArtworks[fingerprint]?.let { hit ->
+                navigationArtwork = NavigationArtwork(hit.id, hit.bytes, png, dark)
+                return hit.id
+            }
+        }
         val previous = navigationArtwork
-        if (previous != null && previous.darkTile == dark && previous.source.contentEquals(png)) return previous.id
+        if (previous != null && previous.darkTile == dark && previous.source.contentEquals(png)) {
+            return previous.id
+        }
         val converted = if (dark) NavigationIcon.toCardJpeg(png) else png
         val bytes = if (converted.isEmpty()) png else converted
         val id = allocateArtworkId(exclude = artworkId)
         navigationArtwork = NavigationArtwork(id, bytes, png, dark)
+        if (reuse) {
+            if (navigationArtworks.size >= navArtworkCacheMax) navigationArtworks.clear()
+            navigationArtworks[fingerprint] = CachedNavArtwork(id, bytes)
+        }
         return id
     }
 
@@ -2875,6 +3039,7 @@ object SessionController {
     fun statusLine(): String =
         "wifi=${wifiConnector?.currentNetwork != null} " +
             "bt=${bluetoothServer?.isRunning == true} ctrl=${(ctrlAdvertiser?.port ?: -1) > 0}"
+
     /**
      * 首页「连接阶段」卡片的一次只读取样（每 1s 由 MainActivity 调用）。
      *
@@ -2918,7 +3083,6 @@ object SessionController {
             timingReplyAgeMs = timing?.lastReplyAgeMs,
         )
     }
-
 
     /** 会话是否活跃（推出流进程或 BT 任一在跑）。 */
     fun isSessionRunning(): Boolean =
@@ -6111,8 +6275,27 @@ object SessionController {
      * 旧日志在「SETUP 成功」之后就断片了，到底是黑屏、还是 CarLife 没在投，
      * 事后完全无从判断（2026-11-01 日志 090105 就缺这一段）。
      */
+    /**
+     * 本轮会话**第一次**确认车机收到视频帧：置位 [videoReadyThisSession]，
+     * 开关打开时在这里清零重连计数（[VideoReadyGateOption]）。
+     *
+     * 幂等，且只由首帧门调用——它观察的是 `framesDelivered` 相对本会话基准的增长，
+     * 即「帧真的写进了车机数据口」，不是 `VideoSender.isRunning` 那种「起了就算」的判据。
+     */
+    private fun markVideoReady() {
+        if (videoReadyThisSession) return
+        videoReadyThisSession = true
+        if (VideoReadyGateOption.enabled) {
+            reconnectGate.clearAttempt()
+            appendLog("RETRY: ✓ 本轮已确认车机收到画面——重连计数清零（下次断链重新从最短退避起算）")
+        }
+    }
+
     private fun startFirstFrameGate() {        Bg.run("first-frame-gate") {
             videoSessionEnded = false
+            // 门开即「本轮视频尚未就绪」。放在这里而不是各个 attach 点：初次挂屏与主屏归还
+            // 都会重新起这道门，一处重置即可覆盖两条路径。
+            videoReadyThisSession = false
             // 基准取 attach **之前**的累计送达数（videoSessionFrameBase）：缓存回放成功时
             // framesDelivered 在 attach 里已经涨过，若在这里重新取基准，会把「已经回放了画面」
             // 误判成「20s 没帧」，然后用提示帧把真实画面盖掉。
@@ -6121,6 +6304,7 @@ object SessionController {
             val deadline = android.os.SystemClock.uptimeMillis() + budget
             while (android.os.SystemClock.uptimeMillis() < deadline) {
                 if (CarLifeHijack.framesDelivered > base) {
+                    markVideoReady()
                     connectBudget.markStreaming()
                     rememberNetworkEndpoint()
                     return@run
@@ -6141,6 +6325,7 @@ object SessionController {
                 sleepQuietly(250)
             }
             if (CarLifeHijack.framesDelivered > base) {
+                markVideoReady()
                 connectBudget.markStreaming()
                 rememberNetworkEndpoint()
                 return@run
@@ -6660,7 +6845,7 @@ object SessionController {
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
                             created.nowPlayingSource = { buildNowPlaying() }
                             val navigation = NavigationNowPlaying(::buildNowPlaying, ::ensureNavigationArtwork)
-                            created.nowPlayingOverride = { navigation.displayOverride(nowPlayingGuide()) }
+                            created.nowPlayingOverride = { navigation.displayOverride(nowPlayingGuideForCard()) }
                             // 封面字节：iAP2 文件传输（session 12）按 0x5001 里声明的 id 来取图。
                             // 分别按编号查当前箭头和音乐封面，拿不到的旧编号直接丢弃。
                             created.artworkSource = { id ->
@@ -7848,9 +8033,17 @@ object SessionController {
                                     // 零动作就是这么来的）
                                     scheduleConnectRetry("本轮未建立会话")
                                 }
-                            } else {
+                            } else if (VideoReadyGateOption.shouldClearAttempt(videoReadyThisSession)) {
                                 // 起来了：重试计数归零，下次断链重新从 3s 起算
                                 reconnectGate.clearAttempt()
+                            } else {
+                                // 开关打开 + 会话建立但本轮还没有画面送达：先保留失败计数。
+                                // 真出画面时由 startFirstFrameGate 清零；一直黑屏则计数自然累加，
+                                // 退避按 3s→10s→30s 爬升后停下，不再无限重连拖住车机。
+                                appendLog(
+                                    "RETRY: 会话已建立但本轮尚无画面送达——重连计数暂不清零" +
+                                        "（车机真收到首帧后才归零；若这是黑屏假成功，下一轮退避会正常加长）",
+                                )
                             }
                         }
                     }
@@ -8068,6 +8261,18 @@ object SessionController {
      */
     @Volatile
     private var videoSessionFrameBase = 0L
+
+    /**
+     * **本轮会话**是否真的把视频送进了车机通道（[VideoReadyGateOption] 打开时才被使用）。
+     *
+     * 与 `currentClient.wasSessionEstablished`（RECORD 成功）的区别：后者只要 RTSP 回 200
+     * 就为 true，而车机可能一个字节都不消费（奥迪 4580 / 宝马 MGU-81 的黑屏假成功）。
+     * 这里只由首帧门在观察到 `framesDelivered` 相对 [videoSessionFrameBase] 增长时置位。
+     *
+     * 关闭开关时这个字段不参与任何判定，纯粹是摆设。
+     */
+    @Volatile
+    private var videoReadyThisSession = false
 
     /** 本次主屏流重新挂载成功的时刻（`uptimeMillis`；0 = 还没挂过）。只用于日志里的存活时长。 */
     @Volatile

@@ -43,6 +43,30 @@ object MfiCertificateLength {
     private val EXTENSION_MARKERS = intArrayOf(2, 6, 8, 11)
 
     /**
+     * `0xAA01` 证书参数总长阈值（含 4 字节 TLV 参数头），来自 hypercar `MfiChallenge.kt`
+     * （它注释说是 xiap2 的实现：挑战长度由证书**参数总长**决定）。
+     *
+     * 只作为 [recognize] 失败时的兜底首猜，见 [parseParamBytes]。
+     */
+    const val CERTIFICATE_PARAM_THRESHOLD_BYTES = 644
+
+    /** `0xAA01` 参数头长度：len(u16) + id(u16)，与 [Iap2Csm.param] 一致。 */
+    const val PARAM_HEADER_BYTES = 4
+
+    /**
+     * 按证书参数**总字节**猜首选挑战长度（>644 → 20B，否则 32B）。
+     *
+     * 与 [recognize] 的分工：OID 规则精确但只认 Apple 私有扩展；证书里没有那些 OID 时
+     * 返回 null，此时这个粗判能把「首连盲试最坏 12 秒」压到「最多错一档」。
+     *
+     * **只作首选**，调用方必须仍走 [prefer] 的「插队首 + 原顺序回退」语义。
+     *
+     * @param derBytes 证书 DER 本身的字节数（不含参数头）。
+     */
+    fun fallbackByParamBytes(derBytes: Int): Int =
+        if (derBytes + PARAM_HEADER_BYTES > CERTIFICATE_PARAM_THRESHOLD_BYTES) 20 else 32
+
+    /**
      * 从证书 DER 识别首选挑战长度。
      * @return 20 / 32 / 16；`null` = 识别不出来（调用方按原试探顺序走）。
      */

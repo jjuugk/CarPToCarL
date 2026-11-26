@@ -33,10 +33,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.carptocar.airplay.FeatureTrimOption
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioQueueOption
+import io.github.shaonialife.carptocar.iap2.MfiCertBytesOption
 import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
+import io.github.shaonialife.carptocar.session.VideoReadyGateOption
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -2033,6 +2036,59 @@ class MainActivity : AppCompatActivity() {
             refreshQueue()
             snack("音频队列治理：${AudioQueueOption.label}（下次连接起效）")
             log("AUDIO: 队列治理开关切到 ${AudioQueueOption.label}（下次连接起效）")
+        }
+
+        // 三项连接实验（都默认关，都"下次连接起效"）：接线方式与上面一致——
+        // 开关对象持有进程内当前值，点击立刻落盘并刷新文案。
+        val videoReadyRow = findViewById<android.view.View>(R.id.rowVideoReadyGate)
+        val videoReadyValue = findViewById<TextView>(R.id.videoReadyValue)
+        val videoReadyNote = findViewById<TextView>(R.id.videoReadyNote)
+
+        fun refreshVideoReady() {
+            videoReadyValue.text = VideoReadyGateOption.label
+            videoReadyNote.text = VideoReadyGateOption.note
+        }
+
+        refreshVideoReady()
+        videoReadyRow.setOnClickListener {
+            VideoReadyGateOption.save(ctx, !VideoReadyGateOption.enabled)
+            refreshVideoReady()
+            snack("画面送达才算连上：${VideoReadyGateOption.label}（下次连接起效）")
+            log("CONNECT: 画面就绪判据切到 ${VideoReadyGateOption.label}（下次连接起效）")
+        }
+
+        val mfiCertRow = findViewById<android.view.View>(R.id.rowMfiCertBytes)
+        val mfiCertValue = findViewById<TextView>(R.id.mfiCertValue)
+        val mfiCertNote = findViewById<TextView>(R.id.mfiCertNote)
+
+        fun refreshMfiCert() {
+            mfiCertValue.text = MfiCertBytesOption.label
+            mfiCertNote.text = MfiCertBytesOption.note
+        }
+
+        refreshMfiCert()
+        mfiCertRow.setOnClickListener {
+            MfiCertBytesOption.save(ctx, !MfiCertBytesOption.enabled)
+            refreshMfiCert()
+            snack("MFi 证书兜底：${MfiCertBytesOption.label}（下次连接起效）")
+            log("IAP2: MFi 证书字节兜底切到 ${MfiCertBytesOption.label}（下次连接起效）")
+        }
+
+        val featureTrimRow = findViewById<android.view.View>(R.id.rowFeatureTrim)
+        val featureTrimValue = findViewById<TextView>(R.id.featureTrimValue)
+        val featureTrimNote = findViewById<TextView>(R.id.featureTrimNote)
+
+        fun refreshFeatureTrim() {
+            featureTrimValue.text = FeatureTrimOption.label
+            featureTrimNote.text = FeatureTrimOption.note
+        }
+
+        refreshFeatureTrim()
+        featureTrimRow.setOnClickListener {
+            FeatureTrimOption.save(ctx, !FeatureTrimOption.enabled)
+            refreshFeatureTrim()
+            snack("精简能力清单：${FeatureTrimOption.label}（下次连接起效）")
+            log("AIRPLAY: 特征位裁剪切到 ${FeatureTrimOption.label}（下次连接起效）")
         }
 
         // AMcar 式车机麦克风上行（默认关）。
