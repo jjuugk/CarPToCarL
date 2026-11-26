@@ -136,6 +136,9 @@ class AirPlayClient(
      */
     private val timingServer = TimingServer(log)
 
+    /** 连接阶段卡片只读：车机 timesync 请求/应答统计。 */
+    val timingStats: TimingServer.Stats get() = timingServer.snapshot()
+
     /** pair-verify 之后启用：所有后续 RTSP 报文整体加密封装。 */
     private var cipher: ControlCipher? = null
 
@@ -148,6 +151,9 @@ class AirPlayClient(
 
     /** 首次 RECORD 完成的时刻（uptimeMillis）；0 = 本轮还没 RECORD。 */
     @Volatile private var recordedAtMs: Long = 0L
+
+    /** 连接阶段卡片只读：RECORD 是否拿到过 200（跳过重复 RECORD 也视为已激活）。 */
+    val recordAccepted: Boolean get() = recordedAtMs > 0L
 
     /** 「Restoring LUM」初始接管只豁免一次，之后真让屏照常处理。 */
     @Volatile private var initialScreenTakeoverIgnored = false
@@ -4920,9 +4926,3 @@ class AirPlayClient(
  * 其余失败（端口未开等）保持快速轮询等邀请。
  */
 internal fun pairingRetryBackoffMs(failureMessage: String): Long = if (failureMessage.contains("403")) 5_000L else 500L
-    /** 连接阶段卡片只读：车机 timesync 请求/应答统计。 */
-    val timingStats: TimingServer.Stats get() = timingServer.snapshot()
-
-    /** 连接阶段卡片只读：RECORD 是否拿到过 200（跳过重复 RECORD 也视为已激活）。 */
-    val recordAccepted: Boolean get() = recordedAtMs > 0L
-
