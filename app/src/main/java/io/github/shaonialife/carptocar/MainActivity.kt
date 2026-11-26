@@ -33,6 +33,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.carptocar.airplay.AudioFirstOption
 import io.github.shaonialife.carptocar.airplay.FeatureTrimOption
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
@@ -41,6 +42,7 @@ import io.github.shaonialife.carptocar.iap2.MfiCertBytesOption
 import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
 import io.github.shaonialife.carptocar.session.VideoReadyGateOption
 import io.github.shaonialife.carptocar.bt.AppUiPresence
+import io.github.shaonialife.carptocar.bt.BtAudioHoldOption
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
@@ -105,6 +107,12 @@ class MainActivity : AppCompatActivity() {
 
         /** 「启动连接」被门禁拦下时的视觉强度（不透明度）。 */
         const val CTA_BLOCKED_ALPHA = 0.45f
+
+        /** 可发现时长（秒）：系统上限 300，覆盖一次完整的配对+建链。 */
+        const val DISCOVERABLE_DURATION_SECONDS = 300
+
+        /** 两次「请求可发现」之间的最短间隔（ms）：同一进程里连点「启动连接」不重复弹框。 */
+        const val DISCOVERABLE_REQUEST_INTERVAL_MS = 120_000L
     }
 
     private lateinit var deviceSubtitle: TextView
@@ -870,7 +878,63 @@ class MainActivity : AppCompatActivity() {
             ) {
                 permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
             }
+            // 车机列表能不能看到这台手机：MBUX 的 CarPlay 页只列**本轮扫描结果**，
+            // 而 Android 默认 SCAN_MODE_CONNECTABLE 不回应 inquiry。
+            ensureDiscoverableForCarPlay()
             SessionController.startConnection(this)
+        }
+    }
+
+    /** 上一次请求「可发现」的时刻（[SystemClock.elapsedRealtime]）——避免每次握手都弹框。 */
+    private var lastDiscoverableRequestAt = 0L
+
+    /**
+     * 让手机在当前连接轮次内可被发现。
+     *
+     * 2026-11-26 的 MBUX issue：车机「电话 → Apple CarPlay」列表为空，等多久都没有；
+     * `dumpsys bluetooth_manager` 显示 `ScanMode: SCAN_MODE_CONNECTABLE`——Android 默认
+     * 只对**已配对**设备可见，不回应 inquiry；而部分车机（MBUX NTG7）的 CarPlay 列表
+     * 不是「已配对列表」，是本轮扫描结果。手动让手机可发现后，同一列表立刻出现设备。
+     *
+     * 约束：
+     *  - 已经处于可发现状态就不弹框（系统不提供「永久可发现」，每次最长 300 秒）；
+     *  - 同一进程内 2 分钟内只请求一次，避免反复点「启动连接」时连环弹窗；
+     *  - 走系统 `ACTION_REQUEST_DISCOVERABLE`（由设置页执行），不需要应用自己持有
+     *    BLUETOOTH_ADVERTISE；`scanMode` 读取失败（权限/机型差异）时直接跳过。
+     */
+    private fun ensureDiscoverableForCarPlay() {
+        val adapter =
+            runCatching {
+                (getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
+            }.getOrNull() ?: return
+        if (!runCatching { adapter.isEnabled }.getOrDefault(false)) return
+        val alreadyDiscoverable =
+            runCatching { adapter.scanMode }
+                .getOrNull() == android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE
+        if (alreadyDiscoverable) {
+            log("BT: 手机已处于可发现状态——车机列表可以直接扫到")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (lastDiscoverableRequestAt != 0L && now - lastDiscoverableRequestAt < DISCOVERABLE_REQUEST_INTERVAL_MS) {
+            return
+        }
+        lastDiscoverableRequestAt = now
+        runCatching {
+            startActivity(
+                Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(
+                        android.bluetooth.BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,
+                        DISCOVERABLE_DURATION_SECONDS,
+                    ),
+            )
+        }.onSuccess {
+            log(
+                "BT: 已请求蓝牙可发现（${DISCOVERABLE_DURATION_SECONDS}s）——" +
+                    "奔驰 MBUX 等车机的 CarPlay 列表只列本轮扫到的设备",
+            )
+        }.onFailure {
+            log("BT: 请求可发现失败 - ${it.message ?: it.javaClass.simpleName}")
         }
     }
 
@@ -2091,6 +2155,43 @@ class MainActivity : AppCompatActivity() {
             log("AIRPLAY: 特征位裁剪切到 ${FeatureTrimOption.label}（下次连接起效）")
         }
 
+        // 建链期不断开蓝牙音频（默认关）：MBUX 那类「一断就把 ACL 拽掉、配对反复失效」的车机用。
+        // 打开后 BT-GUARD、出站重试、配对后的断开都不再主动断 HFP/A2DP。
+        val btAudioHoldRow = findViewById<android.view.View>(R.id.rowBtAudioHold)
+        val btAudioHoldValue = findViewById<TextView>(R.id.btAudioHoldValue)
+        val btAudioHoldNote = findViewById<TextView>(R.id.btAudioHoldNote)
+
+        fun refreshBtAudioHold() {
+            btAudioHoldValue.text = BtAudioHoldOption.label
+            btAudioHoldNote.text = BtAudioHoldOption.note
+        }
+
+        refreshBtAudioHold()
+        btAudioHoldRow.setOnClickListener {
+            BtAudioHoldOption.save(ctx, !BtAudioHoldOption.enabled)
+            refreshBtAudioHold()
+            snack("建链期不断开蓝牙音频：${BtAudioHoldOption.label}（下次连接起效）")
+            log("BT-GUARD: 「建链期不断开音频配置文件」切到 ${BtAudioHoldOption.label}（下次连接起效）")
+        }
+
+        // 音频优先 · 只发一次 RECORD（默认关）：MBUX 那类「补发 RECORD 就断」的车机用。
+        val audioFirstRow = findViewById<android.view.View>(R.id.rowAudioFirst)
+        val audioFirstValue = findViewById<TextView>(R.id.audioFirstValue)
+        val audioFirstNote = findViewById<TextView>(R.id.audioFirstNote)
+
+        fun refreshAudioFirst() {
+            audioFirstValue.text = AudioFirstOption.label
+            audioFirstNote.text = AudioFirstOption.note
+        }
+
+        refreshAudioFirst()
+        audioFirstRow.setOnClickListener {
+            AudioFirstOption.save(ctx, !AudioFirstOption.enabled)
+            refreshAudioFirst()
+            snack("音频优先（只发一次 RECORD）：${AudioFirstOption.label}（下次连接起效）")
+            log("STREAM: 音频优先开关切到 ${AudioFirstOption.label}（下次连接起效）")
+        }
+
         // AMcar 式车机麦克风上行（默认关）。
         val amcarMicSwitch = findViewById<SwitchCompat>(R.id.switchAmcarMicUplink)
         val amcarMicNote = findViewById<TextView>(R.id.amcarMicUplinkNote)
@@ -2773,21 +2874,29 @@ class MainActivity : AppCompatActivity() {
                 // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
                 // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
                 // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
+                //
+                // 例外：开了「建链期不断开蓝牙音频」（[BtAudioHoldOption]）就一次都不断。
+                // 刚配对完正是链路密钥最脆弱的时候，MBUX 那类车机被断一次就会把 ACL
+                // 一起拽掉、下一轮拿旧密钥加密失败（bond-loss reason: 2）。
                 val app = applicationContext
-                Bg.run("bt-pair-only") {
-                    repeat(2) { attempt ->
-                        val dropped = BtProfiles.disconnect(app, device)
-                        if (dropped.isNotEmpty()) {
-                            log(
-                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
-                                    "（保持仅配对，避免车机拒绝 CarPlay）",
-                            )
-                        }
-                        if (attempt == 0) {
-                            try {
-                                Thread.sleep(1_500)
-                            } catch (_: InterruptedException) {
-                                return@run
+                if (BtAudioHoldOption.enabled) {
+                    log("BT-PAIR: 「建链期不断开音频配置文件」已打开——不做配对后的断开（保持车机自建的 HFP/A2DP）")
+                } else {
+                    Bg.run("bt-pair-only") {
+                        repeat(2) { attempt ->
+                            val dropped = BtProfiles.disconnect(app, device)
+                            if (dropped.isNotEmpty()) {
+                                log(
+                                    "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
+                                        "（保持仅配对，避免车机拒绝 CarPlay）",
+                                )
+                            }
+                            if (attempt == 0) {
+                                try {
+                                    Thread.sleep(1_500)
+                                } catch (_: InterruptedException) {
+                                    return@run
+                                }
                             }
                         }
                     }

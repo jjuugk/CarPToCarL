@@ -819,6 +819,124 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
+                <!-- 建链期不断开蓝牙音频（默认关）：奔驰 MBUX / 刚连上就断的车机尝试打开 -->
+                <LinearLayout
+                    android:id="@+id/rowBtAudioHold"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="建链期不断开蓝牙音频"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/btAudioHoldNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="默认关（原行为）：建链期会断开目标车机的音频配置文件，宝马/别克等车机不打开 iAP2 窗口时需要它。奔驰 MBUX 等「刚连上就断、配对反复失效」的车机，尝试打开此项。下次连接起效。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/btAudioHoldValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_icon_tile"
+                        android:gravity="center"
+                        android:minWidth="56dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:text="关"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginStart="52dp"
+                    android:background="#5A394444" />
+
+                <!-- 音频优先·只发一次 RECORD（默认关）：奔驰 MBUX / 一放音频就断的车机尝试打开 -->
+                <LinearLayout
+                    android:id="@+id/rowAudioFirst"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="音频优先（只发一次 RECORD）"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/audioFirstNote"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="默认关：按车机记忆/自动学习决定顺序（奥迪 MIB3 走「RECORD 优先 + 补发」）。奔驰 MBUX、或一放音频就断的车机，尝试打开此项。下次连接起效。"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/audioFirstValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="30dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_icon_tile"
+                        android:gravity="center"
+                        android:minWidth="56dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:text="关"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <!-- 方向盘语音键三连击 → 重启音频（默认开） -->
                 <View
                     android:layout_width="match_parent"

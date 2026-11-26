@@ -86,12 +86,20 @@ object StreamOrderMemory {
      */
     private val KNOWN_AUDIO_FIRST = listOf("magic-car-link", "jybox", "nbtevo", "nbt-evo")
 
-    /** 纯函数：结论 → 本轮顺序。便于单测，不需要 Context。 */
+    /**
+     * 纯函数：结论 → 本轮顺序。便于单测，不需要 Context。
+     *
+     * [forcedAudioFirst] 来自用户开关（[AudioFirstOption]）：置 true 时**压过**
+     * 型号快路径与本机记忆。之所以要压过记忆，是因为 MBUX 那一类接收端在补发 RECORD
+     * 的同一毫秒就拆链，归因链根本来不及写下结论——不压过就永远学不出来。
+     */
     fun resolve(
         learned: Learned,
         identityText: String,
+        forcedAudioFirst: Boolean = false,
     ): Order =
         when {
+            forcedAudioFirst -> Order.AUDIO_FIRST
             learned == Learned.AUDIO_FIRST -> Order.AUDIO_FIRST
             learned == Learned.RECORD_FIRST -> Order.RECORD_FIRST
             matchesKnown(identityText) -> Order.AUDIO_FIRST
@@ -173,9 +181,11 @@ object StreamOrderMemory {
         order: Order,
         learned: Learned,
         identityText: String,
+        forced: Boolean = false,
     ): String {
         val why =
             when {
+                forced -> "本机开关（音频优先 · 只发一次 RECORD）"
                 learned == Learned.AUDIO_FIRST -> "本机记忆（补发 RECORD 被拒/被拆）"
                 learned == Learned.RECORD_FIRST -> "本机记忆（音频优先时 RECORD 也被拒）"
                 order == Order.AUDIO_FIRST -> "已知型号快路径"

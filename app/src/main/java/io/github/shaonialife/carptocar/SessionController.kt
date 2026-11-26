@@ -7,6 +7,7 @@ import io.github.shaonialife.carptocar.amap.AmapNaviSource
 import io.github.shaonialife.carptocar.amap.brief
 import io.github.shaonialife.carptocar.airplay.AirPlayClient
 import io.github.shaonialife.carptocar.airplay.AirPlayResourceState
+import io.github.shaonialife.carptocar.airplay.AudioFirstOption
 import io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent
 import io.github.shaonialife.carptocar.airplay.CarPlayResourceStreams
 import io.github.shaonialife.carptocar.airplay.FreshAuthPolicy
@@ -27,6 +28,7 @@ import io.github.shaonialife.carptocar.audio.MicUplink
 import io.github.shaonialife.carptocar.audio.NavigationDucking
 import io.github.shaonialife.carptocar.airplay.AirPlaySessionPolicy
 import io.github.shaonialife.carptocar.bt.AudioGuardGate
+import io.github.shaonialife.carptocar.bt.BtAudioHoldOption
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
@@ -2677,6 +2679,18 @@ object SessionController {
      * 收工时把「因为哪个条件停的」写进日志——见 [AudioGuardGate]。
      */
     private fun startAudioProfileGuard() {
+        // 用户开关（[BtAudioHoldOption]，默认关）：打开后建链期完全不碰车机的
+        // HFP/A2DP。2026-11-26 的 MBUX issue：守卫在车机还没连入时反复断配置文件，
+        // 车机把整条 ACL 一起拽掉，HyperOS 在这种异常断链下丢链路密钥，下一轮
+        // 加密失败 → `bond-loss reason: 2`。日志里守卫自己也写着「再踢只会把 ACL
+        // 一起打掉」。做成开关而不是按车型门控：建链早期还拿不到可靠的车型串。
+        if (BtAudioHoldOption.enabled) {
+            appendLog(
+                "BT-GUARD: 「建链期不断开音频配置文件」开关已打开——本轮不盯 HFP/A2DP" +
+                    "（奔驰 MBUX 等连上就断的车机用这个）",
+            )
+            return
+        }
         // 快照必须在起线程前取：否则上一轮残留的 RFCOMM 会被误判成本轮连入。
         val connectCountAtStart = BtSessionGate.controlConnectCount
         guardStopReason(connectCountAtStart)?.let { reason ->
@@ -7761,13 +7775,24 @@ object SessionController {
                                 // 整轮作废。对它们改用「音频优先」——先 SETUP 音频，再一次
                                 // RECORD 同时激活视频+音频。顺序按接收端学，默认不动
                                 // （见 StreamOrderMemory）。
+                                //
+                                // 2026-11-26 再加一个用户开关 [AudioFirstOption]：奔驰 MBUX
+                                // （MB_D-M-6）在补发 RECORD 的同一毫秒就 control EOF，归因链
+                                // 来不及记录，自动学习永远学不出来——这类车机只能由用户显式
+                                // 指定音频优先。开关压过型号快路径与本机记忆。
                                 val receiverIdentity = client.receiverIdentity()
                                 val orderLearned = StreamOrderMemory.readLearned(appContext, receiverIdentity)
+                                val forcedAudioFirst = AudioFirstOption.enabled
                                 val streamOrder =
-                                    StreamOrderMemory.resolve(orderLearned, receiverIdentity)
+                                    StreamOrderMemory.resolve(orderLearned, receiverIdentity, forcedAudioFirst)
                                 appendLog(
                                     "STREAM: 顺序 = " +
-                                        StreamOrderMemory.describe(streamOrder, orderLearned, receiverIdentity),
+                                        StreamOrderMemory.describe(
+                                            streamOrder,
+                                            orderLearned,
+                                            receiverIdentity,
+                                            forcedAudioFirst,
+                                        ),
                                 )
                                 // 会话级 RECORD 只该有一次：对「重复 RECORD 过敏」的接收端，第二次
                                 // RECORD 会让它关掉自己的 AirPlay 服务（宝马 iD6：一放声音车机重启；
@@ -7775,7 +7800,8 @@ object SessionController {
                                 // 快路径，或已经学过「音频优先」。收紧后 AirPlayClient.record() 对后续
                                 // 调用直接返回成功（见 RecordBudget），奥迪 MIB3 不受影响。
                                 val avoidRepeatRecord =
-                                    StreamOrderMemory.matchesKnown(receiverIdentity) ||
+                                    forcedAudioFirst ||
+                                        StreamOrderMemory.matchesKnown(receiverIdentity) ||
                                         orderLearned == StreamOrderMemory.Learned.AUDIO_FIRST
                                 client.restrictSingleRecord = avoidRepeatRecord
                                 if (avoidRepeatRecord) {
@@ -7800,8 +7826,20 @@ object SessionController {
                                     // 音频优先时连第一次 RECORD 都非 200：不是「补发 RECORD 过敏」，
                                     // 记回 RECORD 优先，别把这台接收端永久锁在错误顺序上
                                     // （已知型号快路径也会被这条压过去）。
-                                    StreamOrderMemory.noteRecordFirstForced(appContext, receiverIdentity)
-                                    appendLog("STREAM: 音频优先下首次 RECORD 也非 200——记住该接收端用 RECORD 优先，下一轮回退")
+                                    // 用户开关强制的那一轮不写记忆：开关本身就是显式选择，
+                                    // 写进去会让关掉开关后的下一轮也被这条记忆带走。
+                                    if (forcedAudioFirst) {
+                                        appendLog(
+                                            "STREAM: 音频优先（开关强制）下首次 RECORD 也非 200" +
+                                                "——不改本机记忆；若持续失败请关掉「音频优先」开关",
+                                        )
+                                    } else {
+                                        StreamOrderMemory.noteRecordFirstForced(appContext, receiverIdentity)
+                                        appendLog(
+                                            "STREAM: 音频优先下首次 RECORD 也非 200" +
+                                                "——记住该接收端用 RECORD 优先，下一轮回退",
+                                        )
+                                    }
                                 }
                                 // 补发 assertModes + RECORD：**整段已移除**（2026-11-09）。
                                 //

@@ -2708,8 +2708,15 @@ class AirPlayClient(
         /**
          * 音频延迟兜底值（ms）：车机 /info 的 audioLatencies 里没给 outputLatencyMicros 时用。
          * catplay 注释：AirPlay 推流最低 250ms 才稳定（clamp 32..2000）——兜底取 250。
+         *
+         * 2026-11-26 起**只是兜底**，不再当作硬下限：车机声明多少就报多少
+         * （32..2000 夹一下），见 `latencyFor()`。
          */
         const val AUDIO_LATENCY_FALLBACK_MS = 250L
+
+        /** 车机声明值的合法区间（ms）：低于 32ms 是异常值，高于 2000ms 会拖到车机不等。 */
+        const val AUDIO_LATENCY_MIN_MS = 32L
+        const val AUDIO_LATENCY_MAX_MS = 2_000L
 
         /**
          * AirPlay RTP 音频的压缩类型（SETUP 的 `ct` 字段）。
@@ -3819,10 +3826,18 @@ class AirPlayClient(
                 }?.let { (it[key] as? Number)?.toLong() }
                 ?.takeIf { it > 0 }
                 ?.let { it / 1000 }
-        // 下限 250ms：车机声明的 outputLatencyMicros 只是它自己的输出延迟（实测 35ms），
-        // 拿它当端到端缓冲会让 WiFi 抖动直接变成欠载。catplay 对 AirPlay 镜像同样是
-        // `max(声明值, 250ms)`。
-        return declaredMs?.coerceAtLeast(AUDIO_LATENCY_FALLBACK_MS) ?: AUDIO_LATENCY_FALLBACK_MS
+        // 2026-11-26：**信任车机声明值**，250ms 只当拿不到声明时的兜底。
+        //
+        // 原先无条件 `coerceAtLeast(250)`（catplay 对 AirPlay 镜像取 max(声明值,250)），
+        // 于是车机说 35ms、真 iPhone 发 75ms，我们一律报 250ms。MBUX issue 里这台车
+        // 对不上号的延迟直接判「参数不可接受」——音频 SETUP 后 1~132ms 就 control EOF，
+        // 整轮作废。改成信任声明值后 latency=75/35ms，SETUP 不再被拒。
+        //
+        // 仍有夹取：声明值 <32ms 视为固件报错（低于 AirPlay 单帧时长），>2000ms 会让
+        // 车机等不到首包。两者都夹回区间，而不是回落到兜底——兜底只在**没有**声明时用。
+        return declaredMs
+            ?.coerceIn(AUDIO_LATENCY_MIN_MS, AUDIO_LATENCY_MAX_MS)
+            ?: AUDIO_LATENCY_FALLBACK_MS
     }
 
     /**

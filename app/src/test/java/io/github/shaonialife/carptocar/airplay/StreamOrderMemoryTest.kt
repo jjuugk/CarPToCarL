@@ -119,6 +119,49 @@ class StreamOrderMemoryTest {
     }
 
     @Test
+    fun `用户开关强制音频优先并压过记忆`() {
+        // MBUX 那类接收端在补发 RECORD 的同一毫秒就拆链，归因链来不及写结论，
+        // 自动学习永远学不出来——只能靠用户显式开关，且必须压过已有的 RECORD 优先记忆。
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(
+                StreamOrderMemory.Learned.RECORD_FIRST,
+                "Mercedes-Benz MB_D-M-6",
+                forcedAudioFirst = true,
+            ),
+        )
+        assertEquals(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.resolve(
+                StreamOrderMemory.Learned.NONE,
+                "Mercedes-Benz MB_D-M-6",
+                forcedAudioFirst = true,
+            ),
+        )
+        // 开关关掉时，奔驰仍然走默认的 RECORD 优先（不按品牌写死）。
+        assertEquals(
+            StreamOrderMemory.Order.RECORD_FIRST,
+            StreamOrderMemory.resolve(
+                StreamOrderMemory.Learned.NONE,
+                "Mercedes-Benz MB_D-M-6",
+                forcedAudioFirst = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `开关强制的诊断行要写明依据`() {
+        val line = StreamOrderMemory.describe(
+            StreamOrderMemory.Order.AUDIO_FIRST,
+            StreamOrderMemory.Learned.NONE,
+            "Mercedes-Benz MB_D-M-6",
+            forced = true,
+        )
+        assertTrue("要能一眼看出是开关生效：$line", line.contains("开关"))
+        assertTrue("要写明音频优先：$line", line.contains("音频优先"))
+    }
+
+    @Test
     fun `存储键与音频档位记忆同口径`() {
         // 与 AudioProfileMemory.receiverKey 必须一致：同一份 /info 文本归一化后
         // 得到同一个键，两套记忆才不会各算各的。

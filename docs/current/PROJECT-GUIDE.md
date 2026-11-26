@@ -110,6 +110,10 @@
 | 车机没歌名歌词 | 通知使用权是否真的 rebound（荣耀需关开一次）；98386 `MEDIA_LYRIC_SUPPORT=1` | [`../archive/iap2-lyric-lines.md`](../archive/iap2-lyric-lines.md)（历史取证） |
 | 方向盘语音键没反应 | 走事件通道 `requestSiri`（`siriAction` 1/2/3），不是 HID 0xCF；看 65574 模块状态是否=1 | `carlife-voice-siri-20261104.md` |
 | 冻结 / 掉网 | 心跳间隔 ≥4000ms 判冻结并重建；断链时刻附近有无 `WIFI:` 行——没有就排除 wlan0 | `process-freeze-recovery.md`、`wifi-link-watchdog.md` |
+| 奔驰 MBUX：车机列表找不到手机 | Android 默认 `SCAN_MODE_CONNECTABLE` 不回应 inquiry，MBUX 的 CarPlay 页只列本轮扫描结果；`startConnectionNow()` 已自动请求可发现（300s，2 分钟内不重复弹） | issue 2026-11-26；日志 `BT: 已请求蓝牙可发现` |
+| 刚连上就断 / 配对反复失效（`bond-loss reason: 2`） | 建链期断 HFP/A2DP 会把 ACL 一起拽掉，蓝牙栈丢链路密钥；开设置「连接实验 · 建链期不断开蓝牙音频」 | `BtAudioHoldOption`、日志 `BT-GUARD:` |
+| 一放音频就断（`control EOF` 紧跟补发 RECORD） | 开设置「音频优先（只发一次 RECORD）」；它依赖音频延迟已改为信任车机声明值（250ms 仅兜底） | `AudioFirstOption`、`StreamOrderMemory`、日志 `STREAM: 顺序 =` |
+| 车机连入被拒 `CONTROLLER_BUSY(0x3a)` | 出站每 3~20s 拨 `…caff` 把控制器打忙；SDP 明确不含 `…caff` 时已改为停止出站、等车机主动连入 | `Iap2BluetoothClient`、日志 `BT-C: 目标 SDP 里没有 …caff` |
 
 ---
 

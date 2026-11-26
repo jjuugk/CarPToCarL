@@ -6,9 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import io.github.shaonialife.carptocar.airplay.AudioFirstOption
 import io.github.shaonialife.carptocar.airplay.FeatureTrimOption
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioQueueOption
+import io.github.shaonialife.carptocar.bt.BtAudioHoldOption
 import io.github.shaonialife.carptocar.bt.BluetoothStateReceiver
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
@@ -52,6 +54,11 @@ class SenderApp : Application() {
         VideoReadyGateOption.load(this)
         MfiCertBytesOption.load(this)
         FeatureTrimOption.load(this)
+        // 奔驰 MBUX 的两条逃生开关（都默认关，保持原行为）：
+        //  - 建链期不断开蓝牙音频配置文件（守卫会把 ACL 一起拽掉 → bond-loss）
+        //  - 音频优先 · 只发一次 RECORD（补发 RECORD 会被同毫秒拆链）
+        BtAudioHoldOption.load(this)
+        AudioFirstOption.load(this)
         // 媒体卡片导航刷新的策略（间隔默认 3 秒 + 相同箭头图不换编号）：
         // 只在发帧时读当前值，改设置立即生效
         NavCardRefreshOption.load(this)

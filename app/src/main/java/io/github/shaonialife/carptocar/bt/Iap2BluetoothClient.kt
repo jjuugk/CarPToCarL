@@ -195,6 +195,16 @@ class Iap2BluetoothClient(
     private val iap2ServiceCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /**
+     * 「SDP 问不出结论」的地址（本轮连接内不再重问）。
+     *
+     * 2026-11-26 起显式目标也要过 SDP 闸门，而 [awaitIap2Service] 一次最多等
+     * 2×2.5 秒。对 SDP 广播根本不来的机型（凯迪拉克那类），若不记住这个结论，
+     * 每一轮出站都要白等 5 秒才去直连——比原来直接放行慢得多。记下来之后
+     * 同一次连接里只付一次代价，之后按 UNKNOWN 走原有直连路径。
+     */
+    private val sdpNoAnswer = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
      * 最近一次 …caff 连接失败的原始原因（IOException 摘要）。
      *
      * 只打「连接失败」时无法区分三种完全不同的情况：
@@ -240,6 +250,8 @@ class Iap2BluetoothClient(
     @SuppressLint("MissingPermission")
     private fun awaitIap2Service(device: BluetoothDevice): Iap2Service {
         iap2ServiceCache[device.address]?.let { return if (it) Iap2Service.HAS else Iap2Service.MISSING }
+        // 本轮连接里已经确认「广播不来」：直接按 UNKNOWN 走原直连路径，别再等 5 秒。
+        if (sdpNoAnswer.contains(device.address)) return Iap2Service.UNKNOWN
 
         fun cachedHas(): Boolean =
             runCatching {
@@ -294,6 +306,8 @@ class Iap2BluetoothClient(
                 return if (has) Iap2Service.HAS else Iap2Service.MISSING
             }
         }
+        // 记下「问不出结论」：本轮连接不再为同一台设备重复等 SDP 超时。
+        sdpNoAnswer.add(device.address)
         return Iap2Service.UNKNOWN
     }
 
@@ -373,6 +387,7 @@ class Iap2BluetoothClient(
         // 每轮启动重置 SDP 结论与跳过日志（新配对/换固件后重新探测）
         iap2ServiceCache.clear()
         skippedNoService.clear()
+        sdpNoAnswer.clear()
         BtSessionGate.targetSoftFallback = false
         BtSessionGate.clearRemoteDisconnectGrace()
         // 用户主动「启动连接」= 给车机端健康判定一次干净的重来机会（可能刚重启过车机）。
@@ -497,6 +512,8 @@ class Iap2BluetoothClient(
             // 本轮有几台设备是「SDP 层就没连上」（不是被拒、不是超时）。累计到
             // [PASSIVE_FALLBACK_ROUNDS] 轮就切被动方向（车机主动连入）。
             var sdpLookupFailures = 0
+            // 显式目标「SDP 明确不含 …caff，直连也失败」：本轮不再拨，转被动等车机连入。
+            var explicitTargetSdpMissing = false
             for (device in candidates) {
                 if (!running || generation.get() != myGeneration) return
                 val name =
@@ -506,20 +523,42 @@ class Iap2BluetoothClient(
                         null
                     } ?: device.address
                 runCatching { adapter.cancelDiscovery() }
-                // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
-                // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
-                // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
-                // 的设备不过闸（用户显式指定，保持原路径与时序）。
-                val gate =
-                    if (targetProvider() == null || BtSessionGate.targetSoftFallback) {
-                        // 软回退（目标连不上、放开限制）也过闸：否则会把已配对的耳机、
-                        // 蓝牙键盘（AB Shutter3）、音箱全试一遍，既断别人的音频又拖慢
-                        // 重试节奏（2026-10-26 雪铁龙日志实测）。
-                        awaitIap2Service(device)
-                    } else {
-                        Iap2Service.HAS
-                    }
+                // 所有模式都先过 SDP 闸门。
+                //
+                // 原来「选定目标」是直接放行（= HAS），2026-11-26 的 MBUX issue 证明这条
+                // 代价很大：MBUX 的 SDP 只报 `2a60e3b2`、明确没有 `…caff`，但因为不过闸，
+                // 拿不到「明确没有」的结论，只能每轮 tryConnect 失败 → 断一次音频配置文件
+                // → 再试，靠 IOException 摘要猜原因。出站循环每 3~20 秒拨一次，把控制器
+                // 打到 CONTROLLER_BUSY(0x3a)，正好撞上车机主动连入 `…cafe` 的窗口。
+                //
+                // 凯迪拉克（2026-10-26）的教训仍然保留：SDP **问不出结论**（UNKNOWN）时
+                // 照旧直接拨，只有「回了答案且不含 …caff」（MISSING）才改判。
+                val explicitTarget = targetProvider() != null && !BtSessionGate.targetSoftFallback
+                val gate = awaitIap2Service(device)
                 if (gate == Iap2Service.MISSING) {
+                    if (explicitTarget) {
+                        // 显式目标仍给**一次**直连机会（PC 测试台 xcertplay/DiPlay 这类
+                        // 不一定在 SDP 里广播 …caff，但照样接 RFCOMM）。失败就收手：
+                        // 不再断音频配置文件重试，直接转「等车机主动连入」，把控制器让出来。
+                        val probe = tryConnect(device)
+                        if (probe != null) {
+                            log("BT-C: 「$name」SDP 不含 …caff 但直连成功——按测试台/车机处理")
+                            log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")
+                            BtSessionGate.clearLinkLost()
+                            connected = probe
+                            break
+                        }
+                        if (skippedNoService.add(device.address)) {
+                            log(
+                                "BT-C: 「$name」SDP 明确不含 …caff、直连也失败" +
+                                    "——停止出站重试，改为等车机主动连入",
+                            )
+                        }
+                        // 耳机/音箱被误选成目标时不要转被动（它永远不会主动连 …cafe），
+                        // 让它照原路走失败计数 → 放开目标限制，好让车机进来。
+                        if (!looksLikePersonalAudio(device)) explicitTargetSdpMissing = true
+                        continue
+                    }
                     if (skippedNoService.add(device.address)) {
                         log("BT-C: 跳过「$name」（SDP 明确不含 iAP2 服务——非 CarPlay 设备，保持其音频连接）")
                     }
@@ -531,12 +570,14 @@ class Iap2BluetoothClient(
                     // 探不通再看是不是「蓝牙已连接时不开放服务窗口」的机型（奥迪实测），
                     // 此时才断开配置文件重试一次——耳机类设备永远不会被我们断掉音频。
                     var probe = tryConnect(device)
-                    if (probe == null && !looksLikePersonalAudio(device)) {
+                    if (probe == null && !looksLikePersonalAudio(device) && !BtAudioHoldOption.enabled) {
                         val dropped = BtProfiles.disconnect(context, device)
                         if (dropped.isNotEmpty()) {
                             log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
                         }
                         probe = tryConnect(device)
+                    } else if (probe == null && BtAudioHoldOption.enabled) {
+                        log("BT-C: $name SDP 未给结论、直连失败——开关要求保持配置文件，不再断开重试")
                     }
                     if (probe == null) {
                         iap2ServiceCache[device.address] = false
@@ -567,12 +608,18 @@ class Iap2BluetoothClient(
                     //
                     // 耳机/音箱例外：哪怕被显式选成目标，也不为探 iAP2 断它的音频——
                     // 正在放的歌会被掐掉，而且它本来就不可能提供 …caff。
+                    //
+                    // 用户开关 [BtAudioHoldOption] 例外：打开后建链期完全不动车机的
+                    // 音频配置文件（MBUX 那类「一断就把 ACL 拽掉」的车机）。
                     val dropped =
-                        if (looksLikePersonalAudio(device)) {
+                        if (looksLikePersonalAudio(device) || BtAudioHoldOption.enabled) {
                             emptyList<String>()
                         } else {
                             BtProfiles.disconnect(context, device)
                         }
+                    if (dropped.isEmpty() && BtAudioHoldOption.enabled) {
+                        log("BT-C: $name 直连失败——「建链期不断开音频配置文件」已打开，不再断配置文件重试")
+                    }
                     if (dropped.isNotEmpty()) {
                         val now = android.os.SystemClock.uptimeMillis()
                         if (now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
@@ -613,6 +660,19 @@ class Iap2BluetoothClient(
                 }
             }
             if (connected == null) {
+                // 显式目标被 SDP 判死（明确不含 …caff）：停止出站，直接把通道让给车机。
+                //
+                // 2026-11-26 MBUX：出站每 3~20 秒拨一次 …caff，每次都失败并把控制器
+                // 打到 CONTROLLER_BUSY(0x3a)，而车机偏偏在那一刻主动连入 …cafe——
+                // 一次都没成功过。这类车机只会「自己发起」，主动拨是纯负收益。
+                if (explicitTargetSdpMissing && recoveryPeers == null) {
+                    awaitCarInitiated(
+                        myGeneration,
+                        "BT-C: 目标 SDP 里没有 …caff（车机只走自己发起）——" +
+                            "停止出站重试，改为等车机主动连入",
+                    )
+                    continue
+                }
                 // 目标连续连不上 → 放开目标限制（见 BtSessionGate.targetSoftFallback）。
                 // 只在「用户指定了目标」时计数，且只降级一次。
                 // 补连控制链路期间（recoveryPeers != null）不计数：那不是「这次坐的是另一台车」，
@@ -702,11 +762,18 @@ class Iap2BluetoothClient(
      *
      * 窗口内一旦车机连入（`BtSessionGate.inboundActive`）或会话已建立就立刻返回，
      * 由主循环接管；超时则回主动方向再来一轮，并给出「该车型可能仅支持有线」的结论性提示。
+     *
+     * @param leadIn 自定义开场日志（显式目标被 SDP 判死时用它说清原因）；为空走默认文案。
      */
-    private fun awaitCarInitiated(myGeneration: Long) {
+    private fun awaitCarInitiated(
+        myGeneration: Long,
+        leadIn: String? = null,
+    ) {
         log(
-            "BT-C: 主动连 …caff 连续 $PASSIVE_FALLBACK_ROUNDS 轮在 SDP 层就失败（车机没广播配件端服务）" +
-                "——切换为等车机主动连入，最长 ${PASSIVE_WAIT_MILLIS / 1000} 秒（本机 …cafe 监听仍在运行）",
+            leadIn ?: (
+                "BT-C: 主动连 …caff 连续 $PASSIVE_FALLBACK_ROUNDS 轮在 SDP 层就失败（车机没广播配件端服务）" +
+                    "——切换为等车机主动连入，最长 ${PASSIVE_WAIT_MILLIS / 1000} 秒（本机 …cafe 监听仍在运行）"
+            ),
         )
         val deadline = android.os.SystemClock.uptimeMillis() + PASSIVE_WAIT_MILLIS
         while (running && generation.get() == myGeneration) {
