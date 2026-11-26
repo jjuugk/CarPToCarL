@@ -71,4 +71,41 @@ class LyricLinesTest {
         val song = info(song = "侧脸", artist = "于果", album = "侧脸")
         assertEquals("于果", LyricLines.trueArtist(song))
     }
+
+    @Test
+    fun `新形状 歌名-画家 也是歌词行`() {
+        val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
+        val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
+        assertTrue(LyricLines.isLyricLine(lyric, base))
+    }
+
+    @Test
+    fun `新形状没有基线时不认——避免误伤正常歌曲`() {
+        val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
+        assertFalse(LyricLines.isLyricLine(lyric))
+    }
+
+    @Test
+    fun `新形状专辑或画家对不上时不认`() {
+        val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
+        assertFalse(
+            LyricLines.isLyricLine(
+                info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "别的专辑"),
+                base,
+            ),
+        )
+        assertFalse(
+            LyricLines.isLyricLine(
+                info(song = "词：林夕", artist = "你快乐 所以我快乐-周杰伦", album = "情·菲·得意"),
+                base,
+            ),
+        )
+    }
+
+    @Test
+    fun `trueArtist 去掉 歌名- 前缀`() {
+        val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
+        val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
+        assertEquals("王菲", LyricLines.trueArtist(lyric, base))
+    }
 }

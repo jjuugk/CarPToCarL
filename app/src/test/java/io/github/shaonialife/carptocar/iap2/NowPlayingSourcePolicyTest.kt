@@ -61,6 +61,20 @@ class NowPlayingSourcePolicyTest {
     }
 
     @Test
+    fun `新形状 歌名-画家 的歌词行也能上位`() {
+        val newBase = info("你快乐 所以我快乐", "王菲", "情·菲·得意")
+        val newLyric = info("词：林夕", "你快乐 所以我快乐-王菲", "情·菲·得意")
+        assertTrue(
+            decide(
+                latest = newLyric,
+                baseInfo = newBase,
+                title = "你快乐 所以我快乐",
+                artist = "王菲",
+            ),
+        )
+    }
+
+    @Test
     fun `超出新鲜期就让位回歌名——暂停后标题不许停在最后一句`() {
         assertFalse(decide(now = 9_500L + NowPlayingSourcePolicy.LYRIC_WINDOW_MILLIS + 1))
     }

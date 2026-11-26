@@ -1736,7 +1736,8 @@ object CarLifeHijack {
         }
         // 歌词行不覆盖「真实歌名」基线：它是判断「MediaSession 与 CarLife 是否同一首歌」
         // 的唯一凭据（见 NowPlayingSourcePolicy），被歌词顶掉就再也判不出来了。
-        if (!LyricLines.isLyricLine(info)) latestSongMediaInfo = info
+        // 先用**旧基线**判歌词，再更新基线：新形状 artist="<歌名>-<画家>" 必须靠它识别。
+        if (!LyricLines.isLyricLine(info, latestSongMediaInfo)) latestSongMediaInfo = info
         latestMediaInfo = info
         latestMediaInfoAtMillis = android.os.SystemClock.uptimeMillis()
         mediaInfoListeners.forEach { runCatching { it(info) } }

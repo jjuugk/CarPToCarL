@@ -59,7 +59,7 @@ object NowPlayingSourcePolicy {
         sessionTitle: String?,
         sessionArtist: String?,
     ): Boolean {
-        if (latest == null || !LyricLines.isLyricLine(latest)) return false
+        if (latest == null || !LyricLines.isLyricLine(latest, base)) return false
         if (lastMediaInfoAtMillis <= 0L) return false
         val age = nowMillis - lastMediaInfoAtMillis
         if (age < 0L || age > LYRIC_WINDOW_MILLIS) return false

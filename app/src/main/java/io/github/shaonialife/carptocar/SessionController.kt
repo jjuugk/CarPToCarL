@@ -685,7 +685,8 @@ object SessionController {
         // 数据源 A：CarLife 内置播放器（0x10035）——兜底，仅其内置播放器会推。
         // 逐行歌词也走这条（`artist == "<专辑>-<画家>"`），日志里单独标出来。
         CarLifeHijack.addMediaInfoListener { info ->
-            val kind = if (LyricLines.isLyricLine(info)) "歌词行" else "歌名"
+            val kind =
+                if (LyricLines.isLyricLine(info, CarLifeHijack.latestSongMediaInfo)) "歌词行" else "歌名"
             appendLog(
                 "EVENT: CarLife $kind「${info.song}」→ 补推 iAP2 0x5001 NowPlayingUpdate",
             )
@@ -1230,7 +1231,7 @@ object SessionController {
         base: CarLifeMediaInfo?,
         includeArtwork: Boolean,
     ): CarPlayNowPlaying {
-        val lyric = LyricLines.isLyricLine(info)
+        val lyric = LyricLines.isLyricLine(info, base)
         val source = if (lyric) base else null
         val artist = source?.artist ?: info.artist
         val album = source?.album ?: info.album
