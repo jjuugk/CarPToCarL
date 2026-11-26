@@ -36,6 +36,7 @@ import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.audio.AudioRatePreference
 import io.github.shaonialife.carptocar.audio.AudioCompatExperiment
 import io.github.shaonialife.carptocar.audio.AudioQueueOption
+import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -54,6 +55,7 @@ import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.legal.DisclaimerDialog
 import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
+import io.github.shaonialife.carptocar.service.KeepAliveMediaOption
 import io.github.shaonialife.carptocar.session.ConnectionPreflight
 import io.github.shaonialife.carptocar.session.PermissionRepair
 import io.github.shaonialife.carptocar.ui.ConnectionStageCard
@@ -1899,6 +1901,52 @@ class MainActivity : AppCompatActivity() {
             CarLifeHijack.navigationNowPlayingEnabled = checked
         }
 
+        // 「导航卡片刷新间隔」：默认 3 秒，可选 1–15 秒或不限。
+        // 改完立即生效——SessionController 在每次发帧时读当前值，不必重连。
+        val navRefreshRow = findViewById<View>(R.id.rowNavRefreshInterval)
+        val navRefreshValue = findViewById<TextView>(R.id.navRefreshValue)
+        val navRefreshNote = findViewById<TextView>(R.id.navRefreshNote)
+
+        fun refreshNavCardInterval() {
+            navRefreshValue.text = NavCardRefreshOption.label()
+            navRefreshNote.text = NavCardRefreshOption.note()
+        }
+
+        refreshNavCardInterval()
+        navRefreshRow.setOnClickListener {
+            val steps = NavCardRefreshOption.STEPS
+            val labels = steps.map { NavCardRefreshOption.label(it) }.toTypedArray()
+            val checked = steps.indexOf(NavCardRefreshOption.intervalMillis).coerceAtLeast(0)
+            AlertDialog.Builder(ctx)
+                .setTitle("导航卡片刷新间隔")
+                .setSingleChoiceItems(labels, checked) { dialog, which ->
+                    NavCardRefreshOption.saveInterval(ctx, steps[which])
+                    refreshNavCardInterval()
+                    snack("导航卡片刷新间隔：${NavCardRefreshOption.label()}（立即生效）")
+                    dialog.dismiss()
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        // 「相同箭头图不重复发送」：默认开（沿用同一编号，车机走缓存、不重复收图）。
+        // 关掉后每次刷新都换新编号、车机会重新拉图——只在「箭头不跟着变」时临时排查用。
+        val navReuseArtSwitch = findViewById<SwitchCompat>(R.id.switchNavReuseArtwork)
+        val navReuseArtNote = findViewById<TextView>(R.id.navReuseArtNote)
+        navReuseArtSwitch.isChecked = NavCardRefreshOption.reuseArtwork
+        navReuseArtNote.text = NavCardRefreshOption.reuseArtworkNote()
+        navReuseArtSwitch.setOnCheckedChangeListener { _, checked ->
+            NavCardRefreshOption.saveReuseArtwork(ctx, checked)
+            navReuseArtNote.text = NavCardRefreshOption.reuseArtworkNote()
+            snack(
+                if (checked) {
+                    "已开启：相同箭头图沿用同一编号，车机不会重复收图"
+                } else {
+                    "已关闭：每次刷新都换新编号，车机会重新拉图（仅用于排查卡图）"
+                },
+            )
+        }
+
         // 「使用手机高德地图获取导航数据」：打开即**替换** CarLife 0x10030，
         // 实时生效（SessionController 的拦截是运行时判断，不必重连）。
         val amapNaviSourceSwitch = findViewById<SwitchCompat>(R.id.switchAmapNaviSource)
@@ -2139,6 +2187,29 @@ class MainActivity : AppCompatActivity() {
                     "已关闭——恢复旧行为（让屏即 TEARDOWN，归还后整套重建）"
                 },
             )
+        }
+
+        // 媒体保活伪装（默认开）：关掉后不再注册假 MediaSession，车机就不会把
+        // 本 App 当成音乐软件。当前会话内立即释放会话，前台类型下次启动完全生效。
+        KeepAliveMediaOption.load(ctx)
+        val keepAliveSwitch = findViewById<SwitchCompat>(R.id.switchKeepAliveMedia)
+        val keepAliveNote = findViewById<TextView>(R.id.keepAliveNote)
+        fun refreshKeepAlive() {
+            keepAliveSwitch.isChecked = KeepAliveMediaOption.enabled
+            keepAliveNote.text = KeepAliveMediaOption.note
+        }
+        refreshKeepAlive()
+        keepAliveSwitch.setOnCheckedChangeListener { _, checked ->
+            KeepAliveMediaOption.save(ctx, checked)
+            refreshKeepAlive()
+            snack(
+                if (checked) {
+                    "媒体保活伪装已开启——下次启动服务时重新注册（防冻结，车机可能显示音乐卡片）"
+                } else {
+                    "媒体保活伪装已关闭——本轮会释放假 MediaSession；下次连接完全生效"
+                },
+            )
+            log("SVC: 媒体保活伪装开关切到 ${KeepAliveMediaOption.label}")
         }
     }
 

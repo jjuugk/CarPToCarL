@@ -35,6 +35,24 @@ import io.github.shaonialife.carptocar.util.DebugFileLog
  * 等于没通知；DEFAULT 则常驻通知栏、有图标，但不响不震。
  */
 class CarPlayService : Service() {
+    override fun onCreate() {
+        super.onCreate()
+        KeepAliveMediaOption.load(applicationContext)
+    }
+
+    /**
+     * 前台服务类型随开关变化：关掉媒体伪装后只声明 connectedDevice，
+     * 不再给自己贴「媒体应用」标签。
+     */
+    private fun foregroundTypes(): Int {
+        val connected = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        return if (KeepAliveMediaOption.enabled) {
+            connected or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        } else {
+            connected
+        }
+    }
+
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
@@ -54,6 +72,15 @@ class CarPlayService : Service() {
      * （会话本身保持 active，重建要重新走系统侧登记，反而多一次抖动）。
      */
     private fun syncKeepAliveSession() {
+        if (!KeepAliveMediaOption.enabled) {
+            // 开关关闭：立即释放已有会话，车机不会再看到假音乐卡片。
+            // 只在真的释放时打一行日志，避免每 3 秒刷屏。
+            if (keepAliveSession != null) {
+                releaseKeepAliveSession()
+                fileLog("SVC: 媒体保活伪装已关闭——已释放假 MediaSession（车机不再看到音乐卡片）")
+            }
+            return
+        }
         val playing = SessionController.audioStreamingNow
         if (keepAlivePlaying == playing && keepAliveSession != null) return
         runCatching {
@@ -207,8 +234,7 @@ class CarPlayService : Service() {
             // 只报 connectedDevice 时，国产 ROM 的冻结策略仍会挂起进程（1.2.62/1.2.63
             // 两份实车日志里各有 7s / 10s / 19s / 25s 的冻结，全部导致车机按 keepAlive
             // 超时撤会话）。带上媒体类身份 + 活跃 MediaSession 才稳。
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            foregroundTypes(),
         )
         acquireLocks()
         // 通知栏文案跟着会话阶段走：服务一活就开始刷新，销毁时停。
@@ -282,9 +308,8 @@ class CarPlayService : Service() {
                 this,
                 NOTIFICATION_ID,
                 buildNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                foregroundTypes() or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
             )
         } catch (error: Exception) {
             fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
