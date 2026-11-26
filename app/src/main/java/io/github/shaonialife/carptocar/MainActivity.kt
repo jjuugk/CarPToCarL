@@ -2085,11 +2085,11 @@ class MainActivity : AppCompatActivity() {
 
         // 音频队列治理（默认关）：稳态积压 / 欠载加深 / 静音关流。音频卡顿时可开启尝试。
         val queueRow = findViewById<android.view.View>(R.id.rowAudioQueueGovernor)
-        val queueValue = findViewById<TextView>(R.id.audioQueueValue)
+        val queueSwitch = findViewById<SwitchCompat>(R.id.switchAudioQueueGovernor)
         val queueNote = findViewById<TextView>(R.id.audioQueueNote)
 
         fun refreshQueue() {
-            queueValue.text = AudioQueueOption.label
+            queueSwitch.isChecked = AudioQueueOption.enabled
             queueNote.text = AudioQueueOption.note
         }
 
@@ -2105,11 +2105,11 @@ class MainActivity : AppCompatActivity() {
         // 三项连接实验（都默认关，都"下次连接起效"）：接线方式与上面一致——
         // 开关对象持有进程内当前值，点击立刻落盘并刷新文案。
         val videoReadyRow = findViewById<android.view.View>(R.id.rowVideoReadyGate)
-        val videoReadyValue = findViewById<TextView>(R.id.videoReadyValue)
+        val videoReadySwitch = findViewById<SwitchCompat>(R.id.switchVideoReadyGate)
         val videoReadyNote = findViewById<TextView>(R.id.videoReadyNote)
 
         fun refreshVideoReady() {
-            videoReadyValue.text = VideoReadyGateOption.label
+            videoReadySwitch.isChecked = VideoReadyGateOption.enabled
             videoReadyNote.text = VideoReadyGateOption.note
         }
 
@@ -2122,11 +2122,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val mfiCertRow = findViewById<android.view.View>(R.id.rowMfiCertBytes)
-        val mfiCertValue = findViewById<TextView>(R.id.mfiCertValue)
+        val mfiCertSwitch = findViewById<SwitchCompat>(R.id.switchMfiCertBytes)
         val mfiCertNote = findViewById<TextView>(R.id.mfiCertNote)
 
         fun refreshMfiCert() {
-            mfiCertValue.text = MfiCertBytesOption.label
+            mfiCertSwitch.isChecked = MfiCertBytesOption.enabled
             mfiCertNote.text = MfiCertBytesOption.note
         }
 
@@ -2139,11 +2139,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val featureTrimRow = findViewById<android.view.View>(R.id.rowFeatureTrim)
-        val featureTrimValue = findViewById<TextView>(R.id.featureTrimValue)
+        val featureTrimSwitch = findViewById<SwitchCompat>(R.id.switchFeatureTrim)
         val featureTrimNote = findViewById<TextView>(R.id.featureTrimNote)
 
         fun refreshFeatureTrim() {
-            featureTrimValue.text = FeatureTrimOption.label
+            featureTrimSwitch.isChecked = FeatureTrimOption.enabled
             featureTrimNote.text = FeatureTrimOption.note
         }
 
@@ -2158,11 +2158,11 @@ class MainActivity : AppCompatActivity() {
         // 建链期不断开蓝牙音频（默认关）：MBUX 那类「一断就把 ACL 拽掉、配对反复失效」的车机用。
         // 打开后 BT-GUARD、出站重试、配对后的断开都不再主动断 HFP/A2DP。
         val btAudioHoldRow = findViewById<android.view.View>(R.id.rowBtAudioHold)
-        val btAudioHoldValue = findViewById<TextView>(R.id.btAudioHoldValue)
+        val btAudioHoldSwitch = findViewById<SwitchCompat>(R.id.switchBtAudioHold)
         val btAudioHoldNote = findViewById<TextView>(R.id.btAudioHoldNote)
 
         fun refreshBtAudioHold() {
-            btAudioHoldValue.text = BtAudioHoldOption.label
+            btAudioHoldSwitch.isChecked = BtAudioHoldOption.enabled
             btAudioHoldNote.text = BtAudioHoldOption.note
         }
 
@@ -2176,11 +2176,11 @@ class MainActivity : AppCompatActivity() {
 
         // 音频优先 · 只发一次 RECORD（默认关）：MBUX 那类「补发 RECORD 就断」的车机用。
         val audioFirstRow = findViewById<android.view.View>(R.id.rowAudioFirst)
-        val audioFirstValue = findViewById<TextView>(R.id.audioFirstValue)
+        val audioFirstSwitch = findViewById<SwitchCompat>(R.id.switchAudioFirst)
         val audioFirstNote = findViewById<TextView>(R.id.audioFirstNote)
 
         fun refreshAudioFirst() {
-            audioFirstValue.text = AudioFirstOption.label
+            audioFirstSwitch.isChecked = AudioFirstOption.enabled
             audioFirstNote.text = AudioFirstOption.note
         }
 

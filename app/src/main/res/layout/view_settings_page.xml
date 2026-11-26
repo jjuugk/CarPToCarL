@@ -619,20 +619,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/audioQueueValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchAudioQueueGovernor"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <!-- ===== 连接实验（三项，均默认关） ===== -->
@@ -687,20 +683,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/videoReadyValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchVideoReadyGate"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <View
@@ -745,20 +737,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/mfiCertValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchMfiCertBytes"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <View
@@ -803,20 +791,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/featureTrimValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchFeatureTrim"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <View
@@ -862,20 +846,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/btAudioHoldValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchBtAudioHold"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <View
@@ -921,20 +901,16 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/audioFirstValue"
+                    <androidx.appcompat.widget.SwitchCompat
+                        xmlns:app="http://schemas.android.com/apk/res-auto"
+                        android:id="@+id/switchAudioFirst"
                         android:layout_width="wrap_content"
-                        android:layout_height="30dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:gravity="center"
-                        android:minWidth="56dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="关"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                        android:thumb="@drawable/sw_thumb"
+                        app:track="@drawable/sw_track"
+                        android:clickable="false"
+                        android:focusable="false" />
                 </LinearLayout>
 
                 <!-- 方向盘语音键三连击 → 重启音频（默认开） -->
