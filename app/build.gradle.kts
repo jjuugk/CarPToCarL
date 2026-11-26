@@ -78,9 +78,16 @@ android {
             signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
         }
         debug {
-            // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
-            // Shizuku 授权是按包名授予的，改包名会要求重新授权。
+            // **debug 与正式包共存**（2026-11-26 用户要求，长期有效）：debug 包用独立
+            // 包名 `…carptocar.debug`，可与 release / 主分支包同时装在一台手机上对比测试，
+            // 互不覆盖、互不影响数据。桌面图标名加「Dev」后缀以便区分。
+            //
+            // 代价：debug 包是「另一个应用」，权限（通知使用权、所有文件访问、电池不优化、
+            // 蓝牙授权）需要在它自己身上重新授予；两个包同时运行会抢同一个车机，
+            // 联调时先把另一个停掉。
+            applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            resValue("string", "app_name", "CarPToCarL Dev")
         }
     }
 
