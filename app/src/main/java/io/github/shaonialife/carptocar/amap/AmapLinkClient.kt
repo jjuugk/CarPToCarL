@@ -22,6 +22,16 @@ import java.nio.charset.StandardCharsets
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.util.concurrent.atomic.AtomicInteger
+
+/** 高德链接失败退避：3s / 6s / 12s / 之后每分钟。纯函数，供单测钉死。 */
+internal fun amapRetryDelayMs(attempt: Int): Long =
+    when (attempt.coerceAtLeast(1)) {
+        1 -> 3_000L
+        2 -> 6_000L
+        3 -> 12_000L
+        else -> 60_000L
+    }
 
 /**
  * 手机高德地图 linksdk 的 Binder 客户端：绑定 → 认证 → 注册 → 收回调。
@@ -91,6 +101,13 @@ internal class AmapLinkClient(
     private var lastNavLogAt = 0L
     private var lastLoggedManeuver = -1
 
+    /** 已排了重试定时器时不再重复排，避免多次失败叠出多个 bind。 */
+    @Volatile
+    private var retryScheduled = false
+
+    /** 每次重绑 +1；旧 Binder 的回调/handshake 结果一律作废。 */
+    private val generation = AtomicInteger(0)
+
     /** 认证拿到的 token，只留在内存，**不落盘、不进日志**。 */
     private var token: String = ""
 
@@ -139,8 +156,10 @@ internal class AmapLinkClient(
     /** 停止：退订 + 解绑。不产出清除帧（由上层决定）。 */
     fun stop() {
         stopping = true
+        generation.incrementAndGet()
         bindRequested = false
         attempts = 0
+        retryScheduled = false
         handlerRef?.removeCallbacksAndMessages(null)
         callback?.let { cb ->
             remote?.let { r ->
@@ -179,41 +198,49 @@ internal class AmapLinkClient(
 
     private fun bind() {
         if (bindRequested) return
+        // 代次 +1：上一次绑定留下的回调从这一刻起全部作废。
+        val gen = generation.incrementAndGet()
         val intent = Intent(ACTION).setComponent(ComponentName(PKG, SERVICE))
         val ok =
-            runCatching {
+            try {
                 context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            }.onFailure { recordFailure("bindService 异常：${it.javaClass.simpleName}") }
-                .getOrDefault(false)
+            } catch (t: Throwable) {
+                failAndRetry("bindService 异常：${t.javaClass.simpleName}")
+                false
+            }
         bindRequested = ok
         if (ok) {
             state = State.BINDING
-            log("AMAP: 绑定高德导航服务（第 ${attempts + 1} 次）")
+            log("AMAP: 绑定高德导航服务（第 ${attempts + 1} 次，代次 $gen）")
         } else {
-            recordFailure("绑定被拒绝：请把高德加入系统「关联启动/自启动」白名单")
-            scheduleRetry()
+            failAndRetry("绑定被拒绝：请把高德加入系统「关联启动/自启动」白名单")
         }
     }
 
     private fun handshake(service: IBinder) {
+        val gen = generation.get()
         Thread({
             try {
+                if (stopping || gen != generation.get()) return@Thread
                 val auth = callString(service, TX_AUTHENTICATE, null)
                 val authJson = JSONObject(auth ?: "{}")
                 if (authJson.optString("status") != "success") {
-                    recordFailure("认证未通过：${authJson.optString("status", "?")}")
+                    failAndRetry("认证未通过：${authJson.optString("status", "?")}")
                     return@Thread
                 }
                 token = authJson.optJSONObject("data")?.optString("token").orEmpty()
-                val cb = LinkCallback()
+                val cb = LinkCallback(gen)
                 callback = cb
                 val accepted = callBoolWithBinder(service, TX_REGISTER, cb)
                 if (!accepted) {
-                    recordFailure("注册监听被拒绝")
+                    failAndRetry("注册监听被拒绝")
                     return@Thread
                 }
+                if (stopping || gen != generation.get()) return@Thread
                 state = State.REGISTERED
                 attempts = 0
+                retryScheduled = false
+                lastError = null
                 log("AMAP: 注册成功（${amapVersion ?: "?"}）；等到导航数据前不会有帧")
                 // cmd 7/5 各请求一次即可：高德之后自己按 1Hz 主动推，不需要轮询。
                 for (cmd in intArrayOf(7, 5)) {
@@ -228,22 +255,21 @@ internal class AmapLinkClient(
                     if (code != 0) log("AMAP: execute cmd=$cmd 返回 errorCode=$code")
                 }
             } catch (t: Throwable) {
-                recordFailure("握手失败：${t.javaClass.simpleName} ${t.message?.take(80) ?: ""}")
+                failAndRetry("握手失败：${t.javaClass.simpleName} ${t.message?.take(80) ?: ""}")
             }
         }, "amap-handshake").start()
     }
 
     private fun onLinkLost(reason: String) {
         if (stopping) return
+        generation.incrementAndGet()
         bound = false
         bindRequested = false
         remote = null
         callback = null
         token = ""
-        state = State.FAILED
-        lastError = reason
         log("AMAP: 链路断开（$reason）")
-        scheduleRetry()
+        failAndRetry(reason)
     }
 
     private fun recordFailure(message: String) {
@@ -252,18 +278,45 @@ internal class AmapLinkClient(
         log("AMAP: $message")
     }
 
-    /** 3s / 6s / 12s 三次快速重试，之后每分钟一次；全程静默，只留一行日志。 */
+    /** 所有失败路径的唯一入口：记状态 + 排重试。 */
+    private fun failAndRetry(message: String) {
+        recordFailure(message)
+        scheduleRetry()
+    }
+
+    /**
+     * 导航中途静默 15s 后由上层调用：拆掉旧 Binder 再按退避重绑。
+     * 只在真的注册过且发过帧时做，避免用户压根没导航时反复重连。
+     */
+    fun restartAfterStale() {
+        if (stopping || state != State.REGISTERED || frameCount == 0) return
+        log("AMAP: 导航中途静默 15s——重建链接服务")
+        generation.incrementAndGet()
+        callback?.let { cb ->
+            remote?.let { r -> runCatching { callBoolWithBinder(r, TX_UNREGISTER, cb) } }
+        }
+        if (bound) runCatching { context.unbindService(connection) }
+        bound = false
+        bindRequested = false
+        remote = null
+        callback = null
+        token = ""
+        state = State.IDLE
+        lastError = null
+        // 上一轮重试可能还在排队：重绑走新一轮退避，别叠两个定时器。
+        retryScheduled = false
+        handlerRef?.removeCallbacksAndMessages(null)
+        scheduleRetry()
+    }
+
+    /** 3s / 6s / 12s 三次快速重试，之后每分钟一次；已排过则忽略。 */
     private fun scheduleRetry() {
-        if (stopping) return
+        if (stopping || retryScheduled) return
+        retryScheduled = true
         attempts++
-        val delay =
-            when (attempts) {
-                1 -> 3_000L
-                2 -> 6_000L
-                3 -> 12_000L
-                else -> 60_000L
-            }
+        val delay = amapRetryDelayMs(attempts)
         handler().postDelayed({
+            retryScheduled = false
             if (!stopping) {
                 bindRequested = false
                 bind()
@@ -313,8 +366,9 @@ internal class AmapLinkClient(
 
     // ---------- 回调 ----------
 
-    private inner class LinkCallback :
-        Binder(),
+    private inner class LinkCallback(
+        private val gen: Int,
+    ) : Binder(),
         IInterface {
         init {
             attachInterface(this, CALLBACK)
@@ -328,6 +382,8 @@ internal class AmapLinkClient(
             reply: Parcel?,
             flags: Int,
         ): Boolean {
+            // 重绑后旧回调可能还在飞：代次不符直接吞掉，避免污染新会话。
+            if (stopping || gen != generation.get()) return true
             if (code == INTERFACE_TRANSACTION) {
                 reply?.writeString(CALLBACK)
                 return true

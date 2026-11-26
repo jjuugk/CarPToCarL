@@ -8,6 +8,28 @@ import io.github.shaonialife.carptocar.media.ManeuverArrow
 import io.github.shaonialife.carptocar.media.NavigationDisplay
 import io.github.shaonialife.carptocar.media.NavigationText
 
+/** 一轮导航里最多因 STALE 重建几次链路：防止高德长期不给帧时无限重绑。 */
+internal const val AMAP_MAX_STALE_RESTARTS = 2
+
+/**
+ * 该不该在 15s 静默清帧后重建高德数据源。
+ *
+ * 纯函数，单测直接钉真值表。`wasGuiding` 必须是 `onTick` **之前**的状态：
+ * 正常导航结束走 `onStop()` 已经把 guiding 置 false，不会误触发重连。
+ */
+internal fun shouldRestartAfterStale(
+    wasGuiding: Boolean,
+    emission: AmapNaviEmission?,
+    registered: Boolean,
+    frameCount: Int,
+    staleRestarts: Int,
+): Boolean =
+    wasGuiding &&
+        emission is AmapNaviEmission.Clear &&
+        registered &&
+        frameCount > 0 &&
+        staleRestarts < AMAP_MAX_STALE_RESTARTS
+
 /**
  * 高德数据源的进程级门面：管开关、管生命周期、管状态机节拍。
  *
@@ -55,6 +77,10 @@ internal object AmapNaviSource {
 
     private val machine = AmapNaviStateMachine()
 
+    /** 本轮导航已因 STALE 重建过几次；收到新引导帧时归零。 */
+    @Volatile
+    private var staleRestarts = 0
+
     /**
      * **必须懒创建**：JVM 单测里 `Looper.getMainLooper()` 返回 null，
      * 构造期 `Handler(null)` 会抛异常，把引用本对象的 `SessionController` 类初始化整个带崩
@@ -77,11 +103,30 @@ internal object AmapNaviSource {
             override fun run() {
                 if (!enabled) return
                 val now = System.currentTimeMillis()
+                // 必须取 tick 之前的状态：正常结束（onStop）已经把 guiding 置 false，
+                // 只有「导航中途静默」才会在 tick 里产出 Clear 且 wasGuiding=true。
+                val wasGuiding =
+                    synchronized(machine) {
+                        machine.isGuiding
+                    }
                 val emission =
                     synchronized(machine) {
                         machine.onTick(now)
                     }
                 emission?.let { dispatch(it) }
+                val c = client
+                if (shouldRestartAfterStale(
+                        wasGuiding = wasGuiding,
+                        emission = emission,
+                        registered = c?.isRegistered == true,
+                        frameCount = c?.frameCount ?: 0,
+                        staleRestarts = staleRestarts,
+                    )
+                ) {
+                    staleRestarts++
+                    logger?.invoke("AMAP: 导航中途静默 15s，重建链接服务（第 $staleRestarts 次）")
+                    c?.restartAfterStale()
+                }
                 ticker().postDelayed(this, 1_000L)
             }
         }
@@ -156,6 +201,7 @@ internal object AmapNaviSource {
     private fun stopInternal(clearHud: Boolean) {
         // 不用 ticker()：停止路径不该为了撤一个回调去创建 Handler（单测里那会崩）。
         tickerHandler?.removeCallbacks(tick)
+        staleRestarts = 0
         val wasGuiding =
             synchronized(machine) {
                 val guiding = machine.isGuiding
@@ -189,6 +235,8 @@ internal object AmapNaviSource {
     }
 
     private fun dispatch(emission: AmapNaviEmission) {
+        // 新引导帧说明数据源活了：重置 STALE 重建计数，下一轮静默仍可再救一次。
+        if (emission is AmapNaviEmission.Guide) staleRestarts = 0
         // 先更新媒体卡片的影子状态，再交给仪表出口：反过来的话，出口若同步触发一次
         // 0x5001 重推，读到的还是上一帧的转向。
         guide = emission.toGuide()
