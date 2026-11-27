@@ -2175,7 +2175,7 @@ class CarLifeHuClient(
                 Thread.sleep(1000)
                 if (!running.get()) return
                 send(CarLifeProtocol.HEARTBEAT, ByteArray(0))
-                if (versionMatched && navigationNowPlayingEnabled()) {
+                if (versionMatched) {
                     hudSubscription.tick(android.os.SystemClock.uptimeMillis())
                 }
             }

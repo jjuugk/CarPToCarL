@@ -485,6 +485,37 @@ class Iap2SenderSessionTest {
         accessoryChannel.close()
     }
 
+    @Test
+    fun subscriptionsAndStartHidArrivingDuringMfiChallengeAreRepliedAfterAuth() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, subscriptionsBeforeAuthResponse = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory-preauth")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "AA:BB:CC:DD:EE:FF",
+            ).run(timeoutMillis = 10_000L)
+        accessoryThread.join(10_000L)
+
+        assertEquals(49152, endpoint.airPlayPort)
+        val authIdx = accessory.receivedIds.indexOf(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
+        val powerIdx = accessory.receivedIds.indexOf(Iap2SubscriptionReplies.POWER_UPDATE)
+        val hidIdx = accessory.receivedIds.indexOf(Iap2MessageIds.DEVICE_HID_REPORT)
+        assertTrue("应收到 0xAA05，实际=${accessory.receivedIds.map { "0x%04x".format(it) }}", authIdx >= 0)
+        assertTrue("认证前早到的 0xAE00 应在 0xAA05 后回 0xAE01", powerIdx > authIdx)
+        assertTrue("认证前早到的 0x6800 应在 0xAA05 后回 0x6801", hidIdx > authIdx)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
@@ -536,6 +567,8 @@ class Iap2SenderSessionTest {
          * 因此这一条就足以让它走「宽限 90 秒 + 拆链前不重认证」那条路。
          */
         private val cinemoIdentity: Boolean = false,
+        /** 在 0xAA02 与 0xAA03 之间提前发送 0xAE00 与 0x6800，验证挑战循环不会丢弃订阅。 */
+        private val subscriptionsBeforeAuthResponse: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -621,9 +654,18 @@ class Iap2SenderSessionTest {
             }
             send(Iap2MessageIds.MFI_CERTIFICATE, Iap2Csm.param(0, ByteArray(64) { it.toByte() }))
             expect(Iap2MessageIds.MFI_REQUEST_CHALLENGE)
+            if (subscriptionsBeforeAuthResponse) {
+                send(Iap2MessageIds.START_POWER_UPDATES)
+                send(
+                    Iap2MessageIds.START_HID,
+                    Iap2Csm.u16(0, 0),
+                    Iap2Csm.u16(1, 2),
+                    Iap2Csm.u16(2, 1),
+                    Iap2Csm.param(4, byteArrayOf(0x05, 0x0c)),
+                )
+            }
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
             expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
-
             // 设备状态问候**紧跟 0xAA05**（2026-10-26 起；上游 PR #17 的结论：
             // 车机据这批消息判定发送端已就绪，晚发会被当成还没起来）。
             //
@@ -643,7 +685,7 @@ class Iap2SenderSessionTest {
             )
 
             // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
-            if (!audiDeclarations) {
+            if (!audiDeclarations && !subscriptionsBeforeAuthResponse) {
                 send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
                 send(Iap2MessageIds.START_POWER_UPDATES)
                 send(
@@ -654,6 +696,11 @@ class Iap2SenderSessionTest {
                     Iap2Csm.param(4, byteArrayOf(0x05, 0x0c)),
                 )
                 expect(Iap2MessageIds.DEVICE_HID_REPORT)
+            } else if (subscriptionsBeforeAuthResponse) {
+                expectAll(
+                    Iap2MessageIds.DEVICE_HID_REPORT,
+                    Iap2SubscriptionReplies.POWER_UPDATE,
+                )
             }
 
             // WiFi 配置：GM/Cinemo 形态的清单里没有 0x5702，发送端因此根本不会发它
@@ -834,9 +881,11 @@ class Iap2SenderSessionTest {
                     return
                 }
                 if (frame.messageId in UNDECLARED_FOR_CADILLAC) seenUndeclared += frame.messageId
-                // 0x4300 可能先于 StartHID 到达（新协议代不再在 0x6800 上空等 2s）：
+                // 0x5702/0x4300 可能先于 StartHID 应答到达（不再在 0x6800 上墙钟空等）：
                 // 不能像其它帧那样丢掉，否则后面永远等不到它。
-                if (frame.messageId == Iap2MessageIds.CARPLAY_AVAILABILITY) {
+                if (frame.messageId == Iap2MessageIds.CARPLAY_AVAILABILITY ||
+                    frame.messageId == Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION
+                ) {
                     stashed += frame
                     continue
                 }

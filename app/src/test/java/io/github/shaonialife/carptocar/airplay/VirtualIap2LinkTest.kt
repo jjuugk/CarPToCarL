@@ -612,4 +612,402 @@ class VirtualIap2LinkTest {
         val report = VirtualIap2Link.hidReportFromParams(Iap2Csm.parseParams(body))
         assertEquals(listOf<Byte>(0x08), report?.toList())
     }
+
+    @Test
+    fun startPowerUpdatesRepliesSingleCombinedPowerUpdateFrameAndStopsOnAe02() {
+        AccessoryDeclaration.reset()
+        try {
+            val h = Harness()
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+            h.carSends(0x1D01, Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr"))
+            h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            h.settle()
+
+            val before = h.controlFrames().size
+            h.carSends(0xAE00, Iap2Csm.param(4, ByteArray(0)) + Iap2Csm.param(5, ByteArray(0)) + Iap2Csm.param(6, ByteArray(0)))
+            h.settle()
+            val replies = h.controlFrames().drop(before)
+            assertEquals(listOf(0xAE01), replies.map { it.second })
+            val params = Iap2Csm.parseParams(replies.single().first.copyOfRange(6, replies.single().first.size))
+            assertEquals(listOf(4, 5, 6), params.map { it.id })
+
+            val beforeStop = h.controlFrames().size
+            h.carSends(0xAE02)
+            h.settle()
+            assertTrue(h.controlFrames().drop(beforeStop).isEmpty())
+        } finally {
+            AccessoryDeclaration.reset()
+        }
+    }
+
+    @Test
+    fun earlyPowerUpdatesDeferredUntilAuthFinishedAndCancelledByAe02AndLinkRestart() {
+        AccessoryDeclaration.reset()
+        try {
+            // 1) 认证前 0xAE00 延后到 0xAA03 完成后发 1 次 0xAE01
+            val deferred = Harness()
+            deferred.link.armMib3()
+            deferred.car.start(0)
+            deferred.exchangeUntilNormal()
+            deferred.carSends(0x1D01, Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr"))
+            deferred.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            val beforeEarly = deferred.controlFrames().size
+            deferred.carSends(0xAE00)
+            deferred.settle()
+            assertTrue("认证完成前不应先发 0xAE01", deferred.controlFrames().drop(beforeEarly).none { it.second == 0xAE01 })
+            val beforeAuth = deferred.controlFrames().size
+            deferred.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            deferred.settle()
+            assertEquals(1, deferred.controlFrames().drop(beforeAuth).count { it.second == 0xAE01 })
+
+            // 2) 认证前 0xAE00 紧跟 0xAE02 取消：0xAA03 后绝不再补发 0xAE01
+            val cancelled = Harness()
+            cancelled.link.armMib3()
+            cancelled.car.start(0)
+            cancelled.exchangeUntilNormal()
+            cancelled.carSends(0x1D01, Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr"))
+            cancelled.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            cancelled.carSends(0xAE00)
+            cancelled.carSends(0xAE02)
+            cancelled.settle()
+            val beforeCancelledAuth = cancelled.controlFrames().size
+            cancelled.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            cancelled.settle()
+            assertEquals(0, cancelled.controlFrames().drop(beforeCancelledAuth).count { it.second == 0xAE01 })
+
+            // 3) 认证前 0xAE00 后对端重发 DETECT 重启链路：旧挂起标志必须清零，新链路认证完不发旧 0xAE01
+            val restarted = Harness()
+            restarted.link.armMib3()
+            restarted.car.start(0)
+            restarted.exchangeUntilNormal()
+            restarted.carSends(0x1D01, Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr"))
+            restarted.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            restarted.carSends(0xAE00)
+            restarted.settle()
+            val freshCar = Iap2LinkEngine()
+            restarted.link.onCarBytes(Iap2LinkEngine.MARKER)
+            restarted.controlSent.clear()
+            freshCar.start(0)
+            repeat(8) {
+                val out = freshCar.takeOutput()
+                if (out.isNotEmpty()) restarted.link.onCarBytes(out)
+                while (restarted.controlSent.isNotEmpty()) {
+                    val batch = restarted.controlSent.toList()
+                    restarted.controlSent.clear()
+                    batch.forEach { freshCar.feed(it, restarted.now) }
+                }
+                restarted.now += 600
+                restarted.clock += 600
+                freshCar.advanceTime(restarted.now)
+                if (freshCar.state == Iap2LinkEngine.State.NORMAL) return@repeat
+            }
+            assertEquals(Iap2LinkEngine.State.NORMAL, freshCar.state)
+            fun freshSend(id: Int, body: ByteArray = ByteArray(0)) {
+                assertTrue(freshCar.sendControl(Iap2Csm.encode(id, body), restarted.now))
+                repeat(6) {
+                    val out = freshCar.takeOutput()
+                    if (out.isNotEmpty()) restarted.link.onCarBytes(out)
+                    while (restarted.controlSent.isNotEmpty()) {
+                        val batch = restarted.controlSent.toList()
+                        restarted.controlSent.clear()
+                        batch.forEach { freshCar.feed(it, restarted.now) }
+                    }
+                    restarted.now += 600
+                    restarted.clock += 600
+                    freshCar.advanceTime(restarted.now)
+                }
+            }
+            freshSend(0x1D01, Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr"))
+            freshSend(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            val beforeNewAuth = restarted.controlFrames().size
+            freshSend(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            assertEquals(0, restarted.controlFrames().drop(beforeNewAuth).count { it.second == 0xAE01 })
+        } finally {
+            AccessoryDeclaration.reset()
+        }
+    }
+
+    @Test
+    fun mib3BurstOmitsVehicleStatusUpdateEvenWhenDeclaredInIdentification() {
+        AccessoryDeclaration.reset()
+        try {
+            val h = Harness()
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+            val receiveList = byteArrayOf(0xA1.toByte(), 0x00, 0x4E, 0x0C, 0x4E, 0x0A, 0x4E, 0x0B, 0x4E, 0x09)
+            h.carSends(
+                0x1D01,
+                Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr") + Iap2Csm.param(7, receiveList),
+            )
+            h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            val burstFrom = h.controlFrames().size
+            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            h.settle()
+            val burst = h.controlFrames().drop(burstFrom)
+            // 五帧突发（0xAA05 + 4×0x4E0x）刚好落入 peerWindow=5，不再夹带 0xA100
+            assertEquals(listOf(0xAA05, 0x4E0C, 0x4E0A, 0x4E0B, 0x4E09), burst.map { it.second })
+        } finally {
+            AccessoryDeclaration.reset()
+        }
+    }
+
+    @Test
+    fun startRouteGuidanceWithoutActiveRouteDoesNotSendEmpty5201AndPushesWhenRouteStarts() {
+        AccessoryDeclaration.reset()
+        io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.reset()
+        try {
+            val h = Harness()
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+            val receiveList = byteArrayOf(0x52, 0x01, 0x52, 0x02, 0x4E, 0x0C, 0x4E, 0x0A, 0x4E, 0x0B, 0x4E, 0x09)
+            h.carSends(
+                0x1D01,
+                Iap2Csm.string(0, "TestCar") + Iap2Csm.string(1, "Mfr") + Iap2Csm.param(7, receiveList),
+            )
+            h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+            h.settle()
+
+            // 尚无活跃导航时收到 0x5200：只登记订阅，绝不发 0 字节空 0x5201
+            val beforeSub = h.controlFrames().size
+            h.carSends(0x5200, Iap2Csm.u16(0, 1))
+            h.settle()
+            assertTrue(
+                "无活跃导航时不应发送空 0x5201：frames=${h.controlFrames().drop(beforeSub).map { it.second }}",
+                h.controlFrames().drop(beforeSub).none { it.second == 0x5201 },
+            )
+            assertTrue(
+                io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.isSubscribed(
+                    io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.Link.TUNNEL,
+                ),
+            )
+
+            // 导航开始后主动推送 0x5202 + 0x5201，且携带车机订阅的 componentId=1
+            val beforeNav = h.controlFrames().size
+            io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.publish(
+                io.github.shaonialife.carptocar.carlife.CarLifeNaviNextTurn(
+                    action = io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide.ACTION_START,
+                    nextTurn = io.github.shaonialife.carptocar.carlife.CarLifeNaviGuide.LEFT_TURN,
+                    rawNextTurn = 7,
+                    roadName = "测试路",
+                    remainDistance = 120,
+                ),
+            )
+            h.link.pushRouteGuidance()
+            h.tick()
+            h.settle()
+            val navFrames = h.controlFrames().drop(beforeNav)
+            assertEquals(listOf(0x5202, 0x5202, 0x5201), navFrames.map { it.second })
+            navFrames.forEach { (raw, _) ->
+                val comp = Iap2Csm.parseParams(raw.copyOfRange(6, raw.size)).first { it.id == 0 }
+                assertEquals(listOf<Byte>(0x00, 0x01), comp.value.toList())
+            }
+        } finally {
+            io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.reset()
+            AccessoryDeclaration.reset()
+        }
+    }
+
+    @Test
+    fun controlChannelTrimsCommunicationsAndListRepliesToRequestedFields() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "TestCar"))
+        h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        h.settle()
+
+        val commsReq = listOf(0, 1, 7, 9, 17).fold(ByteArray(0)) { acc, id -> acc + Iap2Csm.param(id, ByteArray(0)) }
+        assertEquals(listOf(0x4158), h.carSends(0x4157, commsReq))
+        val commsRaw = h.lastRawFrameOf(0x4158)!!
+        val commsParams = Iap2Csm.parseParams(commsRaw.copyOfRange(6, commsRaw.size))
+        assertEquals(listOf(0, 1, 7, 9, 17), commsParams.map { it.id })
+        assertEquals(31, commsRaw.size)
+
+        val listReq =
+            Iap2Csm.param(0x0001, ByteArray(0)) +
+                Iap2Csm.u16(0x0003, 0) +
+                Iap2Csm.u8(0x0004, 0)
+        assertEquals(listOf(0x4171), h.carSends(0x4170, listReq))
+        val listRaw = h.lastRawFrameOf(0x4171)!!
+        val listParams = Iap2Csm.parseParams(listRaw.copyOfRange(6, listRaw.size))
+        assertEquals(listOf(0x0000), listParams.map { it.id })
+        assertEquals(11, listRaw.size)
+    }
+
+    @Test
+    fun unsolicitedOrEmptyMfiResponseDoesNotCompleteControlSession() {
+        val h = Harness()
+        h.link.armMib3()
+        h.car.start(0)
+        h.exchangeUntilNormal()
+        h.carSends(0x1D01, Iap2Csm.string(0, "SpoofCar"))
+
+        // 尚未发出 0xAA02 挑战前就收到 0xAA03：绝不能置为就绪
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        assertFalse(h.link.controlSessionReady)
+
+        // 收到 0xAA01 后手机发了 0xAA02，但车机回空载荷 0xAA03：仍不能置为就绪
+        h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
+        h.carSends(0xAA03, ByteArray(0))
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(0)))
+        assertFalse(h.link.controlSessionReady)
+
+        // 真正带非空参数 0 的签名到达后才完成认证
+        h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
+        assertTrue(h.link.controlSessionReady)
+    }
+
+    @Test
+    fun unsolicitedPushesWaitForMfiAndDeclaredSubscriptions() {
+        AccessoryDeclaration.reset()
+        io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.reset()
+        try {
+            val h = Harness()
+            h.nowPlaying = song("抢跑歌名").copy(artworkId = 1)
+            h.artwork = mapOf(1 to byteArrayOf(1, 2, 3, 4))
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+
+            // 0x1D01 声明车机会发 0x5000 和 0x4154，此时尚未完成 MFi（0xAA03）
+            val sendList = byteArrayOf(0x50, 0x00, 0x41, 0x54)
+            val recvList = byteArrayOf(0x50, 0x01, 0x41, 0x55, 0x52, 0x01, 0x52, 0x02)
+            h.carSends(
+                0x1D01,
+                Iap2Csm.string(0, "BMW 14431") +
+                    Iap2Csm.param(6, sendList) +
+                    Iap2Csm.param(7, recvList),
+            )
+            h.carSends(0xAA01, Iap2Csm.param(0, ByteArray(612)))
+
+            // MFi 进行中：任何主动补推都不得发出 0x5001 / 0x4155 / 0x5201 / 封面 SETUP
+            val beforeMidMfi = h.allControl.size
+            assertFalse("MFi 完成前不得主动推 0x5001", h.link.pushNowPlaying())
+            h.link.pushCallState()
+            h.link.pushRouteGuidance()
+            h.link.pushRouteGuidanceHeartbeat()
+            h.tick()
+            assertEquals("MFi 完成前主动补推不得向控制通道排入任何帧", beforeMidMfi, h.allControl.size)
+
+            // MFi 完成，但车机声明会发 0x5000/0x4154 且尚未订阅：仍不得抢推 0x5001/0x4155
+            h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(64)))
+            h.settle()
+            val beforePreSub = h.controlFrames().size
+            assertFalse("车机声明会发 0x5000 且未订阅前不得抢推 0x5001", h.link.pushNowPlaying())
+            h.link.pushCallState()
+            h.tick()
+            assertTrue(
+                "未收到 0x5000/0x4154 前不得抢推",
+                h.controlFrames().drop(beforePreSub).isEmpty(),
+            )
+
+            // 车机发 0x5000 订阅后才推送 0x5001，后续 pushNowPlaying 正常放行
+            assertEquals(listOf(0x5001), h.carSends(0x5000))
+            h.nowPlaying = song("订阅后新歌")
+            assertTrue(h.link.pushNowPlaying())
+            h.tick()
+            h.settle()
+            assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("订阅后新歌"))
+        } finally {
+            io.github.shaonialife.carptocar.iap2.Iap2RouteGuidance.reset()
+            AccessoryDeclaration.reset()
+        }
+    }
+
+    @Test
+    fun supersedingPendingArtworkCancelsPreviousSetupBeforeSendingNext() {
+        Iap2ArtworkSupport.reset()
+        try {
+            val h = Harness()
+            h.readyForSubscriptions()
+            h.artwork = mapOf(1 to byteArrayOf(1, 2, 3), 2 to byteArrayOf(4, 5, 6))
+            h.nowPlaying = song("第一首").copy(artworkId = 1)
+            h.carSends(0x5000)
+            h.settle()
+
+            val beforeSecond = h.allControl.size
+            h.nowPlaying = song("第二首").copy(artworkId = 2)
+            assertTrue(h.link.pushNowPlaying())
+            h.tick()
+            h.settle()
+
+            val ftPayloads =
+                h.allControl.drop(beforeSecond).flatMap { chunk ->
+                    val out = ArrayList<ByteArray>()
+                    var off = 0
+                    while (off + 9 <= chunk.size) {
+                        if (chunk[off] != 0xFF.toByte() || chunk[off + 1] != 0x5A.toByte()) {
+                            off++
+                            continue
+                        }
+                        val len = ((chunk[off + 2].toInt() and 0xFF) shl 8) or (chunk[off + 3].toInt() and 0xFF)
+                        if (len < 9 || off + len > chunk.size) break
+                        val sid = chunk[off + 7].toInt() and 0xFF
+                        if (sid == Iap2LinkEngine.SESSION_FILE_TRANSFER && len > 9) {
+                            out.add(chunk.copyOfRange(off + 9, off + len - 1))
+                        }
+                        off += len
+                    }
+                    out
+                }
+            assertTrue(
+                "新封面取代未完成旧封面时必须先发 CANCEL(id=1) 再发 SETUP(id=2)：actual=${ftPayloads.map { it.take(2) }}",
+                ftPayloads.size >= 2 &&
+                    ftPayloads[0].size == 2 &&
+                    ftPayloads[0][0] == 1.toByte() &&
+                    ftPayloads[0][1] == io.github.shaonialife.carptocar.iap2.Iap2ArtworkTransfer.CMD_CANCEL.toByte() &&
+                    ftPayloads[1][0] == 2.toByte() &&
+                    ftPayloads[1][1] == io.github.shaonialife.carptocar.iap2.Iap2ArtworkTransfer.CMD_SETUP.toByte(),
+            )
+        } finally {
+            Iap2ArtworkSupport.reset()
+        }
+    }
+
+    @Test
+    fun appleOidCertifiedChallengeLengthSurvivesLinkInterruptAndHealsStaleHardReject() {
+        val identity = "OidCar OidModel tunnel"
+        MfiLengthMemory.forget(null, identity)
+        // 预置旧版遗留的误判硬拒绝记忆（模拟手机 SharedPreferences 已被前版污染）
+        MfiLengthMemory.recordHardRejected(null, identity, 32)
+        try {
+            // 含 Apple 扩展 OID 1.2.840.113635.100.6.36（明确认证 32B）
+            val oid32Cert =
+                byteArrayOf(
+                    0x30, 0x0B,
+                    0x06, 0x09,
+                    0x2A, 0x86.toByte(), 0x48, 0x86.toByte(), 0xF7.toByte(), 0x63, 0x64, 0x06, 0x24,
+                )
+            val first = Harness()
+            first.link.armMib3()
+            first.car.start(0)
+            first.exchangeUntilNormal()
+            first.carSends(0x1D01, Iap2Csm.string(0, "OidCar") + Iap2Csm.string(1, "OidModel"))
+            first.carSends(0xAA01, Iap2Csm.param(0, oid32Cert))
+            assertEquals("Apple OID 明确认证的 32B 必须压过旧 hardRejected 排在首位", listOf(32), first.challengeLengths())
+
+            // 挑战期间外部断链关闭：不得把 OID 认证长度记进 hardRejected
+            first.link.close()
+            MfiLengthMemory.forget(null, identity)
+            val second = Harness()
+            second.link.armMib3()
+            second.car.start(0)
+            second.exchangeUntilNormal()
+            second.carSends(0x1D01, Iap2Csm.string(0, "OidCar") + Iap2Csm.string(1, "OidModel"))
+            second.carSends(0xAA01, Iap2Csm.param(0, oid32Cert))
+            second.link.close()
+            val afterInterrupt = MfiLengthMemory.load(null, identity)
+            assertFalse("Apple OID 认证长度在外部断链时不得记入 hardRejected", 32 in afterInterrupt.hardRejected)
+        } finally {
+            MfiLengthMemory.forget(null, identity)
+        }
+    }
 }

@@ -115,6 +115,8 @@ class VirtualIap2Link(
     /** 车机是否订阅过 0x5000；没订阅不主动推 0x5001，避免改变既有会话形态。 */
     private var nowPlayingSubscribed = false
     private var nowPlayingOverrideSubscribed = false
+    private var callStateSubscribed = false
+    private var deferredPowerUpdates = false
 
     /** 上次实际发出的 0x5001 内容键；订阅应答 / 事件补推 / 周期补推三条路径共用。 */
     private var lastPushedNowPlayingKey: String? = null
@@ -183,6 +185,9 @@ class VirtualIap2Link(
 
     /** 上一次记录过的链路状态（只在对日志里出现一次状态迁移）。 */
     private var lastLinkState = Iap2LinkEngine.State.IDLE
+    /** 逐帧摘要日志计数（每方向每链路周期；SYN/EAK/RST/裸ACK 始终记录）。 */
+    private var rxFrameLogs = 0
+    private var txFrameLogs = 0
 
     // ---- 车机 HID 媒体键（0x6802）状态 ----
     /** 上一次报文里按下的 Usage 集合（用于判定「新按下」，松开后自动清空）。 */
@@ -209,10 +214,14 @@ class VirtualIap2Link(
     private var mfiEcdsa = false
 
     /**
-     * 从 0xAA01 证书识别出的首选挑战长度（协议核 OID 规则，见 [io.github.shaonialife.carptocar.iap2.MfiCertificateLength]）。
+     * 从 0xAA01 证书识别出的首选挑战长度（协议核 OID 规则或参数总长兜底，见 [io.github.shaonialife.carptocar.iap2.MfiCertificateLength]）。
      * null = 未识别 → 沿用原「ECDSA 基线 + 车机记忆 + 逐档试探」；非 null 也只插队首，失败照原顺序退。
      */
     private var mfiRecognizedLength: Int? = null
+
+    /** 证书 X.509 Apple 扩展 OID 明确认证的挑战长度（不含参数总长粗判兜底）；链路意外重置时不得将其记为硬拒绝。 */
+    private var mfiOidRecognizedLength: Int? = null
+    private var mfiChallengePending = false
 
     /**
      * iAP2 控制会话是否真正就绪：链路进入 NORMAL **且** MFi 挑战已应答完。
@@ -228,6 +237,7 @@ class VirtualIap2Link(
     init {
         engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
         engine.onPeerDetect = { handlePeerDetectLocked() }
+        registerLinkDiagnostics()
         // 封面文件传输（session 12）：车机在 START 时说「可以发」，收到数据后回 SUCCESS。
         // 没接这个回调时该会话的数据会被当成「未知会话」丢掉，日志里只留一行丢弃计数。
         engine.onFileTransferData = { bytes ->
@@ -320,7 +330,12 @@ class VirtualIap2Link(
      *  @return 是否真的发出了一帧（链路未识别 / 无内容时为 false）。 */
     fun pushNowPlaying(quiet: Boolean = false): Boolean {
         synchronized(lock) {
-            if (!mib3Identified && !tunnelIdentified) return false
+            if (!mfiFinished || (!mib3Identified && !tunnelIdentified)) return false
+            if (!nowPlayingSubscribed &&
+                AccessoryDeclaration.declaresSend(Iap2MessageIds.START_NOW_PLAYING_UPDATES) == true
+            ) {
+                return false
+            }
             val nowPlaying = displayNowPlaying() ?: return false
             lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
             sendNowPlayingLocked(nowPlaying)
@@ -368,7 +383,7 @@ class VirtualIap2Link(
      * 上次发出的一致也不重发。挂在既有 200ms 节拍上，不新增线程、不额外唤醒。
      */
     private fun maybePollNowPlayingLocked() {
-        if (!nowPlayingSubscribed || (!mib3Identified && !tunnelIdentified)) return
+        if (!mfiFinished || !nowPlayingSubscribed || (!mib3Identified && !tunnelIdentified)) return
         val now = nowMillis()
         if (lastNowPlayingPollMs != 0L && now - lastNowPlayingPollMs < NOW_PLAYING_POLL_MILLIS) return
         lastNowPlayingPollMs = now
@@ -399,7 +414,7 @@ class VirtualIap2Link(
      */
     fun pushRouteGuidanceHeartbeat() {
         synchronized(lock) {
-            if (!mib3Identified && !tunnelIdentified) return
+            if (!mfiFinished || (!mib3Identified && !tunnelIdentified)) return
             if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
             for (frame in Iap2RouteGuidance.nextHeartbeatsFor(Iap2RouteGuidance.Link.TUNNEL)) {
                 sendCsmLocked(frame.first, frame.second)
@@ -410,7 +425,7 @@ class VirtualIap2Link(
 
     /** 把尚未发过的 0x5201/0x5202 帧推给已订阅链路；挂在 200ms 节拍上，不新增线程。 */
     private fun maybePushRouteGuidanceLocked() {
-        if (!mib3Identified && !tunnelIdentified) return
+        if (!mfiFinished || (!mib3Identified && !tunnelIdentified)) return
         if (AccessoryDeclaration.acceptsRouteGuidance() == false) return
         val frames = Iap2RouteGuidance.nextFramesFor(Iap2RouteGuidance.Link.TUNNEL)
         for ((messageId, body) in frames) {
@@ -429,7 +444,12 @@ class VirtualIap2Link(
      */
     fun pushCallState() {
         synchronized(lock) {
-            if (!mib3Identified) return
+            if (!mfiFinished || !mib3Identified) return
+            if (!callStateSubscribed &&
+                AccessoryDeclaration.declaresSend(Iap2MessageIds.START_CALL_STATE_UPDATES) == true
+            ) {
+                return
+            }
             val state = currentCallState()
             sendCallStateLocked(state)
             log("IAPLINK: 主动补推 0x4155（通话状态=$state）")
@@ -490,17 +510,21 @@ class VirtualIap2Link(
             artworkSetupAtMs = 0L
             nowPlayingSubscribed = false
             nowPlayingOverrideSubscribed = false
+            callStateSubscribed = false
             artworkPendingIsNavigation = false
             navigationArtworkUnavailable = false
             artworkWaitLogged = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
             // 导航订阅是链路级状态：对端重发 DETECT 后必须重收 0x5200 才再推
+            deferredPowerUpdates = false
             Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL)
             lastHidUsages = emptySet()
             hidDescriptor = null
             peerDetectCount = 0
             lastDetectResponseAtMs = null
+            rxFrameLogs = 0
+            txFrameLogs = 0
             log("IAPLINK: 对端重发 DETECT 重启链路——旧识别与认证状态已作废")
         }
         val now = nowMillis()
@@ -637,6 +661,7 @@ class VirtualIap2Link(
         val failed = mfiCurrentLength
         MfiLengthMemory.recordSilent(mfiContext, identity, failed)
         log("IAPLINK: 隧道 MFi ${failed}B 静默 ${mfiWindowMillis}ms——记入记忆，换下一档重试")
+        mfiChallengePending = false
         mfiCurrentLength = 0
         startNextMfiChallengeLocked()
     }
@@ -698,9 +723,15 @@ class VirtualIap2Link(
         if (mfiOrder.isEmpty()) {
             mfiMemory = MfiLengthMemory.load(mfiContext, identity)
             val baseline = MfiLengthMemory.orderAttempts(if (mfiEcdsa) TUNNEL_MFI_ECDSA_BASELINE else TUNNEL_MFI_BASELINE, mfiMemory)
-            // 证书识别只插队首，原顺序完整保留为失败后的退路（失败时 checkMfiTimeoutLocked /
-            // 0xAA04 处理会照常推进 mfiPosition 到下一档，识别不会锁死本轮）。
-            mfiOrder = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.prefer(baseline, mfiRecognizedLength)
+            // Apple 扩展 OID 明确认证的长度优先放队首（可自愈外部断链误写入的旧 hardRejected 记忆）；
+            // 参数总长兜底仅走 prefer（不覆盖已有记忆裁剪）。失败后原顺序照常回退。
+            val oidLength = mfiOidRecognizedLength
+            mfiOrder =
+                if (oidLength != null) {
+                    listOf(oidLength) + baseline.filter { it != oidLength }
+                } else {
+                    io.github.shaonialife.carptocar.iap2.MfiCertificateLength.prefer(baseline, mfiRecognizedLength)
+                }
             log(
                 "IAPLINK: 隧道 MFi 证书公钥=${if (mfiEcdsa) "ECDSA-P256" else "RSA/其他"}，" +
                     "车机记忆：${MfiLengthMemory.describe(mfiMemory)} → 本轮顺序 ${mfiOrder.joinToString("/")}B" +
@@ -727,25 +758,30 @@ class VirtualIap2Link(
         mfiChallengeSentAtMs = nowMillis()
         val challenge = ByteArray(mfiCurrentLength).also { SecureRandom().nextBytes(it) }
         sendCsmLocked(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
+        mfiChallengePending = true
         mib3AuthStage = 3
-        log("IAPLINK: 隧道 tx=0xaa02 challenge=${mfiCurrentLength}B（第 ${mfiPosition + 1} 次，窗口 ${mfiWindowMillis}ms）")
     }
 
     /** 挑战等待应答期间链路被对端重置/关闭：该长度记为硬拒绝（推翻可能误记的旧结论），并清空本轮 MFi 状态。 */
     private fun resetMfiLocked(interrupted: Boolean) {
         val identity = mfiIdentity
         if (interrupted && identity != null && !mfiFinished && mfiCurrentLength > 0) {
-            MfiLengthMemory.recordHardRejected(mfiContext, identity, mfiCurrentLength)
-            log("IAPLINK: 隧道 MFi ${mfiCurrentLength}B 挑战期间链路中断——记入硬拒绝记忆")
+            if (mfiCurrentLength == mfiOidRecognizedLength) {
+                log("IAPLINK: 隧道 MFi ${mfiCurrentLength}B 挑战期间链路中断——该长度由证书 Apple OID 明确认证，不记硬拒绝")
+            } else {
+                MfiLengthMemory.recordHardRejected(mfiContext, identity, mfiCurrentLength)
+                log("IAPLINK: 隧道 MFi ${mfiCurrentLength}B 挑战期间链路中断——记入硬拒绝记忆")
+            }
         }
         mfiIdentity = null
         mfiMemory = MfiLengthMemory.Entry()
         mfiOrder = emptyList()
         mfiPosition = -1
         mfiCurrentLength = 0
+        mfiChallengePending = false
         mfiFinished = false
-        mfiEcdsa = false
         mfiRecognizedLength = null
+        mfiOidRecognizedLength = null
         mib3AuthStage = 0
     }
 
@@ -902,6 +938,7 @@ class VirtualIap2Link(
                 if (!mib3 || mfiFinished) return
                 mfiIdentity?.let { MfiLengthMemory.recordRejected(mfiContext, it, mfiCurrentLength) }
                 log("IAPLINK: 隧道 MFi ${mfiCurrentLength}B 被拒（0xaa04）——记入记忆，换下一档")
+                mfiChallengePending = false
                 mfiCurrentLength = 0
                 startNextMfiChallengeLocked()
             }
@@ -917,7 +954,8 @@ class VirtualIap2Link(
                     // 长度按车机记忆（冷启动基线见 startNextMfiChallengeLocked）
                     mfiEcdsa = containsEcdsaPublicKeyOid(certificate)
                     // 协议核逆向回灌：证书扩展区 Apple OID → 首选长度（失败后原顺序照试）
-                    mfiRecognizedLength = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.recognize(certificate)
+                    mfiOidRecognizedLength = io.github.shaonialife.carptocar.iap2.MfiCertificateLength.recognize(certificate)
+                    mfiRecognizedLength = mfiOidRecognizedLength
                     if (mfiRecognizedLength != null) {
                         log("IAPLINK: 隧道 MFi 证书识别 → 首选 ${mfiRecognizedLength}B（协议核 OID 规则；失败自动回退试探）")
                     } else if (io.github.shaonialife.carptocar.iap2.MfiCertBytesOption.enabled) {
@@ -936,23 +974,37 @@ class VirtualIap2Link(
                     val challenge =
                         ByteArray(32).also { SecureRandom().nextBytes(it) }
                     sendCsmLocked(ids.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
+                    mfiChallengePending = true
                     mib3AuthStage = 3
                 }
             }
 
             ids.MFI_RESPONSE -> {
+                val signature =
+                    Iap2Csm.parseParams(frame.body).firstOrNull { it.id == 0 && it.value.isNotEmpty() }?.value
+                if (!mfiChallengePending || signature == null) {
+                    log(
+                        "IAPLINK: 忽略无效 0xaa03（pending=$mfiChallengePending sigBytes=${signature?.size ?: 0} body=${frame.body.size}B）",
+                    )
+                    return
+                }
+                mfiChallengePending = false
                 if (mib3) {
                     mfiIdentity?.let { MfiLengthMemory.recordSuccess(mfiContext, it, mfiCurrentLength) }
-                    log("IAPLINK: 隧道 rx=0xaa03 签名 ${frame.body.size}B（${mfiCurrentLength}B 挑战成功，已记忆）")
+                    log("IAPLINK: 隧道 rx=0xaa03 签名 ${signature.size}B（${mfiCurrentLength}B 挑战成功，已记忆）")
                     mfiCurrentLength = 0
-                    mfiFinished = true
                 }
+                mfiFinished = true
                 sendCsmLocked(ids.MFI_AUTHENTICATION_SUCCEEDED)
                 if (mib3) {
                     mib3AuthStage = 4
                     sendMib3BurstLocked()
                 } else {
                     log("IAPLINK: 隧道 MFi 完成——等待对端订阅（随后其标记隧道就绪）")
+                    if (deferredPowerUpdates) {
+                        deferredPowerUpdates = false
+                        sendPowerUpdatesLocked()
+                    }
                 }
             }
 
@@ -960,31 +1012,43 @@ class VirtualIap2Link(
                 if (mib3 && mfiFinished) sendCsmLocked(0xAD01, Iap2Csm.param(0, byteArrayOf(1)))
             }
 
+            Iap2MessageIds.START_POWER_UPDATES -> {
+                if (!mfiFinished) {
+                    deferredPowerUpdates = true
+                    log("IAPLINK: 0xae00 电源订阅早于认证到达——延后至认证完成后应答")
+                    return
+                }
+                sendPowerUpdatesLocked()
+            }
+
+            Iap2SubscriptionReplies.STOP_POWER_UPDATES -> {
+                deferredPowerUpdates = false
+                log("IAPLINK: 0xae02 车机停止电源状态订阅")
+            }
+
             START_COMMUNICATIONS_UPDATES -> {
-                if (!mib3) return
-                sendRawCsmLocked(Iap2SubscriptionReplies.COMMUNICATIONS_UPDATE_IDLE)
-                log("IAPLINK: MIB3 0x4157 → 0x4158（空态）")
+                val body = Iap2SubscriptionReplies.communicationsUpdateBody(frame.body)
+                sendCsmLocked(Iap2SubscriptionReplies.COMMUNICATIONS_UPDATE, body)
+                log("IAPLINK: 0x4157 → 0x4158（空态 ${body.size}B）")
             }
 
             // 车机点名要 CarPlay 导航引导数据（MIB3 4398/CL3B 投仪表/HUD 的入口）。
-            // 车机可收清单里明确没有 0x52xx 时不回，避免越权；有数据时回真载荷，
-            // 没数据时仍回空体保住控制通道（见 Iap2RouteGuidance）。
+            // 车机可收清单里明确没有 0x52xx 时不登记也不回；有数据时回真载荷，
+            // 没数据时只登记订阅、不发 0 字节空 0x5201（缺必填 ComponentIdentifier 会在部分车机触发断链/重启）。
             Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES -> {
                 if (AccessoryDeclaration.acceptsRouteGuidance() == false) {
                     log("IAPLINK: 0x5200 订阅但可收清单未声明导航引导 → 不回 0x5201（按声明裁剪）")
                     return
                 }
                 val body = Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.TUNNEL, frame.body)
-                sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
-                log(
-                    if (body.isEmpty()) {
-                        "IAPLINK: 0x5200 → 0x5201（空态；CarLife 尚无导航诱导数据）"
-                    } else {
-                        "IAPLINK: 0x5200 → 0x5201（${body.size}B，CarLife 导航引导已就绪）"
-                    },
-                )
-                // 订阅应答只能带 0x5201；0x5202 详情由下面同一拍的推帧逻辑补上
-                maybePushRouteGuidanceLocked()
+                if (body.isEmpty()) {
+                    log("IAPLINK: 0x5200 导航订阅已登记（尚无导航诱导，待导航开始再发 0x5202/0x5201）")
+                } else {
+                    sendCsmLocked(Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE, body)
+                    log("IAPLINK: 0x5200 → 0x5201（${body.size}B，导航引导已就绪）")
+                    // 订阅应答只能带 0x5201；0x5202 详情由下面同一拍的推帧逻辑补上
+                    maybePushRouteGuidanceLocked()
+                }
             }
 
             Iap2SubscriptionReplies.STOP_ROUTE_GUIDANCE_UPDATES -> {
@@ -994,6 +1058,7 @@ class VirtualIap2Link(
 
             START_CALL_STATE_UPDATES -> {
                 if (!mib3) return
+                callStateSubscribed = true
                 // 车机会一直把订阅时的答案当「当前状态」，之后靠主动补推更新。
                 val state = currentCallState()
                 sendCallStateLocked(state)
@@ -1003,16 +1068,14 @@ class VirtualIap2Link(
                 )
             }
 
+            Iap2MessageIds.STOP_CALL_STATE_UPDATES -> {
+                callStateSubscribed = false
+            }
+
             START_LIST_UPDATES -> {
-                if (!mib3) return
-                sendCsmLocked(
-                    LIST_UPDATE,
-                    Iap2Csm.param(0x0000, byteArrayOf(0)) +
-                        Iap2Csm.param(0x0002, byteArrayOf(0, 0)) +
-                        Iap2Csm.param(0x0005, byteArrayOf(0)) +
-                        Iap2Csm.param(0x0007, byteArrayOf(0, 0)),
-                )
-                log("IAPLINK: MIB3 0x4170 → 0x4171（空列表）")
+                val body = Iap2SubscriptionReplies.listUpdateBody(frame.body)
+                sendCsmLocked(LIST_UPDATE, body)
+                log("IAPLINK: 0x4170 → 0x4171（空列表 ${body.size}B）")
             }
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
@@ -1236,10 +1299,21 @@ class VirtualIap2Link(
         sendCsmLocked(DEVICE_TIME, mib3DeviceTimeParams())
         sendCsmLocked(DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, "iPhone"))
         log(
-            "IAPLINK: MIB3 突发已发（会话标识 $sessionId，语言=$language）——等待车机订阅；" +
-                "已停发 0xA100/0xFFFA/0xFFF0（抓包常量，疑为车机 CarPlay 组件崩溃源）；" +
+            "IAPLINK: MIB3 突发已发（会话标识 $sessionId，语言=$language）" +
+                "——等待车机订阅；已停发 0xA100/0xFFFA/0xFFF0；" +
                 AccessoryDeclaration.describe(),
         )
+        if (deferredPowerUpdates) {
+            deferredPowerUpdates = false
+            sendPowerUpdatesLocked()
+        }
+    }
+
+    private fun sendPowerUpdatesLocked() {
+        val battery = Iap2SubscriptionReplies.readBatterySnapshot(mfiContext)
+        val body = Iap2SubscriptionReplies.powerUpdateBody(battery)
+        sendCsmLocked(Iap2SubscriptionReplies.POWER_UPDATE, body)
+        log("IAPLINK: 0xae00 → 0xae01（${body.size}B 电源状态 level=${battery.chargeLevel}% charging=${battery.chargingState}）")
     }
 
     /**
@@ -1303,12 +1377,22 @@ class VirtualIap2Link(
             log("IAPLINK: 封面 id=$id 过大（${bytes.size}B > 16MB）——跳过")
             return
         }
+        val previousId = artworkPendingId
+        val session = engine.artworkSessionId
+        if (previousId != 0 && previousId != id && artworkPendingBytes != null && engine.peerDeclaresFileTransfer) {
+            engine.sendOnSession(
+                byteArrayOf(previousId.toByte(), Iap2ArtworkTransfer.CMD_CANCEL.toByte()),
+                session,
+                nowMillis(),
+                awaitAck = false,
+            )
+            log("IAPLINK: 封面传输 CANCEL id=$previousId 会话=$session（已被新封面 id=$id 取代）")
+        }
         artworkPendingId = id
         artworkPendingIsNavigation = navigation
         artworkPendingBytes = bytes
         artworkSetupAtMs = nowMillis()
         artworkWaitLogged = false
-        val session = engine.artworkSessionId
         if (!engine.peerDeclaresFileTransfer) {
             log(
                 "IAPLINK: 封面 id=$id ${bytes.size}B 等车机在会话 $session 上要图" +
@@ -1378,6 +1462,7 @@ class VirtualIap2Link(
             response.isSuccess -> {
                 log("IAPLINK: 封面传输 SUCCESS id=${response.transferId}（车机已收图）")
                 artworkDeliveredId = artworkPendingId
+                artworkPendingId = 0
                 artworkPendingBytes = null
                 artworkSetupAtMs = 0L
             }
@@ -1386,6 +1471,7 @@ class VirtualIap2Link(
                 // 车机拒收（格式不支持/超限/超时）。标记成「已处理」，避免同一张图无限重试。
                 log("IAPLINK: 封面传输 FAILURE id=${response.transferId}（车机拒收，本轮放弃）")
                 artworkDeliveredId = artworkPendingId
+                artworkPendingId = 0
                 artworkPendingBytes = null
                 artworkSetupAtMs = 0L
             }
@@ -1481,6 +1567,66 @@ class VirtualIap2Link(
 
     /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
     private var hidDescriptor: ByteArray? = null
+
+    private fun registerLinkDiagnostics() {
+        engine.onPeerSynchronizationAdopted = { sync ->
+            val zeroAck = engine.isZeroAckReliablePeer(sync)
+            log(
+                "IAPLINK: 采纳对端会话表 maxOutgoing=${sync.maxOutgoing} maxLen=${sync.maxLength} " +
+                    "rto=${sync.retransmissionTimeoutMillis}ms ack=${sync.acknowledgementTimeoutMillis}ms " +
+                    "maxRetrans=${sync.maxRetransmissions} maxAck=${sync.maxAcknowledgements} " +
+                    "zeroAck=$zeroAck sessions=" +
+                    sync.sessions.joinToString { "${it.id}/k${it.kind}/v${it.version}" },
+            )
+        }
+        engine.onUnknownSessionData = { sessionId, size ->
+            log("IAPLINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
+        }
+        engine.onFrameAbandoned = { detail ->
+            log("IAPLINK: ⚠ $detail")
+        }
+        engine.onSendWindowHold = { peerMax, effective, backlog ->
+            log(
+                "IAPLINK: 对端窗口 $peerMax 帧（本端声明 ${engine.declaredSendWindow}）→ 按 $effective 发，" +
+                    "其余 $backlog 帧 holding 等 ACK",
+            )
+        }
+        engine.onSendWindowReleased = { effective, heldMillis ->
+            log("IAPLINK: 对端窗口放行（窗口 $effective，停发 ${heldMillis}ms）")
+        }
+        engine.onSendWindowStalled = { heldMillis, backlog ->
+            log("IAPLINK: ⚠ 车机 ${heldMillis}ms 没推进 ACK（发送窗口仍满，积压 $backlog 帧）")
+        }
+        engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
+            if (shouldLogLinkFrame(rxFrameLogs, control, size)) {
+                rxFrameLogs++
+                log(
+                    "IAPLINK rx: ctl=0x${"%02x".format(control)} seq=$sequence ack=$ack " +
+                        "session=$sessionId len=$size",
+                )
+            }
+        }
+        engine.onFrameSent = { control, sequence, ack, sessionId, size ->
+            if (shouldLogLinkFrame(txFrameLogs, control, size)) {
+                txFrameLogs++
+                log(
+                    "IAPLINK tx: ctl=0x${"%02x".format(control)} seq=$sequence ack=$ack " +
+                        "session=$sessionId len=$size",
+                )
+            }
+        }
+    }
+
+    private fun shouldLogLinkFrame(
+        logged: Int,
+        control: Int,
+        size: Int,
+    ): Boolean {
+        if (logged < FRAME_LOG_LIMIT) return true
+        val isBareAck = control == 0x40 && size == 0
+        val isControlSignal = (control and 0xB0) != 0 // SYN(0x80) | EAK(0x20) | RST(0x10)
+        return isBareAck || isControlSignal
+    }
 
     companion object {
         /**
@@ -1610,6 +1756,8 @@ class VirtualIap2Link(
 
         /** ---- 以下为 Frida 抓包的逐字节常量（MIB3 真机 iPhone → Audi MMI）---- */
         private val HEX_DIGITS = "0123456789abcdef"
+        /** 常规数据帧逐帧日志上限（每方向每链路周期）；SYN/EAK/RST/裸ACK 始终记录。 */
+        private const val FRAME_LOG_LIMIT = 80
 
         /**
          * 0xFFFA StartLocationInformation。
