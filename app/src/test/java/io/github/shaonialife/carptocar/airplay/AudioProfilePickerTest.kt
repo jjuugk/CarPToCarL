@@ -131,6 +131,30 @@ class AudioProfilePickerTest {
     }
 
     @Test
+    fun opus48kMonoSelectedOnAltAudioOnlyWhenPcmAndAacAbsent() {
+        val opus48kMono = 1L shl 30
+        val navOrder =
+            listOf(
+                101L to pcm48k,
+                101L to (1L shl 14),
+                101L to pcm44k,
+                101L to (1L shl 10),
+                101L to aac48k,
+                101L to aac44k,
+                101L to opus48kMono,
+            )
+        assertEquals(
+            101L to opus48kMono,
+            pickDeclaredFormat(listOf(channel(101L, "default", opus48kMono)), "default", navOrder),
+        )
+        // 同时声明 PCM 单声道与 Opus（奥迪 MIB3）：仍优先 PCM，不改既有车型行为
+        assertEquals(
+            101L to (1L shl 14),
+            pickDeclaredFormat(listOf(channel(101L, "default", opus48kMono or (1L shl 14))), "default", navOrder),
+        )
+    }
+
+    @Test
     fun navBorrowIsSkippedWhenNavStreamUnavailable() {
         val plan =
             CarPlayResourceStreams.planAudioStep(
