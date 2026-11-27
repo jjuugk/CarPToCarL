@@ -96,4 +96,48 @@ class SessionSetupBodyTest {
             ) as Map<*, *>
         assertNull(root["et"])
     }
+
+    @Test
+    fun disableBluetoothBodyCarriesPhoneDeviceId() {
+        val root =
+            BinaryPlist.parse(
+                client().buildDisableBluetoothBody("AA:BB:CC:00:00:07"),
+            ) as Map<*, *>
+        assertEquals("disableBluetooth", root["type"])
+        val params = root["params"] as Map<*, *>
+        assertEquals("AA:BB:CC:00:00:07", params["deviceID"])
+    }
+
+    @Test
+    fun setupBodySeparatesWifiMacAddressFromBluetoothDeviceId() {
+        val root =
+            BinaryPlist.parse(
+                client().buildSessionSetupBody(
+                    deviceId = "B0:DE:31:01:65:22",
+                    timingPort = 35449,
+                    encrypted = true,
+                    macAddress = "0A:A2:DF:C8:E6:1A",
+                ),
+            ) as Map<*, *>
+        assertEquals("B0:DE:31:01:65:22", root["deviceID"])
+        assertEquals("0A:A2:DF:C8:E6:1A", root["macAddress"])
+    }
+
+    @Test
+    fun extractEui64MacDecodesRealSlaacLinkLocalAndRejectsInvalidAddresses() {
+        val valid = java.net.InetAddress.getByName("fe80::8a2:dfff:fec8:e61a").address
+        assertEquals(
+            "0A:A2:DF:C8:E6:1A",
+            io.github.shaonialife.carptocar.util.DeviceIdentity.extractEui64Mac(valid),
+        )
+        // 非 EUI-64（中间不是 ff:fe）
+        val opaque = java.net.InetAddress.getByName("fe80::1234:5678:9abc:def0").address
+        assertNull(io.github.shaonialife.carptocar.util.DeviceIdentity.extractEui64Mac(opaque))
+        // Android 占位 MAC 02:00:00:00:00:00（对应 EUI-64 接口 ID 0000:00ff:fe00:0000）必须过滤
+        val placeholder = java.net.InetAddress.getByName("fe80::ff:fe00:0").address
+        assertNull(io.github.shaonialife.carptocar.util.DeviceIdentity.extractEui64Mac(placeholder))
+        // 组播 MAC（bit0=1）必须过滤
+        val multicast = java.net.InetAddress.getByName("fe80::100:00ff:fe00:1").address
+        assertNull(io.github.shaonialife.carptocar.util.DeviceIdentity.extractEui64Mac(multicast))
+    }
 }

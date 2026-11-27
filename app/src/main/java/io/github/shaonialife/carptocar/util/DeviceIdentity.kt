@@ -340,4 +340,67 @@ object DeviceIdentity {
             "/sys/devices/virtual/bluetooth/hci0/address",
             "/sys/module/bluetooth/parameters/bdaddr",
         )
+
+    /**
+     * 跨传输一致的 iAP2 设备 UUID（`0x4E0C DeviceUUIDUpdate`）：由蓝牙 MAC 确定性派生。
+     * 经典蓝牙 iAP2 与 Wi-Fi iAP2 必须上报同一个 UUID，否则车机在蓝牙→Wi-Fi 交接时无法关联同一设备。
+     */
+    fun deviceUuid(bluetoothMac: String): String =
+        java.util.UUID
+            .nameUUIDFromBytes(bluetoothMac.toByteArray())
+            .toString()
+            .uppercase()
+
+    /**
+     * 解析当前车机 Wi-Fi 接口（优先匹配控制 socket 所在网卡，其次 `wlan0`）的真实站端 MAC，
+     * 供 AirPlay 初始 `SETUP` 的 `macAddress` 字段使用（与 `deviceID` 蓝牙 MAC 区分）。
+     *
+     * Android 11+ 对普通应用隐藏 `NetworkInterface.hardwareAddress`，但同一接口的 SLAAC
+     * 链路本地 IPv6（`fe80::...ff:fe...`）按 RFC 4291 Modified EUI-64 编码了真实随机化站端 MAC；
+     * 两者皆不可用时返回 null，由调用方安全回退至 `deviceID`。
+     */
+    fun wifiStationMac(localAddress: java.net.InetAddress? = null): String? {
+        val iface =
+            runCatching {
+                localAddress?.let { java.net.NetworkInterface.getByInetAddress(it) }
+            }.getOrNull()
+                ?: runCatching { java.net.NetworkInterface.getByName("wlan0") }.getOrNull()
+                ?: return null
+        runCatching { iface.hardwareAddress }
+            .getOrNull()
+            ?.let(::formatValidUnicastMac)
+            ?.let { return it }
+        val addresses = runCatching { iface.inetAddresses.toList() }.getOrNull().orEmpty()
+        for (addr in addresses) {
+            if (addr is java.net.Inet6Address && addr.isLinkLocalAddress) {
+                extractEui64Mac(addr.address)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** 从 16B IPv6 链路本地地址提取 RFC 4291 Modified EUI-64 MAC；非 EUI-64 或非法地址返回 null。 */
+    internal fun extractEui64Mac(addressBytes: ByteArray): String? {
+        if (addressBytes.size != 16) return null
+        if (addressBytes[11] != 0xFF.toByte() || addressBytes[12] != 0xFE.toByte()) return null
+        val mac =
+            byteArrayOf(
+                (addressBytes[8].toInt() xor 0x02).toByte(),
+                addressBytes[9],
+                addressBytes[10],
+                addressBytes[13],
+                addressBytes[14],
+                addressBytes[15],
+            )
+        return formatValidUnicastMac(mac)
+    }
+
+    internal fun formatValidUnicastMac(bytes: ByteArray): String? {
+        if (bytes.size != 6) return null
+        if (bytes.all { it == 0.toByte() }) return null
+        // 拒绝组播位（bit 0 = 1）
+        if ((bytes[0].toInt() and 0x01) != 0) return null
+        val formatted = bytes.joinToString(":") { "%02X".format(it.toInt() and 0xFF) }
+        return if (formatted == PLACEHOLDER_MAC) null else formatted
+    }
 }

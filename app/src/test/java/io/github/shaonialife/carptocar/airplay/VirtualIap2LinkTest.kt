@@ -46,7 +46,10 @@ private fun splitLinkFrames(chunk: ByteArray): List<ByteArray> {
 }
 
 class VirtualIap2LinkTest {
-    private class Harness {
+    private class Harness(
+        controlChannelEnabled: Boolean = true,
+        deviceUuid: String? = null,
+    ) {
         val controlSent = ArrayList<ByteArray>()
         val allControl = ArrayList<ByteArray>()
         val eventSent = ArrayList<ByteArray>()
@@ -75,6 +78,8 @@ class VirtualIap2LinkTest {
                 nowPlayingProvider = { nowPlaying },
                 artworkProvider = { artwork[it] },
                 nowPlayingOverride = { nowPlayingOverride },
+                controlChannelEnabled = { controlChannelEnabled },
+                deviceUuidProvider = deviceUuid?.let { fixed -> { fixed } },
             )
         var clock = 0L
         var now = 1L
@@ -184,8 +189,8 @@ class VirtualIap2LinkTest {
     }
 
     @Test
-    fun preArmMarkerGetsNoReply() {
-        val h = Harness()
+    fun plaintextSessionPreArmMarkerGetsNoReply() {
+        val h = Harness(controlChannelEnabled = false)
         h.link.begin()
         h.link.onCarBytes(Iap2LinkEngine.MARKER)
         assertTrue(h.controlSent.isEmpty())

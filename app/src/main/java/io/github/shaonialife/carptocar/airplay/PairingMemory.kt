@@ -61,6 +61,7 @@ object PairingMemory {
     const val TTL_MS = 15 * 60_000L
 
     private const val KEY = "carplay_pairing_rejection_v1"
+    private const val KEY_PAIRED_RECEIVERS = "carplay_paired_receivers_v1"
 
     /**
      * 接收端身份键：优先配对公钥（最能区分「哪台车机」），退到 deviceid，再退到 SSID。
@@ -107,6 +108,40 @@ object PairingMemory {
 
     fun clear(context: Context) {
         store(context)?.edit()?.remove(KEY)?.apply()
+    }
+
+    /** 该接收端是否已完成过 HomeKit 配对（命中则优先直通 `/pair-verify`，不再每轮重跑 `/pair-setup`）。 */
+    fun isPaired(
+        context: Context?,
+        receiverKey: String,
+    ): Boolean {
+        if (context == null || receiverKey.isBlank()) return false
+        return store(context).getStringSet(KEY_PAIRED_RECEIVERS, emptySet())?.contains(receiverKey) == true
+    }
+
+    fun markPaired(
+        context: Context?,
+        receiverKey: String,
+    ) {
+        if (context == null || receiverKey.isBlank()) return
+        val prefs = store(context)
+        val updated = LinkedHashSet(prefs.getStringSet(KEY_PAIRED_RECEIVERS, emptySet()).orEmpty())
+        if (updated.add(receiverKey)) {
+            prefs.edit().putStringSet(KEY_PAIRED_RECEIVERS, updated).apply()
+        }
+    }
+
+    fun clearPaired(
+        context: Context?,
+        receiverKey: String,
+    ) {
+        if (context == null || receiverKey.isBlank()) return
+        val prefs = store(context)
+        val current = prefs.getStringSet(KEY_PAIRED_RECEIVERS, emptySet()).orEmpty()
+        if (receiverKey !in current) return
+        val updated = LinkedHashSet(current)
+        updated.remove(receiverKey)
+        prefs.edit().putStringSet(KEY_PAIRED_RECEIVERS, updated).apply()
     }
 
     private fun store(context: Context) =

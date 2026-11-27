@@ -382,6 +382,7 @@ object CarLifeHijack {
             audioSink?.setPlaybackPaused(
                 !mediaPlayback.canForwardPcm,
                 indefinite = mediaPlayback.pauseHeldByCar,
+                autoRelease = mediaPlayback.pauseAutoRelease,
             )
             updateAudioPlayback(media = mediaPlayback.playing)
         }
@@ -401,6 +402,7 @@ object CarLifeHijack {
             sink.setPlaybackPaused(
                 !mediaPlayback.canForwardPcm,
                 indefinite = mediaPlayback.pauseHeldByCar,
+                autoRelease = mediaPlayback.pauseAutoRelease,
             )
             updateAudioPlayback(media = mediaPlayback.playing, navigation = false)
             true
@@ -755,7 +757,7 @@ object CarLifeHijack {
         val wasPlaying: Boolean
         synchronized(audioPlaybackLock) {
             wasPlaying = (knownMediaPlaying() ?: mediaPlayback.playing) || mediaAudioActive
-            mediaPlayback.onCarPause()
+            mediaPlayback.onCarPause(autoRelease = autoRelease)
             audioSink?.setPlaybackPaused(true, indefinite = true, autoRelease = autoRelease)
             audioSink?.clearPendingPcm()
             updateAudioPlayback(media = false)
@@ -1336,6 +1338,7 @@ object CarLifeHijack {
             sink.setPlaybackPaused(
                 !mediaPlayback.canForwardPcm,
                 indefinite = mediaPlayback.pauseHeldByCar,
+                autoRelease = mediaPlayback.pauseAutoRelease,
             )
             val playing = mediaPlayback.playing
             updateAudioPlayback(

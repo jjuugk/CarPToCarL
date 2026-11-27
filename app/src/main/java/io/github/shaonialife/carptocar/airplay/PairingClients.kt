@@ -301,3 +301,85 @@ private fun requireNoError(
 }
 
 private fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+/**
+ * AirPlay MFi-SAP `/auth-setup`（v1）：部分车机（如 BMW MGU）在加密 `/pair-verify` 后、
+ * 初始 `SETUP` 前执行一次 MFi-SAP 握手以激活无线 CarPlay 会话的蓝牙退场权限。
+ *
+ * 派生的 AES-128-CTR 密钥仅用于解密本轮应答签名，**绝不替换** HomeKit 控制/媒体密钥。
+ */
+object MfiAuthSetup {
+    private const val VERSION: Byte = 1
+    private const val MIN_RESPONSE_BYTES = 40
+    private const val MAX_RESPONSE_BYTES = 131_072
+    private const val MAX_CERT_BYTES = 65_536
+    private const val MAX_SIGNATURE_BYTES = 8_192
+
+    data class Result(
+        val certificateBytes: Int,
+        val decryptedSignature: ByteArray,
+    )
+
+    /** 构造 33B 请求体：`[0x01] + ephemeral X25519 pubkey (32B)`。 */
+    fun buildRequest(keyPair: AirPlayCrypto.X25519KeyPair): ByteArray {
+        require(keyPair.publicKey.size == 32) { "invalid X25519 public key size: ${keyPair.publicKey.size}" }
+        return ByteArray(33).also { out ->
+            out[0] = VERSION
+            System.arraycopy(keyPair.publicKey, 0, out, 1, 32)
+        }
+    }
+
+    /** 解析并解密接收端返回的 MFi-SAP 信封（不做证书链校验，仅校验结构与密钥交换）。 */
+    fun decodeResponse(
+        keyPair: AirPlayCrypto.X25519KeyPair,
+        body: ByteArray,
+    ): Result {
+        if (body.size < MIN_RESPONSE_BYTES || body.size > MAX_RESPONSE_BYTES) {
+            throw IOException("invalid SAP response size: ${body.size}")
+        }
+        val peerPublic = body.copyOfRange(0, 32)
+        val certLen = readU32Be(body, 32)
+        val sigOffset = 36L + certLen
+        if (certLen <= 0L || certLen > MAX_CERT_BYTES || sigOffset > body.size - 4L) {
+            throw IOException("invalid SAP certificate length: $certLen")
+        }
+        val sigOffsetInt = sigOffset.toInt()
+        val sigLen = readU32Be(body, sigOffsetInt)
+        if (sigLen <= 0L || sigLen > MAX_SIGNATURE_BYTES || sigOffset + 4L + sigLen != body.size.toLong()) {
+            throw IOException("invalid SAP signature envelope: cert=$certLen sig=$sigLen total=${body.size}")
+        }
+        val shared =
+            try {
+                AirPlayCrypto.x25519Shared(keyPair.privateKey, peerPublic)
+            } catch (error: RuntimeException) {
+                throw IOException("invalid SAP peer public key", error)
+            }
+        if (shared.all { it == 0.toByte() }) {
+            throw IOException("invalid SAP peer public key")
+        }
+        val aesKey = deriveSha1Key("AES-KEY", shared)
+        val aesIv = deriveSha1Key("AES-IV", shared)
+        val signature = body.copyOfRange(sigOffsetInt + 4, body.size)
+        AirPlayCrypto.Aes128CtrStream(aesKey, aesIv).applyKeystream(signature)
+        return Result(certLen.toInt(), signature)
+    }
+
+    private fun deriveSha1Key(
+        salt: String,
+        shared: ByteArray,
+    ): ByteArray {
+        val digest = java.security.MessageDigest.getInstance("SHA-1")
+        digest.update(salt.toByteArray(Charsets.US_ASCII))
+        digest.update(shared)
+        return digest.digest().copyOf(16)
+    }
+
+    private fun readU32Be(
+        data: ByteArray,
+        offset: Int,
+    ): Long =
+        ((data[offset].toLong() and 0xFFL) shl 24) or
+            ((data[offset + 1].toLong() and 0xFFL) shl 16) or
+            ((data[offset + 2].toLong() and 0xFFL) shl 8) or
+            (data[offset + 3].toLong() and 0xFFL)
+}

@@ -97,4 +97,76 @@ class AudioSenderRecordGateTest {
             }
         }
     }
+
+    @Test
+    fun `静音停顿超阈值后续播按流逝时间推进 RTP 时间轴并重打 Marker`() {
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { dataRx ->
+            dataRx.soTimeout = 500
+            val key = ByteArray(32) { (it + 11).toByte() }
+            val clockNanos = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
+            val sender =
+                AudioSender(
+                    host = "127.0.0.1",
+                    dataPort = dataRx.localPort,
+                    streamKey = key,
+                    log = {},
+                    sampleRate = 48_000,
+                    codec = AudioCodec.PCM,
+                    streamType = 100L,
+                    nowNanos = { clockNanos.get() },
+                )
+            val pcm = ByteArray(AudioSender.PACKET_BYTES) { (it * 5 and 0xFF).toByte() }
+            fun receiveHeader(): Triple<Boolean, Int, Long> {
+                val rtp = DatagramPacket(ByteArray(4096), 4096)
+                dataRx.receive(rtp)
+                val marker = (rtp.data[1].toInt() and 0x80) != 0
+                val seq = ((rtp.data[2].toInt() and 0xFF) shl 8) or (rtp.data[3].toInt() and 0xFF)
+                val ts =
+                    ((rtp.data[4].toLong() and 0xFF) shl 24) or
+                        ((rtp.data[5].toLong() and 0xFF) shl 16) or
+                        ((rtp.data[6].toLong() and 0xFF) shl 8) or
+                        (rtp.data[7].toLong() and 0xFF)
+                return Triple(marker, seq, ts)
+            }
+            try {
+                assertTrue(sender.startPassthrough())
+                sender.onRecorded()
+
+                // 首包：Marker=1, seq=0, ts=0
+                sender.feedPcm(pcm, pcm.size, 48_000, 2)
+                val (m0, s0, ts0) = receiveHeader()
+                assertTrue(m0)
+                assertEquals(0, s0)
+                assertEquals(0L, ts0)
+
+                // 正常连发（+10ms < 250ms）：Marker=0, seq=1, ts=352
+                clockNanos.addAndGet(10_000_000L)
+                sender.feedPcm(pcm, pcm.size, 48_000, 2)
+                val (m1, s1, ts1) = receiveHeader()
+                org.junit.Assert.assertFalse(m1)
+                assertEquals(1, s1)
+                assertEquals(AudioSender.SAMPLES_PER_PACKET.toLong(), ts1)
+
+                // 模拟 CarLife 暂停 950ms 后续播：时间轴应推进静音样本数并重打 Marker=1，seq 保持连续
+                clockNanos.addAndGet(950_000_000L)
+                sender.feedPcm(pcm, pcm.size, 48_000, 2)
+                val (m2, s2, ts2) = receiveHeader()
+                val spf = AudioSender.SAMPLES_PER_PACKET.toLong()
+                val expectedSkipped = ((950L * 48_000L / 1_000L - spf) / spf) * spf
+                assertTrue("长停顿后续播首包必须重置 Marker=1", m2)
+                assertEquals(2, s2)
+                assertEquals(spf * 2 + expectedSkipped, ts2)
+
+                // 下一包（+10ms）：恢复常规连发，Marker=0，ts=+352
+                clockNanos.addAndGet(10_000_000L)
+                sender.feedPcm(pcm, pcm.size, 48_000, 2)
+                val (m3, s3, ts3) = receiveHeader()
+                org.junit.Assert.assertFalse(m3)
+                assertEquals(3, s3)
+                assertEquals(ts2 + spf, ts3)
+            } finally {
+                sender.stop()
+            }
+        }
+    }
 }

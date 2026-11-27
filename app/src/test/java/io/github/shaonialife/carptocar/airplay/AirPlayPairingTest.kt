@@ -143,6 +143,49 @@ class AirPlayPairingTest {
         assertTrue(PairingPolicy.shouldRetrySameStage(error.code))
     }
 
+    @Test
+    fun mfiAuthSetupRoundtripAndMalformedEnvelopes() {
+        val client = AirPlayCrypto.x25519Generate()
+        val server = AirPlayCrypto.x25519Generate()
+        val request = MfiAuthSetup.buildRequest(client)
+        assertEquals(33, request.size)
+        assertEquals(1.toByte(), request[0])
+        assertArrayEquals(client.publicKey, request.copyOfRange(1, 33))
+
+        val shared = AirPlayCrypto.x25519Shared(server.privateKey, client.publicKey)
+        fun sha1_16(salt: String): ByteArray =
+            java.security.MessageDigest.getInstance("SHA-1").run {
+                update(salt.toByteArray(Charsets.US_ASCII))
+                update(shared)
+                digest().copyOf(16)
+            }
+        val plainSig = ByteArray(64) { 0x37 }
+        val encSig = plainSig.copyOf().also { AirPlayCrypto.Aes128CtrStream(sha1_16("AES-KEY"), sha1_16("AES-IV")).applyKeystream(it) }
+        val cert = byteArrayOf(1, 2, 3)
+        val validBody =
+            server.publicKey +
+                byteArrayOf(0, 0, 0, 3) +
+                cert +
+                byteArrayOf(0, 0, 0, 64) +
+                encSig
+
+        val result = MfiAuthSetup.decodeResponse(client, validBody)
+        assertEquals(3, result.certificateBytes)
+        assertArrayEquals(plainSig, result.decryptedSignature)
+
+        // 截断、多出尾部字节、全零对端公钥均必须拒收
+        assertThrows(java.io.IOException::class.java) {
+            MfiAuthSetup.decodeResponse(client, validBody.copyOf(validBody.size - 1))
+        }
+        assertThrows(java.io.IOException::class.java) {
+            MfiAuthSetup.decodeResponse(client, validBody + byteArrayOf(0))
+        }
+        val zeroPeer = validBody.copyOf().also { it.fill(0, 0, 32) }
+        assertThrows(java.io.IOException::class.java) {
+            MfiAuthSetup.decodeResponse(client, zeroPeer)
+        }
+    }
+
     private fun stateOf(body: ByteArray): Int = Tlv8.decode(body)[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xFF) ?: 0
 
     /** 真机拒绝应答的形状：State 仍是「正常值」，错误码单独在 TYPE_ERROR。 */

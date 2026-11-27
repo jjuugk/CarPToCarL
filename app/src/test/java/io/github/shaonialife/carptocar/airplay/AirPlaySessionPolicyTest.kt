@@ -127,4 +127,50 @@ class AirPlaySessionPolicyTest {
             ),
         )
     }
+
+    // ---- ④ RECORD 后蓝牙控制通道交接（disableBluetooth） ----
+
+    @Test
+    fun `disableBluetooth 仅在加密会话且车机声明 bluetoothIDs 与本机 MAC 有效时发送`() {
+        assertTrue(
+            AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = true,
+                bluetoothIds = listOf("0C:71:D9:16:D8:E8"),
+                deviceId = "B0:DE:31:01:65:22",
+                placeholderMac = "02:00:00:00:00:00",
+            ),
+        )
+        assertFalse(
+            AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = false,
+                bluetoothIds = listOf("0C:71:D9:16:D8:E8"),
+                deviceId = "B0:DE:31:01:65:22",
+                placeholderMac = "02:00:00:00:00:00",
+            ),
+        )
+        assertFalse(
+            AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = true,
+                bluetoothIds = emptyList(),
+                deviceId = "B0:DE:31:01:65:22",
+                placeholderMac = "02:00:00:00:00:00",
+            ),
+        )
+        assertFalse(
+            AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = true,
+                bluetoothIds = listOf("0C:71:D9:16:D8:E8"),
+                deviceId = "02:00:00:00:00:00",
+                placeholderMac = "02:00:00:00:00:00",
+            ),
+        )
+        assertFalse(
+            AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = true,
+                bluetoothIds = listOf("0C:71:D9:16:D8:E8"),
+                deviceId = "",
+                placeholderMac = "02:00:00:00:00:00",
+            ),
+        )
+    }
 }

@@ -31,6 +31,7 @@ import java.net.Socket
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * AirPlay 客户端（Phase 2）：
@@ -157,6 +158,35 @@ class AirPlayClient(
 
     /** 「Restoring LUM」初始接管只豁免一次，之后真让屏照常处理。 */
     @Volatile private var initialScreenTakeoverIgnored = false
+
+    /** 会话级 SETUP 自报的本机真实蓝牙 MAC（供 disableBluetooth 复用同一身份）。 */
+    @Volatile
+    private var sessionDeviceId: String? = null
+
+    /** 本会话是否已发送过 disableBluetooth（幂等：单会话至多一次）。 */
+    private val disableBluetoothSent = AtomicBoolean(false)
+
+    private val firstRecordLock = Any()
+    private var firstRecordAccepted = false
+    private var firstRecordCallback: (() -> Unit)? = null
+
+    /**
+     * 注册「首个实际拿到 RTSP 200 的 RECORD」回调（跳过重复 RECORD 不触发，单会话至多一次）。
+     * 若首个真实 200 早于注册到达，则注册时原子补发一次。
+     */
+    fun onFirstRecordAccepted(callback: () -> Unit) {
+        val fireNow =
+            synchronized(firstRecordLock) {
+                firstRecordCallback = callback
+                if (firstRecordAccepted) {
+                    firstRecordCallback = null
+                    true
+                } else {
+                    false
+                }
+            }
+        if (fireNow) callback()
+    }
 
     /**
      * 本接收端对「会话激活后再发一次 RECORD」过敏（宝马 iD6 / NBT Evo、JYBOX-80）。
@@ -369,16 +399,24 @@ class AirPlayClient(
         return true
     }
 
-    fun runPairing(windowMillis: Long = PAIRING_WINDOW_MILLIS): PairVerifyClient.ControlKeys? {
+    fun runPairing(
+        windowMillis: Long = PAIRING_WINDOW_MILLIS,
+        preferVerifyFirst: Boolean = false,
+        onFastVerifyRejected: (() -> Unit)? = null,
+    ): PairVerifyClient.ControlKeys? {
         pairingInProgress = true
         try {
-            return runPairingLoop(windowMillis)
+            return runPairingLoop(windowMillis, preferVerifyFirst, onFastVerifyRejected)
         } finally {
             pairingInProgress = false
         }
     }
 
-    private fun runPairingLoop(windowMillis: Long): PairVerifyClient.ControlKeys? {
+    private fun runPairingLoop(
+        windowMillis: Long,
+        preferVerifyFirst: Boolean,
+        onFastVerifyRejected: (() -> Unit)?,
+    ): PairVerifyClient.ControlKeys? {
         val identity = loadOrCreateIdentity()
         log("AIRPLAY: 控制器身份 pairingId=${identity.pairingId}")
         // 车机 AirPlay 窗口是「用户点车机上的手机图标 / 收到 ctrl 邀请后才开」的
@@ -391,6 +429,7 @@ class AirPlayClient(
         // 「退避」只多给一次重试机会：够了（一次退避基本就是车机刚被上一次中断搅了状态机），
         // 又不会在一台「其实已配对、只是回退避码」的车机上把 120s 窗口空转掉。
         var backoffRetried = false
+        var tryVerifyFirst = preferVerifyFirst
         while (System.currentTimeMillis() < deadline && !cancelled) {
             attempt++
             // 每轮重试前吸收一次 mDNS 新结果：网关兜底地址连不通时，车机的
@@ -436,9 +475,52 @@ class AirPlayClient(
             refusedStreak = 0
             attemptedPairing = true
             // 本轮起点：用于判定失败到底是车机给的，还是我们自己 close() 掐断的。
-            val localCloseAtStart = localCloseGeneration
-            val transport = TlvTransport { path, body -> postPairing(path, body) }
+            var localCloseAtStart = localCloseGeneration
+            var transport = TlvTransport { path, body -> postPairing(path, body) }
             try {
+                // 已配对接收端优先直通 /pair-verify（跳过重复 /pair-setup M1..M6，与真 iPhone / 盒子一致）；
+                // 若车机已清配对记录或状态复位导致拒绝，则清除已配对标记并换新连接回退完整 /pair-setup。
+                if (tryVerifyFirst) {
+                    val fastVerifyResult =
+                        try {
+                            val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
+                            val keys = PairVerifyClient(identity, transport, log).run(receiverStaticKey)
+                            cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
+                            log("AIRPLAY: 控制通道加密已启用（已配对直通 pair-verify，跳过 pair-setup）")
+                            pairingTrouble = null
+                            return keys
+                        } catch (invalid: PairingIntegrityException) {
+                            throw invalid
+                        } catch (rejected: PairingRejectedException) {
+                            if (localCloseGeneration != localCloseAtStart) {
+                                log("AIRPLAY: 已配对直通 pair-verify 被本机打断（${rejected.message}）——不计入车机拒绝，重试")
+                                pairingTrouble = null
+                                continue
+                            }
+                            rejected.message ?: "error=${rejected.rawCode}"
+                        } catch (error: IOException) {
+                            if (localCloseGeneration != localCloseAtStart) {
+                                log("AIRPLAY: 已配对直通 pair-verify 被本机打断（${error.message}）——不计入车机拒绝，重试")
+                                pairingTrouble = null
+                                continue
+                            }
+                            val message = error.message.orEmpty()
+                            if (PAIRING_UNSUPPORTED_STATUS.any { message.contains(it) }) {
+                                pairingUnsupported = true
+                                log("AIRPLAY: 接收端不提供 HomeKit 配对通道（$message）——转明文会话")
+                                close()
+                                return null
+                            }
+                            message
+                        }
+                    tryVerifyFirst = false
+                    onFastVerifyRejected?.invoke()
+                    log("AIRPLAY: 已配对直通 pair-verify 未通过（$fastVerifyResult）——换新连接回退 pair-setup")
+                    close()
+                    if (!ensureConnected(2_000)) continue
+                    localCloseAtStart = localCloseGeneration
+                    transport = TlvTransport { path, body -> postPairing(path, body) }
+                }
                 val setupStatus =
                     try {
                         PairSetupClient(identity, transport, log).run()
@@ -589,6 +671,48 @@ class AirPlayClient(
         }
         log("AIRPLAY: 配对最终失败（接收端 RTSP 无应答）")
         return null
+    }
+
+    /**
+     * 加密配对完成后、初始 SETUP 前执行一次 MFi-SAP `POST /auth-setup`（v1）。
+     *
+     * 部分车机（如 BMW MGU）在无线 CarPlay 交接前通过该接口完成 AirPlay 侧 MFi 握手；
+     * 不提供该接口的车机返回 404/501 时保留已认证 HomeKit 会话继续推进，绝不替换 HomeKit 密钥。
+     */
+    fun runAuthSetup(): Boolean {
+        if (cancelled) return false
+        if (cipher == null) return true
+        val keyPair = AirPlayCrypto.x25519Generate()
+        val body = MfiAuthSetup.buildRequest(keyPair)
+        val startedAt = System.nanoTime()
+        return try {
+            val (statusLine, responseBody) =
+                request(
+                    "POST",
+                    "/auth-setup",
+                    body,
+                    timeoutMillis = 10_000,
+                    contentType = "application/octet-stream",
+                )
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+            if (isStatus200(statusLine)) {
+                try {
+                    val parsed = MfiAuthSetup.decodeResponse(keyPair, responseBody)
+                    log(
+                        "AIRPLAY: ✓ /auth-setup 完成 cert=${parsed.certificateBytes}B " +
+                            "sig=${parsed.decryptedSignature.size}B（${elapsedMs}ms）",
+                    )
+                } catch (error: IOException) {
+                    log("AIRPLAY: /auth-setup 应答解析异常（${error.message}，${responseBody.size}B）——保留已认证 HomeKit 会话继续")
+                }
+            } else {
+                log("AIRPLAY: /auth-setup 应答 [$statusLine]（${responseBody.size}B，${elapsedMs}ms）——保留已认证 HomeKit 会话继续")
+            }
+            true
+        } catch (error: IOException) {
+            log("AIRPLAY: /auth-setup 传输失败 - ${error.message}")
+            false
+        }
     }
 
     /** 把带错误码的拒绝翻译成「定性结果 + 一句人话」，日志与界面共用同一份文案。 */
@@ -1414,11 +1538,13 @@ class AirPlayClient(
      * 报文体解析失败时按**成功**处理：老固件可能回非 plist 的短答复，此时没有拒绝证据，
      * 不能因为解析不了就判定车机不同意。
      */
+    private fun isStatus200(statusLine: String): Boolean = STATUS_200_REGEX.containsMatchIn(statusLine)
+
     private fun commandAccepted(
         statusLine: String,
         body: ByteArray,
     ): Boolean {
-        if (!Regex("^(?:RTSP|HTTP)/[0-9.]+\\s+200(?:\\s|$)").containsMatchIn(statusLine)) return false
+        if (!isStatus200(statusLine)) return false
         if (body.isEmpty()) return true
         val response = runCatching { BinaryPlist.parseRecovered(body).value as? Map<*, *> }.getOrNull() ?: return true
         val status = response["status"] as? Number ?: return true
@@ -1442,10 +1568,15 @@ class AirPlayClient(
             log("AIRPLAY: 计时服务未启动（继续，但媒体时钟无法同步）")
         }
         val deviceId = setupDeviceId()
-        val body = buildSessionSetupBody(deviceId, timingServer.port, encrypted = cipher != null)
+        sessionDeviceId = deviceId
+        val wifiMac = DeviceIdentity.wifiStationMac(socket?.localAddress)
+        val macAddress = wifiMac ?: deviceId
+        val body = buildSessionSetupBody(deviceId, timingServer.port, encrypted = cipher != null, macAddress = macAddress)
         log(
             "AIRPLAY: 初始 SETUP body=${body.size}B timingPort=${timingServer.port} " +
-                "deviceID=$deviceId 加密=${if (cipher != null) "是" else "否（et=NONE）"}",
+                "deviceID=$deviceId macAddress=$macAddress" +
+                "（${if (wifiMac != null) "Wi-Fi实测" else "回退deviceID"}） " +
+                "加密=${if (cipher != null) "是" else "否（et=NONE）"}",
         )
         val (statusLine, responseBody) =
             try {
@@ -1965,7 +2096,6 @@ class AirPlayClient(
         private val writeLock = Any()
         private var writeCounter = 0L
         private var writeFailureLogged = false
-
         /** 「一次写出里含多帧」只在首轮记一行：常态是否合并，一眼能看出来。 */
         @Volatile
         private var splitLogged = false
@@ -2353,6 +2483,8 @@ class AirPlayClient(
                     nowPlayingOverride = { nowPlayingOverride?.invoke() },
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                     artworkProvider = { id -> artworkSource?.invoke(id) },
+                    controlChannelEnabled = { cipher != null },
+                    deviceUuidProvider = { DeviceIdentity.deviceUuid(sessionDeviceId ?: setupDeviceId()) },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }
@@ -2403,7 +2535,7 @@ class AirPlayClient(
      * 主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。
      * quiet = 播放位置逐秒补推：照常发包，但不刷日志。
      */
-    fun pushNowPlaying(quiet: Boolean = false): Boolean = obtainIapLink().pushNowPlaying(quiet)
+    fun pushNowPlaying(quiet: Boolean = false): Boolean = iapLink?.pushNowPlaying(quiet) == true
 
     /**
      * 通话状态变化时主动补推一次 0x4155（见 [VirtualIap2Link.pushCallState]）。
@@ -2412,7 +2544,7 @@ class AirPlayClient(
      * 那时通话流若还没建，它切过去只能拿到一条空流。
      */
     fun pushCallState() {
-        obtainIapLink().pushCallState()
+        iapLink?.pushCallState()
     }
 
     /**
@@ -2420,23 +2552,80 @@ class AirPlayClient(
      * 是否真发由链路侧按「车机已订阅 0x5200」判断，这里只负责转发。
      */
     fun pushRouteGuidance() {
-        obtainIapLink().pushRouteGuidance()
+        iapLink?.pushRouteGuidance()
     }
 
     /** 导航心跳：只刷 0x5201，防止 DiPlay 30s 陈旧超时误清 HUD。 */
     fun pushRouteGuidanceHeartbeat() {
-        obtainIapLink().pushRouteGuidanceHeartbeat()
+        iapLink?.pushRouteGuidanceHeartbeat()
     }
 
     /**
-     * MIB3 布防：屏幕流 SETUP 成功后调用——主动经**控制通道** POST /command 发一次
-     * DETECT，随后等车机 SYN（真机 Frida 时序，详见 [VirtualIap2Link.armMib3]）。
-     * 明文会话（pre-HomeKit 老车机）没有 WiFi 隧道语义，跳过。
+     * 被动优先的 MIB3 布防：`RECORD 200 OK` 激活会话后调用，先等待 [delayMs] 宽限窗口让主动发起
+     * Wi-Fi iAP2 的接收端自行发 DETECT/SYN；仅在窗口内零协商入站时才主动补发一次 DETECT。
      */
-    private fun armMib3VirtualLink() {
+    fun scheduleMib3VirtualLink(delayMs: Long = VirtualIap2Link.PASSIVE_PEER_GRACE_MS) {
         if (cipher == null) return
-        if (iapTunnel != null) return // DiPlay 隧道形态：不需要（也不该）布防
-        obtainIapLink().armMib3()
+        if (iapTunnel != null) return
+        obtainIapLink().scheduleMib3Arm(delayMs)
+    }
+
+    /** 构造 `POST /command disableBluetooth` 报文体（Apple CarPlay 规范 Table 23-26）。 */
+    internal fun buildDisableBluetoothBody(deviceId: String): ByteArray =
+        BinaryPlist.encode(
+            linkedMapOf(
+                "type" to "disableBluetooth",
+                "params" to linkedMapOf<String, Any?>("deviceID" to deviceId),
+            ),
+        )
+
+    /**
+     * 通知车机退场经典蓝牙，把 iAP2 控制通道交接到 Wi-Fi（无线投屏控制协议 Table 23-26）。
+     *
+     * 仅在加密会话 `RECORD 200 OK` 后、`/info` 声明了 `bluetoothIDs` 且本机已解析出真实非占位
+     * 蓝牙 MAC 时发送，每轮会话至多一次。
+     */
+    fun postDisableBluetooth(bluetoothIds: List<String>): Boolean {
+        if (cancelled) return false
+        val deviceId = sessionDeviceId ?: setupDeviceId()
+        if (
+            !AirPlaySessionPolicy.shouldSendDisableBluetooth(
+                encryptedSession = cipher != null,
+                bluetoothIds = bluetoothIds,
+                deviceId = deviceId,
+                placeholderMac = DeviceIdentity.PLACEHOLDER_MAC,
+            )
+        ) {
+            return false
+        }
+        if (!disableBluetoothSent.compareAndSet(false, true)) return false
+        val body = buildDisableBluetoothBody(deviceId)
+        return try {
+            val (statusLine, responseBody) =
+                request(
+                    "POST",
+                    "/command",
+                    body,
+                    timeoutMillis = 2_000,
+                    contentType = "application/x-apple-binary-plist",
+                )
+            val accepted = commandAccepted(statusLine, responseBody)
+            val statusCode =
+                if (responseBody.isNotEmpty()) {
+                    runCatching { (BinaryPlist.parseRecovered(responseBody).value as? Map<*, *>)?.get("status") }.getOrNull()
+                } else {
+                    null
+                }
+            log(
+                "AIRPLAY: disableBluetooth deviceID=$deviceId [$statusLine]" +
+                    (if (statusCode != null) " status=$statusCode" else "") +
+                    " 接受=$accepted",
+            )
+            accepted
+        } catch (error: IOException) {
+            log("AIRPLAY: disableBluetooth 失败 - ${error.message}")
+            false
+        }
     }
 
     /**
@@ -2610,6 +2799,7 @@ class AirPlayClient(
     }
 
     private companion object {
+        val STATUS_200_REGEX = Regex("^(?:RTSP|HTTP)/[0-9.]+\\s+200(?:\\s|$)")
         /** 音频消费倍率告警下界（低于它算欠载，高于 [RATE_ALERT_HIGH] 是追赶不算）。 */
         const val RATE_ALERT_LOW = 0.95
         const val RATE_ALERT_HIGH = 1.05
@@ -3947,9 +4137,6 @@ class AirPlayClient(
         )
         // 登记这条流：拆链时要按 (type, connId) 逐条 TEARDOWN
         noteStream(SCREEN_STREAM_TYPE, connectionId)
-        // MIB3：屏幕流 SETUP 200 拿到 dataPort 后，真机此时在控制通道发 detect（Frida
-        // 时序：screen SETUP → phone detect on control → HU SYN on control）。见 armMib3VirtualLink。
-        armMib3VirtualLink()
         screenUuid = streamUuid
         return ScreenStreamInfo(connectionId, dataPort, cipher)
     }
@@ -3963,6 +4150,8 @@ class AirPlayClient(
             log("AIRPLAY: 跳过重复 RECORD（${recordBudget.describeSkip()}）——会话已激活，按成功处理")
             return true
         }
+        val setRecordedAt = recordedAtMs == 0L
+        if (setRecordedAt) recordedAtMs = SystemClock.uptimeMillis()
         return try {
             val (statusLine, _) =
                 request(
@@ -3973,11 +4162,25 @@ class AirPlayClient(
                 )
             // 报文确实发出去了（拿到应答，不论状态码）：记进预算，后续不再补发。
             recordBudget.noteSent()
-            if (recordedAtMs == 0L) recordedAtMs = SystemClock.uptimeMillis()
-            val ok = statusLine.contains("200")
+            val ok = commandAccepted(statusLine, ByteArray(0))
             log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
+            if (ok) {
+                val callback =
+                    synchronized(firstRecordLock) {
+                        if (firstRecordAccepted) {
+                            null
+                        } else {
+                            firstRecordAccepted = true
+                            val cb = firstRecordCallback
+                            firstRecordCallback = null
+                            cb
+                        }
+                    }
+                callback?.invoke()
+            }
             ok
         } catch (error: IOException) {
+            if (setRecordedAt) recordedAtMs = 0L
             log("AIRPLAY: RECORD 失败 - ${error.message}")
             false
         }
@@ -4785,6 +4988,8 @@ class AirPlayClient(
         timingPort: Int,
         /** false = 未配对/未加密会话：必须显式带 `et=NONE`（catplay do_initial_setup 同款）。 */
         encrypted: Boolean = true,
+        /** Wi-Fi 站端 MAC（Apple CarPlay 规范中与蓝牙 deviceID 区分；缺失时回退 deviceId）。 */
+        macAddress: String = deviceId,
     ): ByteArray {
         // 实验开关：裁掉无实现路径的扩展能力（默认关 → 原样返回 14 项同一列表）。
         val offeredFeatures = FeatureTrimOption.apply(CONTROLLER_FEATURES)
@@ -4798,9 +5003,7 @@ class AirPlayClient(
         val fields =
             linkedMapOf<String, Any?>(
                 "deviceID" to deviceId,
-                // 真机这里也是本机地址；写死假 MAC（原 aa:bb:cc:dd:ee:ff）等于给按设备
-                // 过滤的接收端多一个「对不上」的理由，统一成同一个值。
-                "macAddress" to deviceId,
+                "macAddress" to macAddress,
                 "name" to "iPhone",
                 "model" to "iPhone14,2",
                 "osName" to "iPhone OS",

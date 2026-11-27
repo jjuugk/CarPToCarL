@@ -2677,11 +2677,7 @@ class Iap2SenderSession(
         }
 
     /** 设备 UUID：由蓝牙 MAC 确定性派生，跨会话稳定（车机按它标识设备）。 */
-    private fun deviceUuid(): String =
-        java.util.UUID
-            .nameUUIDFromBytes(bluetoothMac.toByteArray())
-            .toString()
-            .uppercase()
+    private fun deviceUuid(): String = io.github.shaonialife.carptocar.util.DeviceIdentity.deviceUuid(bluetoothMac)
 
     /**
      * NUL 结尾的 CSM 字符串。**必须去掉全部尾部 NUL，不能只去一个**：
