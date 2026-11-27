@@ -757,6 +757,7 @@ class Iap2LinkEngine(
                 // the initiator treats the responder's first data frame as an "expired frame", only re-sending ack=0 —
                 // the responder's send window gets poisoned by this bogus ack (backlog never flushes, unit test located)
                 lastReceivedInOrder = sequence
+                onPeerSynchronizationAdopted?.invoke(sync)
                 completeNegotiationIfPending(nowMillis)
             }
         }
@@ -780,19 +781,23 @@ class Iap2LinkEngine(
                 completeNegotiationIfPending(nowMillis)
                 handleData(sequence, payload!!)
             } else if (sessionId == SESSION_EA) {
-                // EA（ExternalAccessory）会话数据：本项目**已移除 EA 车机控制**，这里不再
-                // 上抛给任何消费者。但链路层仍要 ACK——不确认会让对端不停重传同一个包，
-                // 连带把控制会话也拖慢（EA 的序号账法与控制会话独立，只补 ACK 不前移自身序号）。
-                sendAcknowledgement()
+                // EA（ExternalAccessory）会话数据：已移除 EA 业务消费，但 iAP2 序号是整条链路
+                // 共享的，必须推进 lastReceivedInOrder 再按链路策略确认，避免后续帧 ack 停滞。
+                if (acceptInboundSequence(sequence)) {
+                    sendAcknowledgement()
+                }
             } else if ((sessionId == SESSION_FILE_TRANSFER || sessionId == artworkSessionId) &&
                 onFileTransferData != null
             ) {
                 // 封面文件传输：车机在文件传输会话上的 START / SUCCESS / FAILURE。
                 // **不只看 12 号**：奥迪只声明 {1:control, 2:data}，封面走 2 号；
-                // 只认 12 号时那些应答会落进「未知会话」，业务层永远等不到 START
-                // （2026-11-15 奥迪 19 次 SETUP / 0 次 START 的第二个成因）。
-                // 链路层 ACK 已在上面的 handleAcknowledgement 里统一处理过，这里只管业务。
-                onFileTransferData?.invoke(payload!!)
+                // iAP2 序号跨会话共享，必须推进 lastReceivedInOrder（否则后续帧携带陈旧 ack），
+                // 并在回调前登记 ACK：若回调在 START 上立即发块，数据帧会自动捎带最新 ack。
+                completeNegotiationIfPending(nowMillis)
+                if (acceptInboundSequence(sequence)) {
+                    sendAcknowledgement()
+                    onFileTransferData?.invoke(payload!!)
+                }
             } else {
                 reportUnknownSessionData(sessionId, payload!!.size)
             }
@@ -986,19 +991,24 @@ class Iap2LinkEngine(
         drainSendWindow(nowMillis)
     }
 
-    private fun handleData(
-        sequence: Int,
-        payload: ByteArray,
-    ) {
+    private fun acceptInboundSequence(sequence: Int): Boolean {
         val distance = sequenceDistance(sequence, lastReceivedInOrder)
         val peerWindow = peerSynchronization?.maxOutgoing ?: maxOutgoing
         if (distance == 0 || distance > peerWindow + ACK_SLACK) {
             sendAcknowledgement() // 重复或过期：重新确认当前序号
-            return
+            return false
         }
-        // RFCOMM 为可靠有序流，不会丢包；序号跳变只可能是对端把 ACK/SYN 也计入了序号
+        // RFCOMM/TCP 为可靠有序流，不会丢包；序号跳变只可能是对端把 ACK/SYN 也计入了序号
         // （各家实现账法不一致）。因此接受任意前进量并推进水位，避免死锁式丢帧。
         lastReceivedInOrder = sequence
+        return true
+    }
+
+    private fun handleData(
+        sequence: Int,
+        payload: ByteArray,
+    ) {
+        if (!acceptInboundSequence(sequence)) return
         if (pendingEvents.size >= 256) {
             die("event queue overflow")
             return
@@ -1023,8 +1033,17 @@ class Iap2LinkEngine(
      * （seq 77~83、89~95）连上的；改成按 5 发之后，那 7 帧会切成 5+2、中间要等车机
      * ACK。若哪天「奥迪忽然连不上」，先回到这里看是不是这一步引起的。
      */
+    /**
+     * 对端在 SYN 中声明零重传且零累积确认（`maxRetransmissions == 0 && maxAcknowledgements == 0`，
+     * 即无线 CarPlay Wi-Fi iAP2 的可靠底层传输档）。此类对端在 NORMAL 态不运行累积 ACK 定时器，
+     * 也不会发送独立 9B 空 ACK；向其发送独立 9B 空 ACK 会触发 BMW MGU-93 立即重置/断开 Wi-Fi iAP2
+     * 链路（2026-11-24~27 16/16 轮实车定谳），改为仅在后续数据帧头捎带最新 ack。
+     */
+    internal fun isZeroAckReliablePeer(peer: SynchronizationPayload?): Boolean =
+        peer != null && peer.maxRetransmissions == 0 && peer.maxAcknowledgements == 0
+
     private fun effectiveSendWindow(peer: SynchronizationPayload?): Int =
-        if (peer != null && ((reliableTransport && !echoFirst) || peer.maxRetransmissions > 0)) {
+        if (peer != null && peer.maxRetransmissions > 0) {
             minOf(declaredMaxOutgoing, peer.maxOutgoing.coerceAtLeast(1))
         } else {
             declaredMaxOutgoing
@@ -1088,7 +1107,7 @@ class Iap2LinkEngine(
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
                 retransmitDeadline = packet.deadlineMillis
-            } else if (!reliableTransport || echoFirst) {
+            } else {
                 lastSentAcknowledged = sentSequence
             }
         }
@@ -1191,6 +1210,9 @@ class Iap2LinkEngine(
     }
 
     private fun sendAcknowledgement() {
+        if (state == State.NORMAL && isZeroAckReliablePeer(peerSynchronization)) {
+            return
+        }
         if (reliableTransport) {
             pendingAcknowledgement = true
             return
@@ -1199,9 +1221,12 @@ class Iap2LinkEngine(
     }
 
     private fun flushPendingAcknowledgement() {
-        if (pendingAcknowledgement) {
-            writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
+        if (!pendingAcknowledgement) return
+        if (state == State.NORMAL && isZeroAckReliablePeer(peerSynchronization)) {
+            pendingAcknowledgement = false
+            return
         }
+        writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
     }
 
     private fun writePacket(

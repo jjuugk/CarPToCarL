@@ -128,6 +128,9 @@ class Iap2SenderSession(
      */
     private var mfiRecognizedLength: Int? = null
 
+    /** 证书 X.509 Apple 扩展 OID 明确认证的挑战长度（不含参数总长兜底）；外部断链时不得记硬拒绝。 */
+    private var mfiOidRecognizedLength: Int? = null
+
     /**
      * 本轮 0x4300 用的报文体形态。
      *
@@ -411,9 +414,6 @@ class Iap2SenderSession(
             while (end > 0 && this[end - 1] == 0.toByte()) end--
             return copyOf(end).decodeToString()
         }
-
-        /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
-        const val HID_WAIT_NANOS = 2_000_000_000L
 
         /**
          * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
@@ -702,7 +702,8 @@ class Iap2SenderSession(
         val certDer =
             Iap2Csm.parseParams(certificate.body).firstOrNull { it.id == 0 && it.value.isNotEmpty() }?.value
                 ?: certificate.body
-        mfiRecognizedLength = MfiCertificateLength.recognize(certDer)
+        mfiOidRecognizedLength = MfiCertificateLength.recognize(certDer)
+        mfiRecognizedLength = mfiOidRecognizedLength
         if (mfiRecognizedLength != null) {
             log("iap2 MFi 证书识别 → 首选 ${mfiRecognizedLength}B（协议核 OID 规则；失败自动回退试探）")
         } else if (MfiCertBytesOption.enabled) {
@@ -732,21 +733,11 @@ class Iap2SenderSession(
         // 排在 awaitOptionalHid（最多 2s）之后，等于让车机多等 2 秒——凯迪拉克日志里
         // 0xaa05 在 33.248、问候在 35.249，中间空了 2 秒正是那段 HID 等待。
         sendDeviceStateGreetings()
+        drainDeferredPostAuthFrames()
 
-        // ---- 订阅与 HID：0x6800 是可选步骤 ----
-        // xcertplay 在订阅后发 StartHID；DiPlay 删掉了这一步（订阅完直接等 0x5702）。
-        // 因此这里只短暂等待：收到 0x6800 就应答 0x6801，2 秒内没等到就直接继续。
-        //
-        // **新协议代（NEW）干脆不等**：参考实现 link_plus 的 modernBootstrap 分支就是
-        // 「问候完立刻发 0x4300」。我们在这段空等 2 秒，等于让 0x4300 前出现一段静默——
-        // BUICK_8948（E2LB）两次实测里，车机最后一次 ACK 都停在问候的最后一帧（ack=110），
-        // 2 秒后发出的 0x4300 连链路 ACK 都拿不到（2026-11-07 12:33 / 12:39 两轮）。
-        // 晚到的 0x6800 仍会被 expect 循环接住并应答（见 expectOrNull / respondToStartHid）。
-        if (wifiGen == ReceiverProfile.WifiGen.NEW) {
-            log("iap2 新协议代：不在 0x6800 上空等 2s——问候后立刻发 0x4300（与参考实现一致）")
-        } else {
-            awaitOptionalHid(deadline)
-        }
+        // ---- 订阅与 HID：0x6800 纯事件驱动应答 ----
+        // 晚到的 0x6800 在 expectOrNull 与 pumpIncomingForever 中均会就地应答 0x6801，
+        // 不再在问候后按固定墙钟空等（避免拖慢 0x5702/0x4300 并与 Wi-Fi ctrl-int 产生竞态）。
 
         // ---- WiFi 配置交换（两代协议）----
         // 旧协议（0x5702 → 0x5703）：手机请求，车机回 AP 明文——Audi MIB3 走这条。
@@ -1184,6 +1175,17 @@ class Iap2SenderSession(
      * @return true = 本帧已作为订阅处理，调用方不必再暂存/记 keep-alive
      */
     private fun answerSubscription(frame: Iap2Csm.Frame): Boolean {
+        if (frame.messageId == Iap2MessageIds.START_POWER_UPDATES) {
+            val battery = Iap2SubscriptionReplies.readBatterySnapshot(context)
+            val body = Iap2SubscriptionReplies.powerUpdateBody(battery)
+            send(Iap2SubscriptionReplies.POWER_UPDATE, body)
+            log("iap2 订阅应答 0xae00 → 0xae01（${body.size}B 电源状态 level=${battery.chargeLevel}% charging=${battery.chargingState}）")
+            return true
+        }
+        if (frame.messageId == Iap2SubscriptionReplies.STOP_POWER_UPDATES) {
+            log("iap2 0xae02 车机停止电源状态订阅")
+            return true
+        }
         val replyId = Iap2SubscriptionReplies.replyIdFor(frame.messageId) ?: return false
         if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE &&
             AccessoryDeclaration.acceptsRouteGuidance() == false
@@ -1191,17 +1193,21 @@ class Iap2SenderSession(
             log("iap2 0x5200 订阅但车机可收清单未声明导航引导——不回 0x5201（按声明裁剪）")
             return true
         }
-        val body =
-            if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
-                Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.BT, frame.body)
+        if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
+            val body = Iap2RouteGuidance.onSubscribe(Iap2RouteGuidance.Link.BT, frame.body)
+            if (body.isEmpty()) {
+                log("iap2 0x5200 导航订阅已登记（尚无导航诱导，待导航开始再发 0x5202/0x5201）")
             } else {
-                Iap2SubscriptionReplies.idleBodyFor(replyId) ?: return false
+                send(replyId, body)
+                log("iap2 订阅应答 0x5200 → 0x5201（${body.size}B，导航引导已就绪）")
+                pushRouteGuidance()
             }
+            return true
+        }
+        val body = Iap2SubscriptionReplies.idleBodyFor(replyId, requestBody = frame.body) ?: return false
         send(replyId, body)
         val detail =
-            if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE) {
-                if (body.isEmpty()) "空态；CarLife 尚无导航诱导数据" else "${body.size}B，CarLife 导航引导已就绪"
-            } else if (replyId == Iap2SubscriptionReplies.CALL_STATE_UPDATE) {
+            if (replyId == Iap2SubscriptionReplies.CALL_STATE_UPDATE) {
                 "空态；蓝牙链路无通话状态源，隧道侧订阅会给真实值"
             } else {
                 "空态"
@@ -1210,9 +1216,6 @@ class Iap2SenderSession(
             "iap2 订阅应答 0x${frame.messageId.toString(16).padStart(4, '0')} → " +
                 "0x${replyId.toString(16).padStart(4, '0')}（$detail）",
         )
-        if (replyId == Iap2SubscriptionReplies.ROUTE_GUIDANCE_UPDATE && body.isNotEmpty()) {
-            pushRouteGuidance()
-        }
         return true
     }
 
@@ -1244,6 +1247,11 @@ class Iap2SenderSession(
             // 丢弃（2026-10-18 Audi MMI 0000「连上后 15 秒自动断开」的根因）。
             if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
                 handleLateStartSession(frame)
+            }
+            // 0x6800 StartHID：保活阶段晚到时同样就地应答 0x6801，确保不依赖 Phase 1 空等。
+            if (frame.messageId == Iap2MessageIds.START_HID) {
+                respondToStartHid(frame, "保活阶段")
+                continue
             }
             // 0x5000 NowPlaying 订阅：蓝牙链路（测试台）在这里订阅，回一次 0x5001。
             // 真车（MIB3）的 NowPlaying 订阅走 WiFi 隧道（VirtualIap2Link），此处
@@ -1539,6 +1547,7 @@ class Iap2SenderSession(
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 重认证完成（tx=0xaa05）——重发设备状态问候与 0x4300")
         sendDeviceStateGreetings()
+        drainDeferredPostAuthFrames()
         sendAvailability()
         return expectOrNull(Iap2MessageIds.CARPLAY_START_SESSION, step())
     }
@@ -1925,7 +1934,13 @@ class Iap2SenderSession(
         val memory = MfiLengthMemory.load(context, receiverKey)
         val baselineOrder = MfiLengthMemory.orderAttempts(baselineLengths, memory)
         // 证书识别只插队首，原顺序（记忆 + 基线）完整保留为失败后的退路。
-        val order = MfiCertificateLength.prefer(baselineOrder, mfiRecognizedLength)
+        val oidLength = mfiOidRecognizedLength
+        val order =
+            if (oidLength != null) {
+                listOf(oidLength) + baselineOrder.filter { it != oidLength }
+            } else {
+                MfiCertificateLength.prefer(baselineOrder, mfiRecognizedLength)
+            }
         if (order != baselineOrder) {
             log(
                 "iap2 MFi 证书识别 ${mfiRecognizedLength}B → 本轮顺序 ${order.joinToString("/")}B" +
@@ -1937,77 +1952,92 @@ class Iap2SenderSession(
                     " → 本轮顺序 ${order.joinToString("/")}B",
             )
         }
-        for ((position, size) in order.withIndex()) {
-            // 已知「静默过」的档位缩短窗口：它已经失败过一次，没必要再等满。
-            val baseWindow = windowOf[size] ?: MFI_ATTEMPTS.last().second
-            val windowMillis =
-                if (size in memory.silent && size != memory.succeeded) {
-                    minOf(baseWindow, MFI_SILENT_RETRY_WINDOW_MS)
+        val deferredDuringChallenge = ArrayList<Iap2Csm.Frame>()
+        try {
+            for ((position, size) in order.withIndex()) {
+                // 已知「静默过」的档位缩短窗口：它已经失败过一次，没必要再等满。
+                val baseWindow = windowOf[size] ?: MFI_ATTEMPTS.last().second
+                val windowMillis =
+                    if (size in memory.silent && size != memory.succeeded) {
+                        minOf(baseWindow, MFI_SILENT_RETRY_WINDOW_MS)
+                    } else {
+                        baseWindow
+                    }
+                val challenge = ByteArray(size).also(random::nextBytes)
+                send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
+                log("iap2 tx=0xaa02 challenge=${size}B（第 ${position + 1} 次，窗口 ${windowMillis}ms）")
+                val window = minOf(System.nanoTime() + windowMillis * 1_000_000L, deadline)
+                var gotResponse = false
+                var gotFailure = false
+                while (true) {
+                    val remaining = (window - System.nanoTime()) / 1_000_000L
+                    if (remaining <= 0) break
+                    val frame = recvFrame(remaining)
+                    if (frame == null) {
+                        if (!channel.isAlive) {
+                            if (size == mfiOidRecognizedLength) {
+                                log("iap2 MFi 挑战期间链路断开（${size}B 由证书 Apple OID 明确认证，不记硬拒绝，等待对端重连）")
+                                throw IOException("iAP2 链路在 MFi 挑战 ${size}B 期间被对端断开（OID 认证长度，未记硬拒绝）")
+                            }
+                            // 挑战期间被对端断开 = **强证据**，走硬拒绝：即使该长度曾被记成
+                            // 「成功」也要推翻（迟到应答的归属歧义，见 MfiLengthMemory.recordHardRejected）。
+                            log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机断链档位（硬拒绝，可推翻旧的成功记忆并从基线剔除）")
+                            MfiLengthMemory.recordHardRejected(context, receiverKey, size)
+                            // 链路已死，绝不能返回让外层在死链路上发 0xaa05——那会抛
+                            // 「发送 0xaa05 时关闭」的误导性错误、掩盖真正的断链根因。
+                            // 断链由接收端自然重连流程接管（BT 监听仍在跑）。
+                            throw IOException("iAP2 链路在 MFi 挑战 ${size}B 期间被对端断开（该长度已记入断链档位）")
+                        }
+                        continue
+                    }
+                    when (frame.messageId) {
+                        Iap2MessageIds.MFI_RESPONSE -> {
+                            log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
+                            gotResponse = true
+                        }
+
+                        Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
+                            log("iap2 rx=0xaa04 挑战 ${size}B 被拒 body=${hexOf(frame.body)}")
+                            gotFailure = true
+                        }
+
+                        else -> {
+                            log(
+                                "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                                    "(${Iap2MessageIds.nameOf(frame.messageId)}) 认证前暂存 body=${hexOf(frame.body)}",
+                            )
+                            if (deferredDuringChallenge.size < maxPendingFrames) {
+                                deferredDuringChallenge += frame
+                            }
+                        }
+                    }
+                    if (gotResponse || gotFailure) break
+                }
+                if (gotResponse) {
+                    MfiLengthMemory.recordSuccess(context, receiverKey, size)
+                    return
+                }
+                if (gotFailure) {
+                    MfiLengthMemory.recordRejected(context, receiverKey, size)
+                    // 审计留档：挑战长度被车机明确拒绝（0xAA04）。规范说「接受任意长度」
+                    // （SPEC §2.9），真车却各有偏好——这条是「为什么本轮要换档重试」的依据。
+                    ProtocolAudit.record(
+                        ProtocolAudit.Code.MFI_LENGTH_REJECTED,
+                        detail = "0xAA04 拒绝 ${size}B 挑战",
+                        evidence = "已试 $order，命中第 ${position + 1} 档",
+                    )
                 } else {
-                    baseWindow
+                    MfiLengthMemory.recordSilent(context, receiverKey, size)
                 }
-            val challenge = ByteArray(size).also(random::nextBytes)
-            send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
-            log("iap2 tx=0xaa02 challenge=${size}B（第 ${position + 1} 次，窗口 ${windowMillis}ms）")
-            val window = minOf(System.nanoTime() + windowMillis * 1_000_000L, deadline)
-            var gotResponse = false
-            var gotFailure = false
-            while (true) {
-                val remaining = (window - System.nanoTime()) / 1_000_000L
-                if (remaining <= 0) break
-                val frame = recvFrame(remaining)
-                if (frame == null) {
-                    if (!channel.isAlive) {
-                        // 挑战期间被对端断开 = **强证据**，走硬拒绝：即使该长度曾被记成
-                        // 「成功」也要推翻（迟到应答的归属歧义，见 MfiLengthMemory.recordHardRejected）。
-                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机断链档位（硬拒绝，可推翻旧的成功记忆并从基线剔除）")
-                        MfiLengthMemory.recordHardRejected(context, receiverKey, size)
-                        // 链路已死，绝不能返回让外层在死链路上发 0xaa05——那会抛
-                        // 「发送 0xaa05 时关闭」的误导性错误、掩盖真正的断链根因。
-                        // 断链由接收端自然重连流程接管（BT 监听仍在跑）。
-                        throw IOException("iAP2 链路在 MFi 挑战 ${size}B 期间被对端断开（该长度已记入断链档位）")
-                    }
-                    continue
+                if (position < order.size - 1) {
+                    log("iap2 MFi ${size}B 无应答，改用 ${order[position + 1]}B 重试")
+                } else {
+                    log("iap2 MFi 标准三档全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
                 }
-                when (frame.messageId) {
-                    Iap2MessageIds.MFI_RESPONSE -> {
-                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
-                        gotResponse = true
-                    }
-
-                    Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
-                        log("iap2 rx=0xaa04 挑战 ${size}B 被拒 body=${hexOf(frame.body)}")
-                        gotFailure = true
-                    }
-
-                    else ->
-                        log(
-                            "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                                "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
-                        )
-                }
-                if (gotResponse || gotFailure) break
             }
-            if (gotResponse) {
-                MfiLengthMemory.recordSuccess(context, receiverKey, size)
-                return
-            }
-            if (gotFailure) {
-                MfiLengthMemory.recordRejected(context, receiverKey, size)
-                // 审计留档：挑战长度被车机明确拒绝（0xAA04）。规范说「接受任意长度」
-                // （SPEC §2.9），真车却各有偏好——这条是「为什么本轮要换档重试」的依据。
-                ProtocolAudit.record(
-                    ProtocolAudit.Code.MFI_LENGTH_REJECTED,
-                    detail = "0xAA04 拒绝 ${size}B 挑战",
-                    evidence = "已试 $order，命中第 ${position + 1} 档",
-                )
-            } else {
-                MfiLengthMemory.recordSilent(context, receiverKey, size)
-            }
-            if (position < order.size - 1) {
-                log("iap2 MFi ${size}B 无应答，改用 ${order[position + 1]}B 重试")
-            } else {
-                log("iap2 MFi 标准三档全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
+        } finally {
+            for (frame in deferredDuringChallenge) {
+                if (pendingFrames.size < maxPendingFrames) pendingFrames += frame
             }
         }
         // 注意：不再无条件进入变体扫描。诊断版曾在此连发 6 个 challenge 包，把车机 5 帧
@@ -2041,36 +2071,47 @@ class Iap2SenderSession(
         )
         log("iap2 tx=0xaa02 challenge=20B（EntryEVO 干净单档）")
 
+        val deferredDuringChallenge = ArrayList<Iap2Csm.Frame>()
         val end = System.nanoTime() + MFI_CLEAN_RESPONSE_WINDOW_MS * 1_000_000L
         var gotResponse = false
-        while (true) {
-            val remain = (end - System.nanoTime()) / 1_000_000L
-            if (remain <= 0) break
-            val frame = recvFrame(remain)
-            if (frame == null) {
-                if (!channel.isAlive) {
-                    // 20B 若也断链，这是比 16B 更强的硬件级拒绝证据，如实抛出。
-                    throw IOException("iAP2 链路在 MFi 20B 干净单档挑战期间被对端断开")
+        try {
+            while (true) {
+                val remain = (end - System.nanoTime()) / 1_000_000L
+                if (remain <= 0) break
+                val frame = recvFrame(remain)
+                if (frame == null) {
+                    if (!channel.isAlive) {
+                        // 20B 若也断链，这是比 16B 更强的硬件级拒绝证据，如实抛出。
+                        throw IOException("iAP2 链路在 MFi 20B 干净单档挑战期间被对端断开")
+                    }
+                    continue
                 }
-                continue
+                when (frame.messageId) {
+                    Iap2MessageIds.MFI_RESPONSE -> {
+                        log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
+                        gotResponse = true
+                        MfiLengthMemory.recordSuccess(context, receiverKey, 20)
+                    }
+                    Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
+                        log("iap2 rx=0xaa04 挑战 20B 被拒 body=${hexOf(frame.body)}")
+                        MfiLengthMemory.recordRejected(context, receiverKey, 20)
+                    }
+                    else -> {
+                        log(
+                            "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                                "(${Iap2MessageIds.nameOf(frame.messageId)}) 认证前暂存 body=${hexOf(frame.body)}",
+                        )
+                        if (deferredDuringChallenge.size < maxPendingFrames) {
+                            deferredDuringChallenge += frame
+                        }
+                    }
+                }
+                if (gotResponse) break
             }
-            when (frame.messageId) {
-                Iap2MessageIds.MFI_RESPONSE -> {
-                    log("iap2 rx=0xaa03 signature bytes=${frame.body.size}（跳过校验）body=${hexOf(frame.body)}")
-                    gotResponse = true
-                    MfiLengthMemory.recordSuccess(context, receiverKey, 20)
-                }
-                Iap2MessageIds.MFI_AUTHENTICATION_FAILED -> {
-                    log("iap2 rx=0xaa04 挑战 20B 被拒 body=${hexOf(frame.body)}")
-                    MfiLengthMemory.recordRejected(context, receiverKey, 20)
-                }
-                else ->
-                    log(
-                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                            "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${hexOf(frame.body)}",
-                    )
+        } finally {
+            for (frame in deferredDuringChallenge) {
+                if (pendingFrames.size < maxPendingFrames) pendingFrames += frame
             }
-            if (gotResponse) break
         }
         if (gotResponse) {
             MfiLengthMemory.recordSuccess(context, receiverKey, 20)
@@ -2279,15 +2320,9 @@ class Iap2SenderSession(
                 }
                 continue
             }
-            // 0x6800 StartHID 晚到：新协议代不再空等它，但它真到了必须就地应答，
-            // 否则车机的 HID 通道永远停在「已请求未应答」，触摸/方控就没了。
+            // 0x6800 StartHID：纯事件驱动就地应答 0x6801，无需在 Phase 1 阻塞空等。
             if (frame.messageId == Iap2MessageIds.START_HID) {
-                log("iap2 rx=0x6800 start-hid bytes=${frame.body.size}（晚到——就地应答 0x6801）")
-                send(
-                    Iap2MessageIds.DEVICE_HID_REPORT,
-                    Iap2Csm.u16(0, 0),
-                    Iap2Csm.param(1, byteArrayOf(0)),
-                )
+                respondToStartHid(frame, "等待目标帧期间")
                 continue
             }
             // 等待目标帧期间到达的订阅：先回状态（否则车机 ~10s 后关控制通道），
@@ -2309,51 +2344,45 @@ class Iap2SenderSession(
         }
     }
 
-    private fun awaitOptionalHid(deadline: Long) {
-        // 声明清单里没有 StartHID 就不等（DiPlay/奥迪实测均不发，旧流程每轮白等 2s）。
-        if (accessoryDeclaresSend(Iap2MessageIds.START_HID) == false) {
-            log("iap2 车机未声明会发 0x6800 StartHID——跳过 2s 等待")
-            return
-        }
-        val hidWindowNanos = minOf(System.nanoTime() + HID_WAIT_NANOS, deadline)
-        while (true) {
-            val remaining = (hidWindowNanos - System.nanoTime()) / 1_000_000L
-            if (remaining <= 0) {
-                // 措辞要看声明：车机在 0x1D01 的发送清单里**有** 0x6800 时（别克 E2LB、
-                // 凯迪拉克 Cinemo 都有）它只是这一刻还没发——写成「该接收端不发 StartHID」
-                // 会让人以为清单没声明，和上面那行「StartHID=会发」自相矛盾。
-                log(
-                    "iap2 ${HID_WAIT_NANOS / 1_000_000_000}s 内未收到 0x6800 StartHID" +
-                        (if (accessoryDeclaresSend(Iap2MessageIds.START_HID) == true) {
-                            "（车机声明会发，可能等 0x4300 之后才开 HID）——继续"
-                        } else {
-                            "（车机未声明清单，按不发处理）——继续"
-                        }),
-                )
-                return
-            }
-            val frame = recvFrame(remaining)
-            if (frame == null) {
-                if (!channel.isAlive) return // 链路已死：交给后续 expect 报出明确错误
-                continue
-            }
-            when (frame.messageId) {
-                Iap2MessageIds.START_HID -> {
-                    log("iap2 rx=0x6800 start-hid bytes=${frame.body.size}")
-                    send(
-                        Iap2MessageIds.DEVICE_HID_REPORT,
-                        Iap2Csm.u16(0, 0),
-                        Iap2Csm.param(1, byteArrayOf(0)),
-                    )
-                    return
-                }
+    private fun respondToStartHid(
+        frame: Iap2Csm.Frame,
+        phase: String,
+    ) {
+        log("iap2 rx=0x6800 start-hid bytes=${frame.body.size}（$phase——就地应答 0x6801）")
+        send(
+            Iap2MessageIds.DEVICE_HID_REPORT,
+            Iap2Csm.u16(0, 0),
+            Iap2Csm.param(1, byteArrayOf(0)),
+        )
+    }
 
-                else ->
-                    log(
-                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                            "(${Iap2MessageIds.nameOf(frame.messageId)})",
-                    )
+    /**
+     * 认证（0xAA05）及设备问候完成后，派发认证期间早到并暂存的 `0x6800 StartHID` / 各类订阅帧；
+     * 若 `0xAE02 StopPowerUpdates` 已取消早到的 `0xAE00`，则不再补发 `0xAE01`。
+     * 非订阅业务帧保留在 [pendingFrames] 中供后续 `expectOrNull` 正常消费。
+     */
+    private fun drainDeferredPostAuthFrames() {
+        if (pendingFrames.isEmpty()) return
+        val snapshot = pendingFrames.toList()
+        pendingFrames.clear()
+        var powerSubRequested = false
+        for (frame in snapshot) {
+            when (frame.messageId) {
+                Iap2MessageIds.START_POWER_UPDATES -> powerSubRequested = true
+                Iap2SubscriptionReplies.STOP_POWER_UPDATES -> {
+                    powerSubRequested = false
+                    log("iap2 0xae02 取消认证前早到的电源订阅")
+                }
+                Iap2MessageIds.START_HID -> respondToStartHid(frame, "认证前早到")
+                else -> {
+                    if (!answerSubscription(frame)) {
+                        pendingFrames += frame
+                    }
+                }
             }
+        }
+        if (powerSubRequested) {
+            answerSubscription(Iap2Csm.Frame(Iap2MessageIds.START_POWER_UPDATES, ByteArray(0)))
         }
     }
 

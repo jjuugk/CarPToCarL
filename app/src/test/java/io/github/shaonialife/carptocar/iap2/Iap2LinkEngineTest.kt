@@ -624,6 +624,147 @@ class Iap2LinkEngineTest {
         assertEquals(3, phone.peerHandshakeRejections)
     }
 
+    /**
+     * 无线 CarPlay Wi-Fi iAP2（BMW MGU-93 实车形态）：对端 SYN 声明
+     * `maxRetransmissions=0, maxAcknowledgements=0, maxOutgoing=5`。
+     * NORMAL 态收到只确认不回消息的帧（如 0x5200 / 0x10DA / 0x6800）绝不发独立 9B 空 ACK，
+     * 仅在后续数据帧头捎带最新 ack；同时大于 5 帧的突发与多块封面传输不因无对端空 ACK 死锁。
+     */
+    @Test
+    fun zeroAckReliablePeerSuppressesBareAckAndDoesNotDeadlockOverPeerWindow() {
+        val phone = Iap2LinkEngine(reliableTransport = true, declaredWindow = 32)
+        phone.enterNegotiating()
+        val peerSynSeq = 191
+        val zeroAckSyn =
+            Iap2LinkEngine.SynchronizationPayload(
+                maxOutgoing = 5,
+                maxLength = 2048,
+                retransmissionTimeoutMillis = 0,
+                acknowledgementTimeoutMillis = 0,
+                maxRetransmissions = 0,
+                maxAcknowledgements = 0,
+                sessions =
+                    listOf(
+                        Iap2LinkEngine.SessionDescriptor(1, 0, 2),
+                        Iap2LinkEngine.SessionDescriptor(2, 1, 2),
+                        Iap2LinkEngine.SessionDescriptor(3, 2, 1),
+                    ),
+            ).encode()
+        phone.feed(buildFrame(control = 0x80, sequence = peerSynSeq, ack = 0, sessionId = 0, payload = zeroAckSyn), 1)
+        val synAck = parseFrames(phone.takeOutput()).single { it.control == 0xC0 }
+        assertEquals(Iap2LinkEngine.State.NORMAL, phone.state)
+
+        // 对端发一条只确认不回业务的帧（如 0x10DA）→ 绝不产出独立 9B 空 ACK
+        val rxSeq = (peerSynSeq + 1) and 0xFF
+        phone.feed(
+            buildFrame(control = 0x40, sequence = rxSeq, ack = synAck.sequence, sessionId = 1, payload = Iap2Csm.encode(0x10DA)),
+            2,
+        )
+        assertTrue("零重传/零累积确认对端不得发独立 9B 空 ACK", phone.takeOutput().isEmpty())
+
+        // 随后发 8 帧突发（> peerWindow=5）且对端不回任何 ACK：全部立即放行，且每帧捎带最新 ack
+        repeat(8) { i -> assertTrue(phone.sendControl(Iap2Csm.encode(0x5001), 10L + i)) }
+        val sent = parseFrames(phone.takeOutput())
+        assertEquals("超过 peerWindow=5 的突发必须全部发出，不得死锁", 8, sent.size)
+        assertTrue("不得混入独立 9B 空 ACK", sent.none { it.frameLength == 9 })
+        assertTrue("数据帧必须捎带最新已收序号", sent.all { it.ack == rxSeq })
+    }
+
+    /**
+     * 反向守卫：声明非零重传/累积确认的可靠传输对端（如奥迪 MIB3 1Hz 0xFFFB），
+     * 收到无业务回包的控制帧仍必须发出独立 9B 空 ACK，避免对端 ~10s 拆链。
+     */
+    @Test
+    fun nonZeroAckReliablePeerStillEmitsBareAckForAckOnlyFrame() {
+        val phone = Iap2LinkEngine(reliableTransport = true, declaredWindow = 32)
+        val audi = Iap2LinkEngine(maxOutgoing = 5, maxRetransmissions = 10)
+        phone.enterNegotiating()
+        audi.start(0)
+        exchangeUntilNormal(phone, audi)
+        phone.takeOutput()
+
+        assertTrue(audi.sendControl(Iap2Csm.encode(0xFFFB), tick()))
+        val inbound = audi.takeOutput()
+        val inboundSeq = parseFrames(inbound).single { it.payload.isNotEmpty() }.sequence
+        phone.feed(inbound, tick())
+
+        val bareAcks = parseFrames(phone.takeOutput()).filter { it.frameLength == 9 && it.control == 0x40 }
+        assertEquals("非零重传对端的只确认帧仍须发独立 9B 空 ACK", 1, bareAcks.size)
+        assertEquals(inboundSeq, bareAcks.single().ack)
+    }
+
+    /**
+     * 文件传输会话（session 2）入站帧（START / SUCCESS）必须推进整条链路共享的
+     * `lastReceivedInOrder`：随后发出的封面块或控制帧必须携带最新 ack，而不是停在旧序号。
+     */
+    @Test
+    fun fileTransferFramesAdvanceLinkWatermarkAndPiggybackAck() {
+        val phone = Iap2LinkEngine(reliableTransport = true, declaredWindow = 32)
+        phone.enterNegotiating()
+        val peerSynSeq = 200
+        val zeroAckSyn =
+            Iap2LinkEngine.SynchronizationPayload(
+                maxOutgoing = 5,
+                maxLength = 2048,
+                retransmissionTimeoutMillis = 0,
+                acknowledgementTimeoutMillis = 0,
+                maxRetransmissions = 0,
+                maxAcknowledgements = 0,
+                sessions =
+                    listOf(
+                        Iap2LinkEngine.SessionDescriptor(1, 0, 2),
+                        Iap2LinkEngine.SessionDescriptor(2, 1, 2),
+                    ),
+            ).encode()
+        phone.feed(buildFrame(control = 0x80, sequence = peerSynSeq, ack = 0, sessionId = 0, payload = zeroAckSyn), 1)
+        val synAckSeq = parseFrames(phone.takeOutput()).single { it.control == 0xC0 }.sequence
+
+        phone.onFileTransferData = { datagram ->
+            if (Iap2ArtworkTransfer.parseResponse(datagram)?.isStart == true) {
+                phone.sendOnSession(
+                    Iap2ArtworkTransfer.chunks(1, byteArrayOf(1, 2, 3)).single(),
+                    phone.artworkSessionId,
+                    5,
+                )
+            }
+        }
+
+        // 车机在 session 2 上发 START（seq=201）→ 手机发出的封面块必须捎带 ack=201
+        val startSeq = (peerSynSeq + 1) and 0xFF
+        phone.feed(
+            buildFrame(
+                control = 0x40,
+                sequence = startSeq,
+                ack = synAckSeq,
+                sessionId = 2,
+                payload = byteArrayOf(1, Iap2ArtworkTransfer.CMD_START.toByte()),
+            ),
+            5,
+        )
+        val chunkFrames = parseFrames(phone.takeOutput())
+        assertEquals(1, chunkFrames.size)
+        assertEquals(2, chunkFrames[0].sessionId)
+        assertEquals("封面数据块必须捎带 session 2 START 的序号", startSeq, chunkFrames[0].ack)
+
+        // 车机在 session 2 上发 SUCCESS（seq=202）→ 零重传对端不发 9B 空 ACK，下一条控制帧必须捎带 ack=202
+        val successSeq = (startSeq + 1) and 0xFF
+        phone.feed(
+            buildFrame(
+                control = 0x40,
+                sequence = successSeq,
+                ack = chunkFrames[0].sequence,
+                sessionId = 2,
+                payload = byteArrayOf(1, Iap2ArtworkTransfer.CMD_SUCCESS.toByte()),
+            ),
+            6,
+        )
+        assertTrue("零重传对端在 SUCCESS 后不发独立 9B 空 ACK", phone.takeOutput().isEmpty())
+
+        assertTrue(phone.sendControl(Iap2Csm.encode(0x5001), 7))
+        val nextCtrl = parseFrames(phone.takeOutput()).single()
+        assertEquals("下一条控制帧必须捎带 session 2 SUCCESS 的序号", successSeq, nextCtrl.ack)
+    }
+
     // ---- 工具 ----
 
     private class ParsedFrame(
@@ -856,6 +997,35 @@ class Iap2LinkEngineTest {
         var sum = 0
         for (index in 0 until 8) sum += frame[index].toInt() and 0xFF
         frame[8] = (-sum and 0xFF).toByte()
+        return frame
+    }
+
+    private fun buildFrame(
+        control: Int,
+        sequence: Int,
+        ack: Int,
+        sessionId: Int,
+        payload: ByteArray?,
+    ): ByteArray {
+        val length = payload?.size?.plus(Iap2LinkEngine.HEADER_BYTES + 1) ?: Iap2LinkEngine.HEADER_BYTES
+        val frame = ByteArray(length)
+        frame[0] = 0xFF.toByte()
+        frame[1] = 0x5A
+        frame[2] = (length ushr 8).toByte()
+        frame[3] = length.toByte()
+        frame[4] = control.toByte()
+        frame[5] = sequence.toByte()
+        frame[6] = ack.toByte()
+        frame[7] = sessionId.toByte()
+        var sum = 0
+        for (i in 0 until 8) sum += frame[i].toInt() and 0xFF
+        frame[8] = (-sum and 0xFF).toByte()
+        if (payload != null) {
+            payload.copyInto(frame, 9)
+            var pSum = 0
+            for (b in payload) pSum += b.toInt() and 0xFF
+            frame[frame.size - 1] = (-pSum and 0xFF).toByte()
+        }
         return frame
     }
 
