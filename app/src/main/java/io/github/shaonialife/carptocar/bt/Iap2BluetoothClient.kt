@@ -980,6 +980,7 @@ class Iap2BluetoothClient(
             if (owned &&
                 remoteLoss &&
                 !gotStartSession &&
+                !BtSessionGate.bluetoothHandedOff &&
                 running &&
                 generation.get() == myGeneration &&
                 CarPlayUplinkHealth.finishRound(gotStartSession = false)
@@ -992,16 +993,19 @@ class Iap2BluetoothClient(
                         "请**重启车机**（或熄火重上电）后再试；车机恢复后本机会自动接上。",
                 )
             }
-            // CarPlay 还在跑、又不是我们主动拆的 → 这不是「本轮结束」，是控制链路掉线。
-            // 主循环的静音闸门（sessionActive）会把重连一起挡掉，所以必须显式登记，
-            // 让出站循环对**这一台**单独补连（2026-11-04 奥迪 MIB3 实车：
-            // 三轮会话全在 `packet 115 not acknowledged` 后再也没人重连，车机控制数据全丢）。
+            // CarPlay 还在跑、又不是我们主动拆的：
+            //  - 若已通过 disableBluetooth 完成蓝牙→Wi-Fi 交接（在 BtSessionGate 锁内串行判定），
+            //    对端断开 RFCOMM 属于预期退场，绝不能反向补拨蓝牙与交接打架；
+            //  - 否则按既有逻辑对这一台车单独补连控制链路。
             if (owned && running && remoteLoss && BtSessionGate.sessionActive) {
-                BtSessionGate.noteLinkLost(peerAddress)
-                log(
-                    "BT-C: CarPlay 会话仍在，但 iAP2 控制链路已断（${peerAddress ?: "地址未知"}）" +
-                        "——只对它单独补连，最长 ${BtSessionGate.LINK_RECOVERY_WINDOW_MILLIS / 1000} 秒",
-                )
+                if (BtSessionGate.noteLinkLost(peerAddress)) {
+                    log(
+                        "BT-C: CarPlay 会话仍在，但 iAP2 控制链路已断（${peerAddress ?: "地址未知"}）" +
+                            "——只对它单独补连，最长 ${BtSessionGate.LINK_RECOVERY_WINDOW_MILLIS / 1000} 秒",
+                    )
+                } else if (BtSessionGate.bluetoothHandedOff) {
+                    log("BT-C: 蓝牙 RFCOMM 在 disableBluetooth 交接后正常退场（iAP2 已交接至 Wi-Fi，不反向补拨蓝牙）")
+                }
             }
         }
     }
@@ -1168,6 +1172,30 @@ object BtSessionGate {
     var sessionActive: Boolean = false
 
     /**
+     * 本轮 AirPlay 会话已通过 `POST /command disableBluetooth` 通知车机退场经典蓝牙
+     * （Apple CarPlay 规范 Table 23-26，将 iAP2 交接到 Wi-Fi 控制通道）。
+     *
+     * 置位后对端断开蓝牙 RFCOMM 属于预期交接，出站客户端不登记 [noteLinkLost] 反向重拨。
+     * 会话退役或断开时随 [sessionActive] 一并清零。
+     */
+    @Volatile
+    var bluetoothHandedOff: Boolean = false
+        private set
+
+    /** 与 [noteLinkLost] / [linkRecoveryTarget] 共享锁，避免交接与蓝牙断链登记发生 TOCTOU 竞态。 */
+    @Synchronized
+    fun markBluetoothHandedOff() {
+        bluetoothHandedOff = true
+        linkLostPeerAddress = null
+        linkLostAt = 0L
+    }
+
+    @Synchronized
+    fun clearBluetoothHandedOff() {
+        bluetoothHandedOff = false
+    }
+
+    /**
      * 目标设备软回退：指定了目标车机但连续多轮连不上时置位。
      *
      * 场景：用户上次连的是 A 车（配了目标），这次坐的是 B 车 / 测试台。
@@ -1273,30 +1301,34 @@ object BtSessionGate {
      */
     fun outboundPassiveWaitMillis(): Long = if (inboundActive || sessionActive) 0L else passiveGraceRemainingMillis()
 
-    /** 记一次「控制链路掉线」，交给出站循环单独重连。 */
-    fun noteLinkLost(address: String?) {
-        if (address == null) return
+    /** 记一次「控制链路掉线」，交给出站循环单独重连；已交接至 Wi-Fi 时原子拒绝并返回 false。 */
+    @Synchronized
+    fun noteLinkLost(address: String?): Boolean {
+        if (address == null || bluetoothHandedOff) return false
         linkLostPeerAddress = address
-        linkLostAt = android.os.SystemClock.uptimeMillis()
+        linkLostAt = nowMillis()
+        return true
     }
 
     /** 链路已恢复（或用户已停止）——清掉恢复任务。 */
+    @Synchronized
     fun clearLinkLost() {
         linkLostPeerAddress = null
         linkLostAt = 0L
     }
 
     /**
-     * 当前需要恢复的目标地址；null = 不需要（没有掉线 / CarPlay 已结束 / 已超窗）。
+     * 当前需要恢复的目标地址；null = 不需要（没有掉线 / 已交接蓝牙 / CarPlay 已结束 / 已超窗）。
      *
      * CarPlay 会话结束时 [sessionActive] 会被 SessionController 清掉，这里跟着失效。
      */
+    @Synchronized
     fun linkRecoveryTarget(): String? {
-        if (!sessionActive) return null
+        if (!sessionActive || bluetoothHandedOff) return null
         val address = linkLostPeerAddress ?: return null
         val at = linkLostAt
         if (at == 0L) return null
-        if (android.os.SystemClock.uptimeMillis() - at > LINK_RECOVERY_WINDOW_MILLIS) return null
+        if (nowMillis() - at > LINK_RECOVERY_WINDOW_MILLIS) return null
         return address
     }
 }

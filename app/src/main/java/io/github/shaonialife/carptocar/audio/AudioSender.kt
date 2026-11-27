@@ -93,6 +93,8 @@ class AudioSender(
      * 打开后才启用单写者泵线程 + 分帧队列 + 三态治理。由 [AudioQueueOption] 在会话起步时读取。
      */
     private val queueGovernorEnabled: Boolean = false,
+    /** 单调时钟源（纳秒，仅用于静音长停顿后对齐 RTP 时间轴，单测可注入）。 */
+    private val nowNanos: () -> Long = { System.nanoTime() },
 ) : AudioSink {
     companion object {
         const val CHANNELS = 2
@@ -116,6 +118,12 @@ class AudioSender(
 
         /** 两次「缓冲满丢包」日志之间的最小间隔（5 秒；拥塞时别刷屏）。 */
         private const val DROP_FULL_LOG_GAP_NANOS = 5_000_000_000L
+
+        /** 直通发包静默停顿超过此阈值（250ms）后再续播时，按实际流逝时间推进 RTP 时间轴并重置 Marker。 */
+        internal const val SILENCE_GAP_REALIGN_NANOS = 250_000_000L
+
+        /** 静音时间轴补齐上限（24h），防止异常时钟跳变导致溢出。 */
+        private const val MAX_SILENCE_GAP_MILLIS = 86_400_000L
 
         /** 一次 `sendSyncOnce` 内最多尝试次数（ICMP 端口不可达时就地补发一次）。 */
         private const val SYNC_SEND_ATTEMPTS = 2
@@ -255,6 +263,7 @@ class AudioSender(
     /** 首个音频包标记（打完就清）；AAC 自检只跑一次。 */
     private var markerPending = true
     private var selfChecked = false
+    private var lastPacketAtNanos = 0L
 
     /** 一包负载字节数（按本流声道数：立体声 1408B / 单声道 704B）。 */
     private val packetBytes: Int = SAMPLES_PER_PACKET * channelCount * 2
@@ -952,6 +961,7 @@ class AudioSender(
         healthThread = null
         thread = null
         readyToSend.set(false)
+        lastPacketAtNanos = 0L
         synchronized(pcmLock) { pcmLen = 0 }
         synchronized(pendingLock) {
             pendingFrames.clear()
@@ -1361,14 +1371,33 @@ class AudioSender(
     /** 封包 + 发送一包（同步更新 seq/ts/nonce 游标）。返回 false 表示链路已断。 */
     @Synchronized
     private fun sendPayload(payload: ByteArray): Boolean {
+        val now = nowNanos()
+        val previous = lastPacketAtNanos
+        if (previous > 0L) {
+            val gapNanos = now - previous
+            if (gapNanos >= SILENCE_GAP_REALIGN_NANOS) {
+                val gapMs = (gapNanos / 1_000_000L).coerceAtMost(MAX_SILENCE_GAP_MILLIS)
+                val elapsedSamples = (gapMs * sampleRate.toLong()) / 1_000L
+                val missed = (elapsedSamples - samplesPerPacket).coerceAtLeast(0L)
+                val skippedSamples = (missed / samplesPerPacket) * samplesPerPacket
+                if (skippedSamples > 0L) {
+                    timestamp += skippedSamples
+                    markerPending = true
+                    log(
+                        "AUDIO: 静音停顿 ${gapMs}ms 后续播——RTP 时间轴推进 +$skippedSamples 样本并重置 Marker" +
+                            "（防落后车机缓冲窗）",
+                    )
+                }
+            }
+        }
         val wire = sealPacket(payload, sequence, timestamp, nonceCounter, markerPending)
         // 游标先推进：重试时重发**同一个 wire**（同 seq / 同 ts），绝不能各算一次——
         // 时间轴重复或跳空都会被车机判成丢包/重复而更久不出声。
         markerPending = false
+        lastPacketAtNanos = now
         sequence = (sequence + 1) and 0xFFFF
         timestamp += samplesPerPacket
         nonceCounter++
-
         var lastError: Exception? = null
         for (attempt in 1..SEND_ATTEMPTS) {
             val client = socket ?: return false

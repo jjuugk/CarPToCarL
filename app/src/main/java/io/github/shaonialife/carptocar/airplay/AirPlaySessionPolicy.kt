@@ -54,6 +54,22 @@ internal object AirPlaySessionPolicy {
         receiverControlled: Boolean,
         endpointReachable: Boolean,
     ): Boolean = !receiverControlled || endpointReachable
+
+    /**
+     * 是否在 `RECORD 200 OK` 后发送 `POST /command disableBluetooth`（无线投屏控制协议 Table 23-26）：
+     * 仅在已建立加密会话、接收端 `/info` 声明了 `bluetoothIDs`、且手机侧已解析出真实非占位蓝牙 MAC 时发送，
+     * 触发车机将 iAP2 控制通道从经典蓝牙交接到 Wi-Fi。
+     */
+    fun shouldSendDisableBluetooth(
+        encryptedSession: Boolean,
+        bluetoothIds: List<String>,
+        deviceId: String,
+        placeholderMac: String,
+    ): Boolean =
+        encryptedSession &&
+            bluetoothIds.isNotEmpty() &&
+            deviceId.isNotBlank() &&
+            deviceId != placeholderMac
 }
 
 /** pair-setup 拿到错误码之后的下一步。 */

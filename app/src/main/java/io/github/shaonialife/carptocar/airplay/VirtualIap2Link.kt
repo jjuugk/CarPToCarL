@@ -79,6 +79,10 @@ class VirtualIap2Link(
      */
     private val artworkProvider: ((Int) -> ByteArray?)? = null,
     private val nowPlayingOverride: (() -> CarPlayNowPlaying?)? = null,
+    /** 当前 AirPlay 会话是否已启用加密控制通道（明文 pre-HomeKit 会话为 false，不启用控制通道被动协商）。 */
+    private val controlChannelEnabled: () -> Boolean = { true },
+    /** 跨蓝牙/Wi-Fi 一致的设备 UUID 提供者（0x4E0C）；为 null 时退回随机 UUID（单测默认）。 */
+    private val deviceUuidProvider: (() -> String?)? = null,
 ) {
     private val lock = Any()
 
@@ -103,6 +107,10 @@ class VirtualIap2Link(
 
     // ---- MIB3 路径状态 ----
     private var mib3Armed = false
+    private var pendingDeferredArmAtMs: Long? = null
+    private var peerNegotiationSeen = false
+    private var mib3DetectAttempts = 0
+    private var pacerThread: Thread? = null
     private var mib3SynAckQueued = false
     private var mib3CsmStarted = false
     private var mib3Identified = false
@@ -251,25 +259,43 @@ class VirtualIap2Link(
                     "载荷长度=${handshake.declaredPayloadLength}（累计 ${engine.peerHandshakeRejections} 次）",
             )
         }
-        Thread(
-            {
-                while (alive() && !linkClosed) {
-                    try {
-                        Thread.sleep(200)
-                    } catch (_: InterruptedException) {
-                        return@Thread
-                    }
-                    synchronized(lock) {
-                        engine.advanceTime(nowMillis())
-                        drainLocked()
-                    }
-                }
-            },
-            "iap-link-pacer",
-        ).apply {
-            isDaemon = true
-            start()
+        synchronized(lock) {
+            ensurePacerLocked()
         }
+    }
+
+    private fun ensurePacerLocked() {
+        if (linkClosed || pacerThread != null || !alive()) return
+        val thread =
+            Thread(
+                {
+                    try {
+                        while (alive() && !linkClosed) {
+                            try {
+                                Thread.sleep(200)
+                            } catch (_: InterruptedException) {
+                                return@Thread
+                            }
+                            synchronized(lock) {
+                                if (linkClosed) return@Thread
+                                engine.advanceTime(nowMillis())
+                                drainLocked()
+                            }
+                        }
+                    } finally {
+                        synchronized(lock) {
+                            if (pacerThread === Thread.currentThread()) {
+                                pacerThread = null
+                            }
+                        }
+                    }
+                },
+                "iap-link-pacer",
+            ).apply {
+                isDaemon = true
+            }
+        pacerThread = thread
+        thread.start()
     }
 
     private fun epochPredicate(): (() -> Boolean)? {
@@ -282,16 +308,21 @@ class VirtualIap2Link(
     fun close() {
         val wasOpen = !linkClosed
         linkClosed = true
-        if (wasOpen && !alive()) {
+        val pacer =
             synchronized(lock) {
-                resetMfiLocked(interrupted = true)
+                pendingDeferredArmAtMs = null
+                if (wasOpen && !alive()) {
+                    resetMfiLocked(interrupted = true)
+                }
+                pacerThread.also { pacerThread = null }
             }
-        }
+        pacer?.interrupt()
     }
 
     /** 事件形态启动：服务端待命（收到 marker 回 marker，等车机 SYN）。 */
     fun begin() {
         synchronized(lock) {
+            ensurePacerLocked()
             if (started) return
             started = true
             engine.enterNegotiating()
@@ -299,23 +330,77 @@ class VirtualIap2Link(
     }
 
     /**
-     * MIB3 布防（屏幕流 SETUP 成功后调用，且仅一次）：主动向**控制通道**发一次 DETECT。
-     * 必须等 SETUP 完成后再发——早发会在 SETUP 交换期间被冲掉（Frida 结论）；此后
-     * 车机的 marker 都是探测重发，真机（MIB3）回一次 SYN 就不再重发。
-     *
-     * 注意这里**只发裸 marker**：MIB3 的时序是「它回 SYN → 我们回 SYN|ACK」，
-     * 提前把会话表拍过去反而会打乱它的状态机（见 [Iap2LinkEngine.startResponder]
-     * 的实测记录）。车机若像 Honda HFT 那样反复重发 marker，才由
+     * MIB3 布防：主动向**控制通道**发一次 DETECT，兼容等待手机首发 DETECT 的接收端。
+     * 注意这里**只发裸 marker**：时序是「对端回 SYN → 本端回 SYN|ACK」，
+     * 提前把会话表拍过去反而会打乱状态机；对端若反复重发 marker，才由
      * [startControlRoundLocked] 升级成「marker + 本表会话表」并重试。
      */
     fun armMib3() {
         synchronized(lock) {
-            val isCurrentEpoch = epochPredicate() ?: return
+            pendingDeferredArmAtMs = null
+            ensurePacerLocked()
+            armMib3Locked()
+        }
+    }
+
+    /**
+     * 被动优先布防：在 `RECORD` 后先留出 [delayMs] 窗口等待主动发 DETECT/SYN 的接收端自行建链；
+     * 仅当窗口到期仍未收到任何对端协商字节且链路尚未进入 NORMAL 时，才主动经控制通道补发一次 DETECT
+     * （兼容依赖手机首发 DETECT 的接收端），避免 0ms 抢发与对端主动协商撞车。
+     */
+    fun scheduleMib3Arm(delayMs: Long = PASSIVE_PEER_GRACE_MS) {
+        synchronized(lock) {
+            if (linkClosed || !controlChannelEnabled() || tunnelWriter() != null) return
+            ensurePacerLocked()
             begin()
-            if (mib3Armed) return
-            mib3Armed = true
-            sendControlIap(Iap2LinkEngine.MARKER, isCurrentEpoch)
-            log("IAPLINK: MIB3 detect 已发（控制通道 iAPSendMessage）——等待车机 SYN")
+            if (peerNegotiationSeen || mib3DetectAttempts > 0 || mib3Armed || engine.state == Iap2LinkEngine.State.NORMAL) {
+                pendingDeferredArmAtMs = null
+                return
+            }
+            val clampedDelay = delayMs.coerceAtLeast(0L)
+            val target = nowMillis() + clampedDelay
+            val existing = pendingDeferredArmAtMs
+            if (existing == null || target < existing) {
+                pendingDeferredArmAtMs = target
+            }
+            if (clampedDelay == 0L) {
+                maybeFireDeferredArmLocked()
+            }
+        }
+    }
+
+    private fun maybeFireDeferredArmLocked() {
+        val deadline = pendingDeferredArmAtMs ?: return
+        if (nowMillis() < deadline) return
+        pendingDeferredArmAtMs = null
+        if (linkClosed || !controlChannelEnabled() || tunnelWriter() != null) return
+        if (peerNegotiationSeen || engine.state == Iap2LinkEngine.State.NORMAL) return
+        if (mib3DetectAttempts >= MIB3_DETECT_MAX_ATTEMPTS) return
+        armMib3Locked(allowRetry = true)
+    }
+
+    private fun armMib3Locked(allowRetry: Boolean = false) {
+        val isCurrentEpoch = epochPredicate() ?: return
+        begin()
+        // 已识别到对端发起的 DETECT/SYN 或链路已进入 NORMAL：无需再主动发 DETECT 干扰协商。
+        if (peerNegotiationSeen || engine.state == Iap2LinkEngine.State.NORMAL) {
+            if (!mib3Armed && tunnelWriter() == null && controlChannelEnabled()) {
+                mib3Armed = true
+            }
+            pendingDeferredArmAtMs = null
+            return
+        }
+        if (!allowRetry && mib3Armed) return
+        if (mib3DetectAttempts >= MIB3_DETECT_MAX_ATTEMPTS) return
+        mib3Armed = true
+        mib3DetectAttempts++
+        sendControlIap(Iap2LinkEngine.MARKER, isCurrentEpoch)
+        log(
+            "IAPLINK: MIB3 detect 已发（第 $mib3DetectAttempts/$MIB3_DETECT_MAX_ATTEMPTS 次，" +
+                "控制通道 iAPSendMessage）——等待车机 SYN",
+        )
+        if (allowRetry && mib3DetectAttempts < MIB3_DETECT_MAX_ATTEMPTS) {
+            pendingDeferredArmAtMs = nowMillis() + MIB3_DETECT_RETRY_DELAYS_MS[mib3DetectAttempts - 1]
         }
     }
 
@@ -482,10 +567,15 @@ class VirtualIap2Link(
 
     /** 由链路引擎解析出的完整 DETECT 触发，不受单次传输包切分边界影响。 */
     private fun handlePeerDetectLocked() {
-        // 布防前（屏幕 SETUP 未完成）：不回应——真机在 SETUP 前不 detect，
-        // 事件通道上的回显对 MIB3 无意义（它只认控制通道）；旧明文接收端
-        // 不走此链路语义
-        if (!mib3Armed && tunnelWriter() == null) return
+        if (!mib3Armed && tunnelWriter() == null) {
+            // 明文 pre-HomeKit 会话无加密控制通道 iAP2 语义，不回应预布防前的 marker；
+            // 加密无线 CarPlay 会话在事件通道打开后即被动就绪，车机发 DETECT 时直接进入控制通道协商。
+            if (!controlChannelEnabled()) return
+            mib3Armed = true
+            log("IAPLINK: 收到车机主动 DETECT，被动进入控制通道协商")
+        }
+        peerNegotiationSeen = true
+        pendingDeferredArmAtMs = null
         if (engine.state == Iap2LinkEngine.State.NORMAL) {
             if (linkClosed) return
             epoch++
@@ -563,9 +653,21 @@ class VirtualIap2Link(
     ) {
         synchronized(lock) {
             if (linkClosed || isCurrentEpoch?.invoke() == false) return
-            // 隧道存在时切换「回显先行」协商语义（DiPlay 对端引擎硬性期望）
+            ensurePacerLocked()
+            if (!started && bytes.isNotEmpty() && tunnelWriter() == null && controlChannelEnabled()) {
+                begin()
+            }
+            // type-130 隧道存在时切换「回显先行」协商语义（对端引擎硬性期望）
             engine.echoFirst = tunnelWriter() != null
             engine.feed(bytes, nowMillis())
+            if (engine.peerSynchronization != null || engine.state == Iap2LinkEngine.State.NORMAL) {
+                peerNegotiationSeen = true
+                pendingDeferredArmAtMs = null
+                if (!mib3Armed && tunnelWriter() == null && controlChannelEnabled()) {
+                    mib3Armed = true
+                    log("IAPLINK: 收到车机主动 SYN，被动进入控制通道协商")
+                }
+            }
             drainLocked()
         }
     }
@@ -633,6 +735,7 @@ class VirtualIap2Link(
             if (controlSynRounds >= MAX_CONTROL_SYN_ROUNDS) controlSynGaveUp = true
         }
         noteLinkStateLocked()
+        maybeFireDeferredArmLocked()
         // 先冲刷（回显必须先行送达对端），再启动 CSM；超时换档可能新排队帧，最后再冲一次
         flushOutputLocked()
         maybeStartControlCsmLocked()
@@ -1289,9 +1392,13 @@ class VirtualIap2Link(
      */
     private fun sendMib3BurstLocked() {
         val sessionId =
-            mib3WirelessSessionId ?: UUID.randomUUID().toString().uppercase().also {
-                mib3WirelessSessionId = it
-            }
+            mib3WirelessSessionId
+                ?: deviceUuidProvider?.invoke()?.takeIf { it.isNotBlank() }?.also {
+                    mib3WirelessSessionId = it
+                }
+                ?: UUID.randomUUID().toString().uppercase().also {
+                    mib3WirelessSessionId = it
+                }
         // iAP2 字符串参数必须 NUL 结尾（与蓝牙路径一致）；语言按车机 0x1D01 声明协商，不写死
         val language = AccessoryDeclaration.deviceLanguage("zh")
         sendCsmLocked(WIRELESS_SESSION_ID, Iap2Csm.string(0, sessionId))
@@ -1684,6 +1791,13 @@ class VirtualIap2Link(
             }
 
         private const val DETECT_RESPONSE_INTERVAL_MS = 200L
+
+        /** `RECORD` 后先被动等待车机主动发 Wi-Fi iAP2 DETECT/SYN 的宽限窗口；超时无入站才补发一次 DETECT。 */
+        const val PASSIVE_PEER_GRACE_MS = 800L
+
+        /** 车机在宽限期后仍静默时，最多有限补发 3 次 DETECT（+800ms / +2.5s / +5.5s），一旦收到对端字节立刻停止。 */
+        internal const val MIB3_DETECT_MAX_ATTEMPTS = 3
+        internal val MIB3_DETECT_RETRY_DELAYS_MS = longArrayOf(1_700L, 3_000L)
 
         /**
          * 车机在事件通道上连续发到第几个 SYN marker 才判定「它在等我们回 marker」。

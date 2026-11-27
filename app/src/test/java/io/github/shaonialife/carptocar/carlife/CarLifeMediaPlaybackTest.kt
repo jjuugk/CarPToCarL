@@ -420,4 +420,59 @@ class CarLifeMediaPlaybackTest {
         playback.onCarPause()
         assertTrue("onCarPause 仍是无限期门禁", playback.pauseHeldByCar)
     }
+
+    @Test
+    fun `car borrow pause suppresses stale sessionPlaying and preserves unmute resume command`() {
+        val playback = CarLifeMediaPlayback()
+        val intent = io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent()
+
+        playback.onSessionPlayback(true)
+        playback.onActivity(CarLifeMediaActivity.FOCUS_GAINED)
+        playback.onActivity(CarLifeMediaActivity.INITIALIZED)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+        intent.setPlayback(media = playback.playing, navigation = false)
+        assertTrue(playback.playing)
+
+        // 1. 车机静音借用主音频（BORROWED_CONSTRAINED）：发出暂停并记住车机借用。
+        val pauseCmd =
+            intent.onCarAudioTransfer(
+                io.github.shaonialife.carptocar.airplay.AirPlayResourceState.CarAudioTransfer.BORROWED_CONSTRAINED,
+                currentlyPlaying = playback.playing,
+            )
+        assertEquals(io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent.MediaCommand.PAUSE, pauseCmd)
+        playback.onCarPause(autoRelease = true)
+        assertFalse(playback.playing)
+        assertTrue(playback.pauseHeldByCar)
+        assertTrue(playback.pauseAutoRelease)
+
+        // 2. 10ms 后音乐 App 尚未消化暂停键，残留 PCM + 过时的 sessionPlaying=true 到达：
+        //    playing 必须保持 false，不得反抢主音频或抹掉 pausedByCarAudioBorrow，也不得抹掉 autoRelease。
+        playback.onSessionPlayback(true)
+        playback.onActivity(CarLifeMediaActivity.PCM)
+        intent.setPlayback(media = playback.playing, navigation = false)
+        assertFalse("车机暂停期间过时 sessionPlaying=true 不得反抢播放态", playback.playing)
+        assertTrue(playback.pauseHeldByCar)
+        assertTrue("残留回调不得把 autoRelease 覆盖回 false", playback.pauseAutoRelease)
+
+        // 3. 音乐 App 真正停播并伴随 0x30003 PAUSE / FOCUS_RELEASED：仍维持车机暂停态。
+        playback.onSessionPlayback(false)
+        playback.onActivity(CarLifeMediaActivity.PAUSE)
+        playback.onActivity(CarLifeMediaActivity.FOCUS_RELEASED)
+        assertFalse(playback.playing)
+        assertTrue(playback.pauseHeldByCar)
+        assertTrue(playback.pauseAutoRelease)
+
+        // 4. 用户按音量键解除静音（UNBORROWED_TO_PHONE）：必须触发 RESUME，且 onCarResume 立即把 playing 翻回 true。
+        val resumeCmd =
+            intent.onCarAudioTransfer(
+                io.github.shaonialife.carptocar.airplay.AirPlayResourceState.CarAudioTransfer.UNBORROWED_TO_PHONE,
+                currentlyPlaying = playback.playing,
+            )
+        assertEquals(io.github.shaonialife.carptocar.airplay.CarPlayAudioIntent.MediaCommand.RESUME, resumeCmd)
+        playback.onCarResume()
+        assertTrue("解除静音后即使媒体会话尚未刷新，playing 也必须立刻恢复为 true", playback.playing)
+        assertTrue(playback.canForwardPcm)
+        assertFalse(playback.pauseHeldByCar)
+        assertFalse(playback.pauseAutoRelease)
+    }
 }

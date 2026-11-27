@@ -21,6 +21,7 @@ class BtSessionGateTest {
         BtSessionGate.sessionActive = false
         BtSessionGate.inboundActive = false
         BtSessionGate.iap2Ready = false
+        BtSessionGate.clearBluetoothHandedOff()
     }
 
     @Test
@@ -48,6 +49,23 @@ class BtSessionGateTest {
             outbound.close()
             inbound.close()
         }
+    }
+
+    @Test
+    fun `蓝牙已通过 disableBluetooth 交接后原子拒绝控制链路补连登记`() {
+        BtSessionGate.sessionActive = true
+        assertTrue(BtSessionGate.noteLinkLost("11:22:33:44:55:66"))
+        assertEquals("11:22:33:44:55:66", BtSessionGate.linkRecoveryTarget())
+
+        BtSessionGate.markBluetoothHandedOff()
+        assertTrue(BtSessionGate.bluetoothHandedOff)
+        assertEquals(null, BtSessionGate.linkRecoveryTarget())
+        assertFalse("交接后断开 RFCOMM 绝不得再登记蓝牙补连", BtSessionGate.noteLinkLost("11:22:33:44:55:66"))
+        assertEquals(null, BtSessionGate.linkRecoveryTarget())
+
+        BtSessionGate.clearBluetoothHandedOff()
+        assertFalse(BtSessionGate.bluetoothHandedOff)
+        assertTrue(BtSessionGate.noteLinkLost("11:22:33:44:55:66"))
     }
 
     @Test

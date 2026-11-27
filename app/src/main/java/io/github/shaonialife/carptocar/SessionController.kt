@@ -3451,6 +3451,7 @@ object SessionController {
         // （2026-10-16 实测）。BT 退役只在用户终态做，见 disconnect()。
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
         BtSessionGate.sessionActive = false
+        BtSessionGate.clearBluetoothHandedOff()
         // 协议一致性汇总：放在最后一行，拆链原因与问题清单一前一后，反馈日志时最上面、
         // 最下面各有一条结论，不用翻中间过程。
         flushProtocolAudit("会话退役")
@@ -6929,9 +6930,10 @@ object SessionController {
                     val redoAuth = freshAuthPolicy.consumeRedo(pairingReceiverKey)
                     if (redoAuth) {
                         PairingMemory.clear(context)
+                        PairingMemory.clearPaired(context, pairingReceiverKey)
                         appendLog(
                             "AUTH: 同一车机连续 ${FreshAuthPolicy.DEFAULT_FAILURE_THRESHOLD} 轮未建立会话" +
-                                "——本轮强制重做认证（清掉配对记忆，不再跳过 pair-setup）",
+                                "——本轮强制重做认证（清掉配对记忆与已配对标记，不再跳过 pair-setup）",
                         )
                     }
                     val pairingGate =
@@ -6945,12 +6947,13 @@ object SessionController {
                             )
                         }
                     val noPairing = txtNoPairing || pairingGate == PairingGate.SKIP_SETUP
+                    val preferVerifyFirst = !noPairing && !redoAuth && PairingMemory.isPaired(context, pairingReceiverKey)
                     appendLog(
                         "PROTO 配对策略=$pairingPolicy" +
-                            (if (noPairing) {
-                                "（本轮跳过 pair-setup）"
-                            } else {
-                                "（本轮先配对）"
+                            (when {
+                                noPairing -> "（本轮跳过 pair-setup）"
+                                preferVerifyFirst -> "（已配对，优先直通 pair-verify）"
+                                else -> "（本轮先配对）"
                             }) +
                             "；依据：端点 features=" +
                             (client.currentEndpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知"),
@@ -6968,7 +6971,10 @@ object SessionController {
                             client.reconnect()
                             null
                         } else {
-                            client.runPairing()
+                            client.runPairing(
+                                preferVerifyFirst = preferVerifyFirst,
+                                onFastVerifyRejected = { PairingMemory.clearPaired(context, pairingReceiverKey) },
+                            )
                         }
                     requireAttempt(attempt)
                     // 审计：画像说「该配对」，接收端却根本没有 /pair-setup（404/不可用）。
@@ -7089,7 +7095,10 @@ object SessionController {
                             )
                         }
                     }
-                    if (pairedKeys != null) PairingMemory.clear(context)
+                    if (pairedKeys != null) {
+                        PairingMemory.clear(context)
+                        PairingMemory.markPaired(context, pairingReceiverKey)
+                    }
                     if (pairedKeys != null || plainSession) {
                         phaseHint = if (pairedKeys != null) "配对完成，建立 CarPlay 会话…" else "建立明文会话…"
                         if (pairedKeys != null) {
@@ -7098,6 +7107,8 @@ object SessionController {
                                     pairedKeys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
                                     "readKey=" + pairedKeys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
                             )
+                            client.runAuthSetup()
+                            requireAttempt(attempt)
                         }
                         // 已配对 → 共享密钥；明文会话 → null（流加密降级为 AES-CTR 零密钥）
                         var sessionKey = pairedKeys?.sharedSecret
@@ -7114,6 +7125,9 @@ object SessionController {
                                 // 补配对真的成了：说明「上次确定性拒绝」的记录已经过时，
                                 // 立刻清掉，下一轮不必再走明文。
                                 PairingMemory.clear(context)
+                                PairingMemory.markPaired(context, pairingReceiverKey)
+                                client.runAuthSetup()
+                                requireAttempt(attempt)
                                 sessionKey = upgraded.sharedSecret
                                 setup = client.runSetup()
                                 requireAttempt(attempt)
@@ -7143,6 +7157,28 @@ object SessionController {
                             // mDNS 刷新过端点时，真正连上的是 client 里的地址（2026-10-18：
                             // 0x4301 的定长 IP 字段带 NUL，mDNS 给的是干净地址，取旧值
                             // 会让视频端口/keepAlive 用脏地址 → 一律解析失败）。
+                            val activeSetup = setup
+                            client.onFirstRecordAccepted {
+                                // RECORD 200 OK 后按 Table 23-26 通知接收端交接蓝牙控制通道到 Wi-Fi，
+                                // 同时以被动优先窗口等待主动发起 Wi-Fi iAP2 的车机（超时再补发 DETECT，不与车机抢跑）。
+                                if (activeSetup.bluetoothIds.isNotEmpty() && !client.cancelled) {
+                                    Bg.run("wifi-iap-handoff") {
+                                        if (!ownsAttempt(attempt) || currentClient !== client || client.cancelled) {
+                                            return@run
+                                        }
+                                        if (client.postDisableBluetooth(activeSetup.bluetoothIds)) {
+                                            synchronized(sessionLifecycleLock) {
+                                                if (ownsAttempt(attempt) && currentClient === client && !client.cancelled) {
+                                                    BtSessionGate.markBluetoothHandedOff()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (ownsAttempt(attempt) && currentClient === client && !client.cancelled) {
+                                    client.scheduleMib3VirtualLink()
+                                }
+                            }
                             synchronized(sessionLifecycleLock) {
                                 requireAttempt(attempt)
                                 currentSharedSecret = sessionKey
@@ -8025,6 +8061,7 @@ object SessionController {
                                 retireSessionResources()
                                 SessionTrace.sessionEnd(failure)
                                 BtSessionGate.sessionActive = false
+                                BtSessionGate.clearBluetoothHandedOff()
                                 // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
                                 // 窗口内到达，会被暂存但没人消费。此处补投一次——车机等 15s
                                 // 无人连入就拆链，错过这一投就是整轮失败（2026-10-18 分析）。
