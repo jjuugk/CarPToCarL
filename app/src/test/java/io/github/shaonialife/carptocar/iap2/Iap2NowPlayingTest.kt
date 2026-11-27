@@ -1,5 +1,6 @@
 package io.github.shaonialife.carptocar.iap2
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -215,6 +216,40 @@ class Iap2NowPlayingTest {
         assertEquals(
             0x1122_3344_5566_7788L,
             value.fold(0L) { acc, b -> (acc shl 8) or (b.toInt() and 0xFF).toLong() },
+        )
+    }
+
+    /**
+     * 导航覆盖层（title 是转向文案）在车机订阅**全部**可选字段时，报文字节必须与
+     * 没解析到掩码时完全一致。
+     *
+     * 覆盖层里 itemId / queueCount / 曲目号 / 流派 / 包名全是 null，`wants()` 为真
+     * 也没有值可补——这条锁住「本次订阅掩码改动没有动导航卡片一个字节」。
+     */
+    @Test
+    fun navigationOverlayBytesUnchangedUnderFullMask() {
+        val overlay =
+            CarPlayNowPlaying(
+                title = "300米右转",
+                artist = "人民路",
+                album = "晴天",
+                durationMs = 200_000,
+                status = Iap2NowPlaying.STATUS_PLAYING,
+                elapsedMs = 1_000,
+                appName = "导航",
+                artworkId = 7,
+                navigationArtwork = true,
+                navigationOverlay = true,
+            )
+        val fullMask =
+            mapOf(
+                0 to setOf(0x0000, 0x0007, 0x0008, 0x0009, 0x0010, 0x0012),
+                1 to setOf(0x0003, 0x0010),
+            )
+        assertArrayEquals(
+            "导航覆盖层没有可选字段值，掩码再全也不得改变报文",
+            Iap2NowPlaying.body(overlay, null),
+            Iap2NowPlaying.body(overlay, fullMask),
         )
     }
 

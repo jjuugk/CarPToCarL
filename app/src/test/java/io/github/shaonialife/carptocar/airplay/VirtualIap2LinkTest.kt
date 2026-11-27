@@ -460,6 +460,33 @@ class VirtualIap2LinkTest {
         assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("音乐标题"))
     }
 
+    /**
+     * 导航覆盖层即使挂着歌词（现实里不会这样构造，但门控得自己兜住），也不得被
+     * 两阶段歌词改写 title——它的 title 是转向文案，被歌词顶掉就等于卡片丢了指引。
+     */
+    @Test
+    fun navigationOverlayIsNeverStagedIntoLyrics() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlayingOverride =
+            song("300米右转").copy(
+                navigationOverlay = true,
+                lyricTrack = CarPlayNowPlaying.LyricTrack("晴天", "歌手", "故事的小黄花"),
+            )
+        h.carSends(0x5000)
+        h.settle()
+        assertTrue(String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8).contains("300米右转"))
+
+        // 越过歌名停留窗口：普通歌曲此时早该切歌词，导航覆盖层必须原地不动。
+        h.clock += VirtualIap2Link.LYRIC_TITLE_HOLD_MILLIS + 1_000
+        h.link.pushNowPlaying()
+        h.tick()
+        h.settle()
+        val text = String(h.lastRawFrameOf(0x5001)!!, Charsets.UTF_8)
+        assertTrue("转向文案必须原样保留：$text", text.contains("300米右转"))
+        assertFalse("歌词行不得顶掉转向文案：$text", text.contains("故事的小黄花"))
+    }
+
     @Test
     fun navigationArtworkTimeoutDoesNotDisableMusicArtwork() {
         Iap2ArtworkSupport.reset()
