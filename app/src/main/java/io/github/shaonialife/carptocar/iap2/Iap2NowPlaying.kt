@@ -50,7 +50,44 @@ data class CarPlayNowPlaying(
     val artworkId: Int? = null,
     /** 本地传输策略标记，iAP2 编码不包含此字段。 */
     internal val navigationArtwork: Boolean = false,
-)
+    /**
+     * 曲目持久 ID（组 0 字段 0x0000，u64）。来自 CarLife 的 `songId`。
+     *
+     * 它标识「这是哪一首」：同一首歌的连续更新共用同一个 ID，车机据此判断
+     * 是「同一条内容刷新」还是「换曲」。null = 没有可靠值，不发。
+     */
+    val itemId: Long? = null,
+    /** 队列长度（组 1 字段 0x0003，u32）。来自 CarLife 的 `playlistNum`。 */
+    val queueCount: Int? = null,
+    /** 组 0 字段 0x0007 / 0x0008 / 0x0009：曲目号、曲目总数、碟号。 */
+    val trackNumber: Int? = null,
+    val trackCount: Int? = null,
+    val discNumber: Int? = null,
+    /** 组 0 字段 0x0010 / 0x0012：流派、作曲者。 */
+    val genre: String? = null,
+    val composer: String? = null,
+    /** 组 1 字段 0x0010：应用包名（车机据此认播放器）。 */
+    val appBundleId: String? = null,
+    /** 播放器的可读名称；只在带 [appBundleId] 时才可能替换 [appName]。 */
+    val appDisplayName: String? = null,
+    /**
+     * 「真实曲目 + 已确认属于它的歌词行」。
+     *
+     * iAP2 没有歌词字段，歌词只能顶替 title；但**新曲刚起时先给歌名/歌手**，
+     * 停留一段时间再切歌词，否则首句歌词会抢掉曲目信息（见
+     * [io.github.shaonialife.carptocar.airplay.VirtualIap2Link]）。
+     */
+    internal val lyricTrack: LyricTrack? = null,
+    /** 导航覆盖层：不参与歌词分阶段（它的 title 是转向文案，不是歌名）。 */
+    internal val navigationOverlay: Boolean = false,
+) {
+    /** 已校验属于当前曲目的歌词行。 */
+    data class LyricTrack(
+        val title: String?,
+        val artist: String?,
+        val line: String?,
+    )
+}
 
 object Iap2NowPlaying {
     /** 播放状态枚举（与 iap2-rs PlaybackStatus 一致）。 */
@@ -59,49 +96,103 @@ object Iap2NowPlaying {
     const val STATUS_PAUSED = 2
 
     // ---- media item 组字段 ID（勿凭记忆改，见类注释）----
+    internal const val MEDIA_ITEM_PERSISTENT_ID = 0x0000
     internal const val MEDIA_TITLE = 0x0001
     internal const val MEDIA_DURATION = 0x0004
     internal const val MEDIA_ALBUM = 0x0006
+    internal const val MEDIA_TRACK_NUMBER = 0x0007
+    internal const val MEDIA_TRACK_COUNT = 0x0008
+    internal const val MEDIA_DISC_NUMBER = 0x0009
     internal const val MEDIA_ARTIST = 0x000C
+    internal const val MEDIA_GENRE = 0x0010
+    internal const val MEDIA_COMPOSER = 0x0012
     internal const val MEDIA_ARTWORK_ID = 0x001A
 
     // ---- playback 组字段 ID ----
     internal const val PLAYBACK_STATUS = 0x0000
     internal const val PLAYBACK_ELAPSED = 0x0001
+    internal const val PLAYBACK_QUEUE_COUNT = 0x0003
     internal const val PLAYBACK_SHUFFLE = 0x0005
     internal const val PLAYBACK_REPEAT = 0x0006
     internal const val PLAYBACK_APP_NAME = 0x0007
+    internal const val PLAYBACK_APP_BUNDLE_ID = 0x0010
+
+    /** 组号：0 = media item，1 = playback。 */
+    const val GROUP_MEDIA_ITEM = 0
+    const val GROUP_PLAYBACK = 1
 
     /**
      * 构造 0x5001 NowPlayingUpdate 完整帧（带真实歌名/歌手/专辑/播放状态）。
      * 空字符串字段仍给一个空串 param，保持结构与空态常量同构。
      */
-    fun encode(np: CarPlayNowPlaying): ByteArray = Iap2Csm.encode(Iap2MessageIds.NOW_PLAYING_UPDATE, body(np))
+    fun encode(
+        np: CarPlayNowPlaying,
+        requestedFields: Map<Int, Set<Int>>? = null,
+    ): ByteArray = Iap2Csm.encode(Iap2MessageIds.NOW_PLAYING_UPDATE, body(np, requestedFields))
 
     /**
      * 只返回**参数体**（不含 `0x4040 | len | msgId` 帧头）。
      *
-     * 走 `send(...)/sendFireAndForget(...)` 这类「按消息 ID 发体」的链路时必须用它：
+     * 走 `send(...)/sendForget(...)` 这类「按消息 ID 发体」的链路时必须用它：
      * 那些方法会自己补帧头，把 [encode] 的完整帧当体再封一次，对端解析出来就是
      * `0x4040 0x5001 ...` 这种非法参数组。WinPlay 1.2.4 实测：收到双重封包的 0x5001
      * 后其「接收进程异常」直接退出 → 蓝牙桥接被拆 → 车机不停重连（2026-10-25）。
+     *
+     * @param requestedFields 车机 `0x5000` 订阅里点名的字段（组号 → 字段 ID）。
+     *   **null / 空 = 没解析到掩码**：此时一个可选字段都不加，报文字节与旧版完全一致，
+     *   已跑通车型（宝马 MGU、DiPlay、WinPlay）不会被改变。只有车机明确订阅了某字段，
+     *   我们才补它——「按能力不按型号」。
      */
-    fun body(np: CarPlayNowPlaying): ByteArray {
-        var mediaItem =
+    fun body(
+        np: CarPlayNowPlaying,
+        requestedFields: Map<Int, Set<Int>>? = null,
+    ): ByteArray {
+        fun wants(
+            group: Int,
+            field: Int,
+        ): Boolean = requestedFields?.get(group)?.contains(field) == true
+
+        var mediaItem = byteArrayOf()
+        np.itemId?.takeIf { wants(GROUP_MEDIA_ITEM, MEDIA_ITEM_PERSISTENT_ID) }?.let {
+            mediaItem += Iap2Csm.u64(MEDIA_ITEM_PERSISTENT_ID, it)
+        }
+        mediaItem +=
             Iap2Csm.string(MEDIA_TITLE, np.title.orEmpty()) +
                 Iap2Csm.u32(MEDIA_DURATION, np.durationMs.toLong()) +
-                Iap2Csm.string(MEDIA_ALBUM, np.album.orEmpty()) +
-                Iap2Csm.string(MEDIA_ARTIST, np.artist.orEmpty())
+                Iap2Csm.string(MEDIA_ALBUM, np.album.orEmpty())
+        np.trackNumber?.takeIf { wants(GROUP_MEDIA_ITEM, MEDIA_TRACK_NUMBER) }?.let {
+            mediaItem += Iap2Csm.u16(MEDIA_TRACK_NUMBER, it)
+        }
+        np.trackCount?.takeIf { wants(GROUP_MEDIA_ITEM, MEDIA_TRACK_COUNT) }?.let {
+            mediaItem += Iap2Csm.u16(MEDIA_TRACK_COUNT, it)
+        }
+        np.discNumber?.takeIf { wants(GROUP_MEDIA_ITEM, MEDIA_DISC_NUMBER) }?.let {
+            mediaItem += Iap2Csm.u16(MEDIA_DISC_NUMBER, it)
+        }
+        mediaItem += Iap2Csm.string(MEDIA_ARTIST, np.artist.orEmpty())
+        np.genre?.takeIf { it.isNotBlank() && wants(GROUP_MEDIA_ITEM, MEDIA_GENRE) }?.let {
+            mediaItem += Iap2Csm.string(MEDIA_GENRE, it)
+        }
+        np.composer?.takeIf { it.isNotBlank() && wants(GROUP_MEDIA_ITEM, MEDIA_COMPOSER) }?.let {
+            mediaItem += Iap2Csm.string(MEDIA_COMPOSER, it)
+        }
         // 只有真要传图时才声明编号：给了编号却不传，车机封面位会一直等一张永不
         // 到达的图。合法性按 u8 校验，越界（0 或 >255）一律当「没有封面」处理。
         np.artworkId?.takeIf { it in 1..0xFF }?.let { mediaItem += Iap2Csm.u8(MEDIA_ARTWORK_ID, it) }
-        val playback =
+        var playback =
             Iap2Csm.u8(PLAYBACK_STATUS, np.status) +
-                Iap2Csm.u32(PLAYBACK_ELAPSED, np.elapsedMs.toLong()) +
-                Iap2Csm.u8(PLAYBACK_SHUFFLE, np.shuffleMode) +
+                Iap2Csm.u32(PLAYBACK_ELAPSED, np.elapsedMs.toLong())
+        np.queueCount?.takeIf { it > 0 && wants(GROUP_PLAYBACK, PLAYBACK_QUEUE_COUNT) }?.let {
+            playback += Iap2Csm.u32(PLAYBACK_QUEUE_COUNT, it.toLong())
+        }
+        playback +=
+            Iap2Csm.u8(PLAYBACK_SHUFFLE, np.shuffleMode) +
                 Iap2Csm.u8(PLAYBACK_REPEAT, np.repeatMode) +
                 Iap2Csm.string(PLAYBACK_APP_NAME, np.appName.orEmpty())
-        return Iap2Csm.param(0x0000, mediaItem) + Iap2Csm.param(0x0001, playback)
+        np.appBundleId
+            ?.takeIf { it.isNotBlank() && wants(GROUP_PLAYBACK, PLAYBACK_APP_BUNDLE_ID) }
+            ?.let { playback += Iap2Csm.string(PLAYBACK_APP_BUNDLE_ID, it) }
+        return Iap2Csm.param(GROUP_MEDIA_ITEM, mediaItem) + Iap2Csm.param(GROUP_PLAYBACK, playback)
     }
 
     /** 诊断用：这一帧实际带了哪些字段（日志里一眼看出专辑有没有发出去）。 */

@@ -35,6 +35,8 @@ internal class NavigationNowPlaying(
             appName = "导航",
             artworkId = artworkId(guide.artwork),
             navigationArtwork = true,
+            // 覆盖层的 title 是转向文案：不能参与歌词分阶段，也不能顶掉正在放的歌词。
+            navigationOverlay = true,
         )
     }
 

@@ -209,6 +209,15 @@ class MediaListenerService : NotificationListenerService() {
                     playbackSpeed = if (playing) (state?.playbackSpeed ?: 1f) else 0f,
                     durationMs = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
                     anchoredAtMs = android.os.SystemClock.elapsedRealtime(),
+                    album = meta?.getString(MediaMetadata.METADATA_KEY_ALBUM),
+                    trackNumber =
+                        meta?.getLong(MediaMetadata.METADATA_KEY_TRACK_NUMBER)?.takeIf { it > 0 }?.toInt(),
+                    trackCount =
+                        meta?.getLong(MediaMetadata.METADATA_KEY_NUM_TRACKS)?.takeIf { it > 0 }?.toInt(),
+                    discNumber =
+                        meta?.getLong(MediaMetadata.METADATA_KEY_DISC_NUMBER)?.takeIf { it > 0 }?.toInt(),
+                    genre = meta?.getString(MediaMetadata.METADATA_KEY_GENRE),
+                    composer = meta?.getString(MediaMetadata.METADATA_KEY_COMPOSER),
                 )
             }
         MediaSessionsState.publish(now)
@@ -293,6 +302,19 @@ object MediaSessionsState {
         val durationMs: Long = 0L,
         /** 位置采样的 SystemClock.elapsedRealtime 锚点。 */
         val anchoredAtMs: Long = 0L,
+        /**
+         * 车机 `0x5000` 可能点名订阅的组 0 字段：专辑、曲目号/总数、碟号、流派、作曲者。
+         *
+         * 此前 `0x5001` 把专辑直接写成 null、其余字段压根不存在——车机订阅了却一条
+         * 不给，很容易判定「数据不完整」而整张卡片不重绘。这里如实抓，由编码层
+         * 按订阅掩码决定发不发。
+         */
+        val album: String? = null,
+        val trackNumber: Int? = null,
+        val trackCount: Int? = null,
+        val discNumber: Int? = null,
+        val genre: String? = null,
+        val composer: String? = null,
     ) {
         /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
         fun displayPositionAt(elapsedRealtimeMs: Long): Long {

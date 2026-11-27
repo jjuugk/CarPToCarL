@@ -2535,8 +2535,12 @@ class AirPlayClient(
     /**
      * 主动补推一次 0x5001（见 [VirtualIap2Link.pushNowPlaying]）。
      * quiet = 播放位置逐秒补推：照常发包，但不刷日志。
+     * lyricOnly = 只有歌词行推进时才补推（歌名没变、仅歌词换了下一句）。
      */
-    fun pushNowPlaying(quiet: Boolean = false): Boolean = iapLink?.pushNowPlaying(quiet) == true
+    fun pushNowPlaying(
+        quiet: Boolean = false,
+        lyricOnly: Boolean = false,
+    ): Boolean = iapLink?.pushNowPlaying(quiet, lyricOnly) == true
 
     /**
      * 通话状态变化时主动补推一次 0x4155（见 [VirtualIap2Link.pushCallState]）。

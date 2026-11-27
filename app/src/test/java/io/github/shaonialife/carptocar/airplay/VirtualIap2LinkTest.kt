@@ -1015,4 +1015,163 @@ class VirtualIap2LinkTest {
             MfiLengthMemory.forget(null, identity)
         }
     }
+
+    // ---- 订阅掩码与歌词分阶段（2026-11-27）----
+
+    /** 取一条 0x5001 的（组0 字段集, 组1 字段集）。 */
+    private fun nowPlayingFieldIds(payload: ByteArray): Pair<Set<Int>, Set<Int>> {
+        val body = Iap2Csm.Parser().offer(payload).first { it.messageId == 0x5001 }.body
+        val top = Iap2Csm.parseParams(body).associateBy { it.id }
+        return Iap2Csm.parseParams(top.getValue(0).value).map { it.id }.toSet() to
+            Iap2Csm.parseParams(top.getValue(1).value).map { it.id }.toSet()
+    }
+
+    private fun nowPlayingText(
+        payload: ByteArray,
+        group: Int,
+        field: Int,
+    ): String {
+        val body = Iap2Csm.Parser().offer(payload).first { it.messageId == 0x5001 }.body
+        val top = Iap2Csm.parseParams(body).associateBy { it.id }
+        val value = Iap2Csm.parseParams(top.getValue(group).value).associateBy { it.id }.getValue(field).value
+        assertTrue("字符串字段必须以 NUL 结尾", value.isNotEmpty() && value.last() == 0.toByte())
+        return value.copyOf(value.size - 1).decodeToString()
+    }
+
+    /**
+     * 车机在 `0x5000` 里点名了哪些字段，我们就补哪些。
+     *
+     * 掩码只认订阅里点到的 ID：点名的补上，没点的一个不加——这样宝马 MGU、
+     * DiPlay、WinPlay 这些发空订阅体的接收端拿到的帧与改动前逐字节一致。
+     */
+    @Test
+    fun subscriptionMaskDecidesWhichExtraFieldsAreSent() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying =
+            song("带掩码的歌").copy(
+                itemId = 7L,
+                trackNumber = 2,
+                queueCount = 9,
+                appBundleId = "com.tencent.qqmusic",
+            )
+        // 点名：组0 曲目号 0x07；组1 队列长度 0x03。故意不点 0x00 与 0x10。
+        val mask =
+            Iap2Csm.param(0, Iap2Csm.u16(0x0007, 2)) +
+                Iap2Csm.param(1, Iap2Csm.u32(0x0003, 9))
+        assertEquals(listOf(0x5001), h.carSends(0x5000, mask))
+        val (media, playback) = nowPlayingFieldIds(h.lastRawFrameOf(0x5001)!!)
+        assertTrue("订阅了曲目号就要发 0x0007", 0x0007 in media)
+        assertFalse("没订阅曲目持久 ID，不得多发 0x0000", 0x0000 in media)
+        assertTrue("订阅了队列长度就要发 0x0003", 0x0003 in playback)
+        assertFalse("没订阅包名，不得多发 0x0010", 0x0010 in playback)
+    }
+
+    /** 空订阅体（旧接收端）：可选字段一个都不加，报文与旧版一致。 */
+    @Test
+    fun emptySubscriptionKeepsLegacyNowPlayingFields() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying =
+            song("老接收端").copy(
+                itemId = 7L,
+                trackNumber = 2,
+                queueCount = 9,
+                appBundleId = "com.tencent.qqmusic",
+            )
+        assertEquals(listOf(0x5001), h.carSends(0x5000))
+        val (media, playback) = nowPlayingFieldIds(h.lastRawFrameOf(0x5001)!!)
+        assertEquals(setOf(0x0001, 0x0004, 0x0006, 0x000C), media)
+        assertEquals(setOf(0x0000, 0x0001, 0x0005, 0x0006, 0x0007), playback)
+    }
+
+    /**
+     * 奥迪 MIB3（3874 / 3801）真实订阅面：只点名 7 个媒体字段 + 4 个播放字段，
+     * 车机用 **CsmFlag**（`len=4 + id`、无值）声明（2026-10-31 实车抓包：
+     * `00 20 00 00 00 04 00 01 ... 00 04 00 1a`）。
+     *
+     * 结论（对应「按订阅裁剪对奥迪有没有影响」）：
+     * - 媒体组：车机点名 0x0001/0x0004/0x0006/0x000C/0x0010(流派)/0x0012(作曲)/0x001A(封面)，
+     *   我们**只多带流派与作曲**（有值时），其余基础九项与改动前逐字节一致；
+     * - 播放组：车机点名 status/elapsed/shuffle/repeat，**没点 0x0010 包名** →
+     *   `appBundleId` 不进稳态帧；这是「决定要不要带 appBundleId」在奥迪上的实际取值。
+     * - 没订阅的 itemId(0x0000)/曲目号(0x0007)/队列长度(0x0003) 一个都不发。
+     */
+    @Test
+    fun audiMib3FlagSubscriptionKeepsAudiFrameShape() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying =
+            song("奥迪订阅").copy(
+                itemId = 7L,
+                trackNumber = 2,
+                queueCount = 9,
+                genre = "流行",
+                composer = "某作曲",
+                appBundleId = "com.tencent.qqmusic",
+            )
+        // 真机 flag 形状：顶层两个 group，group 的 value 是若干 len=4 的 CsmFlag。
+        fun flag(id: Int) = Iap2Csm.param(id, ByteArray(0))
+        val mediaFlags =
+            listOf(0x0001, 0x0004, 0x0006, 0x000C, 0x0010, 0x0012, 0x001A)
+                .fold(byteArrayOf()) { acc, id -> acc + flag(id) }
+        val playbackFlags =
+            listOf(0x0000, 0x0001, 0x0005, 0x0006)
+                .fold(byteArrayOf()) { acc, id -> acc + flag(id) }
+        val body = Iap2Csm.param(0, mediaFlags) + Iap2Csm.param(1, playbackFlags)
+
+        assertEquals(listOf(0x5001), h.carSends(0x5000, body))
+        val (media, playback) = nowPlayingFieldIds(h.lastRawFrameOf(0x5001)!!)
+        // 基础项保持原样 + 车机点名的流派/作曲；未订阅的 itemId/曲目号不出现。
+        assertEquals(setOf(0x0001, 0x0004, 0x0006, 0x000C, 0x0010, 0x0012), media)
+        // 奥迪没订阅 playback 0x0010 → appBundleId 不进帧；没订阅 0x0003 → 队列长度不发。
+        assertEquals(setOf(0x0000, 0x0001, 0x0005, 0x0006, 0x0007), playback)
+    }
+
+    /**
+     * 新曲先给「歌名/歌手」，[VirtualIap2Link.LYRIC_TITLE_HOLD_MILLIS] 之后歌词才上位
+     * （title=歌词行、artist=歌名），否则首句歌词会抢掉曲目信息。
+     */
+    @Test
+    fun newTrackShowsTitleBeforeLyricLineTakesOver() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying =
+            song("总有春风为你而来").copy(
+                lyricTrack = CarPlayNowPlaying.LyricTrack("总有春风为你而来", "悠禾", "要相信所有缘分上天"),
+            )
+        assertEquals(listOf(0x5001), h.carSends(0x5000))
+        // 订阅应答：窗口内只给歌名/歌手
+        assertEquals("总有春风为你而来", nowPlayingText(h.lastRawFrameOf(0x5001)!!, 0, 0x0001))
+        assertEquals("悠禾", nowPlayingText(h.lastRawFrameOf(0x5001)!!, 0, 0x000C))
+
+        // 窗口没到：即使宿主主动补推，也不让歌词顶掉歌名
+        // （carSends 内部的 exchange 已把时钟推进 600ms，这里只再加 200）
+        h.clock += 200
+        assertTrue(h.link.pushNowPlaying())
+        h.tick() // 出站字节由节拍冲入控制通道
+        assertEquals("总有春风为你而来", nowPlayingText(h.lastRawFrameOf(0x5001)!!, 0, 0x0001))
+
+        // 窗口到期：歌词行上位，第二行变成歌名
+        h.clock += VirtualIap2Link.LYRIC_TITLE_HOLD_MILLIS + 200
+        assertTrue(h.link.pushNowPlaying())
+        h.tick()
+        val last = h.lastRawFrameOf(0x5001)!!
+        assertEquals("要相信所有缘分上天", nowPlayingText(last, 0, 0x0001))
+        assertEquals("总有春风为你而来", nowPlayingText(last, 0, 0x000C))
+    }
+
+    /** 没有已校验歌词行时（普通歌曲），title/artist 原样透传，不启用分阶段。 */
+    @Test
+    fun plainSongKeepsTitleWithoutLyricStaging() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        h.nowPlaying = song("普通歌名")
+        assertEquals(listOf(0x5001), h.carSends(0x5000))
+        h.clock += VirtualIap2Link.LYRIC_TITLE_HOLD_MILLIS * 4
+        assertTrue(h.link.pushNowPlaying())
+        val last = h.lastRawFrameOf(0x5001)!!
+        assertEquals("普通歌名", nowPlayingText(last, 0, 0x0001))
+        assertEquals("歌手", nowPlayingText(last, 0, 0x000C))
+    }
 }

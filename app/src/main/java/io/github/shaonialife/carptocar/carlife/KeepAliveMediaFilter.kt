@@ -14,7 +14,7 @@ package io.github.shaonialife.carptocar.carlife
  * 14:12:07.129  EVENT: CarLife 歌名「车机音频直通」→ 补推 iAP2 0x5001 NowPlayingUpdate
  * ```
  *
- * 后果：车机歌名/歌词基线被假歌名顶掉（`latestSongMediaInfo` 一度是它，
+ * 后果：车机歌名/歌词基线被假歌名顶掉（媒体快照里的真实曲目一度是它，
  * `NowPlayingSourcePolicy` 再也判不出「MediaSession 与 CarLife 是否同一首歌」），
  * 时间戳也被污染成「引擎还在推送」的假象。
  *

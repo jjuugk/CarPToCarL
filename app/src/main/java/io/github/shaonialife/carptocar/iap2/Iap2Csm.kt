@@ -124,6 +124,16 @@ object Iap2Csm {
             ),
         )
 
+    /** u64 大端（iAP2 的 MediaItemPersistentID 等）。 */
+    fun u64(
+        id: Int,
+        value: Long,
+    ): ByteArray =
+        param(
+            id,
+            ByteArray(8) { index -> (value ushr ((7 - index) * 8)).toByte() },
+        )
+
     fun string(
         id: Int,
         value: String,

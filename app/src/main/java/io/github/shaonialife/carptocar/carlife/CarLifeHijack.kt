@@ -254,32 +254,42 @@ object CarLifeHijack {
         }
     }
 
-    /** 最近一条 CarLife 媒体信息（0x10035，歌名/歌手/封面）。供 iAP2 0x5001 转发。 */
-    @Volatile
-    var latestMediaInfo: CarLifeMediaInfo? = null
-        private set
-
     /**
-     * 最近一条**非歌词行**的媒体信息（真实歌名）。
+     * 最近一次 `0x10035` 的**同批快照**：当前行、真实曲目、到达时刻。
      *
-     * CarLife 把逐行歌词也当成一条媒体信息推（`artist == "<album>-<artist>"`，
-     * 见 [LyricLines]），[latestMediaInfo] 会很快被歌词行覆盖掉。歌名基线单独留一份，
-     * 用来判断「MediaSession 与 CarLife 是不是同一首歌」——见
-     * [io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy]。
+     * 三者必须同源。此前是三个独立的 `@Volatile`，先写「真实曲目」再写「当前行」再写
+     * 时间戳——中间任何一个读点都能凑出「新歌词行 + 上一首的真实曲目 + 新的时间戳」
+     * 这种不存在的组合，于是歌词会挂到刚切的那首歌上（跨批次混用）。
      */
+    internal data class MediaInfoSnapshot(
+        /** 当前行，可能本身就是歌词行。 */
+        val latest: CarLifeMediaInfo,
+        /** 最近一条**非歌词行**（真实歌名）；从没有过则为 null。 */
+        val song: CarLifeMediaInfo?,
+        /** 这条信息的到达时刻（`SystemClock.uptimeMillis()`）。 */
+        val receivedAtMs: Long,
+    )
+
     @Volatile
-    var latestSongMediaInfo: CarLifeMediaInfo? = null
+    internal var mediaInfoSnapshot: MediaInfoSnapshot? = null
         private set
 
+    /** 最近一条 CarLife 媒体信息（0x10035，歌名/歌手/封面）。供 iAP2 0x5001 转发。 */
+    val latestMediaInfo: CarLifeMediaInfo?
+        get() = mediaInfoSnapshot?.latest
+
+    /** 最近一条**非歌词行**的媒体信息（真实歌名）。 */
+    val latestSongMediaInfo: CarLifeMediaInfo?
+        get() = mediaInfoSnapshot?.song
+
     /**
-     * 最近一条媒体信息的到达时刻（`SystemClock.uptimeMillis()`；0 = 本轮还没收到过）。
+     * 最近一条媒体信息的到达时刻（0 = 本轮还没收到过）。
      *
      * 歌词行只在「CarLife 还在推」时才有资格顶掉 MediaSession 的歌名，
      * 窗口长度见 [io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy.LYRIC_WINDOW_MILLIS]。
      */
-    @Volatile
-    var latestMediaInfoAtMillis: Long = 0L
-        private set
+    val latestMediaInfoAtMillis: Long
+        get() = mediaInfoSnapshot?.receivedAtMs ?: 0L
 
     /**
      * 最近一次播放进度（ms）与采样时刻（`SystemClock.elapsedRealtime()`）。
@@ -1740,9 +1750,9 @@ object CarLifeHijack {
         // 歌词行不覆盖「真实歌名」基线：它是判断「MediaSession 与 CarLife 是否同一首歌」
         // 的唯一凭据（见 NowPlayingSourcePolicy），被歌词顶掉就再也判不出来了。
         // 先用**旧基线**判歌词，再更新基线：新形状 artist="<歌名>-<画家>" 必须靠它识别。
-        if (!LyricLines.isLyricLine(info, latestSongMediaInfo)) latestSongMediaInfo = info
-        latestMediaInfo = info
-        latestMediaInfoAtMillis = android.os.SystemClock.uptimeMillis()
+        val previousSong = mediaInfoSnapshot?.song
+        val song = if (LyricLines.isLyricLine(info, previousSong)) previousSong else info
+        mediaInfoSnapshot = MediaInfoSnapshot(info, song, android.os.SystemClock.uptimeMillis())
         mediaInfoListeners.forEach { runCatching { it(info) } }
     }
 

@@ -73,4 +73,51 @@ object NowPlayingSourcePolicy {
         if (baseArtist.isNotEmpty() && !artist.isNullOrEmpty() && baseArtist != artist) return false
         return true
     }
+
+    /**
+     * 联唱（`歌手A/歌手B`）场景下，取一条**能确认属于当前曲目**的歌词行。
+     *
+     * 为什么单开一条：CarLife 推的 `0x10035` 里歌手常常只给联唱名单的**第一位**，
+     * 而系统 MediaSession 给的是完整名单（`A/B`），于是 [shouldShowCarLifeLyric] 的
+     * 「两边歌手一致」门永远过不去，歌词一直上不了车机。
+     *
+     * 这条路径**不放松**原有三条门，只是在它前面补三件事：
+     * 1. 会话歌手确实是联唱名单（含 `/`），且首位与 CarLife 的歌手一致；
+     * 2. 歌名允许一边是另一边的前缀（现场常见 `(Live)` / `(女版)` 后缀差异）；
+     * 3. 两边时长都有值时必须相差 < 1 秒——同名不同版本靠它挡住。
+     *
+     * 通过后再用 [LyricLines.matchesSong] 做归属校验，并复用原有的三条门。
+     *
+     * @return 可用的歌词行；不满足任一条件返回 null（调用方按普通歌名处理）。
+     */
+    fun lyricForMultipleArtists(
+        nowMillis: Long,
+        lastMediaInfoAtMillis: Long,
+        latest: CarLifeMediaInfo,
+        base: CarLifeMediaInfo?,
+        sessionTitle: String?,
+        sessionArtist: String?,
+        sessionDurationMs: Long,
+    ): String? {
+        if (sessionTitle.isNullOrBlank() || base == null) return null
+        val session = sessionTitle.trim()
+        val baseSong = base.song.trim()
+        if (baseSong.isEmpty()) return null
+        val artist = sessionArtist?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if ('/' !in artist) return null
+        val lead = artist.substringBefore('/').trim()
+        if (lead.isEmpty() || lead != base.artist.trim()) return null
+        val titleMatches =
+            session == baseSong || session.startsWith(baseSong) || baseSong.startsWith(session)
+        if (!titleMatches) return null
+        if (base.duration <= 0 || sessionDurationMs <= 0L) return null
+        if (kotlin.math.abs(sessionDurationMs - base.duration) >= SAME_TRACK_DURATION_TOLERANCE_MILLIS) return null
+        // 复用原有三条门：确实是歌词行 / CarLife 还在推 / 与真实曲目同一首
+        if (!shouldShowCarLifeLyric(nowMillis, lastMediaInfoAtMillis, latest, base, baseSong, lead)) return null
+        if (!LyricLines.matchesSong(latest, base)) return null
+        return latest.song.takeIf { it.isNotBlank() }
+    }
+
+    /** 「同一首歌」的时长容差：超过它一律当成另一版（Live / remix / 翻唱）。 */
+    private const val SAME_TRACK_DURATION_TOLERANCE_MILLIS = 1_000L
 }

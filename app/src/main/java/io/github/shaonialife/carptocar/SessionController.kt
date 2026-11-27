@@ -692,7 +692,7 @@ object SessionController {
         // 逐行歌词也走这条（`artist == "<专辑>-<画家>"`），日志里单独标出来。
         CarLifeHijack.addMediaInfoListener { info ->
             val kind =
-                if (LyricLines.isLyricLine(info, CarLifeHijack.latestSongMediaInfo)) "歌词行" else "歌名"
+                if (LyricLines.isLyricLine(info, CarLifeHijack.mediaInfoSnapshot?.song)) "歌词行" else "歌名"
             appendLog(
                 "EVENT: CarLife $kind「${info.song}」→ 补推 iAP2 0x5001 NowPlayingUpdate",
             )
@@ -978,15 +978,24 @@ object SessionController {
         // 各自的 provider 构造（隧道带封面、蓝牙不带），这里先编码一遍纯属浪费。
         val np = buildNowPlaying(includeArtwork = false) ?: return
         val key = "${np.title}|${np.artist}"
-        if (key == lastPushedNowPlayingKey) return
-        lastPushedNowPlayingKey = key
+        val lyric = np.lyricTrack?.line
+        val previous = lastPushedNowPlaying.getAndSet(key to lyric)
+        if (previous != null && key == previous.first) {
+            // 歌名没变、只有歌词推进到下一句：只补 WiFi 隧道那条。
+            // 蓝牙链路的订阅端没有歌词语义，为每句歌词再刷两帧只是噪音。
+            if (!lyric.isNullOrBlank() && lyric != previous.second) {
+                currentClient?.pushNowPlaying(lyricOnly = true)
+            }
+            return
+        }
         currentClient?.pushNowPlaying()
         bluetoothServer?.pushNowPlaying()
         bluetoothClient?.pushNowPlaying()
     }
 
-    /** 上次推送的 0x5001 内容键（title|artist），用于去重。 */
-    private var lastPushedNowPlayingKey: String? = null
+    /** 媒体回调共用的去重状态：(`title|artist`, 当前歌词行)。歌词推进但歌名不变时靠它补推。 */
+    private val lastPushedNowPlaying =
+        java.util.concurrent.atomic.AtomicReference<Pair<String, String?>?>()
 
     /** 上次推到媒体卡片的导航文案（转向+距离+路名），用于去重。 */
     private var lastPushedGuideKey: String? = null
@@ -1109,7 +1118,7 @@ object SessionController {
      */
     @Synchronized
     fun resetNowPlayingDedupe() {
-        lastPushedNowPlayingKey = null
+        lastPushedNowPlaying.set(null)
         // 导航卡片的去重键同理，且原先漏了这一条：上一轮推过的「300 米右转」会吞掉
         // 这一轮完全一样的内容——重连后卡片停在空白，日志里连「补推」都没有。
         lastPushedGuideKey = null
@@ -1340,24 +1349,52 @@ object SessionController {
      */
     private fun buildNowPlaying(includeArtwork: Boolean = true): CarPlayNowPlaying? {
         val session = MediaSessionsState.nowPlaying
-        val carLifeLatest = CarLifeHijack.latestMediaInfo
-        val carLifeBase = CarLifeHijack.latestSongMediaInfo
+        val carLife = CarLifeHijack.mediaInfoSnapshot
+        val carLifeLatest = carLife?.latest
+        val carLifeBase = carLife?.song
         if (session != null && session.title != null) {
+            val now = android.os.SystemClock.uptimeMillis()
+            val carLifeAt = carLife?.receivedAtMs ?: 0L
             val lyricTakeover =
                 carLifeLatest != null &&
                     NowPlayingSourcePolicy.shouldShowCarLifeLyric(
-                        nowMillis = android.os.SystemClock.uptimeMillis(),
-                        lastMediaInfoAtMillis = CarLifeHijack.latestMediaInfoAtMillis,
+                        nowMillis = now,
+                        lastMediaInfoAtMillis = carLifeAt,
                         latest = carLifeLatest,
                         base = carLifeBase,
                         sessionTitle = session.title,
                         sessionArtist = session.artist,
                     )
-            if (lyricTakeover) return carLifeNowPlaying(carLifeLatest, carLifeBase, includeArtwork)
+            if (lyricTakeover) {
+                return carLifeNowPlaying(
+                    carLifeLatest,
+                    carLifeBase,
+                    includeArtwork,
+                    mediaSessionPackage = session.pkg,
+                    sessionTitle = session.title,
+                    sessionArtist = session.artist,
+                )
+            }
+            // 联唱场景：CarLife 只报联唱名单的第一位，普通三条门过不去，
+            // 但歌词其实属于当前曲目——歌名仍用 MediaSession 的，歌词单独挂上去。
+            val lyricLine =
+                if (carLifeLatest != null && carLifeBase != null) {
+                    NowPlayingSourcePolicy.lyricForMultipleArtists(
+                        nowMillis = now,
+                        lastMediaInfoAtMillis = carLifeAt,
+                        latest = carLifeLatest,
+                        base = carLifeBase,
+                        sessionTitle = session.title,
+                        sessionArtist = session.artist,
+                        sessionDurationMs = session.durationMs,
+                    )
+                } else {
+                    null
+                }
             return CarPlayNowPlaying(
                 title = session.title,
                 artist = session.artist,
-                album = null, // MediaSession 未单独暴露专辑名，这里留空
+                album = session.album?.takeIf { it.isNotBlank() },
                 durationMs = session.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                 status =
                     if (session.playing) {
@@ -1379,6 +1416,19 @@ object SessionController {
                     } else {
                         null
                     },
+                itemId = persistentIdOf(carLifeBase?.songId),
+                queueCount = carLifeBase?.playlistNum?.takeIf { it > 0 },
+                trackNumber = session.trackNumber,
+                trackCount = session.trackCount,
+                discNumber = session.discNumber,
+                genre = session.genre?.takeIf { it.isNotBlank() },
+                composer = session.composer?.takeIf { it.isNotBlank() },
+                appBundleId = session.pkg,
+                appDisplayName = mediaAppLabel(session.pkg),
+                lyricTrack =
+                    lyricLine?.let {
+                        CarPlayNowPlaying.LyricTrack(session.title, session.artist, it)
+                    },
             )
         }
         val info = carLifeLatest ?: return null
@@ -1392,17 +1442,37 @@ object SessionController {
      * 画家一栏会显示 `总有春风为你而来 (女版)-悠禾` 这种拼接串。
      * 封面同理按「专辑|真实画家」归一化：歌词行共用一个键，`ensureArtwork` 直接命中，
      * 不会每行重编码重传一遍（参考项目当年每行都重传 19.5KB）。
+     *
+     * [sessionTitle]/[sessionArtist] 来自系统媒体会话（CarLife 分支外那层），
+     * 用来给歌词分阶段提供一个「真实曲目名」；[mediaSessionPackage] 供订阅了包名的
+     * 车机认播放器。
      */
     private fun carLifeNowPlaying(
         info: CarLifeMediaInfo,
         base: CarLifeMediaInfo?,
         includeArtwork: Boolean,
+        mediaSessionPackage: String? = null,
+        sessionTitle: String? = null,
+        sessionArtist: String? = null,
     ): CarPlayNowPlaying {
         val lyric = LyricLines.isLyricLine(info, base)
         val source = if (lyric) base else null
         val artist = source?.artist ?: info.artist
         val album = source?.album ?: info.album
         val duration = source?.duration?.takeIf { it > 0 } ?: info.duration
+        val real = source ?: info
+        // 只有**归属已校验**的歌词行才挂 lyricTrack：没校验的一律按老路径直接把歌词
+        // 当 title 发出去，行为与改动前逐字节一致（宁可保持原样，也不拿未证实的歌词
+        // 去顶掉真实歌名）。
+        val verified = if (lyric) base?.takeIf { LyricLines.matchesSong(info, it) } else null
+        val lyricTrack =
+            verified?.let {
+                CarPlayNowPlaying.LyricTrack(
+                    title = sessionTitle?.takeUnless { s -> s.isBlank() } ?: it.song,
+                    artist = sessionArtist?.takeUnless { s -> s.isBlank() } ?: it.artist,
+                    line = info.song.takeIf { s -> s.isNotBlank() },
+                )
+            }
         return CarPlayNowPlaying(
             title = info.song.takeIf { it.isNotBlank() },
             artist = artist.takeIf { it.isNotBlank() },
@@ -1418,7 +1488,34 @@ object SessionController {
                 } else {
                     null
                 },
+            itemId = persistentIdOf(real.songId),
+            queueCount = real.playlistNum.takeIf { it > 0 },
+            appBundleId = mediaSessionPackage,
+            appDisplayName = mediaAppLabel(mediaSessionPackage),
+            lyricTrack = lyricTrack,
         )
+    }
+
+    /**
+     * CarLife `songId` → `0x5001` 的曲目持久 ID。
+     *
+     * 数字串直接转；非数字串退化为 32 位无符号哈希（同一条 songId 每次算出来一样，
+     * 车机只需「同曲同 ID」）。掩到 32 位是为了不把负号扩成 `0xFFFFFFFF........`，
+     * 那种值在车机侧看着像一整个地址空间。
+     */
+    private fun persistentIdOf(songId: String?): Long? {
+        val raw = songId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return raw.toLongOrNull() ?: (raw.hashCode().toLong() and 0xFFFF_FFFFL)
+    }
+
+    /** 包名 → 应用可读名（车机媒体卡上显示哪个播放器）。取不到就不发。 */
+    private fun mediaAppLabel(packageName: String?): String? {
+        if (packageName.isNullOrBlank()) return null
+        val pm = appContext?.packageManager ?: return null
+        return runCatching {
+            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+                .takeIf { it.isNotBlank() }
+        }.getOrNull()
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */

@@ -1,7 +1,9 @@
 package io.github.shaonialife.carptocar.iap2
 
 import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -117,5 +119,80 @@ class NowPlayingSourcePolicyTest {
     @Test
     fun `媒体会话没有画家时不因画家缺失而否决`() {
         assertTrue(decide(artist = null))
+    }
+
+    // ---- 联唱（歌手A/歌手B）歌词（2026-11-27）----
+
+    private fun track(
+        song: String,
+        artist: String,
+        album: String,
+        duration: Int,
+    ) = CarLifeMediaInfo(
+        source = "carlife",
+        song = song,
+        artist = artist,
+        album = album,
+        albumArt = null,
+        duration = duration,
+        playlistNum = 0,
+        songId = "",
+        mode = 0,
+    )
+
+    private val duetBase = track("你快乐 所以我快乐", "王菲", "情·菲·得意", 240_000)
+    private val duetLyric = track("词：林夕", "你快乐 所以我快乐-王菲", "情·菲·得意", 240_000)
+
+    private fun duetLyricOf(
+        sessionTitle: String? = duetBase.song,
+        sessionArtist: String? = "王菲/张亚东",
+        sessionDurationMs: Long = 240_000L,
+        now: Long = 10_000L,
+        at: Long = 9_500L,
+        latest: CarLifeMediaInfo = duetLyric,
+        baseInfo: CarLifeMediaInfo? = duetBase,
+    ) = NowPlayingSourcePolicy.lyricForMultipleArtists(
+        nowMillis = now,
+        lastMediaInfoAtMillis = at,
+        latest = latest,
+        base = baseInfo,
+        sessionTitle = sessionTitle,
+        sessionArtist = sessionArtist,
+        sessionDurationMs = sessionDurationMs,
+    )
+
+    @Test
+    fun `联唱时 CarLife 只报首位歌手也能取到歌词`() {
+        assertEquals("词：林夕", duetLyricOf())
+    }
+
+    @Test
+    fun `不是联唱就不走这条路——普通歌曲仍由三条门决定`() {
+        assertNull(duetLyricOf(sessionArtist = "王菲"))
+    }
+
+    @Test
+    fun `联唱首位与 CarLife 歌手不一致时否决`() {
+        assertNull(duetLyricOf(sessionArtist = "李宗盛/王菲"))
+    }
+
+    @Test
+    fun `时长差超过一秒当成另一版`() {
+        assertNull(duetLyricOf(sessionDurationMs = 245_000L))
+    }
+
+    @Test
+    fun `歌名带 Live 后缀仍认同一首——前缀匹配`() {
+        assertEquals("词：林夕", duetLyricOf(sessionTitle = "你快乐 所以我快乐 (Live)"))
+    }
+
+    @Test
+    fun `新鲜期过了就不给歌词——切到第三方播放器后不能挂着旧歌词`() {
+        assertNull(duetLyricOf(now = 20_000L, at = 9_500L))
+    }
+
+    @Test
+    fun `没有真实歌名基线时不给歌词`() {
+        assertNull(duetLyricOf(baseInfo = null))
     }
 }

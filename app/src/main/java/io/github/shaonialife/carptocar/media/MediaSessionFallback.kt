@@ -146,6 +146,15 @@ object MediaSessionFallback {
                 playbackSpeed = if (playing) (state?.playbackSpeed ?: 1f) else 0f,
                 durationMs = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
                 anchoredAtMs = android.os.SystemClock.elapsedRealtime(),
+                album = meta?.getString(MediaMetadata.METADATA_KEY_ALBUM),
+                trackNumber =
+                    meta?.getLong(MediaMetadata.METADATA_KEY_TRACK_NUMBER)?.takeIf { it > 0 }?.toInt(),
+                trackCount =
+                    meta?.getLong(MediaMetadata.METADATA_KEY_NUM_TRACKS)?.takeIf { it > 0 }?.toInt(),
+                discNumber =
+                    meta?.getLong(MediaMetadata.METADATA_KEY_DISC_NUMBER)?.takeIf { it > 0 }?.toInt(),
+                genre = meta?.getString(MediaMetadata.METADATA_KEY_GENRE),
+                composer = meta?.getString(MediaMetadata.METADATA_KEY_COMPOSER),
             ),
         )
     }

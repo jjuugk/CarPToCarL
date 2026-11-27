@@ -56,6 +56,32 @@ object LyricLines {
     }
 
     /**
+     * 确认这条**已识别为歌词行**的信息确实属于 [base] 那首歌。
+     *
+     * [isLyricLine] 只判「形状像不像歌词」，不看归属：切歌瞬间旧歌的歌词行与新曲的
+     * 真实曲目混在同一批里时，形状照样成立。这里补两道校验：
+     *
+     * 1. 专辑必须一致，且 `artist` 的前缀确实是 `"<歌名>-<歌手>"` 或 `"<专辑>-<歌手>"`；
+     * 2. 两边时长都有值时**必须相等**——同名不同版本（Live / remix / 翻唱）靠它挡住。
+     *
+     * 第 2 条之所以对两种形状都生效：专辑名与歌名相同的歌太多了（`总有春风为你而来`
+     * 就是），此时两种形状的字符串完全一样，时长是唯一能分辨的凭据。
+     */
+    fun matchesSong(
+        info: CarLifeMediaInfo,
+        base: CarLifeMediaInfo,
+    ): Boolean {
+        val album = info.album.trim()
+        val title = base.song.trim()
+        val artist = base.artist.trim()
+        if (title.isEmpty() || album != base.album.trim()) return false
+        val lineArtist = info.artist.trim()
+        if (lineArtist != "$title-$artist" && lineArtist != "$album-$artist") return false
+        if (info.duration > 0 && base.duration > 0 && info.duration != base.duration) return false
+        return true
+    }
+
+    /**
      * 歌词行里真正的画家名：去掉 `[album]-` 或 `[base.song]-` 前缀。
      * 取不到（不是歌词行 / 前缀对不上）时原样返回入参。
      */

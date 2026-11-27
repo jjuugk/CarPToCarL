@@ -136,6 +136,88 @@ class Iap2NowPlayingTest {
         assertEquals(0x5001, msgId)
     }
 
+    /** 带全部可选字段的样本，用来验证「发不发」只由订阅掩码决定。 */
+    private fun rich() =
+        sample("测试专辑").copy(
+            itemId = 0x1122_3344_5566_7788L,
+            queueCount = 12,
+            trackNumber = 3,
+            trackCount = 10,
+            discNumber = 1,
+            genre = "流行",
+            composer = "某作曲",
+            appBundleId = "com.tencent.qqmusic",
+            appDisplayName = "QQ音乐",
+        )
+
+    private fun groups(
+        np: CarPlayNowPlaying,
+        mask: Map<Int, Set<Int>>? = null,
+    ): Pair<Map<Int, Iap2Csm.Param>, Map<Int, Iap2Csm.Param>> {
+        val top = Iap2Csm.parseParams(Iap2NowPlaying.body(np, mask)).associateBy { it.id }
+        return Iap2Csm.parseParams(top.getValue(0).value).associateBy { it.id } to
+            Iap2Csm.parseParams(top.getValue(1).value).associateBy { it.id }
+    }
+
+    /**
+     * 没解析到订阅掩码（旧接收端发空 `0x5000` 体）：一个可选字段都不加。
+     *
+     * 这是「已通车型逐字节保护」的落点——宝马 MGU / DiPlay / WinPlay 收到的帧
+     * 与改动前完全一致。
+     */
+    @Test
+    fun optionalFieldsAbsentWithoutSubscriptionMask() {
+        val (media, playback) = groups(rich())
+        assertEquals(setOf(0x0001, 0x0004, 0x0006, 0x000C), media.keys)
+        assertEquals(setOf(0x0000, 0x0001, 0x0005, 0x0006, 0x0007), playback.keys)
+    }
+
+    /** 空掩码（解析到了但没有字段）与 null 等价：同样不发可选项。 */
+    @Test
+    fun emptyMaskBehavesLikeNoMask() {
+        val (media, playback) = groups(rich(), emptyMap())
+        assertEquals(setOf(0x0001, 0x0004, 0x0006, 0x000C), media.keys)
+        assertEquals(setOf(0x0000, 0x0001, 0x0005, 0x0006, 0x0007), playback.keys)
+    }
+
+    /** 车机点名订阅了哪些字段，才补哪些；没点名的照旧不发。 */
+    @Test
+    fun optionalFieldsFollowSubscriptionMask() {
+        val mask = mapOf(0 to setOf(0x0000, 0x0007), 1 to setOf(0x0003))
+        val (media, playback) = groups(rich(), mask)
+        assertTrue("订阅了曲目持久 ID", media.containsKey(0x0000))
+        assertTrue("订阅了曲目号", media.containsKey(0x0007))
+        assertFalse("没订阅曲目总数", media.containsKey(0x0008))
+        assertFalse("没订阅碟号", media.containsKey(0x0009))
+        assertFalse("没订阅流派", media.containsKey(0x0010))
+        assertFalse("没订阅作曲者", media.containsKey(0x0012))
+        assertTrue("订阅了队列长度", playback.containsKey(0x0003))
+        assertFalse("没订阅包名", playback.containsKey(0x0010))
+    }
+
+    /** 订阅了但本地没有值：不发空字段（避免车机读到 0 曲目号/diskc 之类的假数据）。 */
+    @Test
+    fun requestedButUnknownFieldIsOmitted() {
+        val mask = mapOf(0 to setOf(0x0007, 0x0010), 1 to setOf(0x0003, 0x0010))
+        val (media, playback) = groups(sample("专辑"), mask)
+        assertFalse(media.containsKey(0x0007))
+        assertFalse(media.containsKey(0x0010))
+        assertFalse(playback.containsKey(0x0003))
+        assertFalse(playback.containsKey(0x0010))
+    }
+
+    /** 曲目持久 ID 是 u64 大端（8 字节，高位在前）。 */
+    @Test
+    fun itemIdEncodedAsU64BigEndian() {
+        val (media, _) = groups(rich(), mapOf(0 to setOf(0x0000)))
+        val value = media.getValue(0x0000).value
+        assertEquals(8, value.size)
+        assertEquals(
+            0x1122_3344_5566_7788L,
+            value.fold(0L) { acc, b -> (acc shl 8) or (b.toInt() and 0xFF).toLong() },
+        )
+    }
+
     /** 只用来在单测里读空态常量，避免把常量可见性再放大。 */
     private object VirtualIap2LinkProbe {
         fun idleFrame(): ByteArray = io.github.shaonialife.carptocar.airplay.VirtualIap2Link.MIB3_NOW_PLAYING_UPDATE_IDLE

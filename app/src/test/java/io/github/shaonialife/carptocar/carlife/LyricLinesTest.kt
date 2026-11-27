@@ -108,4 +108,41 @@ class LyricLinesTest {
         val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
         assertEquals("王菲", LyricLines.trueArtist(lyric, base))
     }
+
+    // ---- 归属校验（2026-11-27）----
+
+    @Test
+    fun `matchesSong 新形状 歌名-歌手 同专辑放行`() {
+        val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
+        val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
+        assertTrue(LyricLines.matchesSong(lyric, base))
+    }
+
+    @Test
+    fun `matchesSong 老形状 专辑-歌手 且时长一致放行`() {
+        val base = info(song = "总有春风为你而来", artist = "悠禾", album = "总有春风为你而来", duration = 240_000)
+        val lyric = info(song = "要相信所有缘分", artist = "总有春风为你而来-悠禾", album = "总有春风为你而来", duration = 240_000)
+        assertTrue(LyricLines.matchesSong(lyric, base))
+    }
+
+    @Test
+    fun `matchesSong 专辑不同一律否决`() {
+        val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
+        val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "另一张专辑")
+        assertFalse(LyricLines.matchesSong(lyric, base))
+    }
+
+    @Test
+    fun `matchesSong 老形状时长冲突时否决——同名不同版本`() {
+        val base = info(song = "总有春风为你而来", artist = "悠禾", album = "总有春风为你而来", duration = 240_000)
+        val lyric = info(song = "要相信所有缘分", artist = "总有春风为你而来-悠禾", album = "总有春风为你而来", duration = 205_000)
+        assertFalse(LyricLines.matchesSong(lyric, base))
+    }
+
+    @Test
+    fun `matchesSong 真实曲目没有歌名时否决`() {
+        val base = info(song = "", artist = "悠禾", album = "总有春风为你而来")
+        val lyric = info(song = "要相信所有缘分", artist = "总有春风为你而来-悠禾", album = "总有春风为你而来")
+        assertFalse(LyricLines.matchesSong(lyric, base))
+    }
 }

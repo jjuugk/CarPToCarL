@@ -132,6 +132,25 @@ class VirtualIap2Link(
     /** 上次周期查询时刻（[nowMillis] 时钟）；0 = 还没查过。 */
     private var lastNowPlayingPollMs = 0L
 
+    /**
+     * 车机 `0x5000` 订阅里点名的字段：组号 → 字段 ID 集合。
+     *
+     * 空 = 没解析到掩码（旧接收端发空订阅体）。此时 `0x5001` 只发原本那九项，
+     * 报文字节与旧版完全一致——已跑通车型一个字节都不变。
+     */
+    private var requestedNowPlayingFields: Map<Int, Set<Int>> = emptyMap()
+
+    /** 歌词分阶段的当前曲目：歌名/歌手先亮相，满 [LYRIC_TITLE_HOLD_MILLIS] 再让歌词上位。 */
+    private data class LyricStage(
+        val title: String,
+        val artist: String?,
+        val packageName: String?,
+        val firstSeenAtMs: Long,
+        val line: String? = null,
+    )
+
+    private var lyricStage: LyricStage? = null
+
     // ---- 封面文件传输（session 12）状态 ----
     /** 正在传的封面 id；0 = 没有在传。 */
     private var artworkPendingId = 0
@@ -411,9 +430,15 @@ class VirtualIap2Link(
      * CarLife 0x10035 到达的——若订阅先于歌名，就会停在空态。所以歌名就绪后必须
      * 由外部主动补推一次。链路尚未建立（MIB3 未识别）时静默忽略。
      */
-    /** @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。
-     *  @return 是否真的发出了一帧（链路未识别 / 无内容时为 false）。 */
-    fun pushNowPlaying(quiet: Boolean = false): Boolean {
+    /**
+     * @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。
+     * @param lyricOnly 只在「有已校验歌词行」时才发：宿主发现歌名没变、仅歌词推进时走这条，
+     *   源里没有歌词则静默返回，不产生多余帧。
+     * @return 是否真的发出了一帧（链路未识别 / 无内容 / 被去重时为 false）。 */
+    fun pushNowPlaying(
+        quiet: Boolean = false,
+        lyricOnly: Boolean = false,
+    ): Boolean {
         synchronized(lock) {
             if (!mfiFinished || (!mib3Identified && !tunnelIdentified)) return false
             if (!nowPlayingSubscribed &&
@@ -422,8 +447,8 @@ class VirtualIap2Link(
                 return false
             }
             val nowPlaying = displayNowPlaying() ?: return false
-            lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
-            sendNowPlayingLocked(nowPlaying)
+            if (lyricOnly && nowPlaying.lyricTrack?.line.isNullOrBlank()) return false
+            if (!sendNowPlayingLocked(nowPlaying)) return false
             if (!quiet) {
                 log(
                     "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
@@ -473,10 +498,7 @@ class VirtualIap2Link(
         if (lastNowPlayingPollMs != 0L && now - lastNowPlayingPollMs < NOW_PLAYING_POLL_MILLIS) return
         lastNowPlayingPollMs = now
         val np = displayNowPlaying() ?: return
-        val key = nowPlayingKey(np)
-        if (key == lastPushedNowPlayingKey) return
-        lastPushedNowPlayingKey = key
-        sendNowPlayingLocked(np)
+        if (!sendNowPlayingLocked(np, onlyIfChanged = true)) return
         log(
             "IAPLINK: 0x5000 订阅后周期补推 0x5001（歌名=${np.title ?: "?"}" +
                 " 歌手=${np.artist ?: "?"} 状态=${np.status}）",
@@ -606,6 +628,8 @@ class VirtualIap2Link(
             artworkWaitLogged = false
             lastPushedNowPlayingKey = null
             lastNowPlayingPollMs = 0L
+            requestedNowPlayingFields = emptyMap()
+            lyricStage = null
             // 导航订阅是链路级状态：对端重发 DETECT 后必须重收 0x5200 才再推
             deferredPowerUpdates = false
             Iap2RouteGuidance.onUnsubscribe(Iap2RouteGuidance.Link.TUNNEL)
@@ -1182,6 +1206,19 @@ class VirtualIap2Link(
             }
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
+                // 这条订阅可能带**字段掩码**（宝马 / MBUX 实测 180B）：车机点名它要哪些字段。
+                // 我们只按它点名的补发可选字段（曲目 ID、队列长度、包名等）；
+                // 空订阅体（旧接收端）一个可选字段都不加，报文与旧版逐字节一致。
+                requestedNowPlayingFields = parseNowPlayingSubscription(frame.body)
+                if (requestedNowPlayingFields.isNotEmpty()) {
+                    log(
+                        "IAPLINK: 0x5000 订阅字段 " +
+                            requestedNowPlayingFields.entries.joinToString(" ") { (gid, ids) ->
+                                "组$gid=" + ids.sorted().joinToString(",") { "0x%02x".format(it) }
+                            } +
+                            "（body=${frame.body.size}B）",
+                    )
+                }
                 // 隧道链路（非 MIB3）也要把覆盖层挂上。此前这里直接 return，导致
                 // `nowPlayingOverrideSubscribed` 只在 MIB3 会话里为真——隧道车的车机
                 // 明明订阅了「正在播放更新」，导航文字却永远上不了媒体卡片
@@ -1194,9 +1231,9 @@ class VirtualIap2Link(
                         nowPlayingOverrideSubscribed = true
                         lastPushedNowPlayingKey = null
                         lastNowPlayingPollMs = nowMillis()
+                        lyricStage = null
                         // 订阅那一刻若已有导航/歌曲，直接给一帧，不必等下一次变化。
                         displayNowPlaying()?.let {
-                            lastPushedNowPlayingKey = nowPlayingKey(it)
                             sendNowPlayingLocked(it)
                             log(
                                 "IAPLINK: 隧道 0x5000 → 0x5001（歌名=${it.title ?: "?"}" +
@@ -1212,9 +1249,9 @@ class VirtualIap2Link(
                 nowPlayingOverrideSubscribed = true
                 lastPushedNowPlayingKey = null
                 lastNowPlayingPollMs = nowMillis()
+                lyricStage = null
                 val nowPlaying = displayNowPlaying()
                 if (nowPlaying != null) {
-                    lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
                     sendNowPlayingLocked(nowPlaying)
                     log(
                         "IAPLINK: MIB3 0x5000 → 0x5001（歌名=${nowPlaying.title ?: "?"}" +
@@ -1229,6 +1266,7 @@ class VirtualIap2Link(
             Iap2MessageIds.STOP_NOW_PLAYING_UPDATES -> {
                 // 保持上游音乐路径的订阅行为，只停止额外的导航覆盖。
                 nowPlayingOverrideSubscribed = false
+                lyricStage = null
             }
 
             ids.START_HID -> {
@@ -1426,8 +1464,12 @@ class VirtualIap2Link(
     /**
      * 构造 0x5001 NowPlayingUpdate 完整帧（带真实歌名/歌手/专辑/播放状态）。
      * 字段布局见 [Iap2NowPlaying]，与空态常量 [MIB3_NOW_PLAYING_UPDATE_IDLE] 同构。
+     *
+     * 只有车机在 `0x5000` 里点名订阅了某字段，才补发那些可选字段；没解析到掩码时
+     * 只发原本九项，已通车型的字节不变。
      */
-    private fun buildNowPlayingUpdate(np: CarPlayNowPlaying): ByteArray = Iap2NowPlaying.encode(np)
+    private fun buildNowPlayingUpdate(np: CarPlayNowPlaying): ByteArray =
+        Iap2NowPlaying.encode(np, requestedNowPlayingFields.takeIf { it.isNotEmpty() })
 
     private fun displayNowPlaying(): CarPlayNowPlaying? {
         val overlay = if (nowPlayingOverrideSubscribed) nowPlayingOverride?.invoke() else null
@@ -1439,6 +1481,66 @@ class VirtualIap2Link(
         }
     }
 
+    /** 解析 `0x5000` 订阅体里的字段掩码；空体 / 解析失败返回空表（= 按旧九项发）。 */
+    private fun parseNowPlayingSubscription(body: ByteArray): Map<Int, Set<Int>> {
+        if (body.isEmpty()) return emptyMap()
+        return runCatching {
+            Iap2Csm.parseParams(body)
+                .mapNotNull { group ->
+                    val ids =
+                        runCatching { Iap2Csm.parseParams(group.value).map { it.id }.toSet() }
+                            .getOrDefault(emptySet())
+                    if (ids.isEmpty()) null else group.id to ids
+                }.toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    /**
+     * 把「真实曲目 + 歌词行」编排成这一帧要显示的 title/artist。
+     *
+     * 两个阶段（iAP2 没有歌词字段，歌词只能顶替 title）：
+     * - 换曲后的 [LYRIC_TITLE_HOLD_MILLIS] 内：title = 歌名，artist = 歌手；
+     * - 之后：title = 当前歌词行，artist = 歌名。
+     *
+     * 没有已校验歌词行（[CarPlayNowPlaying.lyricTrack] 为 null）或这是导航覆盖层时，
+     * 原样返回入参——那些路径的报文与旧版完全一致。
+     */
+    private fun stagedNowPlaying(
+        np: CarPlayNowPlaying,
+        now: Long,
+    ): Pair<CarPlayNowPlaying, LyricStage?> {
+        val lyric = np.lyricTrack
+        if (lyric == null || np.navigationOverlay) return np to null
+        val songTitle = lyric.title?.trim()?.takeIf { it.isNotEmpty() } ?: return np to null
+        val songArtist = lyric.artist?.trim()?.takeIf { it.isNotEmpty() }
+        val packageName = np.appBundleId
+        // 同一首曲目：歌名相同，且歌手/包名两边都有值时必须一致。
+        // 歌词行和 CarLife 曲目 ID 都会变，不能拿它们认曲目。
+        val known =
+            lyricStage?.takeIf {
+                it.title == songTitle &&
+                    (it.artist == null || songArtist == null || it.artist == songArtist) &&
+                    (it.packageName == null || packageName == null || it.packageName == packageName)
+            }
+        val stage =
+            (known ?: LyricStage(songTitle, songArtist, packageName, now, lyric.line)).copy(
+                artist = songArtist ?: known?.artist,
+                packageName = packageName ?: known?.packageName,
+                line = lyric.line ?: known?.line,
+            )
+        if (known == null) {
+            log("IAPLINK: 0x5001 歌词分阶段（歌名=「$songTitle」歌手=「${stage.artist ?: "?"}」）")
+        }
+        val line = stage.line?.takeIf { now - stage.firstSeenAtMs >= LYRIC_TITLE_HOLD_MILLIS }
+        val display =
+            if (line == null) {
+                np.copy(title = stage.title, artist = stage.artist ?: np.artist)
+            } else {
+                np.copy(title = line, artist = stage.title)
+            }
+        return display to stage
+    }
+
     /**
      * 发 `0x5001`，并在带封面编号时紧接着发起 session 12 文件传输。
      *
@@ -1447,12 +1549,28 @@ class VirtualIap2Link(
      *
      * 三处发 0x5001 的地方（订阅应答 / 事件补推 / 周期补推）全部走这里，
      * 否则会出现「某条路径带了歌名却漏了封面」这种只有在特定时机才复现的怪相。
+     *
+     * @param onlyIfChanged 内容键与上次发出一致时不发（周期补推用）。歌词分阶段期间
+     *   仍会把最新歌词行记进 [lyricStage]，窗口一到就顶上去。
+     * @return 是否真的发出了帧。
      */
-    private fun sendNowPlayingLocked(np: CarPlayNowPlaying) {
-        sendRawCsmLocked(buildNowPlayingUpdate(np))
-        val id = np.artworkId ?: return
-        if (id == artworkDeliveredId || id == artworkPendingId) return
+    private fun sendNowPlayingLocked(
+        np: CarPlayNowPlaying,
+        onlyIfChanged: Boolean = false,
+    ): Boolean {
+        val (display, stage) = stagedNowPlaying(np, nowMillis())
+        val key = nowPlayingKey(display)
+        if (onlyIfChanged && key == lastPushedNowPlayingKey) {
+            if (stage != null) lyricStage = stage
+            return false
+        }
+        sendRawCsmLocked(buildNowPlayingUpdate(display))
+        if (stage != null) lyricStage = stage
+        lastPushedNowPlayingKey = key
+        val id = np.artworkId ?: return true
+        if (id == artworkDeliveredId || id == artworkPendingId) return true
         startArtworkTransferLocked(id, np.navigationArtwork)
+        return true
     }
 
     /**
@@ -1763,6 +1881,15 @@ class VirtualIap2Link(
          * （只有内容键变化才真正发，见 [nowPlayingKey]）。
          */
         const val NOW_PLAYING_POLL_MILLIS = 1_500L
+
+        /**
+         * 换曲后「先显示歌名/歌手」的停留时长。
+         *
+         * 歌词行通常 1~2 秒一行，如果它一到就顶掉 title，车机根本来不及画曲目信息，
+         * 用户看到的第一眼是半句歌词。1.5 秒 ≈ 一行歌词的间隔：够读完歌名，
+         * 又不会让歌词明显延迟。只对**确实有歌词行**的源生效。
+         */
+        internal const val LYRIC_TITLE_HOLD_MILLIS = 1_500L
 
         /**
          * 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。
