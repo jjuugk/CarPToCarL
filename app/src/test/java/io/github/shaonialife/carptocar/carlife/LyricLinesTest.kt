@@ -77,6 +77,16 @@ class LyricLinesTest {
         val base = info(song = "你快乐 所以我快乐", artist = "王菲", album = "情·菲·得意")
         val lyric = info(song = "词：林夕", artist = "你快乐 所以我快乐-王菲", album = "情·菲·得意")
         assertTrue(LyricLines.isLyricLine(lyric, base))
+        assertTrue(LyricLines.matchesSong(lyric, base))
+    }
+
+    @Test
+    fun `专辑格式的旧歌词不能套给同专辑的新歌`() {
+        val base = info(song = "新歌", artist = "歌手", album = "专辑", duration = 150_000)
+        val lyric = info(song = "上一首的歌词", artist = "专辑-歌手", album = "专辑", duration = 180_000)
+        assertTrue(LyricLines.isLyricLine(lyric, base))
+        assertFalse(LyricLines.matchesSong(lyric, base))
+        assertTrue(LyricLines.matchesSong(lyric.copy(duration = base.duration), base))
     }
 
     @Test

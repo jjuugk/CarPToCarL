@@ -106,6 +106,7 @@ class VirtualIap2Link(
     private var mib3SynAckQueued = false
     private var mib3CsmStarted = false
     private var mib3Identified = false
+    private var mbuxReceiver = false
     private var mib3AuthStage = 0
     private var mib3WirelessSessionId: String? = null
     private var peerDetectCount = 0
@@ -122,6 +123,16 @@ class VirtualIap2Link(
     /** 上次周期查询时刻（[nowMillis] 时钟）；0 = 还没查过。 */
     private var lastNowPlayingPollMs = 0L
 
+    private data class MbuxTrack(
+        val title: String,
+        val artist: String?,
+        val packageName: String?,
+        val firstSubmittedAtMs: Long,
+        val lyric: String? = null,
+    )
+
+    private var mbuxTrack: MbuxTrack? = null
+
     // ---- 封面文件传输（session 12）状态 ----
     /** 正在传的封面 id；0 = 没有在传。 */
     private var artworkPendingId = 0
@@ -133,6 +144,10 @@ class VirtualIap2Link(
 
     /** 已传完或被拒的封面 id：同一张图不重传（车机自己也会用缓存 id 直接回 SUCCESS）。 */
     private var artworkDeliveredId = 0
+
+    /** 车机 0x5000 里订阅的字段：组号 → 字段 ID 集合（空 = 未解析到，按全量发）。 */
+    private var requestedNowPlayingFields: Map<Int, Set<Int>> = emptyMap()
+
 
     /**
      * `SETUP` 发出的时刻（[nowMillis] 时钟）；0 = 当前没有待确认的传输。
@@ -318,12 +333,13 @@ class VirtualIap2Link(
      */
     /** @param quiet 播放位置逐秒补推：照常发包，但不刷日志（否则每秒一行）。
      *  @return 是否真的发出了一帧（链路未识别 / 无内容时为 false）。 */
-    fun pushNowPlaying(quiet: Boolean = false): Boolean {
+    fun pushNowPlaying(quiet: Boolean = false, mbuxOnly: Boolean = false): Boolean {
         synchronized(lock) {
             if (!mib3Identified && !tunnelIdentified) return false
+            if (mbuxOnly && !mbuxReceiver) return false
+            if (mbuxReceiver && !nowPlayingSubscribed) return false
             val nowPlaying = displayNowPlaying() ?: return false
-            lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
-            sendNowPlayingLocked(nowPlaying)
+            if (!sendNowPlayingLocked(nowPlaying, onlyIfChanged = mbuxReceiver && !quiet)) return false
             if (!quiet) {
                 log(
                     "IAPLINK: 主动补推 0x5001（歌名=${nowPlaying.title ?: "?"}" +
@@ -346,7 +362,7 @@ class VirtualIap2Link(
             np.title,
             np.artist,
             np.album,
-            np.appName,
+            if (mbuxReceiver) np.appBundleId ?: np.appName else np.appName,
             np.status,
             np.durationMs,
             np.shuffleMode,
@@ -373,10 +389,7 @@ class VirtualIap2Link(
         if (lastNowPlayingPollMs != 0L && now - lastNowPlayingPollMs < NOW_PLAYING_POLL_MILLIS) return
         lastNowPlayingPollMs = now
         val np = displayNowPlaying() ?: return
-        val key = nowPlayingKey(np)
-        if (key == lastPushedNowPlayingKey) return
-        lastPushedNowPlayingKey = key
-        sendNowPlayingLocked(np)
+        if (!sendNowPlayingLocked(np, onlyIfChanged = true)) return
         log(
             "IAPLINK: 0x5000 订阅后周期补推 0x5001（歌名=${np.title ?: "?"}" +
                 " 歌手=${np.artist ?: "?"} 状态=${np.status}）",
@@ -479,6 +492,9 @@ class VirtualIap2Link(
             mib3SynAckQueued = false
             mib3CsmStarted = false
             mib3Identified = false
+            mbuxReceiver = false
+            mbuxTrack = null
+            requestedNowPlayingFields = emptyMap()
             mib3WirelessSessionId = null
             eventCsmStarted = false
             eventLinkArmed = false
@@ -788,7 +804,7 @@ class VirtualIap2Link(
     }
 
     /** 直接投递完整 CSM 帧（Frida 抓的逐字节常量，勿重新编码）。 */
-    private fun sendRawCsmLocked(frame: ByteArray) {
+    private fun sendRawCsmLocked(frame: ByteArray): Boolean {
         // 帧头：0..1 起始字、2..3 总长度、4..5 messageId、6.. body。
         // 旧实现从 2..3 取 ID（那是长度），日志里的「隧道 tx 0x0100」全是假 ID。
         val messageId =
@@ -799,8 +815,19 @@ class VirtualIap2Link(
             }
         // 必须在写进引擎 backlog **之前**判：MIB3 突发里的 0xFFF0 就是走这条出口，
         // 车机没声明可收时要整帧丢掉，不能只丢日志。
-        if (messageId >= 0 && !AccessoryDeclaration.noteSend(messageId, "tunnel", log)) return
-        val ok = engine.sendControl(frame, nowMillis())
+        if (messageId >= 0 && !AccessoryDeclaration.noteSend(messageId, "tunnel", log)) return false
+        val disposable =
+            messageId == Iap2MessageIds.NOW_PLAYING_UPDATE ||
+                messageId == Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES ||
+                messageId == 0x5201
+        // 2026-11-27 MBUX: 有 iAP 隧道就走隧道（iPhone 实测 0x5001 走 tunnel，车机才刷新）
+        val tunnel = tunnelWriter()
+        val ok =
+            if (tunnel != null) {
+                runCatching { tunnel.writeIapBytes(frame) }.getOrDefault(false)
+            } else {
+                engine.sendControl(frame, nowMillis(), dropWhenExhausted = disposable)
+            }
         log(
             "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B raw ok=$ok",
@@ -814,6 +841,7 @@ class VirtualIap2Link(
                 if (ok) "raw" else "raw,send-failed",
             )
         }
+        return ok
     }
 
     /**
@@ -839,10 +867,13 @@ class VirtualIap2Link(
                     Iap2Csm
                         .parseParams(frame.body)
                         .associateBy { it.id }
+                val model = params[1]?.value?.decodeToString()?.trimEnd('\u0000')
+                mbuxReceiver = mib3 && model?.startsWith("MB_D-M-", ignoreCase = true) == true
+                engine.acknowledgeFileTransferData = mbuxReceiver
                 log(
                     "IAPLINK: 隧道 rx 0x1d01 接收端身份 " +
                         "name=${params[0]?.value?.decodeToString()?.trimEnd('\u0000')} " +
-                        "model=${params[1]?.value?.decodeToString()?.trimEnd('\u0000')}",
+                        "model=$model",
                 )
                 // 参 6/7 = 车机声明「它会发 / 它可收」的消息清单。三层输出见 Iap2CapabilityReport
                 // （原始清单 / 按子系统分组 / 目录里没有的陌生 ID）：
@@ -1016,6 +1047,26 @@ class VirtualIap2Link(
             }
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
+                // 2026-11-27：车机这条订阅（实测 180B）带**字段掩码**，hypercar 严格按它
+                // 过滤要发的字段（`wants(group, field)`）。我们此前整包丢弃、固定发九项，
+                // 车机很可能因此认为「订阅的字段没给全」而整条不渲染。这里先解析并记录。
+                runCatching {
+                    val groups = Iap2Csm.parseParams(frame.body)
+                    requestedNowPlayingFields =
+                        groups.mapNotNull { g ->
+                            val ids =
+                                runCatching {
+                                    Iap2Csm.parseParams(g.value).map { it.id }.toSet()
+                                }.getOrDefault(emptySet())
+                            if (ids.isEmpty()) null else g.id to ids
+                        }.toMap()
+                    log(
+                        "IAPLINK: 0x5000 订阅字段 " +
+                            requestedNowPlayingFields.entries.joinToString(" ") { (gid, ids) ->
+                                "组$gid=${ids.sorted().joinToString(","){"0x%02x".format(it)}}"
+                            } + "（body=${frame.body.size}B）",
+                    )
+                }
                 // 隧道链路（非 MIB3）也要把覆盖层挂上。此前这里直接 return，导致
                 // `nowPlayingOverrideSubscribed` 只在 MIB3 会话里为真——隧道车的车机
                 // 明明订阅了「正在播放更新」，导航文字却永远上不了媒体卡片
@@ -1030,7 +1081,6 @@ class VirtualIap2Link(
                         lastNowPlayingPollMs = nowMillis()
                         // 订阅那一刻若已有导航/歌曲，直接给一帧，不必等下一次变化。
                         displayNowPlaying()?.let {
-                            lastPushedNowPlayingKey = nowPlayingKey(it)
                             sendNowPlayingLocked(it)
                             log(
                                 "IAPLINK: 隧道 0x5000 → 0x5001（歌名=${it.title ?: "?"}" +
@@ -1046,10 +1096,9 @@ class VirtualIap2Link(
                 nowPlayingOverrideSubscribed = true
                 lastPushedNowPlayingKey = null
                 lastNowPlayingPollMs = nowMillis()
+                mbuxTrack = null
                 val nowPlaying = displayNowPlaying()
-                if (nowPlaying != null) {
-                    lastPushedNowPlayingKey = nowPlayingKey(nowPlaying)
-                    sendNowPlayingLocked(nowPlaying)
+                if (nowPlaying != null && sendNowPlayingLocked(nowPlaying, subscriptionReply = true)) {
                     log(
                         "IAPLINK: MIB3 0x5000 → 0x5001（歌名=${nowPlaying.title ?: "?"}" +
                             " 歌手=${nowPlaying.artist ?: "?"} 状态=${nowPlaying.status})",
@@ -1242,12 +1291,6 @@ class VirtualIap2Link(
         )
     }
 
-    /**
-     * 构造 0x5001 NowPlayingUpdate 完整帧（带真实歌名/歌手/专辑/播放状态）。
-     * 字段布局见 [Iap2NowPlaying]，与空态常量 [MIB3_NOW_PLAYING_UPDATE_IDLE] 同构。
-     */
-    private fun buildNowPlayingUpdate(np: CarPlayNowPlaying): ByteArray = Iap2NowPlaying.encode(np)
-
     private fun displayNowPlaying(): CarPlayNowPlaying? {
         val overlay = if (nowPlayingOverrideSubscribed) nowPlayingOverride?.invoke() else null
         if (overlay == null) return nowPlayingProvider?.invoke()
@@ -1256,6 +1299,28 @@ class VirtualIap2Link(
         } else {
             overlay
         }
+    }
+
+    private fun mbuxTrackFor(np: CarPlayNowPlaying, now: Long): MbuxTrack? {
+        val lyricTrack = np.lyricTrack
+        val title = (if (lyricTrack == null) np.title else lyricTrack.title)
+            ?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val artist = (if (lyricTrack == null) np.artist else lyricTrack.artist)
+            ?.trim()?.takeIf { it.isNotEmpty() }
+        val packageName = np.appBundleId
+        val line = lyricTrack?.line
+        // 歌词及旧 CarLife 曲目 ID 都会变化，歌曲只按真实元数据识别。
+        val current = mbuxTrack?.takeIf {
+            it.title == title &&
+                (it.artist == null || artist == null || it.artist == artist) &&
+                (it.packageName == null || packageName == null || it.packageName == packageName)
+        } ?: return MbuxTrack(title, artist, packageName, now, line)
+
+        return current.copy(
+            artist = artist ?: current.artist,
+            packageName = packageName ?: current.packageName,
+            lyric = line ?: current.lyric,
+        )
     }
 
     /**
@@ -1267,11 +1332,49 @@ class VirtualIap2Link(
      * 三处发 0x5001 的地方（订阅应答 / 事件补推 / 周期补推）全部走这里，
      * 否则会出现「某条路径带了歌名却漏了封面」这种只有在特定时机才复现的怪相。
      */
-    private fun sendNowPlayingLocked(np: CarPlayNowPlaying) {
-        sendRawCsmLocked(buildNowPlayingUpdate(np))
-        val id = np.artworkId ?: return
-        if (id == artworkDeliveredId || id == artworkPendingId) return
-        startArtworkTransferLocked(id, np.navigationArtwork)
+    private fun sendNowPlayingLocked(
+        np: CarPlayNowPlaying,
+        subscriptionReply: Boolean = false,
+        onlyIfChanged: Boolean = false,
+    ): Boolean {
+        val mbuxMusic = mbuxReceiver && !np.navigationOverlay
+        val now = nowMillis()
+        val track = if (mbuxMusic) mbuxTrackFor(np, now) else null
+        // 未取得真实歌名时先等下一条媒体信息，避免把首句歌词当成新歌标题。
+        if (mbuxMusic && np.lyricTrack != null && track == null) return false
+        val lyric = track?.lyric?.takeIf { now - track.firstSubmittedAtMs >= MBUX_TRACK_TITLE_HOLD_MILLIS }
+        val display = if (track == null) np else np.copy(
+            title = lyric ?: track.title,
+            artist = if (lyric == null) track.artist else track.title,
+        )
+        val key = nowPlayingKey(display)
+        if (onlyIfChanged && key == lastPushedNowPlayingKey) {
+            // 歌名帧已发出，等待窗口内仍可更新待显示的最新歌词行。
+            if (mbuxMusic) mbuxTrack = track
+            return false
+        }
+        log(
+            "IAPLINK: 0x5001 内容 title=「${display.title}」 artist=「${display.artist}」" +
+                " status=${np.status} elapsed=${np.elapsedMs} dur=${np.durationMs} art=${np.artworkId}",
+        )
+        // MBUX 已验证靠后续文件会话刷新封面；编号字段保持省略，避免等待未声明的图。
+        // 其他接收端维持原有 artwork ID 与导航图逻辑，避免改变已通车型的报文。
+        val mapped = if (mbuxReceiver) null else np.artworkId
+        // 稳态 MBUX 帧分别提供播放器名称和包名。CarLife 的歌词时间戳不可代替应用标识。
+        val includeAppIdentity = mbuxReceiver && !subscriptionReply &&
+            (requestedNowPlayingFields.isEmpty() ||
+                requestedNowPlayingFields[1]?.contains(Iap2NowPlaying.PLAYBACK_APP_BUNDLE_ID) == true)
+        val submitted = sendRawCsmLocked(
+            Iap2NowPlaying.encode(display.copy(artworkId = mapped), includeAppIdentity = includeAppIdentity),
+        )
+        if (mbuxReceiver && !submitted) return false
+        if (mbuxMusic) mbuxTrack = track
+        lastPushedNowPlayingKey = key
+        val id = np.artworkId
+        if (id != null && id != artworkDeliveredId && id != artworkPendingId) {
+            startArtworkTransferLocked(id, np.navigationArtwork)
+        }
+        return true
     }
 
     /**
@@ -1309,6 +1412,11 @@ class VirtualIap2Link(
         artworkSetupAtMs = nowMillis()
         artworkWaitLogged = false
         val session = engine.artworkSessionId
+        // 2026-11-27 对齐 hypercar：它**无条件**发文件传输 SETUP（`Output.File` →
+        // `engine.sendFileTransfer`），不检查对端是否声明了文件传输会话。
+        // MBUX 的 identification 只声明 `1/control 2/data`，旧逻辑据此直接 return，
+        // 封面永远发不出去——而媒体卡片很可能要等封面到位才整体重绘。
+        // 发出去最坏是被车机忽略（零风险），不发则必然没有封面。
         if (!engine.peerDeclaresFileTransfer) {
             log(
                 "IAPLINK: 封面 id=$id ${bytes.size}B 等车机在会话 $session 上要图" +
@@ -1510,6 +1618,9 @@ class VirtualIap2Link(
          * （只有内容键变化才真正发，见 [nowPlayingKey]）。
          */
         const val NOW_PLAYING_POLL_MILLIS = 1_500L
+
+        /** 新曲先显示歌名和歌手，避免首句歌词抢在订阅刷新前顶掉曲目信息。 */
+        private const val MBUX_TRACK_TITLE_HOLD_MILLIS = 1_500L
 
         /**
          * 隧道 MFi 冷启动基线（Frida 真机 20B 优先；顺序会被按车机记忆重排）。

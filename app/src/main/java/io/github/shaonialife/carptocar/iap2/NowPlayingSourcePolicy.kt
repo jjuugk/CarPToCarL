@@ -67,10 +67,35 @@ object NowPlayingSourcePolicy {
         if (sessionTitle.isNullOrBlank()) return true
         // 没见过「真实歌名」的基线，无法证明是同一首歌——保守起见不抢。
         if (base == null) return false
-        if (sessionTitle.trim() != base.song.trim()) return false
+        val sessionText = sessionTitle.trim()
+        val baseSong = base.song.trim()
+        if (baseSong.isEmpty()) return false
+        if (!(sessionText == baseSong || sessionText.startsWith(baseSong) || baseSong.startsWith(sessionText))) return false
         val baseArtist = base.artist.trim()
         val artist = sessionArtist?.trim()
         if (baseArtist.isNotEmpty() && !artist.isNullOrEmpty() && baseArtist != artist) return false
         return true
+    }
+
+    /** MBUX 的歌词源可能只提供联唱名单中的第一位演唱者。 */
+    internal fun mbuxLyricForMultipleArtists(
+        nowMillis: Long,
+        lastMediaInfoAtMillis: Long,
+        latest: CarLifeMediaInfo,
+        base: CarLifeMediaInfo,
+        sessionTitle: String,
+        sessionArtist: String?,
+        sessionDurationMs: Long,
+    ): String? {
+        if (sessionTitle.isBlank() || sessionTitle.trim() != base.song.trim()) return null
+        if (sessionArtist == null || '/' !in sessionArtist) return null
+        val lead = sessionArtist.substringBefore('/').trim()
+        if (lead.isEmpty() || lead != base.artist.trim()) return null
+        if (base.duration <= 0 || sessionDurationMs <= 0L ||
+            kotlin.math.abs(sessionDurationMs - base.duration) >= 1_000L
+        ) return null
+        if (!shouldShowCarLifeLyric(nowMillis, lastMediaInfoAtMillis, latest, base, sessionTitle, lead)) return null
+        if (!LyricLines.matchesSong(latest, base)) return null
+        return latest.song.takeIf { it.isNotBlank() }
     }
 }

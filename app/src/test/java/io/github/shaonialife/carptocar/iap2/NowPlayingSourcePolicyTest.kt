@@ -1,7 +1,9 @@
 package io.github.shaonialife.carptocar.iap2
 
 import io.github.shaonialife.carptocar.carlife.CarLifeMediaInfo
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -117,5 +119,53 @@ class NowPlayingSourcePolicyTest {
     @Test
     fun `媒体会话没有画家时不因画家缺失而否决`() {
         assertTrue(decide(artist = null))
+    }
+
+    private val duet = info("没有理由", "杨胖雨", "没有理由").copy(duration = 199_000)
+    private val duetLine = duet.copy(song = "测试歌词", artist = "没有理由-杨胖雨")
+
+    private fun mbuxDuetLine(
+        title: String = duet.song,
+        artist: String = "杨胖雨/Lambert凌杰",
+        duration: Long = 199_723L,
+        latest: CarLifeMediaInfo = duetLine,
+        track: CarLifeMediaInfo = duet,
+        age: Long = 20L,
+    ): String? = NowPlayingSourcePolicy.mbuxLyricForMultipleArtists(
+        nowMillis = 10_000L,
+        lastMediaInfoAtMillis = 10_000L - age,
+        latest = latest,
+        base = track,
+        sessionTitle = title,
+        sessionArtist = artist,
+        sessionDurationMs = duration,
+    )
+
+    @Test
+    fun `MBUX 合作曲可用首位歌手匹配 CarLife 截到整秒的曲目`() {
+        assertEquals(duetLine.song, mbuxDuetLine())
+        assertEquals(duetLine.song, mbuxDuetLine(title = " 没有理由 ", duration = 199_999L))
+        assertFalse(decide(latest = duetLine, baseInfo = duet, title = duet.song, artist = "杨胖雨/Lambert凌杰"))
+    }
+
+    @Test
+    fun `MBUX 合作曲首位歌手及完整歌名必须一致`() {
+        assertNull(mbuxDuetLine(artist = "Lambert凌杰/杨胖雨"))
+        assertNull(mbuxDuetLine(title = "没有理由 (Live)"))
+    }
+
+    @Test
+    fun `MBUX 合作曲两侧时长必须有效且差值小于一秒`() {
+        assertNull(mbuxDuetLine(duration = 200_000L))
+        assertNull(mbuxDuetLine(duration = 198_000L))
+        assertNull(mbuxDuetLine(duration = 0L))
+        assertNull(mbuxDuetLine(track = duet.copy(duration = 0)))
+    }
+
+    @Test
+    fun `MBUX 合作曲仅放行同曲且仍新鲜的歌词`() {
+        assertNull(mbuxDuetLine(age = NowPlayingSourcePolicy.LYRIC_WINDOW_MILLIS + 1))
+        assertNull(mbuxDuetLine(latest = duet))
+        assertNull(mbuxDuetLine(latest = duetLine.copy(artist = "上一首-杨胖雨", album = "上一首")))
     }
 }

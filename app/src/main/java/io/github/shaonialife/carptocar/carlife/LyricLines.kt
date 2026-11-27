@@ -55,6 +55,17 @@ object LyricLines {
         return tail.isNotEmpty() && (baseArtist.isEmpty() || tail == baseArtist)
     }
 
+    /** 确认这条已识别的歌词可以使用当前曲目的歌名和歌手。 */
+    internal fun matchesSong(info: CarLifeMediaInfo, base: CarLifeMediaInfo): Boolean {
+        val album = info.album.trim()
+        val title = base.song.trim()
+        val artist = base.artist.trim()
+        if (title.isEmpty() || album != base.album.trim()) return false
+        if (info.artist.trim() == "$title-$artist") return true
+        return info.artist.trim() == "$album-$artist" &&
+            (info.duration <= 0 || base.duration <= 0 || info.duration == base.duration)
+    }
+
     /**
      * 歌词行里真正的画家名：去掉 `[album]-` 或 `[base.song]-` 前缀。
      * 取不到（不是歌词行 / 前缀对不上）时原样返回入参。

@@ -50,7 +50,32 @@ data class CarPlayNowPlaying(
     val artworkId: Int? = null,
     /** 本地传输策略标记，iAP2 编码不包含此字段。 */
     internal val navigationArtwork: Boolean = false,
-)
+    /**
+     * 曲目持久 ID（iAP2 组 0 字段 0x00，u64）。来自 CarLife 的 `songId`——
+     * 这是车机能认的真实曲目标识，比哈希更有意义；null = 没有可靠值，不发。
+     */
+    val itemId: Long? = null,
+    /** 队列数量（iAP2 组 1 字段 0x03，u32）。来自 CarLife 的 `playlistNum`。 */
+    val queueCount: Int? = null,
+    /** 组 0 字段 0x07 / 0x08 / 0x09：曲目号、曲目总数、碟号。 */
+    val trackNumber: Int? = null,
+    val trackCount: Int? = null,
+    val discNumber: Int? = null,
+    /** 组 0 字段 0x10 / 0x12。 */
+    val genre: String? = null,
+    val composer: String? = null,
+    val appBundleId: String? = null,
+    val appDisplayName: String? = null,
+    internal val lyricTrack: LyricTrack? = null,
+    internal val navigationOverlay: Boolean = false,
+) {
+    /** 给 MBUX 使用的真实曲目信息，以及已确认属于该曲的歌词。 */
+    data class LyricTrack(
+        val title: String?,
+        val artist: String?,
+        val line: String?,
+    )
+}
 
 object Iap2NowPlaying {
     /** 播放状态枚举（与 iap2-rs PlaybackStatus 一致）。 */
@@ -71,12 +96,16 @@ object Iap2NowPlaying {
     internal const val PLAYBACK_SHUFFLE = 0x0005
     internal const val PLAYBACK_REPEAT = 0x0006
     internal const val PLAYBACK_APP_NAME = 0x0007
+    internal const val PLAYBACK_APP_BUNDLE_ID = 0x0010
 
     /**
      * 构造 0x5001 NowPlayingUpdate 完整帧（带真实歌名/歌手/专辑/播放状态）。
      * 空字符串字段仍给一个空串 param，保持结构与空态常量同构。
      */
-    fun encode(np: CarPlayNowPlaying): ByteArray = Iap2Csm.encode(Iap2MessageIds.NOW_PLAYING_UPDATE, body(np))
+    fun encode(
+        np: CarPlayNowPlaying,
+        includeAppIdentity: Boolean = false,
+    ): ByteArray = Iap2Csm.encode(Iap2MessageIds.NOW_PLAYING_UPDATE, body(np, includeAppIdentity))
 
     /**
      * 只返回**参数体**（不含 `0x4040 | len | msgId` 帧头）。
@@ -86,21 +115,49 @@ object Iap2NowPlaying {
      * `0x4040 0x5001 ...` 这种非法参数组。WinPlay 1.2.4 实测：收到双重封包的 0x5001
      * 后其「接收进程异常」直接退出 → 蓝牙桥接被拆 → 车机不停重连（2026-10-25）。
      */
-    fun body(np: CarPlayNowPlaying): ByteArray {
+    fun body(
+        np: CarPlayNowPlaying,
+        includeAppIdentity: Boolean = false,
+    ): ByteArray {
+        // 2026-11-27 移植自 hypercar：MediaItemPersistentID（参数 0，u64）。
+        // 它标识「这是哪一首」——之前完全没发，车机可能因此把每次更新都当成
+        // 「同一条内容重复投递」而只存不画。用 title+artist 的稳定哈希当 ID。
+        val itemId = np.itemId
         var mediaItem =
-            Iap2Csm.string(MEDIA_TITLE, np.title.orEmpty()) +
+            (
+                itemId?.let {
+                    Iap2Csm.param(
+                        0x0000,
+                        byteArrayOf(
+                            (it ushr 56).toByte(), (it ushr 48).toByte(),
+                            (it ushr 40).toByte(), (it ushr 32).toByte(),
+                            (it ushr 24).toByte(), (it ushr 16).toByte(),
+                            (it ushr 8).toByte(), it.toByte(),
+                        ),
+                    )
+                } ?: byteArrayOf()
+            ) + Iap2Csm.string(MEDIA_TITLE, np.title.orEmpty()) +
                 Iap2Csm.u32(MEDIA_DURATION, np.durationMs.toLong()) +
                 Iap2Csm.string(MEDIA_ALBUM, np.album.orEmpty()) +
-                Iap2Csm.string(MEDIA_ARTIST, np.artist.orEmpty())
+                (np.trackNumber?.let { Iap2Csm.u16(0x0007, it) } ?: byteArrayOf()) +
+                (np.trackCount?.let { Iap2Csm.u16(0x0008, it) } ?: byteArrayOf()) +
+                (np.discNumber?.let { Iap2Csm.u16(0x0009, it) } ?: byteArrayOf()) +
+                Iap2Csm.string(MEDIA_ARTIST, np.artist.orEmpty()) +
+                (np.genre?.let { Iap2Csm.string(0x0010, it) } ?: byteArrayOf()) +
+                (np.composer?.let { Iap2Csm.string(0x0012, it) } ?: byteArrayOf())
         // 只有真要传图时才声明编号：给了编号却不传，车机封面位会一直等一张永不
         // 到达的图。合法性按 u8 校验，越界（0 或 >255）一律当「没有封面」处理。
         np.artworkId?.takeIf { it in 1..0xFF }?.let { mediaItem += Iap2Csm.u8(MEDIA_ARTWORK_ID, it) }
+        val appBundleId = np.appBundleId?.takeIf { includeAppIdentity && it.isNotBlank() }
+        val appName = if (appBundleId != null) np.appDisplayName ?: appBundleId else np.appName.orEmpty()
         val playback =
             Iap2Csm.u8(PLAYBACK_STATUS, np.status) +
                 Iap2Csm.u32(PLAYBACK_ELAPSED, np.elapsedMs.toLong()) +
                 Iap2Csm.u8(PLAYBACK_SHUFFLE, np.shuffleMode) +
                 Iap2Csm.u8(PLAYBACK_REPEAT, np.repeatMode) +
-                Iap2Csm.string(PLAYBACK_APP_NAME, np.appName.orEmpty())
+                (np.queueCount?.let { Iap2Csm.u32(0x0003, it.toLong()) } ?: byteArrayOf()) +
+                Iap2Csm.string(PLAYBACK_APP_NAME, appName) +
+                (appBundleId?.let { Iap2Csm.string(PLAYBACK_APP_BUNDLE_ID, it) } ?: byteArrayOf())
         return Iap2Csm.param(0x0000, mediaItem) + Iap2Csm.param(0x0001, playback)
     }
 

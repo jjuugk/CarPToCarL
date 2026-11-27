@@ -236,6 +236,9 @@ class Iap2LinkEngine(
      */
     var onFileTransferData: ((ByteArray) -> Unit)? = null
 
+    /** 本次 Wi-Fi 识别的对端要求文件会话和控制会话共用接收序号。 */
+    internal var acknowledgeFileTransferData = false
+
     /**
      * 诊断：「可丢弃」的帧重传到上限、被主动放弃时回调（参数为人类可读说明）。
      *
@@ -447,6 +450,7 @@ class Iap2LinkEngine(
         adoptedSynchronization = null
         adoptedPeerControlSessionId = null
         adoptedPeerSessions = emptyList()
+        acknowledgeFileTransferData = false
         peerRetransmissionTimeoutMillis = null
         peerHandshakeRejections = 0
         declaredMaxOutgoing = maxOutgoing
@@ -791,7 +795,12 @@ class Iap2LinkEngine(
                 // **不只看 12 号**：奥迪只声明 {1:control, 2:data}，封面走 2 号；
                 // 只认 12 号时那些应答会落进「未知会话」，业务层永远等不到 START
                 // （2026-11-15 奥迪 19 次 SETUP / 0 次 START 的第二个成因）。
-                // 链路层 ACK 已在上面的 handleAcknowledgement 里统一处理过，这里只管业务。
+                // handleAcknowledgement 消费车机对出站数据的确认。这里确认车机发来的文件数据，
+                // 先更新接收序号，让 START 回调发送的第一块图像能捎带这一 ACK。
+                if (acknowledgeFileTransferData) {
+                    if (!acceptDataSequence(sequence)) return
+                    sendAcknowledgement()
+                }
                 onFileTransferData?.invoke(payload!!)
             } else {
                 reportUnknownSessionData(sessionId, payload!!.size)
@@ -986,19 +995,24 @@ class Iap2LinkEngine(
         drainSendWindow(nowMillis)
     }
 
-    private fun handleData(
-        sequence: Int,
-        payload: ByteArray,
-    ) {
+    private fun acceptDataSequence(sequence: Int): Boolean {
         val distance = sequenceDistance(sequence, lastReceivedInOrder)
         val peerWindow = peerSynchronization?.maxOutgoing ?: maxOutgoing
         if (distance == 0 || distance > peerWindow + ACK_SLACK) {
             sendAcknowledgement() // 重复或过期：重新确认当前序号
-            return
+            return false
         }
         // RFCOMM 为可靠有序流，不会丢包；序号跳变只可能是对端把 ACK/SYN 也计入了序号
         // （各家实现账法不一致）。因此接受任意前进量并推进水位，避免死锁式丢帧。
         lastReceivedInOrder = sequence
+        return true
+    }
+
+    private fun handleData(
+        sequence: Int,
+        payload: ByteArray,
+    ) {
+        if (!acceptDataSequence(sequence)) return
         if (pendingEvents.size >= 256) {
             die("event queue overflow")
             return

@@ -84,7 +84,8 @@ object StreamOrderMemory {
      *
      * 匹配串取小写子串，自报口径差异（`NBT-Evo` / `NBTEvo`）都能命中。
      */
-    private val KNOWN_AUDIO_FIRST = listOf("magic-car-link", "jybox", "nbtevo", "nbt-evo")
+    private val KNOWN_AUDIO_FIRST =
+        listOf("magic-car-link", "jybox", "nbtevo", "nbt-evo", "mb_d-m")
 
     /**
      * 纯函数：结论 → 本轮顺序。便于单测，不需要 Context。

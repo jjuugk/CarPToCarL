@@ -191,6 +191,48 @@ class Iap2LinkEngineTest {
         assertTrue("接了文件传输回调就不该再报未知会话，实际=$unknownSessions", unknownSessions.isEmpty())
     }
 
+    @Test
+    fun mbuxFileStartAndSuccessAdvanceReceiveAckAcrossSequenceWrap() {
+        val phone = Iap2LinkEngine(reliableTransport = true, declaredWindow = 32)
+        phone.enterNegotiating()
+        val sessions = listOf(Iap2LinkEngine.SessionDescriptor(1, 0, 2), Iap2LinkEngine.SessionDescriptor(2, 1, 2))
+        phone.feed(synFrame(peerSequence = 254, sessions = sessions), tick())
+        val synAck = parseFrames(phone.takeOutput()).single()
+        phone.acknowledgeFileTransferData = true
+
+        val delivered = mutableListOf<Int>()
+        val chunk = byteArrayOf(1, Iap2ArtworkTransfer.CMD_FIRST_AND_ONLY.toByte(), 42)
+        phone.onFileTransferData = { response ->
+            val command = response[1].toInt()
+            delivered += command
+            if (command == Iap2ArtworkTransfer.CMD_START) phone.sendOnSession(chunk, 2, tick())
+        }
+        fun fileResponse(seq: Int, ack: Int, cmd: Int) =
+            Iap2LinkPacket.encode(Iap2LinkPacket.LinkPacket(0x40, seq, ack, 2, byteArrayOf(1, cmd.toByte())))
+
+        val start = fileResponse(255, synAck.sequence, Iap2ArtworkTransfer.CMD_START)
+        phone.feed(start, tick())
+        val data = parseFrames(phone.takeOutput()).single()
+        assertEquals(255, data.ack)
+        assertEquals(2, data.sessionId)
+        assertArrayEquals(chunk, data.payload)
+
+        phone.feed(start, tick())
+        val repeated = parseFrames(phone.takeOutput()).single()
+        assertEquals(255, repeated.ack)
+        assertEquals(0, repeated.sessionId)
+        assertEquals(9, repeated.frameLength)
+
+        val success = fileResponse(0, data.sequence, Iap2ArtworkTransfer.CMD_SUCCESS)
+        phone.feed(success, tick())
+        val completed = parseFrames(phone.takeOutput()).single()
+        assertEquals(0, completed.ack)
+        assertEquals(9, completed.frameLength)
+        assertEquals(listOf(Iap2ArtworkTransfer.CMD_START, Iap2ArtworkTransfer.CMD_SUCCESS), delivered)
+        phone.restartResponder()
+        assertTrue(!phone.acknowledgeFileTransferData)
+    }
+
     /**
      * 奥迪形态：车机 SYN 只声明 `{1:control, 2:data}`，**没有 12 号会话**。
      *
@@ -683,8 +725,12 @@ class Iap2LinkEngineTest {
      * 帧头是 **9 字节**：`FF5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 会话 | u8 头校验和`，
      * 所以 seq 在帧内偏移 5、头校验和在偏移 8（不是 7——那一位是会话 ID）。
      */
-    private fun synFrame(peerSequence: Int): ByteArray {
+    private fun synFrame(
+        peerSequence: Int,
+        sessions: List<Iap2LinkEngine.SessionDescriptor>? = null,
+    ): ByteArray {
         val engine = Iap2LinkEngine()
+        engine.declaredSessions = sessions
         engine.start(0)
         val raw = engine.takeOutput()
         val synOffset = 6 // 前置 marker 6 字节

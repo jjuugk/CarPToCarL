@@ -293,6 +293,18 @@ object MediaSessionsState {
         val durationMs: Long = 0L,
         /** 位置采样的 SystemClock.elapsedRealtime 锚点。 */
         val anchoredAtMs: Long = 0L,
+        /**
+         * 2026-11-27：车机 0x5000 订阅了组0 的 0x06(album) / 0x07(trackNumber) /
+         * 0x08(trackCount) / 0x09(discNumber) / 0x10(genre) / 0x12(composer)，
+         * 而此前 MediaSession 分支把 album 直接写成 null、其余字段压根不存在。
+         * 订阅了却一条不给，车机很可能判定「数据不完整」而不重绘卡片。
+         */
+        val album: String? = null,
+        val trackNumber: Int? = null,
+        val trackCount: Int? = null,
+        val discNumber: Int? = null,
+        val genre: String? = null,
+        val composer: String? = null,
     ) {
         /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
         fun displayPositionAt(elapsedRealtimeMs: Long): Long {

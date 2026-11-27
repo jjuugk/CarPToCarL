@@ -192,6 +192,29 @@ class VirtualIap2LinkTest {
         assertTrue(h.eventSent.isEmpty())
     }
 
+    @Test
+    fun identificationEnablesFileAcknowledgementsOnlyForMbux() {
+        fun responseFrames(model: String): List<ByteArray> {
+            val h = Harness()
+            h.car.declaredSessions = listOf(
+                Iap2LinkEngine.SessionDescriptor(1, 0, 2),
+                Iap2LinkEngine.SessionDescriptor(2, 1, 2),
+            )
+            h.link.armMib3()
+            h.car.start(0)
+            h.exchangeUntilNormal()
+            h.carSends(0x1d01, Iap2Csm.string(1, model))
+            h.settle()
+            val before = h.allControl.size
+            assertTrue(h.car.sendOnSession(byteArrayOf(1, 5), 2, h.now))
+            h.carToLink()
+            return h.allControl.drop(before)
+        }
+
+        assertEquals(9, responseFrames("MB_D-M-5").single().size)
+        assertTrue(responseFrames("AUDI 0000").isEmpty())
+    }
+
     /**
      * Honda HFT（2026-10-20 实测）：车机在事件通道上 1Hz 反复发 marker，说明它卡在
      * 探测态、在等**我们**的会话表。连着第 2 个 marker 起必须升级为「marker + 本表
@@ -338,11 +361,11 @@ class VirtualIap2LinkTest {
     }
 
     /** 走完 MIB3 识别 + MFi，停在「车机即将订阅」之前。 */
-    private fun Harness.readyForSubscriptions() {
+    private fun Harness.readyForSubscriptions(model: String = "MMI") {
         link.armMib3()
         car.start(0)
         exchangeUntilNormal()
-        carSends(0x1D01, Iap2Csm.string(0, "Audi") + Iap2Csm.string(1, "MMI"))
+        carSends(0x1D01, Iap2Csm.string(0, "Audi") + Iap2Csm.string(1, model))
         carSends(0xAA01, Iap2Csm.param(0, ByteArray(642)))
         carSends(0xAA03, Iap2Csm.param(0, ByteArray(96)))
         settle() // 突发按对端窗口分批发，先走完再让车机订阅
@@ -360,6 +383,124 @@ class VirtualIap2LinkTest {
         elapsedMs = elapsedMs,
         appName = "CarLife+",
     )
+
+    private fun CarPlayNowPlaying.withLyric(line: String) =
+        copy(title = line, lyricTrack = CarPlayNowPlaying.LyricTrack(title, artist, line))
+
+    /** 解码真正进入 Wi-Fi 发送回调的帧，逐个比较媒体条目里的 Title、Artist。 */
+    private fun Harness.mediaRows(): List<Pair<String, String>> =
+        controlFrames().filter { it.second == 0x5001 }.map { (raw, _) ->
+            val body = Iap2Csm.Parser().offer(raw).single().body
+            val media = Iap2Csm.parseParams(body).single { it.id == 0 }.value
+            val fields = Iap2Csm.parseParams(media).associateBy { it.id }
+            fun value(id: Int) = fields.getValue(id).value.decodeToString().trimEnd('\u0000')
+            value(1) to value(12)
+        }
+
+    private fun Harness.publishMedia(sample: CarPlayNowPlaying, quiet: Boolean = false) {
+        nowPlaying = sample
+        link.pushNowPlaying(quiet)
+        tick()
+        linkToCar()
+        carToLink()
+        linkToCar()
+    }
+
+    @Test
+    fun mbuxLyricsPresentAtSubscriptionHoldSongBeforeShowingLatestLine() {
+        val h = Harness()
+        h.readyForSubscriptions(model = "MB_D-M-5")
+        val track = song("甲曲")
+        h.nowPlaying = track.withLyric("第一行")
+        val firstAt = h.clock
+        assertEquals(listOf(0x5001), h.carSends(0x5000))
+        assertEquals(listOf("甲曲" to "歌手"), h.mediaRows())
+
+        h.clock = firstAt + 1_000
+        h.publishMedia(track.withLyric("第二行"))
+        h.clock += 13
+        h.publishMedia(track.copy(elapsedMs = 1_013))
+        h.clock = firstAt + 1_499
+        h.tick()
+        assertTrue(h.mediaRows().all { it == ("甲曲" to "歌手") })
+
+        h.clock = firstAt + 1_500
+        h.tick()
+        assertEquals("第二行" to "甲曲", h.mediaRows().last())
+        h.publishMedia(track.withLyric("第三行"))
+        assertEquals("第三行" to "甲曲", h.mediaRows().last())
+
+        val beforeProgress = h.mediaRows().size
+        h.clock += 5_000
+        h.publishMedia(track.copy(elapsedMs = 7_000), quiet = true)
+        val progress = h.mediaRows().drop(beforeProgress)
+        assertTrue(progress.isNotEmpty() && progress.all { it == ("第三行" to "甲曲") })
+
+        h.carSends(0x5000)
+        assertEquals("甲曲" to "歌手", h.mediaRows().last())
+        h.clock += 1_500
+        h.publishMedia(track.copy(elapsedMs = 9_000), quiet = true)
+        assertEquals("甲曲" to "歌手", h.mediaRows().last())
+    }
+
+    @Test
+    fun mbuxQuickTrackChangeDiscardsPreviousPendingLyricEvenWithSameItemId() {
+        val h = Harness()
+        h.readyForSubscriptions(model = "MB_D-M-5")
+        val first = song("甲曲").copy(itemId = 123L)
+        val next = first.copy(title = "乙曲")
+        h.nowPlaying = first.withLyric("甲的待播歌词")
+        val firstAt = h.clock
+        h.carSends(0x5000)
+        val switchedAt = firstAt + 700
+        h.clock = switchedAt
+        h.publishMedia(next.withLyric("乙的第一行"))
+        assertEquals("乙曲" to "歌手", h.mediaRows().last())
+
+        h.clock = firstAt + 1_500
+        h.publishMedia(next.withLyric("乙的最新行"))
+        assertEquals("乙曲" to "歌手", h.mediaRows().last())
+        h.clock = switchedAt + 1_500
+        h.publishMedia(next.withLyric("乙的最新行"))
+        assertEquals("乙的最新行" to "乙曲", h.mediaRows().last())
+        assertFalse(h.mediaRows().any { it.first == "甲的待播歌词" })
+    }
+
+    @Test
+    fun otherReceiversKeepOriginalLyricTitleAndArtist() {
+        val h = Harness()
+        h.readyForSubscriptions()
+        val track = song("甲曲")
+        h.nowPlaying = track.withLyric("第一行")
+        h.carSends(0x5000)
+        assertEquals("第一行" to "歌手", h.mediaRows().last())
+        h.publishMedia(track)
+        assertEquals("甲曲" to "歌手", h.mediaRows().last())
+    }
+
+    @Test
+    fun mbuxOnlyLyricEventCanUseSeparateLineWithoutChangingOriginalMediaMetadata() {
+        val track = song("没有理由").copy(artist = "杨胖雨/Lambert凌杰")
+        val withLine = track.copy(
+            lyricTrack = CarPlayNowPlaying.LyricTrack(track.title, track.artist, "没有人可以去等待"),
+        )
+        for (model in listOf("MB_D-M-5", "MMI")) {
+            val h = Harness()
+            h.readyForSubscriptions(model = model)
+            h.nowPlaying = track
+            h.carSends(0x5000)
+            h.clock += 1_500
+            h.nowPlaying = withLine
+            assertEquals(model == "MB_D-M-5", h.link.pushNowPlaying(mbuxOnly = true))
+            h.tick()
+            val expected = if (model == "MB_D-M-5") {
+                "没有人可以去等待" to "没有理由"
+            } else {
+                "没有理由" to "杨胖雨/Lambert凌杰"
+            }
+            assertEquals(expected, h.mediaRows().last())
+        }
+    }
 
     /**
      * 真机（vivo Android 17 / 通知监听器晚绑定）复现：车机先订阅 0x5000 拿到空态，

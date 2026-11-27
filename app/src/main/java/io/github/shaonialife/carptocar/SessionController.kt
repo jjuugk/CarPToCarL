@@ -692,7 +692,7 @@ object SessionController {
         // 逐行歌词也走这条（`artist == "<专辑>-<画家>"`），日志里单独标出来。
         CarLifeHijack.addMediaInfoListener { info ->
             val kind =
-                if (LyricLines.isLyricLine(info, CarLifeHijack.latestSongMediaInfo)) "歌词行" else "歌名"
+                if (LyricLines.isLyricLine(info, CarLifeHijack.mediaInfoSnapshot?.song)) "歌词行" else "歌名"
             appendLog(
                 "EVENT: CarLife $kind「${info.song}」→ 补推 iAP2 0x5001 NowPlayingUpdate",
             )
@@ -978,15 +978,21 @@ object SessionController {
         // 各自的 provider 构造（隧道带封面、蓝牙不带），这里先编码一遍纯属浪费。
         val np = buildNowPlaying(includeArtwork = false) ?: return
         val key = "${np.title}|${np.artist}"
-        if (key == lastPushedNowPlayingKey) return
-        lastPushedNowPlayingKey = key
+        val mbuxLyric = np.lyricTrack?.line
+        val previous = lastPushedNowPlaying.getAndSet(key to mbuxLyric)
+        if (previous != null && key == previous.first) {
+            if (mbuxLyric != null && mbuxLyric != previous.second) {
+                currentClient?.pushNowPlaying(mbuxOnly = true)
+            }
+            return
+        }
         currentClient?.pushNowPlaying()
         bluetoothServer?.pushNowPlaying()
         bluetoothClient?.pushNowPlaying()
     }
 
-    /** 上次推送的 0x5001 内容键（title|artist），用于去重。 */
-    private var lastPushedNowPlayingKey: String? = null
+    /** 媒体回调共用的去重状态，含只供 MBUX 使用的歌词行。 */
+    private val lastPushedNowPlaying = java.util.concurrent.atomic.AtomicReference<Pair<String, String?>?>()
 
     /** 上次推到媒体卡片的导航文案（转向+距离+路名），用于去重。 */
     private var lastPushedGuideKey: String? = null
@@ -1109,7 +1115,7 @@ object SessionController {
      */
     @Synchronized
     fun resetNowPlayingDedupe() {
-        lastPushedNowPlayingKey = null
+        lastPushedNowPlaying.set(null)
         // 导航卡片的去重键同理，且原先漏了这一条：上一轮推过的「300 米右转」会吞掉
         // 这一轮完全一样的内容——重连后卡片停在空白，日志里连「补推」都没有。
         lastPushedGuideKey = null
@@ -1340,24 +1346,48 @@ object SessionController {
      */
     private fun buildNowPlaying(includeArtwork: Boolean = true): CarPlayNowPlaying? {
         val session = MediaSessionsState.nowPlaying
-        val carLifeLatest = CarLifeHijack.latestMediaInfo
-        val carLifeBase = CarLifeHijack.latestSongMediaInfo
+        val carLife = CarLifeHijack.mediaInfoSnapshot
+        val carLifeLatest = carLife?.latest
+        val carLifeBase = carLife?.song
         if (session != null && session.title != null) {
+            val now = android.os.SystemClock.uptimeMillis()
             val lyricTakeover =
                 carLifeLatest != null &&
                     NowPlayingSourcePolicy.shouldShowCarLifeLyric(
-                        nowMillis = android.os.SystemClock.uptimeMillis(),
-                        lastMediaInfoAtMillis = CarLifeHijack.latestMediaInfoAtMillis,
+                        nowMillis = now,
+                        lastMediaInfoAtMillis = carLife.receivedAtMs,
                         latest = carLifeLatest,
                         base = carLifeBase,
                         sessionTitle = session.title,
                         sessionArtist = session.artist,
                     )
-            if (lyricTakeover) return carLifeNowPlaying(carLifeLatest, carLifeBase, includeArtwork)
+            if (lyricTakeover) {
+                return carLifeNowPlaying(
+                    carLifeLatest,
+                    carLifeBase,
+                    includeArtwork,
+                    mediaSessionPackage = session.pkg,
+                    sessionTitle = session.title,
+                    sessionArtist = session.artist,
+                )
+            }
+            val mbuxLyric = if (carLifeLatest != null && carLifeBase != null) {
+                NowPlayingSourcePolicy.mbuxLyricForMultipleArtists(
+                    nowMillis = now,
+                    lastMediaInfoAtMillis = carLife.receivedAtMs,
+                    latest = carLifeLatest,
+                    base = carLifeBase,
+                    sessionTitle = session.title,
+                    sessionArtist = session.artist,
+                    sessionDurationMs = session.durationMs,
+                )
+            } else {
+                null
+            }
             return CarPlayNowPlaying(
                 title = session.title,
                 artist = session.artist,
-                album = null, // MediaSession 未单独暴露专辑名，这里留空
+                album = session.album?.takeIf { it.isNotBlank() },
                 durationMs = session.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                 status =
                     if (session.playing) {
@@ -1379,10 +1409,26 @@ object SessionController {
                     } else {
                         null
                     },
+                itemId = carLifeBase?.songId?.takeIf { it.isNotBlank() }?.toLongOrNull(),
+                queueCount = carLifeBase?.playlistNum?.takeIf { it > 0 },
+                trackNumber = session.trackNumber,
+                trackCount = session.trackCount,
+                discNumber = session.discNumber,
+                genre = session.genre?.takeIf { it.isNotBlank() },
+                composer = session.composer?.takeIf { it.isNotBlank() },
+                appBundleId = session.pkg,
+                appDisplayName = mediaAppLabel(session.pkg),
+                lyricTrack = mbuxLyric?.let { CarPlayNowPlaying.LyricTrack(session.title, session.artist, it) },
             )
         }
         val info = carLifeLatest ?: return null
-        return carLifeNowPlaying(info, carLifeBase, includeArtwork)
+        val age = android.os.SystemClock.uptimeMillis() - carLife.receivedAtMs
+        return carLifeNowPlaying(
+            info,
+            carLifeBase,
+            includeArtwork,
+            lyricIsFresh = age in 0..NowPlayingSourcePolicy.LYRIC_WINDOW_MILLIS,
+        )
     }
 
     /**
@@ -1397,12 +1443,26 @@ object SessionController {
         info: CarLifeMediaInfo,
         base: CarLifeMediaInfo?,
         includeArtwork: Boolean,
+        mediaSessionPackage: String? = null,
+        sessionTitle: String? = null,
+        sessionArtist: String? = null,
+        lyricIsFresh: Boolean = true,
     ): CarPlayNowPlaying {
         val lyric = LyricLines.isLyricLine(info, base)
         val source = if (lyric) base else null
         val artist = source?.artist ?: info.artist
         val album = source?.album ?: info.album
         val duration = source?.duration?.takeIf { it > 0 } ?: info.duration
+        val lyricTrack = if (lyric) {
+            val verifiedSong = source?.takeIf { LyricLines.matchesSong(info, it) }
+            CarPlayNowPlaying.LyricTrack(
+                title = sessionTitle?.takeUnless { it.isBlank() } ?: verifiedSong?.song,
+                artist = sessionArtist?.takeUnless { it.isBlank() } ?: verifiedSong?.artist,
+                line = info.song.takeIf { verifiedSong != null && lyricIsFresh && it.isNotBlank() },
+            )
+        } else {
+            null
+        }
         return CarPlayNowPlaying(
             title = info.song.takeIf { it.isNotBlank() },
             artist = artist.takeIf { it.isNotBlank() },
@@ -1418,7 +1478,27 @@ object SessionController {
                 } else {
                     null
                 },
+            // 2026-11-27：车机订阅了组0 的 0x00（MediaItemPersistentID）与组1 的 0x03
+            // （queueCount）。CarLife 协议里正好有真实值：songId / playlistNum。
+            // 之前一个不发、一个固定填 0，车机很可能认为「订阅的字段没给」而不重绘。
+            itemId = (source ?: info).songId.takeIf { it.isNotBlank() }?.toLongOrNull()
+                ?: (source ?: info).songId.takeIf { it.isNotBlank() }?.hashCode()?.toLong(),
+            queueCount = (source ?: info).playlistNum.takeIf { it > 0 },
+            appBundleId = mediaSessionPackage,
+            appDisplayName = mediaAppLabel(mediaSessionPackage),
+            lyricTrack = lyricTrack,
         )
+    }
+
+    private fun mediaAppLabel(packageName: String?): String? {
+        val packageManager = appContext?.packageManager ?: return null
+        if (packageName == null) return null
+        return try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0))
+                .toString().takeIf { it.isNotBlank() }
+        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+            null
+        }
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */

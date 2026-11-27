@@ -35,6 +35,7 @@ internal class NavigationNowPlaying(
             appName = "导航",
             artworkId = artworkId(guide.artwork),
             navigationArtwork = true,
+            navigationOverlay = true,
         )
     }
 

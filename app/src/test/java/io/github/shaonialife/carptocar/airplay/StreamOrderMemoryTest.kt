@@ -138,9 +138,9 @@ class StreamOrderMemoryTest {
                 forcedAudioFirst = true,
             ),
         )
-        // 开关关掉时，奔驰仍然走默认的 RECORD 优先（不按品牌写死）。
+        // MBUX 型号在已知快路径中，开关关掉时仍优先尝试音频。
         assertEquals(
-            StreamOrderMemory.Order.RECORD_FIRST,
+            StreamOrderMemory.Order.AUDIO_FIRST,
             StreamOrderMemory.resolve(
                 StreamOrderMemory.Learned.NONE,
                 "Mercedes-Benz MB_D-M-6",

@@ -50,6 +50,26 @@ class Iap2NowPlayingTest {
         assertEquals("测试专辑", media.getValue(Iap2NowPlaying.MEDIA_ALBUM).text())
     }
 
+    @Test
+    fun appIdentitySeparatesDisplayNameAndBundleIdWhenEnabled() {
+        val nowPlaying = sample("测试专辑").copy(
+            appName = "1795774339987",
+            appDisplayName = "网易云音乐",
+            appBundleId = "com.netease.cloudmusic",
+        )
+        val baselineGroups = Iap2Csm.parseParams(Iap2NowPlaying.body(nowPlaying))
+        val baselinePlayback = Iap2Csm.parseParams(baselineGroups.single { it.id == 1 }.value).associateBy { it.id }
+        assertEquals("1795774339987", baselinePlayback.getValue(7).text())
+        assertFalse(baselinePlayback.containsKey(16))
+
+        val groups = Iap2Csm.parseParams(Iap2NowPlaying.body(nowPlaying, includeAppIdentity = true))
+        val playback = Iap2Csm.parseParams(groups.single { it.id == 1 }.value).associateBy { it.id }
+        assertEquals("网易云音乐", playback.getValue(7).text())
+        assertEquals("com.netease.cloudmusic", playback.getValue(16).text())
+        assertEquals(baselinePlayback.keys + 16, playback.keys)
+        assertFalse(Iap2Csm.parseParams(groups.single { it.id == 0 }.value).any { it.id == 26 })
+    }
+
     /** 核心回归：任何专辑名（含 null / 空 / 长串）都不能再占用封面传输 id 0x001A。 */
     @Test
     fun albumNeverWritesArtworkTransferId() {
