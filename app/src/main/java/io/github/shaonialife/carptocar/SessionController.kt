@@ -61,6 +61,7 @@ import io.github.shaonialife.carptocar.iap2.NowPlayingSourcePolicy
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.HidDescriptorSummary
+import io.github.shaonialife.carptocar.input.KnobHardKeyOption
 import io.github.shaonialife.carptocar.input.KnobReports
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.MediaKeyRoute
@@ -1636,6 +1637,44 @@ object SessionController {
 
     /** 语音硬键的唯一实现：门面委托与未装配路径都落在这里。 */
     private fun sendVoiceHardKey(keycode: Int): Boolean = CarLifeHijack.sendVoiceKey(keycode)
+
+    // ---- 旋钮原生硬键实验（默认关，见 KnobHardKeyOption）----
+
+    /**
+     * 旋钮硬键专用单线程池。不复用 [carLifeCommandSender]：那条只有 2 槽 + DiscardOldest，
+     * 快速连转时绝大多数格会被丢；旋钮要「每格一次」才能验证引擎是否逐格响应。
+     * 这里同样不在收帧线程直接写本地 socket——引擎卡住时会阻塞 iAP2 ACK。
+     */
+    private val knobHardKeySender =
+        java.util.concurrent.ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+            java.util.concurrent.LinkedBlockingQueue(64),
+            { runnable -> Thread(runnable, "knob-hardkey").apply { isDaemon = true } },
+            java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy(),
+        )
+
+    /**
+     * 旋钮动作 → CarLife 原生硬键 0x68008。仅当 [KnobHardKeyOption.enabled] 时调用。
+     *
+     * 反编译实证的键码：6=顺时针 / 7=逆时针 / 20=按下确认 / 14=返回。
+     * 前两项在 CarLife+ 内部有 `MultiScreenManager.isRemoteAlive()` 前置门——
+     * 本 debug 就是用来验证那道门在普通连接下是否已经置位。
+     * 发送失败**不回退触摸**：两种动作叠加会让实车日志无法判读。
+     */
+    private fun dispatchKnobHardKey(keycode: Int) {
+        knobHardKeySender.execute {
+            // 直接走门面，不经 dispatchVoiceHardKey：后者会打「车机语音键」日志、
+            // 还会被 ProtocolRegistry 的 VOICE_KEY 消费者截走（旋钮不该触发语音路由）。
+            val ok = sendVoiceHardKey(keycode)
+            appendLog(
+                "KNOB: 硬键 0x%02X → 0x68008".format(keycode) +
+                    if (ok) " 已送达（等 CarLife+ 焦点反应）" else " 未送达（CarLife 未接管）",
+            )
+        }
+    }
 
     /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
     private val carNmea = NmeaAssembler()
@@ -7371,8 +7410,32 @@ object SessionController {
                                                         " 按下=${knob.pressed} 返回=${knob.backPressed}",
                                                 )
                                             }
-                                            if (knob.steps != 0) KnobRouter.onSteps(knob.steps)
-                                            if (knob.pressed == true) KnobRouter.onPress()
+                                            // knobby: 实验开关打开时改走 CarLife 原生硬键
+                                            // （0x68008 的 6/7/20），关闭时逐字节回到触摸翻译。
+                                            val useHardKey =
+                                                KnobHardKeyOption.enabled && CarLifeHijack.isActive
+                                            if (useHardKey) {
+                                                if (knob.steps != 0) {
+                                                    val key =
+                                                        if (knob.steps > 0) {
+                                                            CarLifeProtocol.HardKey.KNOB_CLOCKWISE
+                                                        } else {
+                                                            CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE
+                                                        }
+                                                    val repeat = kotlin.math.abs(knob.steps).coerceAtMost(16)
+                                                    repeat(repeat) { dispatchKnobHardKey(key) }
+                                                    appendLog(
+                                                        "EVENT: 旋钮 steps=${knob.steps} → 硬键 0x%02X ×$repeat"
+                                                            .format(key),
+                                                    )
+                                                }
+                                                if (knob.pressed == true) {
+                                                    dispatchKnobHardKey(CarLifeProtocol.HardKey.KNOB_OK)
+                                                }
+                                            } else {
+                                                if (knob.steps != 0) KnobRouter.onSteps(knob.steps)
+                                                if (knob.pressed == true) KnobRouter.onPress()
+                                            }
                                         } else if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                             lastConsumerUsage = consumerUsage

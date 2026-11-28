@@ -257,6 +257,27 @@ internal object CarLifeProtocol {
 
         /** 停语音识别。 */
         const val VR_STOP = 0x22
+
+        // ---- 旋钮/面板键（0x68008，同上，反编译 CarLife+ 8.8.5 实证）----
+        //
+        // CarlifeTouchManager.onHardKeyCodeEvent 的 switch：
+        //   6  → onKeyKnobClockwise()      → sendKeyDownUpSync(300)
+        //   7  → onKeyKnobAntiClockwise()  → sendKeyDownUpSync(301)
+        //   20 → onKeyOkEvent()            （旋钮按下确认）
+        //   14 → onKeyBackEvent()          （返回）
+        // 前两者有 `MultiScreenManager.isRemoteAlive()` 前置门，是否随普通连接置位待实车验证
+        // （见 input/KnobHardKeyOption 的 KDoc）。
+        /** 旋钮顺时针一格（CarLife 内部键 300）。 */
+        const val KNOB_CLOCKWISE = 0x06
+
+        /** 旋钮逆时针一格（CarLife 内部键 301）。 */
+        const val KNOB_ANTI_CLOCKWISE = 0x07
+
+        /** 旋钮按下确认。 */
+        const val KNOB_OK = 0x14
+
+        /** 返回键。 */
+        const val KNOB_BACK = 0x0E
     }
 
     // ---- 车机语音控制（0x10066，HU → MD，控制通道）----

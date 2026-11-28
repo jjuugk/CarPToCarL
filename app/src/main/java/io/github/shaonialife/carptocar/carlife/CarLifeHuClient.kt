@@ -1559,11 +1559,35 @@ class CarLifeHuClient(
                     CarLifeProtocol.HardKey.VR_START ->
                         "（语音识别开始）→ CarLife+ 应起小度；等它的「引擎模块状态 …语音=1」确认"
                     CarLifeProtocol.HardKey.VR_STOP -> "（语音识别结束）"
+                    CarLifeProtocol.HardKey.KNOB_CLOCKWISE -> "（旋钮顺时针）→ 待引擎焦点下一项"
+                    CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE -> "（旋钮逆时针）→ 待引擎焦点上一项"
+                    CarLifeProtocol.HardKey.KNOB_OK -> "（旋钮按下）→ 待引擎确认当前项"
+                    CarLifeProtocol.HardKey.KNOB_BACK -> "（返回）"
                     else -> ""
                 },
-            ) + if (ok) "" else " —— 命令通道不可用，未送达",
+            ) + " " + focusSnapshot() + if (ok) "" else " —— 命令通道不可用，未送达",
         )
         return ok
+    }
+
+    /**
+     * 硬键发送时刻的引擎焦点快照（旋钮 debug 判据，2026-11-28）。
+     *
+     * 开源 CarLife 车机端实证：旋钮/硬键只有在「CarLife 持有音频焦点」时才被引擎处理
+     * （车机侧 `isHoldingAudioFocus` 门 + 手机侧 `MultiScreenManager.isRemoteAlive()` 门）。
+     * 我们这台车机是自己的引擎投屏，焦点状态就落在 65574 的 `MUSIC(3)` 模块里。
+     * 把这行打进硬键日志，实车就能区分两种失败：
+     * - `音乐焦点=0` → 引擎根本不在音乐态，硬键被焦点门挡掉属预期，先让 CarLife+ 开始播放；
+     * - `音乐焦点=1` 且连按 20（按下）也不动 → 才指向 `isRemoteAlive()` 门没置位。
+     *
+     * 不缓存、不推断，只读最近一次 65574 上报；连接初期没有上报时如实显示 `-`。
+     */
+    private fun focusSnapshot(): String {
+        val modules = lastModuleStatus ?: return "[引擎焦点: 无上报]"
+        val music = modules.firstOrNull { it.first == CarLifeProtocol.Module.MUSIC }?.second
+        val vr = modules.firstOrNull { it.first == CarLifeProtocol.Module.VR }?.second
+        return "[引擎焦点: 音乐=${music?.toString() ?: "-"} 语音=${vr?.toString() ?: "-"}" +
+            " · 音乐=1 才有焦点处理旋钮]"
     }
 
     /**

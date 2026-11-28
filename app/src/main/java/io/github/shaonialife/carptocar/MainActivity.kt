@@ -52,6 +52,7 @@ import io.github.shaonialife.carptocar.amap.AmapNaviSource
 import io.github.shaonialife.carptocar.carlife.AmcarMicUplinkOption
 import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
+import io.github.shaonialife.carptocar.input.KnobHardKeyOption
 import io.github.shaonialife.carptocar.input.KnobRouter
 import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
@@ -2216,6 +2217,28 @@ class MainActivity : AppCompatActivity() {
                     "已关闭车机麦克风上行——会话中途关闭会立刻停输入流"
                 },
             )
+        }
+        // 旋钮走 CarLife 原生硬键（debug 实验，默认关）。
+        val knobHardKeyRow = findViewById<android.view.View>(R.id.rowKnobHardKey)
+        val knobHardKeySwitch = findViewById<SwitchCompat>(R.id.switchKnobHardKey)
+        fun refreshKnobHardKey() {
+            knobHardKeySwitch.isChecked = KnobHardKeyOption.enabled
+        }
+        refreshKnobHardKey()
+        knobHardKeyRow.setOnClickListener {
+            val next = !KnobHardKeyOption.enabled
+            KnobHardKeyOption.save(ctx, next)
+            refreshKnobHardKey()
+            snack(
+                if (next) {
+                    "旋钮改发 0x68008 硬键（6/7/20）——下次连接生效。" +
+                        "验证：先让 CarLife+ 开始播放，日志「引擎焦点: 音乐=1」时转旋钮，" +
+                        "看焦点是否随 6/7 移动；连按 20 不动即是 isRemoteAlive 门没开。"
+                } else {
+                    "旋钮回到触摸翻译（转动→滑动）——下次连接生效"
+                },
+            )
+            log("KNOB: 原生硬键实验开关切到 ${if (next) "开" else "关"}（下次连接起效）")
         }
         // 连上后主动取一次主音频（实验，默认关；按车型自行开启，不做车机指纹判定）。
         val proactiveAudioSwitch = findViewById<SwitchCompat>(R.id.switchProactiveAudio)
