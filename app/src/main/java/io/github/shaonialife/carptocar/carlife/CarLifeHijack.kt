@@ -689,19 +689,15 @@ object CarLifeHijack {
      *
      * 按用户 2026-11-24 的「全盘照抄」决定，起识别退回 `keycode=33 (0x21)`，
      * 收尾发 `keycode=34 (0x22)`；不再走 1.2.78 引入的 `0x10066`。
-     *
-     * 2026-11-28 定谳：改走 **touch 通道（9340）**。此前写 command 通道（7240）
-     * socket 成功但引擎不处理——这正是历史注释里「0x21 在 8.8.5 上死的」的根因，
-     * 开源 Apollo 车机端所有 0x68008 硬键都用 writeCarlifeTouchMessage 发。
-     * 判据仍是引擎 `65574 … 语音=1`：入队成功只是写进 touch 通道，不等于引擎执行。
+     * 两条都只写控制通道：CarLife+ 用**手机自己的麦克风**识别，不牵扯音频通道。
      */
     fun sendVoiceKey(keycode: Int = CarLifeProtocol.HardKey.VR_START): Boolean =
-        client?.sendKnobHardKeyOnTouch(keycode) ?: false
+        client?.sendHardKeyCode(keycode) ?: false
 
     /**
-     * 旋钮/语音硬键 → touch 通道（9340）。开源实证 0x68008 属 touch 类消息，
+     * 旋钮硬键 → touch 通道（9340）。开源实证 0x68008 属 touch 类消息，
      * 之前走 command 通道 socket 写成功但引擎不处理，见
-     * [CarLifeHuClient.sendKnobHardKeyOnTouch] 的定谳注释。
+     * [CarLifeHuClient.sendKnobHardKeyOnTouch] 的定谳注释。仅旋钮 debug 用。
      */
     fun sendKnobHardKey(keycode: Int): Boolean =
         client?.sendKnobHardKeyOnTouch(keycode) ?: false

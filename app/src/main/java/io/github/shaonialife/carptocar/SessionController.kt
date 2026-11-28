@@ -1614,10 +1614,9 @@ object SessionController {
      * FIRST_MATCH（`CarLifeModule.onVoiceKey` 委托回 [sendVoiceHardKey]），
      * 未装配直接调本地函数；两路共用同一份实现，不会重复下发。
      *
-     * 2026-11-28 定谳：[sendVoiceHardKey] 已改走 touch 通道（9340）——0x68008 全系
-     * 硬键都属 touch 通道，此前 command 通道写成功但引擎不处理，是语音键「死的」根因。
-     * 日志「已入队 / 未入队」只表示写进 touch 通道，不是「引擎收到了」——
-     * 唯一凭据是引擎自己回的 `65574 … 语音=1`（见 [CarLifeProtocol.Module]）。
+     * 日志里的「已送达 / 未送达」只在 [CarLifeHijack.sendVoiceKey] 返回 false 时才有信息量，
+     * 它表示「socket 写失败」，不是「引擎收到了」——语音控制（0x10066）同样没有回执，
+     * 唯一的凭据是引擎自己回的 `65574 … 语音=1`（见 [CarLifeProtocol.Module]）。
      */
     private fun dispatchVoiceHardKey(keycode: Int) {
         val ok =
@@ -1631,8 +1630,8 @@ object SessionController {
                 sendVoiceHardKey(keycode)
             }
         appendLog(
-            "CARLIFE: 车机语音键 0x%02X → 0x68008 touch 通道".format(keycode) +
-                if (ok) " 已入队（等引擎「语音=1」确认）" else " 未入队（CarLife 未接管）",
+            "CARLIFE: 车机语音键 0x%02X → 0x68008".format(keycode) +
+                if (ok) " 已送达" else " 未送达（CarLife 未接管）",
         )
     }
 

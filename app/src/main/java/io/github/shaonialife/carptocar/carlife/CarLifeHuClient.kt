@@ -1650,16 +1650,15 @@ class CarLifeHuClient(
     }
 
     /**
-     * 把 `0x68008` 硬键写进 **touch 通道（9340）**而非 command 通道（7240）。
+     * 旋钮硬键专用：把 `0x68008` 写进 **touch 通道（9340）**而非 command 通道（7240）。
      *
      * 为什么必须走 touch 通道（2026-11-28 日志定谳）：开源 Apollo `CarLife-Android-Vehicle`
      * 的 `TouchListenerManager.sendHardKeyCodeEvent()` 收尾是
-     * `ConnectManager.writeCarlifeTouchMessage(command)`——0x68008 全系（旋钮 6/7/20、
-     * 语音 0x21/0x22、媒体键）都与触摸同属 touch 通道，端口 9340/9300。此前写 command
-     * 通道 socket 成功（日志「已送达」）但引擎的 touch 分发根本不看那条 socket。
+     * `ConnectManager.writeCarlifeTouchMessage(command)`——硬键与触摸同属 touch 通道，
+     * 端口 9340/9300。我们此前把 6/7/20 写进 command 通道，socket 写成功（日志「已送达」）
+     * 但引擎的 touch 消息分发根本不看那条 socket，于是焦点毫无反应。
      *
-     * 旋钮与语音键共用本方法（[CarLifeHijack.sendKnobHardKey] / [CarLifeHijack.sendVoiceKey]）；
-     * [sendHardKeyCode] 仍保留 command 通道给未迁移的调用方，避免一次性改动面过大。
+     * 与 [sendHardKeyCode] 分开、不动它，是为了不影响已验证的语音/媒体键路径；
      * 复用同一条 carlife-touch worker 串行写出，避免与触摸帧并发写坏帧。
      *
      * @return 是否成功入队到 touch 通道（写入结果由 worker 线程记录）
@@ -1668,27 +1667,12 @@ class CarLifeHuClient(
         if (!running.get()) return false
         val payload = CarLifeProtocol.carHardKeyCode(keycode)
         val ok = enqueueRawTouch(CarLifeProtocol.TOUCH_CAR_HARD_KEY_CODE, payload)
-        val meaning =
-            when (keycode) {
-                CarLifeProtocol.HardKey.VR_START -> "语音起识别"
-                CarLifeProtocol.HardKey.VR_STOP -> "语音停识别"
-                CarLifeProtocol.HardKey.KNOB_CLOCKWISE -> "旋钮顺时针"
-                CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE -> "旋钮逆时针"
-                CarLifeProtocol.HardKey.KNOB_OK -> "旋钮按下"
-                else -> ""
-            }
         log(
-            "CARLIFE: 0x68008 硬键 0x%02X（%s）→ touch 通道入队 %s %s".format(
+            "CARLIFE: 旋钮硬键 0x%02X → touch 通道入队 %s %s".format(
                 keycode,
-                meaning,
                 if (ok) "成功" else "失败（未连接）",
                 focusSnapshot(),
-            ) +
-                if (keycode == CarLifeProtocol.HardKey.VR_START) {
-                    " —— 判据：引擎若起识别会回 65574「语音=1」"
-                } else {
-                    ""
-                },
+            ),
         )
         return ok
     }

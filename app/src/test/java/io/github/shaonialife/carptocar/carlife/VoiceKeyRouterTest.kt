@@ -160,32 +160,10 @@ class VoiceKeyRouterTest {
             advance(delta)
             router.onSiriAction(action)
         }
-        // 2026-11-28 翻案：旧实现因 pressedAt 恒为 0，只有第一次带 action=1 的能触发（1 次）。
-        // 修复后 ACTIVATE 无 PRESS 时补记按下时刻，后续 3 个真实长按（2→3 间隔 2.5s/2.1s/0.9s）
-        // 都能起识别——共 4 次。这正是「修语义映射、保留长按」要达到的效果。
-        assertEquals(4, sent.count { it == CarLifeProtocol.HardKey.VR_START })
-        // 后 3 轮 ACTIVATE 各自先补一条 STOP 收尾上一轮（startVoice 的既有逻辑），
-        // 租约 60s 未到，没有额外的租约 STOP。
-        assertEquals(3, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
-    }
-
-    @Test
-    fun activateWithoutPrewarmLongHoldStartsVoice() {
-        // 奥迪车机实测：只发 Apple 语义 2(ButtonDown)/3(ButtonUp)，从不发 1(Prewarm)。
-        // 按住 500ms：2 → 等 500ms → 定时器应起识别（旧实现 pressedAt=0 永不触发）。
-        activate()
-        advance(VoiceKeyRouter.HOLD_MILLIS)
-        assertEquals(listOf(CarLifeProtocol.HardKey.VR_START), sent)
-    }
-
-    @Test
-    fun activateWithoutPrewarmShortTapStillCancelled() {
-        // 同一车机：2 → 7ms 后 3（短按）应被 RELEASE 取消，防误触语义保留。
-        activate()
-        advance(7)
-        release()
-        advance(VoiceKeyRouter.HOLD_MILLIS + 100)
-        assertTrue(sent.isEmpty())
+        // 按 AMcar 原样：只有第一次带 action=1（按下），后续 2/3 成对时
+        // 补足长按的回调拿不到按下时刻，不会起识别——这是照抄保留的行为。
+        assertEquals(1, sent.count { it == CarLifeProtocol.HardKey.VR_START })
+        assertEquals(0, sent.count { it == CarLifeProtocol.HardKey.VR_STOP })
     }
 
     @Test
