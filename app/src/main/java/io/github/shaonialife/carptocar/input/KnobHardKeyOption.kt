@@ -48,21 +48,35 @@ import android.content.Context
  * （否则两种动作叠加，无法判断硬键到底生没生效）。
  *
  * 开关下次连接生效；会话中途切换不影响已建立的会话。
+ *
+ * ## 旋钮方向开关（2026-11-28 实车）
+ *
+ * 这台车 Wheel report 的 `steps>0`（顺时针）在 CarLife+ 里实际是「上一项」，与直觉相反。
+ * [invertWheelDirection] 默认 **true**（顺时针=下一项 0x06、逆时针=上一项 0x07），
+ * 即实车验证后的正确方向；关掉则回到未反转的原始映射。
+ * 只作用于硬键分支；开关关闭时的触摸翻译方向（KnobRouter）不受影响。
  */
 object KnobHardKeyOption {
     private const val PREFS = "knob_hardkey_v1"
     private const val KEY_ENABLED = "enabled"
     private const val DEFAULT_ENABLED = false
+    private const val KEY_INVERT_WHEEL = "invert_wheel"
+    private const val DEFAULT_INVERT_WHEEL = true
 
     @Volatile
     var enabled: Boolean = DEFAULT_ENABLED
         private set
 
+    /** 顺时针是否映射成「下一项」。默认 true（实车修正后的方向）。 */
+    @Volatile
+    var invertWheelDirection: Boolean = DEFAULT_INVERT_WHEEL
+        private set
+
     fun load(context: Context?) {
         val app = context?.applicationContext ?: return
-        enabled =
-            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getBoolean(KEY_ENABLED, DEFAULT_ENABLED)
+        val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        enabled = prefs.getBoolean(KEY_ENABLED, DEFAULT_ENABLED)
+        invertWheelDirection = prefs.getBoolean(KEY_INVERT_WHEEL, DEFAULT_INVERT_WHEEL)
     }
 
     fun save(
@@ -74,6 +88,18 @@ object KnobHardKeyOption {
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_ENABLED, value)
+            .apply()
+    }
+
+    fun saveInvertWheel(
+        context: Context?,
+        value: Boolean,
+    ) {
+        invertWheelDirection = value
+        val app = context?.applicationContext ?: return
+        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_INVERT_WHEEL, value)
             .apply()
     }
 }

@@ -2240,6 +2240,26 @@ class MainActivity : AppCompatActivity() {
             )
             log("KNOB: 原生硬键实验开关切到 ${if (next) "开" else "关"}（下次连接起效）")
         }
+        // 旋钮方向（仅硬键模式）：这台车实测 steps>0 是上一项，默认反转。
+        val knobDirectionRow = findViewById<android.view.View>(R.id.rowKnobDirection)
+        val knobDirectionSwitch = findViewById<SwitchCompat>(R.id.switchKnobDirection)
+        fun refreshKnobDirection() {
+            knobDirectionSwitch.isChecked = KnobHardKeyOption.invertWheelDirection
+        }
+        refreshKnobDirection()
+        knobDirectionRow.setOnClickListener {
+            val next = !KnobHardKeyOption.invertWheelDirection
+            KnobHardKeyOption.saveInvertWheel(ctx, next)
+            refreshKnobDirection()
+            snack(
+                if (next) {
+                    "旋钮方向已反转：顺时针=下一项（0x06）、逆时针=上一项（0x07）——下次连接生效"
+                } else {
+                    "旋钮方向恢复原始：顺时针=上一项、逆时针=下一项——下次连接生效"
+                },
+            )
+            log("KNOB: 方向反转开关切到 ${if (next) "开" else "关"}（下次连接起效）")
+        }
         // 连上后主动取一次主音频（实验，默认关；按车型自行开启，不做车机指纹判定）。
         val proactiveAudioSwitch = findViewById<SwitchCompat>(R.id.switchProactiveAudio)
         proactiveAudioSwitch.isChecked = DisplayPrefs.proactiveAudioOnLink(ctx)

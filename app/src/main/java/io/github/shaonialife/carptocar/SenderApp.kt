@@ -16,6 +16,7 @@ import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyGesture
 import io.github.shaonialife.carptocar.iap2.MfiCertBytesOption
 import io.github.shaonialife.carptocar.iap2.NavCardRefreshOption
+import io.github.shaonialife.carptocar.input.KnobHardKeyOption
 import io.github.shaonialife.carptocar.session.VideoReadyGateOption
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
@@ -43,6 +44,9 @@ class SenderApp : Application() {
         CarGpsOption.load(this)
         // 方向盘语音键手势（默认开）：短按三次重启音频。按键线程每按一次都会读
         VoiceKeyGesture.load(this)
+        // 旋钮原生硬键实验（默认关）+ 方向反转（默认开，这台车实测需反转）：
+        // 会话收帧线程每格会读，启动时载入一次。漏了这行会让偏好重启后丢失、开关形同虚设。
+        KnobHardKeyOption.load(this)
         // 音频兼容实验（默认关，对所有车型生效）：拨档下次连接起效
         AudioCompatExperiment.load(this)
         // 音频队列治理（默认关，音频卡顿时可开启尝试）：建音频流时读一次

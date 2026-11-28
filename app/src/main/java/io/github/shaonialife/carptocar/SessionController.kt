@@ -2353,6 +2353,9 @@ object SessionController {
             // 旋钮的锚点是「上一笔真触摸的位置」，跨会话残留会让新会话的第一次转动
             // 落在上轮的用户停手处；顺手把积压动作丢掉（此时已经没有触摸通道可走）。
             KnobRouter.reset()
+            // 硬键按钮位的边沿状态同理：跨会话残留会让新会话第一帧误判成「刚按下」。
+            lastKnobPressed = false
+            lastKnobBackPressed = false
             // 挂起的「等车机归还后重启音频」属于上一轮会话，不能带进下一轮。
             pendingAudioRebuild = null
             retireSessionResources()
@@ -7407,7 +7410,11 @@ object SessionController {
                                             // CarLife+ 没有焦点引擎，只能把旋钮翻译成触摸
                                             // （为什么不是硬键，见 KnobRouter 的 KDoc）。
                                             val knob = KnobReports.parse(report, knobLayout)
-                                            if (knob.steps != 0 || knob.pressed == true) {
+                                            // 返回键单独按下时 steps=0/pressed=false——旧条件会把它整条
+                                            // 吞掉，日志里看不到「返回=true」，排查时误以为用户没按。补上。
+                                            if (knob.steps != 0 || knob.pressed == true ||
+                                                knob.backPressed == true
+                                            ) {
                                                 appendLog(
                                                     "EVENT: 旋钮 uuid=$uuid steps=${knob.steps}" +
                                                         " 按下=${knob.pressed} 返回=${knob.backPressed}",
@@ -7419,11 +7426,25 @@ object SessionController {
                                                 KnobHardKeyOption.enabled && CarLifeHijack.isActive
                                             if (useHardKey) {
                                                 if (knob.steps != 0) {
+                                                    // 2026-11-28 实车：这台车 Wheel 的 steps>0（顺时针）在
+                                                    // CarLife+ 里是「上一项」，与直觉相反。用开关决定方向：
+                                                    // invert=true（默认，修正后）顺时针=下一项 0x06；
+                                                    // invert=false 保留原始映射。只作用于硬键分支，
+                                                    // 触摸翻译（KnobRouter）方向已验证可用，不受影响。
+                                                    val clockwiseNext = KnobHardKeyOption.invertWheelDirection
                                                     val key =
                                                         if (knob.steps > 0) {
-                                                            CarLifeProtocol.HardKey.KNOB_CLOCKWISE
+                                                            if (clockwiseNext) {
+                                                                CarLifeProtocol.HardKey.KNOB_CLOCKWISE
+                                                            } else {
+                                                                CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE
+                                                            }
                                                         } else {
-                                                            CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE
+                                                            if (clockwiseNext) {
+                                                                CarLifeProtocol.HardKey.KNOB_ANTI_CLOCKWISE
+                                                            } else {
+                                                                CarLifeProtocol.HardKey.KNOB_CLOCKWISE
+                                                            }
                                                         }
                                                     val repeat = kotlin.math.abs(knob.steps).coerceAtMost(16)
                                                     repeat(repeat) { dispatchKnobHardKey(key) }
@@ -7432,9 +7453,19 @@ object SessionController {
                                                             .format(key),
                                                     )
                                                 }
-                                                if (knob.pressed == true) {
+                                                // 按钮位是电平，只在 false→true 边沿发一次，避免按住连发。
+                                                val pressedNow = knob.pressed == true
+                                                if (pressedNow && !lastKnobPressed) {
                                                     dispatchKnobHardKey(CarLifeProtocol.HardKey.KNOB_OK)
                                                 }
+                                                lastKnobPressed = pressedNow
+                                                // Consumer 页 0x0224（AC Back）返回键：解析得出但此前只打日志，
+                                                // 现在按边沿发 CarLife KEYCODE_BACK(0x0E)。
+                                                val backNow = knob.backPressed == true
+                                                if (backNow && !lastKnobBackPressed) {
+                                                    dispatchKnobHardKey(CarLifeProtocol.HardKey.KNOB_BACK)
+                                                }
+                                                lastKnobBackPressed = backNow
                                             } else {
                                                 if (knob.steps != 0) KnobRouter.onSteps(knob.steps)
                                                 if (knob.pressed == true) KnobRouter.onPress()
@@ -8399,6 +8430,18 @@ object SessionController {
      */
     @Volatile
     private var lastConsumerUsage: Int? = null
+
+    /**
+     * 旋钮「确认」与「返回」两个按钮位的上一帧电平（2026-11-28）。
+     *
+     * HID 按钮位是电平：按住期间每帧都报 true，必须只在 **false→true 边沿**发一次硬键，
+     * 否则一次按压会打出十几条 0x14/0x0E。与 Wheel 的相对位移（每格一次）分开处理。
+     */
+    @Volatile
+    private var lastKnobPressed = false
+
+    @Volatile
+    private var lastKnobBackPressed = false
 
     @Volatile
     private var iapEventMessageCount = 0
