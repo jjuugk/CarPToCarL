@@ -15,7 +15,13 @@ package io.github.shaonialife.carptocar.carlife
  *
  * 2026-11-28 定谳：`0x21` 当时「死的」根因不是协议而是通道——0x68008 全系硬键
  * 必须走 touch 通道（9340），此前误写 command 通道（7240）socket 成功但引擎不理。
- * 现已随旋钮一起迁移，本类的状态机逻辑不变。
+ * 现已随旋钮一起迁移。
+ *
+ * 同日第二处修复（实车日志定谳）：这台奥迪车机只发 2(ButtonDown)/3(ButtonUp)，
+ * 从不发 1(Prewarm)。旧实现 `pressedAt` 恒为 0，补足定时器条件 `pressedAt == token`
+ * 永远不成立——真按住 ≥500ms 也不会起识别。现改为 ACTIVATE 时若无 PRESS 记录就
+ * 就地补记按下时刻。长按防误触语义（≥500ms、松手取消、不补结束键）完全保留；
+ * 7ms 级短按仍被 RELEASE 拦掉。
  */
 class VoiceKeyRouter(
     private val nowMillis: () -> Long = System::currentTimeMillis,
@@ -66,7 +72,13 @@ class VoiceKeyRouter(
             }
 
             SIRI_ACTION_ACTIVATE -> {
-                val downAt = if (pressedAt != 0L) pressedAt else now
+                // 2026-11-28 翻案：这台奥迪车机只发 Apple 语义的 2(ButtonDown)/3(ButtonUp)，
+                // 从不发 1(Prewarm)。旧实现里 pressedAt 恒为 0，补足定时器的
+                // `pressedAt == token` 永远不成立——即便真按住 ≥500ms 也不会起识别。
+                // 修：没有 PRESS 记录时，把「激活」这一帧当作按下时刻就地补记。
+                // 长按语义不变：held < 500ms 仍走补足定时器，短按松开仍被 RELEASE 取消。
+                if (pressedAt == 0L) pressedAt = now
+                val downAt = pressedAt
                 val held = now - downAt
                 if (held >= HOLD_MILLIS) {
                     startVoice("已按住 ${held}ms")
