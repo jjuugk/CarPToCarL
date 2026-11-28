@@ -12,6 +12,10 @@ package io.github.shaonialife.carptocar.carlife
  *
  * 注意：1.2.78 曾因这台车机的 `0x21` 无 `语音=1` 而改走 `0x10066`，本次按用户
  * 「全盘照抄」决定退回；判据仍是引擎自己的 `65574 … 语音=1`。
+ *
+ * 2026-11-28 定谳：`0x21` 当时「死的」根因不是协议而是通道——0x68008 全系硬键
+ * 必须走 touch 通道（9340），此前误写 command 通道（7240）socket 成功但引擎不理。
+ * 现已随旋钮一起迁移，本类的状态机逻辑不变。
  */
 class VoiceKeyRouter(
     private val nowMillis: () -> Long = System::currentTimeMillis,
