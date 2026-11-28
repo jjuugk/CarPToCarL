@@ -671,6 +671,15 @@ class CarLifeHuClient(
      *   引擎消费不过来时自动合并，不做无意义的排队；
      * - 队列总长有上限，超了从最老的 MOVE 开始丢，仍保留 DOWN/UP。
      */
+    /**
+     * touch 队列里的「裸帧」事件：`[0]=serviceType`，`[1]=payload`。
+     *
+     * 硬键 0x68008 与触摸同属 touch 通道（9340），必须走同一条 carlife-touch 线程串行写，
+     * 否则会与触摸帧并发写坏同一个 OutputStream。这里用单独的队列，在 worker 里优先取。
+     */
+    private data class RawTouchFrame(val serviceType: Int, val payload: ByteArray)
+    private val rawTouchQueue = ArrayDeque<RawTouchFrame>()
+
     private val touchQueue = ArrayDeque<IntArray>()
 
     private val touchLock = java.util.concurrent.locks.ReentrantLock()
@@ -716,6 +725,26 @@ class CarLifeHuClient(
         }
     }
 
+    /**
+     * 把一条裸报文入队到 touch 通道（硬键 0x68008 专用）。
+     *
+     * 与 [enqueueTouch] 同一把锁、同一条 worker，保证和触摸帧串行写出、不会写坏帧。
+     * 队列上限小、满了丢最旧——旋钮快转时丢几格硬键远好过堵住整个 touch 通道。
+     */
+    private fun enqueueRawTouch(serviceType: Int, payload: ByteArray): Boolean {
+        if (!running.get()) return false
+        touchLock.lock()
+        try {
+            if (!running.get()) return false
+            if (rawTouchQueue.size >= TOUCH_QUEUE_MAX) rawTouchQueue.removeFirst()
+            rawTouchQueue.addLast(RawTouchFrame(serviceType, payload))
+            touchReady.signalAll()
+        } finally {
+            touchLock.unlock()
+        }
+        return true
+    }
+
     /** 是不是「可合并的移动事件」：单点 MOVE，或复合动作里的 ACTION_MOVE。 */
     private fun isMoveEvent(
         serviceType: Int,
@@ -729,10 +758,18 @@ class CarLifeHuClient(
         val worker = Thread({
             while (running.get()) {
                 var event: IntArray? = null
+                var raw: RawTouchFrame? = null
                 touchLock.lock()
                 try {
-                    if (touchQueue.isEmpty()) touchReady.await(400, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    if (touchQueue.isNotEmpty()) event = touchQueue.removeFirst()
+                    // 硬键裸帧优先：它是一次性的语义事件，排在连续 MOVE 后面会被队列上限丢掉。
+                    if (touchQueue.isEmpty() && rawTouchQueue.isEmpty()) {
+                        touchReady.await(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    }
+                    if (rawTouchQueue.isNotEmpty()) {
+                        raw = rawTouchQueue.removeFirst()
+                    } else if (touchQueue.isNotEmpty()) {
+                        event = touchQueue.removeFirst()
+                    }
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     break
@@ -740,7 +777,11 @@ class CarLifeHuClient(
                     touchLock.unlock()
                 }
                 if (!running.get()) break
-                if (event != null) sendTouch(event[0], event[1], event[2], event[3])
+                if (raw != null) {
+                    sendRawTouchFrame(raw.serviceType, raw.payload)
+                } else if (event != null) {
+                    sendTouch(event[0], event[1], event[2], event[3])
+                }
             }
         }, "carlife-touch").apply {
             isDaemon = true
@@ -779,6 +820,24 @@ class CarLifeHuClient(
         touchWriteFailures++
         if (touchWriteFailures == 1 || touchWriteFailures % 50 == 0) {
             log("CARLIFE: 触摸写入失败 $touchWriteFailures 次（通道可能已断）")
+        }
+    }
+
+    /**
+     * 在 touch worker 线程里写一条裸控制帧（硬键 0x68008）。
+     *
+     * 帧格式与 [sendTouch] 相同（packCommand 的 8B 头），只是负载由调用方给。
+     * 重连策略照抄 [sendTouch]——touch 通道断了就强制重连一次。
+     */
+    private fun sendRawTouchFrame(serviceType: Int, payload: ByteArray) {
+        val frame = CarLifeProtocol.packCommand(serviceType, payload)
+        val current = touchOut ?: reopenTouch()
+        if (current != null && writeTouchBytes(current, frame)) return
+        val reopened = reopenTouch(force = true)
+        if (reopened != null && writeTouchBytes(reopened, frame)) return
+        touchWriteFailures++
+        if (touchWriteFailures == 1 || touchWriteFailures % 50 == 0) {
+            log("CARLIFE: 硬键写入 touch 通道失败 $touchWriteFailures 次")
         }
     }
 
@@ -1588,6 +1647,34 @@ class CarLifeHuClient(
         val vr = modules.firstOrNull { it.first == CarLifeProtocol.Module.VR }?.second
         return "[引擎焦点: 音乐=${music?.toString() ?: "-"} 语音=${vr?.toString() ?: "-"}" +
             " · 音乐=1 才有焦点处理旋钮]"
+    }
+
+    /**
+     * 旋钮硬键专用：把 `0x68008` 写进 **touch 通道（9340）**而非 command 通道（7240）。
+     *
+     * 为什么必须走 touch 通道（2026-11-28 日志定谳）：开源 Apollo `CarLife-Android-Vehicle`
+     * 的 `TouchListenerManager.sendHardKeyCodeEvent()` 收尾是
+     * `ConnectManager.writeCarlifeTouchMessage(command)`——硬键与触摸同属 touch 通道，
+     * 端口 9340/9300。我们此前把 6/7/20 写进 command 通道，socket 写成功（日志「已送达」）
+     * 但引擎的 touch 消息分发根本不看那条 socket，于是焦点毫无反应。
+     *
+     * 与 [sendHardKeyCode] 分开、不动它，是为了不影响已验证的语音/媒体键路径；
+     * 复用同一条 carlife-touch worker 串行写出，避免与触摸帧并发写坏帧。
+     *
+     * @return 是否成功入队到 touch 通道（写入结果由 worker 线程记录）
+     */
+    fun sendKnobHardKeyOnTouch(keycode: Int): Boolean {
+        if (!running.get()) return false
+        val payload = CarLifeProtocol.carHardKeyCode(keycode)
+        val ok = enqueueRawTouch(CarLifeProtocol.TOUCH_CAR_HARD_KEY_CODE, payload)
+        log(
+            "CARLIFE: 旋钮硬键 0x%02X → touch 通道入队 %s %s".format(
+                keycode,
+                if (ok) "成功" else "失败（未连接）",
+                focusSnapshot(),
+            ),
+        )
+        return ok
     }
 
     /**

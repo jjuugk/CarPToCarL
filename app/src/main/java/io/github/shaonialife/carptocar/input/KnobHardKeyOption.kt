@@ -25,6 +25,15 @@ import android.content.Context
  * - 焦点状态由手机下发的 `0x3002 GAIN` / `0x3003~3005 LOSS` 命令驱动，默认 false；
  * - 转发用 `0x68008 + CarlifeCarHardKeyCode{keycode}`，与我们发的报文逐字节同款。
  *
+ * ## 2026-11-28 实车日志定谳：根因是通道，不是门
+ *
+ * 首版按「6/7/20 走 command 通道 7240」实现，实车日志显示音乐=1、三键全部
+ * `已送达`，焦点却毫无反应。回查开源实现发现 `sendHardKeyCodeEvent` 收尾是
+ * `writeCarlifeTouchMessage`——0x68008 与触摸同属 **touch 通道（9340）**。
+ * command socket 写成功只代表字节进了另一条引擎不监听该消息的 socket。
+ * 已改为走 touch 通道（CarLifeHuClient.sendKnobHardKeyOnTouch，复用 carlife-touch
+ * worker 串行写）；媒体/语音键的 sendHardKeyCode 保持 command 通道不动，避免误伤。
+ *
  * 由此得到本 debug 的判据（已接进 `CarLifeHuClient.sendHardKeyCode` 的日志）：
  * 1. 先让 CarLife+ 进入播放态，确认日志出现「引擎焦点: 音乐=1」（65574 的 MUSIC 模块）；
  * 2. 此刻转旋钮，6/7 送达后若焦点仍不动，才判定 `isRemoteAlive()` 门未置位；

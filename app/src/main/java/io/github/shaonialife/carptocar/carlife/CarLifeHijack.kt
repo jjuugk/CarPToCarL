@@ -695,6 +695,14 @@ object CarLifeHijack {
         client?.sendHardKeyCode(keycode) ?: false
 
     /**
+     * 旋钮硬键 → touch 通道（9340）。开源实证 0x68008 属 touch 类消息，
+     * 之前走 command 通道 socket 写成功但引擎不处理，见
+     * [CarLifeHuClient.sendKnobHardKeyOnTouch] 的定谳注释。仅旋钮 debug 用。
+     */
+    fun sendKnobHardKey(keycode: Int): Boolean =
+        client?.sendKnobHardKeyOnTouch(keycode) ?: false
+
+    /**
      * 打开 9242 的麦克风写回器（AMcar 实验桥）。未接管 / 端口连不上时返回 null；
      * 关闭时由 [closeSocket] 一并释放 9242 写通道。
      */

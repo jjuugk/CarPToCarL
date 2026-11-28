@@ -1666,12 +1666,14 @@ object SessionController {
      */
     private fun dispatchKnobHardKey(keycode: Int) {
         knobHardKeySender.execute {
-            // 直接走门面，不经 dispatchVoiceHardKey：后者会打「车机语音键」日志、
-            // 还会被 ProtocolRegistry 的 VOICE_KEY 消费者截走（旋钮不该触发语音路由）。
-            val ok = sendVoiceHardKey(keycode)
+            // 2026-11-28 定谳：0x68008 是 touch 通道（9340）消息，开源车机端用
+            // writeCarlifeTouchMessage 发。此前走 command 通道 socket 写成功但引擎不理，
+            // 这正是「已送达却不动」的根因。改走 CarLifeHijack.sendKnobHardKey（touch 通道）。
+            // 不经 sendVoiceHardKey：那条走 command 通道，且会被语音路由截走。
+            val ok = CarLifeHijack.sendKnobHardKey(keycode)
             appendLog(
-                "KNOB: 硬键 0x%02X → 0x68008".format(keycode) +
-                    if (ok) " 已送达（等 CarLife+ 焦点反应）" else " 未送达（CarLife 未接管）",
+                "KNOB: 硬键 0x%02X → 0x68008 touch 通道".format(keycode) +
+                    if (ok) " 已入队（看焦点是否随 6/7 移动）" else " 未入队（CarLife 未接管）",
             )
         }
     }
