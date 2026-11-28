@@ -1039,7 +1039,7 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="默认开（这台车实测需反转）。关掉则顺时针=上一项。只作用于上面的原生硬键模式；触摸翻译方向不受影响。"
+                            android:text="默认关（顺时针=上一项 0x07、逆时针=下一项 0x06）。若方向反了就打开反转。只作用于上面的原生硬键模式；触摸翻译方向不受影响。"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>

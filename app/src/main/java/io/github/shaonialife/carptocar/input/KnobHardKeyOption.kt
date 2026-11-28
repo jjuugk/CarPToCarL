@@ -51,9 +51,9 @@ import android.content.Context
  *
  * ## 旋钮方向开关（2026-11-28 实车）
  *
- * 这台车 Wheel report 的 `steps>0`（顺时针）在 CarLife+ 里实际是「上一项」，与直觉相反。
- * [invertWheelDirection] 默认 **true**（顺时针=下一项 0x06、逆时针=上一项 0x07），
- * 即实车验证后的正确方向；关掉则回到未反转的原始映射。
+ * 这台车 Wheel report 的 `steps>0`（顺时针）在 CarLife+ 里实际是「上一项」。
+ * [invertWheelDirection] 默认 **false**（未反转的原始映射）；
+ * 打开则反转成顺时针=下一项 0x06、逆时针=上一项 0x07。
  * 只作用于硬键分支；开关关闭时的触摸翻译方向（KnobRouter）不受影响。
  */
 object KnobHardKeyOption {
@@ -61,13 +61,13 @@ object KnobHardKeyOption {
     private const val KEY_ENABLED = "enabled"
     private const val DEFAULT_ENABLED = false
     private const val KEY_INVERT_WHEEL = "invert_wheel"
-    private const val DEFAULT_INVERT_WHEEL = true
+    private const val DEFAULT_INVERT_WHEEL = false
 
     @Volatile
     var enabled: Boolean = DEFAULT_ENABLED
         private set
 
-    /** 顺时针是否映射成「下一项」。默认 true（实车修正后的方向）。 */
+    /** 顺时针是否映射成「下一项」。默认 false（原始映射，顺时针=上一项）。 */
     @Volatile
     var invertWheelDirection: Boolean = DEFAULT_INVERT_WHEEL
         private set
