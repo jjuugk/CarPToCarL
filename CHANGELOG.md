@@ -16,6 +16,87 @@
 
 ---
 
+### 1.2.91 —— 2026-11-28（iAP2/AirPlay 链路修复 + 0x5001 订阅掩码与歌词两阶段，正式版）
+
+> 本版合并三个外部 PR（#51 / #52 / #53，作者 jackjinke），并叠加两条本地改动（订阅掩码补字段、
+> 歌词两阶段）。三条链路修复与两条媒体改动**均以单测锁定（1135 项全绿），未逐项实车回归**；
+> 遇到问题按需回退 1.2.90。
+
+**一、导航独立流 Opus 回退（PR #53）**
+
+部分车机（BMW iD8 / MGU）的 `101/default` 导航独立流只声明 `0x40000000`（Opus 48kHz 单声道），
+此前因缺少编码器被整档跳过。
+
+- 新增 `audio/OpusEncoder.kt`：基于 Android 12+ 平台 MediaCodec（`audio/opus`），跳过
+  CODEC_CONFIG，输出 20ms（960 采样）裸 RFC 6716 帧。
+- `AudioProfile` / `AudioSender`：新增 `AudioCodec.OPUS`，RTP 负载不做大端换序，时间轴按
+  960 采样推进，PT 跟随 `streamType=101`。
+- `AirPlayClient`：Opus 档**排在所有 PCM/AAC 之后**——已声明 PCM/AAC 的车机选档逐字节不变；
+  对应 SETUP 为 `ct=32`、`spf=960`。
+
+**二、Wi-Fi iAP2 链路修复（PR #51）**
+
+- **零 ACK 档**：对端声明 `maxRetransmissions=0 && maxAcknowledgements=0` 时，NORMAL 态不再
+  发送独立 9B 空 ACK、不触发 RTO 重传，改为在后续数据帧头捎带最新 ack；入站非控制会话
+  （EA/封面）同样推进 `lastReceivedInOrder`，防止 ack 停滞。
+- **链路可观测**：接入 `onPeerSynchronizationAdopted` / `WindowHold` / `Stalled` /
+  `UnknownSessionData` / `FrameAbandoned` 回调，以及上限 80 帧的收发摘要（SYN/EAK/RST/裸 ACK
+  始终记录）。
+- **封面**：新封面取代未完成的旧封面时先发 `CMD_CANCEL` 并清理已完成槽位。
+- **门禁**：认证完成（`0xAA03` 携带非空签名）前绝不放行主动推送；未订阅 `0x5000`/`0x4154`
+  前不抢推。
+- **MFi OID 保护**：证书 Apple 扩展 OID 明确认证的挑战长度始终排在队首，并自愈旧的
+  `hardRejected` 记忆；链路意外断开时不把它污染成硬拒绝。
+- **订阅应答对齐**：`0xAE00→0xAE01` 电源更新（认证前延后，`0xAE02`/链路重启取消）；
+  `0x4157→0x4158` 与 `0x4170→0x4171` 按车机请求的字段子集裁剪；无活跃导航时 `0x5200`
+  只登记订阅、不发 0B 空 `0x5201`；蓝牙侧 `0x6800 StartHID` 即时应答。
+
+**三、AirPlay 配对与蓝牙交接（PR #52）**
+
+- **已配对直通**：优先走 `/pair-verify`，跳过重复的 `/pair-setup`；被拒或状态复位时清标记并
+  换连接回退。
+- **`/auth-setup`**：加密配对后、初始 SETUP 前新增 MFi-SAP `POST /auth-setup`（兼容 404/501，
+  绝不替换 HomeKit 密钥）。
+- **`DeviceIdentity`**：区分 Wi-Fi 站端 `macAddress` 与蓝牙 `deviceID`。
+- **蓝牙→Wi-Fi 交接**：首个真实 RECORD 200 OK 后按 Table 23-26 幂等发送 `disableBluetooth`，
+  并由 `BtSessionGate` 原子置位交接态，阻止经典蓝牙 RFCOMM 反向补连；Wi-Fi iAP2 改为被动优先
+  等待窗口（800ms）+ 有限补发 DETECT（最多 3 次）；两条链路共享同一确定性 deviceUuid（`0x4E0C`）。
+- **RECORD 竞态**：`recordedAtMs` 提前置位，并按命令应答状态判定。
+- **音频与播放态收敛**：直通发包静默 ≥250ms 续播时，按流逝时间推进 RTP 时间轴并重置 Marker；
+  车机侧暂停压住过时的 `sessionPlaying=true`，迟到 `0x30003 PAUSE` 后保留临时借用自恢复语义。
+
+**四、`0x5001` 按订阅掩码补字段**
+
+- 解析 `0x5000` 订阅掩码（组号 → 字段集），**只补车机点名的可选字段**：曲目持久 ID（`0/0x00`）、
+  曲目号/总数/碟号（`0/0x07-09`）、流派/作曲者（`0/0x10-12`）、队列长度（`1/0x03`）、
+  应用包名（`1/0x10`）。
+- **空订阅体（旧接收端）一个可选字段都不加**：宝马 MGU、DiPlay、WinPlay 的报文字节与改动前
+  完全一致；奥迪 MIB3 的 CsmFlag 订阅（`len=4 + id`、无值）实测只多带流派与作曲。
+- 车机点名了我们没有值的字段时直接省略，不写 0。
+
+**五、歌词两阶段显示**
+
+- 新曲先给「歌名/歌手」，持续 `LYRIC_TITLE_HOLD_MILLIS`（1.5s），之后才切「歌词行/歌名」；
+  只在存在**已校验**歌词行（`lyricTrack` 非空）时生效，普通歌曲与导航覆盖层原样透传。
+- `LyricLines.matchesSong` 归属校验：专辑一致 + 前缀匹配 + 时长相等，杜绝「上一首的歌词挂到
+  当前歌」。
+- `NowPlayingSourcePolicy` 支持联唱：CarLife 只报首位歌手时，`A/B` 也能取到歌词（另加 1s
+  时长容差）。
+- `MediaSessionsState` 补 `album/trackNumber/trackCount/discNumber/genre/composer`，两条 provider
+  均回填；`SessionController` 提供 `itemId`/`queueCount`/包名/应用名。
+- 歌名未变、仅歌词推进时，只补推 WiFi 隧道一条。
+- `CarLifeHijack` 三个 volatile（当前行 / 真实曲目 / 到达时刻）合并为一个同批快照，杜绝
+  「新歌词 + 上一首曲目」的跨批次混用。
+
+**六、验证**
+
+- `:app:testReleaseUnitTest` **1135 项全绿**；`assembleRelease` 通过；包内
+  `versionName=1.2.91` / `versionCode=10291`。
+- 导航覆盖层两条回归：全字段订阅掩码下报文字节与无掩码时**逐字节相同**；即使被挂上
+  `lyricTrack`，越过 1.5s 停留窗口也不得把转向文案换成歌词。
+
+---
+
 ### 1.2.90 —— 2026-11-26（奔驰 MBUX 连接五处修复，正式版）
 
 > 针对 MBUX（NTG7，`MB_D-M-6`）实车 issue 的五条定位逐项落地，全部做成默认关的实验开关或
